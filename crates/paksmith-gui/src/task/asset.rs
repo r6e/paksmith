@@ -124,7 +124,7 @@ pub async fn load(reader: Arc<PakReader>, path: String) -> AssetLoad {
             .map(Box::new)
             .map_err(|e| e.to_string())
     } else {
-        Err(format!("{path} is not a UAsset \u{2014} showing raw bytes"))
+        Err("Not a UAsset \u{2014} showing raw bytes".to_string())
     };
 
     AssetLoad {
@@ -229,7 +229,7 @@ mod tests {
         assert!(out.parsed.is_err(), "missing entry must be a parse error");
         let err_msg = out.parsed.unwrap_err();
         assert!(
-            !err_msg.contains("is not a UAsset"),
+            !err_msg.contains("Not a UAsset"),
             "read error must not be the 'not a UAsset' message (was: {err_msg:?})"
         );
     }

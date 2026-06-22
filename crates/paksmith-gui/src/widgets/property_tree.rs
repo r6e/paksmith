@@ -20,7 +20,7 @@ use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Element, Length};
 
 use crate::app::Message;
-use crate::state::property_view::{NodeId, PropKind, flatten};
+use crate::state::property_view::{NodeId, PropKind, flatten_capped};
 use crate::theme::tokens;
 use crate::widgets::file_tree::row_indent;
 
@@ -53,18 +53,17 @@ const SWATCH_BORDER_ALPHA: f32 = 0.35;
 ///
 /// # Rendering bound
 ///
-/// Rendering is capped at `MAX_VISIBLE_PROP_ROWS` (a truncation note is shown
-/// when exceeded), so a deeply-expanded large asset cannot build an unbounded
-/// widget tree. TODO(perf): `flatten` still rebuilds the full row `Vec` per
-/// call; memoize it (and add a "Collapse All") when wide-DataTable inspection
-/// becomes a primary workflow.
+/// Uses [`flatten_capped`] so the walk itself stops once `MAX_VISIBLE_PROP_ROWS`
+/// rows are built — both allocation and CPU are bounded to `cap + 1` rows.
+/// A truncation note is shown when the cap is hit. A crafted asset with a huge
+/// export/property count cannot force an O(exports) per-frame build.
 #[mutants::skip]
 pub fn view<'a>(
     pkg: &'a paksmith_core::asset::Package,
     expanded: &std::collections::HashSet<NodeId>,
 ) -> Element<'a, Message> {
-    let rows = flatten(pkg, expanded);
-    let total = rows.len();
+    let rows = flatten_capped(pkg, expanded, MAX_VISIBLE_PROP_ROWS);
+    let truncated = rows.len() > MAX_VISIBLE_PROP_ROWS;
 
     let mut items: Vec<Element<'_, Message>> = rows
         .into_iter()
@@ -72,11 +71,11 @@ pub fn view<'a>(
         .map(build_row)
         .collect();
 
-    if total > MAX_VISIBLE_PROP_ROWS {
+    if truncated {
         items.push(
             container(
                 text(format!(
-                    "Showing first {MAX_VISIBLE_PROP_ROWS} of {total} properties \u{2014} collapse nodes or extract the asset to inspect fully",
+                    "Showing the first {MAX_VISIBLE_PROP_ROWS} properties \u{2014} collapse nodes or extract the asset to inspect fully",
                 ))
                 .size(f32::from(tokens::TEXT_SM))
                 .style(|theme: &iced::Theme| iced::widget::text::Style {

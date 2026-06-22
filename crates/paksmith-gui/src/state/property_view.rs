@@ -42,7 +42,7 @@ pub enum PropKind {
 }
 
 /// One rendered row in the property tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PropRow {
     pub depth: usize,
     pub label: String,
@@ -296,9 +296,22 @@ pub fn scalar_display(v: &PropertyValue) -> Option<String> {
 /// Top-level rows are one-per-export Branch rows. Expanding an export's
 /// `node_id` (by inserting it into `expanded`) causes its property bag rows
 /// to appear at depth 1. Containers recurse similarly.
+///
+/// Delegates to [`flatten_capped`] with an uncapped limit.
 pub fn flatten(pkg: &Package, expanded: &HashSet<NodeId>) -> Vec<PropRow> {
+    flatten_capped(pkg, expanded, usize::MAX)
+}
+
+/// Like [`flatten`] but stops building rows once `cap` is reached (it builds at
+/// most `cap + 1` rows, so a caller can detect truncation via `rows.len() > cap`).
+/// Bounds BOTH allocation and CPU during the walk — a crafted high-export asset
+/// cannot force an O(exports) per-frame build.
+pub fn flatten_capped(pkg: &Package, expanded: &HashSet<NodeId>, cap: usize) -> Vec<PropRow> {
     let mut rows = Vec::new();
     for (idx, export) in pkg.exports.exports.iter().enumerate() {
+        if rows.len() > cap {
+            break;
+        }
         let object_name = pkg
             .names
             .resolve(export.object_name, export.object_name_number);
@@ -321,15 +334,17 @@ pub fn flatten(pkg: &Package, expanded: &HashSet<NodeId>) -> Vec<PropRow> {
             kind: PropKind::Branch,
         });
 
-        // Nested `if is_exp { if let ... }` is intentional: MSRV 1.88 does not
-        // support let-chains; merging requires the unstable `if let` chain syntax.
+        // Children block: guarded by both `is_exp` and the cap. The cap guard is
+        // necessary here (not only inside the helpers) because the Opaque / unknown /
+        // typed arms push directly to `rows` without going through a helper.
+        // Nested `if` is intentional: MSRV 1.88 does not support let-chains.
         #[allow(clippy::collapsible_if)]
-        if is_exp {
+        if is_exp && rows.len() <= cap {
             if let Some(asset) = pkg.payloads.get(idx) {
                 match payload_bag(asset) {
                     Some(PropertyBag::Tree { properties }) => {
                         for prop in properties {
-                            flatten_property(prop, 1, node_id, &mut rows, expanded);
+                            flatten_property(prop, 1, node_id, &mut rows, expanded, cap);
                         }
                     }
                     Some(PropertyBag::Opaque { bytes }) => {
@@ -389,14 +404,15 @@ fn flatten_property(
     parent_id: NodeId,
     rows: &mut Vec<PropRow>,
     expanded: &HashSet<NodeId>,
+    cap: usize,
 ) {
-    if at_depth_cap(depth) {
+    if at_depth_cap(depth) || rows.len() > cap {
         return;
     }
 
     let node_id = child_node_id(parent_id, prop.name(), prop.array_index);
     let label = prop.name().to_string();
-    push_value_row(&prop.value, depth, node_id, label, rows, expanded);
+    push_value_row(&prop.value, depth, node_id, label, rows, expanded, cap);
 }
 
 /// Flatten an anonymous positional element (array/set item) into rows.
@@ -407,13 +423,14 @@ fn flatten_value(
     position: usize,
     rows: &mut Vec<PropRow>,
     expanded: &HashSet<NodeId>,
+    cap: usize,
 ) {
-    if at_depth_cap(depth) {
+    if at_depth_cap(depth) || rows.len() > cap {
         return;
     }
     let node_id = element_node_id(parent_id, position);
     let label = format!("[{position}]");
-    push_value_row(value, depth, node_id, label, rows, expanded);
+    push_value_row(value, depth, node_id, label, rows, expanded, cap);
 }
 
 /// Push a value row (scalar leaf or expandable branch) using a pre-computed id and label.
@@ -429,8 +446,9 @@ fn push_value_row(
     label: String,
     rows: &mut Vec<PropRow>,
     expanded: &HashSet<NodeId>,
+    cap: usize,
 ) {
-    if at_depth_cap(depth) {
+    if at_depth_cap(depth) || rows.len() > cap {
         return;
     }
     let is_exp = expanded.contains(&node_id);
@@ -455,7 +473,7 @@ fn push_value_row(
             });
             if is_exp {
                 for child in properties {
-                    flatten_property(child, child_depth, node_id, rows, expanded);
+                    flatten_property(child, child_depth, node_id, rows, expanded, cap);
                 }
             }
         }
@@ -480,7 +498,7 @@ fn push_value_row(
             });
             if is_exp {
                 for (i, elem) in elements.iter().enumerate() {
-                    flatten_value(elem, child_depth, node_id, i, rows, expanded);
+                    flatten_value(elem, child_depth, node_id, i, rows, expanded, cap);
                 }
             }
         }
@@ -507,10 +525,26 @@ fn push_value_row(
                 for (i, entry) in entries.iter().enumerate() {
                     let key_id = element_node_id(node_id, i * 2);
                     let key_label = format!("[{i}].key");
-                    push_value_row(&entry.key, child_depth, key_id, key_label, rows, expanded);
+                    push_value_row(
+                        &entry.key,
+                        child_depth,
+                        key_id,
+                        key_label,
+                        rows,
+                        expanded,
+                        cap,
+                    );
                     let val_id = element_node_id(node_id, i * 2 + 1);
                     let val_label = format!("[{i}].value");
-                    push_value_row(&entry.value, child_depth, val_id, val_label, rows, expanded);
+                    push_value_row(
+                        &entry.value,
+                        child_depth,
+                        val_id,
+                        val_label,
+                        rows,
+                        expanded,
+                        cap,
+                    );
                 }
             }
         }
@@ -1109,6 +1143,7 @@ mod tests {
             "MyColor".to_string(),
             &mut rows,
             &HashSet::new(),
+            usize::MAX,
         );
         assert_eq!(rows.len(), 1, "exactly one leaf row");
         let c = rows[0]
@@ -1142,7 +1177,15 @@ mod tests {
         // Kills a mutant that incorrectly returns `Some` for all leaves.
         let v = PropertyValue::Int(42);
         let mut rows: Vec<PropRow> = Vec::new();
-        push_value_row(&v, 0, 0, "X".to_string(), &mut rows, &HashSet::new());
+        push_value_row(
+            &v,
+            0,
+            0,
+            "X".to_string(),
+            &mut rows,
+            &HashSet::new(),
+            usize::MAX,
+        );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].color.is_none(), "Int leaf must have color = None");
     }
@@ -1334,6 +1377,7 @@ mod tests {
             "MyArray".to_string(),
             &mut rows,
             &expanded,
+            usize::MAX,
         );
 
         // 1 branch row + 2 element leaf rows
@@ -1427,6 +1471,7 @@ mod tests {
             "MyMap".to_string(),
             &mut rows,
             &expanded,
+            usize::MAX,
         );
 
         // 1 branch + 4 rows (2 entries × key + value)
@@ -1534,6 +1579,7 @@ mod tests {
             "MyArray".to_string(),
             &mut rows,
             &HashSet::new(),
+            usize::MAX,
         );
 
         // Only the branch row, no child rows.
@@ -1541,5 +1587,76 @@ mod tests {
         assert_eq!(rows[0].kind, PropKind::Branch);
         assert!(!rows[0].expanded);
         assert!(rows[0].is_expandable);
+    }
+
+    // ── flatten_capped tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn flatten_capped_at_zero_builds_at_most_one_row() {
+        // cap=0 → at most cap+1=1 rows built (truncation is detectable via len > cap).
+        let pkg = demo_package();
+        let rows = flatten_capped(&pkg, &HashSet::new(), 0);
+        // The fixture has ≥1 export, so exactly 1 row is produced (cap+1 sentinel).
+        assert!(rows.len() <= 1, "cap=0 must produce at most 1 row");
+        assert!(
+            rows.len() == 1,
+            "fixture has ≥1 export, so cap=0 yields exactly 1 row"
+        );
+        // Truncation is detectable: rows.len() > cap.
+        assert!(!rows.is_empty(), "truncation detectable: rows.len() > cap=0");
+    }
+
+    #[test]
+    fn flatten_capped_never_exceeds_cap_plus_one() {
+        // Boundary test pinning the off-by-one: capped result is NEVER more than cap+1.
+        let pkg = demo_package();
+        let collapsed = flatten(&pkg, &HashSet::new());
+        // Use cap=0 and cap=1 so the cap check is exercised at and just above boundary.
+        for cap in [0usize, 1] {
+            let rows = flatten_capped(&pkg, &HashSet::new(), cap);
+            assert!(
+                rows.len() <= cap + 1,
+                "flatten_capped with cap={cap} must return at most cap+1 rows; got {}",
+                rows.len()
+            );
+        }
+        // Expanding the first export: even with children, cap+1 is respected.
+        if !collapsed.is_empty() && collapsed[0].is_expandable {
+            let mut exp = HashSet::new();
+            #[allow(unused_results)]
+            exp.insert(collapsed[0].node_id);
+            let rows = flatten_capped(&pkg, &exp, 1);
+            assert!(
+                rows.len() <= 2,
+                "expanded fixture at cap=1 must return at most 2 rows; got {}",
+                rows.len()
+            );
+        }
+    }
+
+    #[test]
+    fn flatten_capped_max_equals_uncapped_flatten() {
+        // flatten_capped with usize::MAX must produce the same rows as flatten.
+        let pkg = demo_package();
+        let collapsed = flatten(&pkg, &HashSet::new());
+
+        // Test collapsed case.
+        assert_eq!(
+            flatten_capped(&pkg, &HashSet::new(), usize::MAX),
+            flatten(&pkg, &HashSet::new()),
+            "flatten_capped(usize::MAX) collapsed must equal flatten"
+        );
+
+        // Test with first export expanded.
+        if !collapsed.is_empty() && collapsed[0].is_expandable {
+            let mut exp = HashSet::new();
+            #[allow(unused_results)]
+            exp.insert(collapsed[0].node_id);
+            assert_eq!(
+                flatten_capped(&pkg, &exp, usize::MAX),
+                flatten(&pkg, &exp),
+                "flatten_capped(usize::MAX) expanded must equal flatten"
+            );
+        }
     }
 }
