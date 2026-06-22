@@ -466,7 +466,7 @@ fn push_value_row(
             inner_type,
             elements,
         } => {
-            let branch_label = format!("{label} [{inner_type}]");
+            let branch_label = format!("{label} [{inner_type}] ({} items)", elements.len());
             rows.push(PropRow {
                 depth,
                 label: branch_label,
@@ -488,7 +488,10 @@ fn push_value_row(
             value_type,
             entries,
         } => {
-            let branch_label = format!("{label} [{key_type} → {value_type}]");
+            let branch_label = format!(
+                "{label} [{key_type} → {value_type}] ({} entries)",
+                entries.len()
+            );
             rows.push(PropRow {
                 depth,
                 label: branch_label,
@@ -1338,6 +1341,11 @@ mod tests {
             3,
             "expanded array must emit 1 branch + 2 leaves"
         );
+        // Label-pin: branch label must include the element count suffix.
+        assert_eq!(
+            rows[0].label, "MyArray [IntProperty] (2 items)",
+            "array branch label must include inner_type and element count"
+        );
         assert_eq!(rows[0].kind, PropKind::Branch, "first row must be a branch");
         assert_eq!(rows[1].kind, PropKind::Leaf, "second row must be a leaf");
         assert_eq!(rows[2].kind, PropKind::Leaf, "third row must be a leaf");
@@ -1425,6 +1433,11 @@ mod tests {
             rows.len(),
             5,
             "expanded 2-entry map must emit 1 branch + 4 leaf rows"
+        );
+        // Label-pin: branch label must include key/value types and entry count suffix.
+        assert_eq!(
+            rows[0].label, "MyMap [IntProperty → StrProperty] (2 entries)",
+            "map branch label must include key_type, value_type, and entry count"
         );
         assert_eq!(rows[0].kind, PropKind::Branch);
         for r in &rows[1..5] {

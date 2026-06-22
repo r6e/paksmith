@@ -38,7 +38,7 @@ pub fn view<'a>(
     }
 
     // ── tab bar ───────────────────────────────────────────────────────────────
-    let tab_bar: Element<'_, Message> = tab_bar::view(tabs, accent);
+    let tab_strip: Element<'_, Message> = tab_bar::view(tabs, accent);
 
     // ── active tab body ───────────────────────────────────────────────────────
     let body: Element<'_, Message> = match tabs.active_tab() {
@@ -65,7 +65,7 @@ pub fn view<'a>(
         }
     };
 
-    column![tab_bar, body]
+    column![tab_strip, body]
         .spacing(0)
         .width(Length::Fill)
         .height(Length::Fill)

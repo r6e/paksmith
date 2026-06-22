@@ -66,6 +66,26 @@ pub fn ascii_cell_char(b: u8) -> char {
 
 // ── view ──────────────────────────────────────────────────────────────────────
 
+/// Build a toolbar copy button, enabled only when `enabled` is true.
+///
+/// When `enabled` the button emits `msg` on press; otherwise it renders
+/// without an `on_press` handler (visually disabled).
+#[mutants::skip]
+fn copy_toolbar_button(
+    label: &str,
+    msg: Message,
+    enabled: bool,
+) -> iced::widget::Button<'_, Message> {
+    let b = button(
+        text(label)
+            .size(f32::from(tokens::TEXT_SM))
+            .font(Font::MONOSPACE),
+    )
+    .style(iced::widget::button::secondary)
+    .padding([tokens::SPACE_XS, tokens::SPACE_SM]);
+    if enabled { b.on_press(msg) } else { b }
+}
+
 /// Render a hex dump of `bytes` as a scrollable, selectable grid.
 ///
 /// Each row shows: an 8-digit offset gutter, 16 hex-cell columns, and 16
@@ -83,35 +103,8 @@ pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Elem
     // ── copy toolbar ─────────────────────────────────────────────────────────
     let has_sel = hex.selection.is_some();
 
-    let copy_hex_btn = {
-        let b = button(
-            text("Copy hex")
-                .size(f32::from(tokens::TEXT_SM))
-                .font(Font::MONOSPACE),
-        )
-        .style(iced::widget::button::secondary)
-        .padding([tokens::SPACE_XS, tokens::SPACE_SM]);
-        if has_sel {
-            b.on_press(Message::HexCopyRequested)
-        } else {
-            b
-        }
-    };
-
-    let copy_ascii_btn = {
-        let b = button(
-            text("Copy ASCII")
-                .size(f32::from(tokens::TEXT_SM))
-                .font(Font::MONOSPACE),
-        )
-        .style(iced::widget::button::secondary)
-        .padding([tokens::SPACE_XS, tokens::SPACE_SM]);
-        if has_sel {
-            b.on_press(Message::HexCopyAsciiRequested)
-        } else {
-            b
-        }
-    };
+    let copy_hex_btn = copy_toolbar_button("Copy hex", Message::HexCopyRequested, has_sel);
+    let copy_ascii_btn = copy_toolbar_button("Copy ASCII", Message::HexCopyAsciiRequested, has_sel);
 
     let (shown, truncated) = display_slice(bytes);
 
@@ -120,8 +113,8 @@ pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Elem
     if truncated {
         toolbar_items.push(
             text(format!(
-                "Showing first {} of {} bytes — extract to inspect fully",
-                MAX_HEX_DISPLAY_BYTES,
+                "Showing first {} KiB of {} bytes — extract to inspect fully",
+                MAX_HEX_DISPLAY_BYTES / 1024,
                 bytes.len()
             ))
             .size(f32::from(tokens::TEXT_SM))
