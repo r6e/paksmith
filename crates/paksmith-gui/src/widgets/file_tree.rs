@@ -203,7 +203,6 @@ fn build_row(
             });
         btn.into()
     } else {
-        let full_path = row.full_path.clone().unwrap_or_default();
         let btn = button(content)
             .on_press(Message::RowSelected(i))
             .padding([tokens::SPACE_XS, tokens::SPACE_SM])
@@ -236,9 +235,15 @@ fn build_row(
                     }
                 }
             });
-        mouse_area(btn)
-            .on_double_click(Message::OpenAsset(full_path))
-            .into()
+        // Wire double-click-to-open only when the file row carries its path
+        // (the `full_path: Some` invariant for file rows). If that invariant is
+        // ever broken, the row stays selectable but never opens an empty path.
+        match row.full_path.clone() {
+            Some(path) => mouse_area(btn)
+                .on_double_click(Message::OpenAsset(path))
+                .into(),
+            None => btn.into(),
+        }
     }
 }
 

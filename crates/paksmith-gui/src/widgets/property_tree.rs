@@ -51,10 +51,13 @@ const SWATCH_BORDER_ALPHA: f32 = 0.35;
 /// * `pkg`      — the parsed asset Package.
 /// * `expanded` — the set of currently-expanded node ids (from the active tab).
 ///
-/// # Known limitation
+/// # Rendering bound
 ///
-/// TODO(perf): a deeply-expanded large asset (e.g. a wide DataTable) builds many
-/// widgets; consider a visible-row cap + "Collapse All" in a later pass.
+/// Rendering is capped at `MAX_VISIBLE_PROP_ROWS` (a truncation note is shown
+/// when exceeded), so a deeply-expanded large asset cannot build an unbounded
+/// widget tree. TODO(perf): `flatten` still rebuilds the full row `Vec` per
+/// call; memoize it (and add a "Collapse All") when wide-DataTable inspection
+/// becomes a primary workflow.
 #[mutants::skip]
 pub fn view<'a>(
     pkg: &'a paksmith_core::asset::Package,

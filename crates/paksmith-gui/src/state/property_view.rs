@@ -21,8 +21,9 @@ use paksmith_core::asset::structs::TypedStructValue;
 pub const MAX_RENDER_DEPTH: usize = 64;
 
 /// Whether `depth` has reached the render-depth cap (defense-in-depth guard
-/// against deeply-nested/adversarial property trees). Uses `>=` so the cap is
-/// the maximum depth actually rendered.
+/// against deeply-nested/adversarial property trees). Recursion stops AT
+/// `MAX_RENDER_DEPTH`; since `depth` is 0-based, the deepest depth actually
+/// rendered is `MAX_RENDER_DEPTH - 1`.
 fn at_depth_cap(depth: usize) -> bool {
     depth >= MAX_RENDER_DEPTH
 }
