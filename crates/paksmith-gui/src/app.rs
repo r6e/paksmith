@@ -819,6 +819,30 @@ mod tests {
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
+    /// Returns a shared `Arc<PakReader>` opened from the real_v8b_uasset fixture.
+    ///
+    /// The reader is opened exactly once per test binary via `OnceLock`; every
+    /// call clones the `Arc`, so 100+ `app_with_paths` calls pay only a single
+    /// disk-open.
+    fn shared_test_reader() -> std::sync::Arc<paksmith_core::container::pak::PakReader> {
+        use std::sync::{Arc, OnceLock};
+        static READER: OnceLock<Arc<paksmith_core::container::pak::PakReader>> = OnceLock::new();
+        READER
+            .get_or_init(|| {
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("tests/fixtures/real_v8b_uasset.pak");
+                Arc::new(
+                    paksmith_core::container::pak::PakReader::open(path)
+                        .expect("open fixture reader"),
+                )
+            })
+            .clone()
+    }
+
     /// Build a minimal `App` with a loaded archive whose tree is built from
     /// `paths` (forward-slash separated).  The archive has no real entries in
     /// the `entries` BTreeMap — keyboard-nav tests only need the tree rows.
@@ -838,17 +862,7 @@ mod tests {
             );
         }
         let entry_count = paths.len();
-        let reader = std::sync::Arc::new(
-            paksmith_core::container::pak::PakReader::open(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .join("tests/fixtures/real_v8b_uasset.pak"),
-            )
-            .expect("open fixture for test reader"),
-        );
+        let reader = shared_test_reader();
         let archive = LoadedArchive {
             path: PathBuf::from("test.pak"),
             entry_count,

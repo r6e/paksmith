@@ -116,7 +116,7 @@ fn build_loaded(path: PathBuf, resolved_key: Option<&AesKey>) -> Result<LoadedAr
         Err(e) => return Err(e.into()),
     };
 
-    let raw_entries: Vec<_> = reader.entries().collect(); // Arc<PakReader> derefs to &PakReader
+    let raw_entries: Vec<_> = reader.entries().collect();
     let entry_count = raw_entries.len();
     // Allocate each path string once and reuse it for both the BTreeMap key and
     // the paths Vec — avoids a second `to_string()` per entry.
