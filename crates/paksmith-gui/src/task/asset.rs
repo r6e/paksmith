@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use paksmith_core::asset::Package;
-use paksmith_core::container::ContainerReader;
+use paksmith_core::container::ContainerReader as _;
 use paksmith_core::container::pak::PakReader;
 
 /// Result of loading one asset entry: the raw bytes (always present on a
@@ -75,6 +75,7 @@ mod tests {
         assert!(!should_attempt_parse("Game/Maps/Demo.uexp"));
         assert!(!should_attempt_parse("Game/T_Rock.ubulk"));
         assert!(!should_attempt_parse("readme.txt"));
+        assert!(!should_attempt_parse("x.uasset/file.bin")); // dir named *.uasset, file is .bin
     }
 
     #[tokio::test]
