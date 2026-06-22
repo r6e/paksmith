@@ -235,15 +235,13 @@ fn build_row(
                     }
                 }
             });
-        // Wire double-click-to-open only when the file row carries its path
-        // (the `full_path: Some` invariant for file rows). If that invariant is
-        // ever broken, the row stays selectable but never opens an empty path.
-        match row.full_path.clone() {
-            Some(path) => mouse_area(btn)
-                .on_double_click(Message::OpenAsset(path))
-                .into(),
-            None => btn.into(),
-        }
+        // Wire double-click-to-open using the row index — path resolution happens
+        // once in `update` (via `open_path_for_row`), not per-frame here.
+        // Rows with no path (the `full_path: None` case) are handled in `update`:
+        // `OpenAssetByRow` resolves to `None` and is silently ignored.
+        mouse_area(btn)
+            .on_double_click(Message::OpenAssetByRow(i))
+            .into()
     }
 }
 

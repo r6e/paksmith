@@ -173,6 +173,9 @@ pub enum Message {
     HexCopyAsciiRequested,
     /// Toggle expand/collapse of a property-tree node in the active tab.
     PropToggled(crate::state::property_view::NodeId),
+    /// A file row was double-clicked (carries the visible-row index, not the path,
+    /// so the per-frame view doesn't clone a path String for every file row).
+    OpenAssetByRow(usize),
 }
 
 /// Processes a `Message` and updates the application state.
@@ -462,6 +465,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::OpenAssetByRow(i) => match open_path_for_row(app, i) {
+            Some(path) => Task::done(Message::OpenAsset(path)),
+            None => Task::none(),
+        },
     }
 }
 
@@ -635,6 +642,18 @@ fn clamp_selected_row(selected_row: &mut Option<usize>, row_count: usize) {
             *selected_row = Some(row_count - 1);
         }
     }
+}
+
+/// The asset path to open for visible tree row `i`, if it is a file row with a
+/// path. Resolving here (once, on the actual open event) keeps the per-frame
+/// view from cloning a path String for every file row.
+pub fn open_path_for_row(app: &App, i: usize) -> Option<String> {
+    app.archive.as_ref().and_then(|a| {
+        a.tree
+            .visible_rows()
+            .get(i)
+            .and_then(|r| r.full_path.clone())
+    })
 }
 
 /// Returns `true` when the active tab is a Hex view (so the drag-release
@@ -1932,5 +1951,41 @@ mod tests {
             before.wrapping_add(1),
             "ArchiveOpened(Locked) must bump archive_generation by 1"
         );
+    }
+
+    // ── open_path_for_row resolver ────────────────────────────────────────────
+
+    #[test]
+    fn open_path_for_row_resolves_file_row_path() {
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        // Row 0 is "Dir" (a dir row, collapsed). Expand it so "Dir/file.txt" appears.
+        if let Some(ref mut a) = app.archive {
+            a.tree.toggle(0); // expand Dir → file row appears at index 1
+        }
+        // Dir row (index 0) has no path → None.
+        assert_eq!(
+            open_path_for_row(&app, 0),
+            None,
+            "dir row must resolve to None"
+        );
+        // File row (index 1) has the path → Some.
+        assert_eq!(
+            open_path_for_row(&app, 1),
+            Some("Dir/file.txt".to_string()),
+            "file row must resolve to its full path"
+        );
+        // Out-of-bounds index → None (no panic, no path).
+        assert_eq!(
+            open_path_for_row(&app, 999),
+            None,
+            "out-of-bounds index must resolve to None"
+        );
+    }
+
+    #[test]
+    fn open_path_for_row_returns_none_without_archive() {
+        // No archive loaded → always None, regardless of index.
+        let app = App::default();
+        assert_eq!(open_path_for_row(&app, 0), None);
     }
 }
