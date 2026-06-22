@@ -477,17 +477,16 @@ fn flatten_property(
             }
         }
         other => {
-            // Scalar leaf — populate color channel for color-typed values.
-            rows.push(PropRow {
+            // Scalar leaf — delegate to push_value_row (single source of truth for
+            // as_color + scalar_display leaf wiring, already unit-tested).
+            push_value_row(
+                other,
                 depth,
-                label: prop.name().to_string(),
-                value: scalar_display(other),
-                color: as_color(other),
                 node_id,
-                is_expandable: false,
-                expanded: false,
-                kind: PropKind::Leaf,
-            });
+                prop.name().to_string(),
+                rows,
+                expanded,
+            );
         }
     }
 }
@@ -776,6 +775,12 @@ mod tests {
         assert!((c[1] - expected_g).abs() < f32::EPSILON, "g mismatch");
         assert!((c[2] - expected_b).abs() < f32::EPSILON, "b mismatch");
         assert!((c[3] - expected_a).abs() < f32::EPSILON, "a mismatch");
+        // Swap-guard: the four channels must be strictly ordered as produced,
+        // so a transposed r/g/b/a in as_color is caught regardless of tolerance.
+        assert!(
+            c[0] < c[1] && c[1] < c[2] && c[2] < c[3],
+            "channels must stay in r<g<b<a order for the chosen distinct inputs"
+        );
     }
 
     #[test]
@@ -913,6 +918,19 @@ mod tests {
         assert_eq!(
             scalar_display(&v).as_deref(),
             Some("/Game/Textures/Foo:SubObject")
+        );
+    }
+
+    #[test]
+    fn scalar_display_soft_class_path() {
+        let v = PropertyValue::SoftClassPath {
+            asset_path: "/Game/BP/Hero.Hero_C".into(),
+            sub_path: String::new(),
+        };
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("/Game/BP/Hero.Hero_C"),
+            "SoftClassPath without sub_path must show only asset_path"
         );
     }
 
