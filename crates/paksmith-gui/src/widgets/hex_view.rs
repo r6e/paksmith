@@ -102,9 +102,10 @@ pub fn view<'a>(
         vec![copy_hex_btn.into(), copy_ascii_btn.into()];
     if truncated {
         toolbar_items.push(
-            text(
-                "Showing the first 16 KiB \u{2014} entry is larger; see Info for the full size or extract it",
-            )
+            text(format!(
+                "Showing the first {} KiB \u{2014} entry is larger; see Info for the full size or extract it",
+                crate::task::asset::HEX_BYTES_CAP / 1024,
+            ))
             .size(f32::from(tokens::TEXT_SM))
             .style(|theme: &iced::Theme| iced::widget::text::Style {
                 color: Some(theme.palette().text.scale_alpha(tokens::TEXT_MUTED_ALPHA)),
