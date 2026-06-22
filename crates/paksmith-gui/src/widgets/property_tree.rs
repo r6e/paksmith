@@ -32,6 +32,7 @@ const SWATCH_SIZE: f32 = 12.0;
 /// Border alpha for the swatch hairline — subtle enough on colored swatches but
 /// enough contrast to make a white/transparent swatch visible against a light
 /// background.
+/// Decorative hairline (non-text) — WCAG text-contrast rules do not apply; deliberately below TEXT_MUTED_ALPHA.
 const SWATCH_BORDER_ALPHA: f32 = 0.35;
 
 // ── view ──────────────────────────────────────────────────────────────────────
@@ -40,8 +41,13 @@ const SWATCH_BORDER_ALPHA: f32 = 0.35;
 ///
 /// * `pkg`      — the parsed asset Package.
 /// * `expanded` — the set of currently-expanded node ids (from the active tab).
-/// * `accent`   — the system accent color (not used for swatch fill — swatches
-///   use the literal `row.color` RGBA).
+/// * `_accent`  — reserved for a future row-selection highlight (mirrors file_tree's accent use);
+///   unused in 7a.
+///
+/// # Known limitation
+///
+/// TODO(perf): a deeply-expanded large asset (e.g. a wide DataTable) builds many
+/// widgets; consider a visible-row cap + "Collapse All" in a later pass.
 #[mutants::skip]
 pub fn view<'a>(
     pkg: &'a paksmith_core::asset::Package,
@@ -147,7 +153,8 @@ fn build_row(row: crate::state::property_view::PropRow) -> Element<'static, Mess
             });
 
             let mut leaf_row = row![
-                iced::widget::Space::new().width(indent + tokens::TREE_INDENT),
+                iced::widget::Space::new()
+                    .width(crate::widgets::file_tree::file_row_indent(indent)),
                 label_part,
             ]
             .align_y(iced::Alignment::Center)

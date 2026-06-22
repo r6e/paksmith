@@ -43,7 +43,7 @@ pub fn row_indent(depth: usize) -> f32 {
 
 /// Pixel indent for a file row — one extra [`tokens::TREE_INDENT`] step past
 /// the parent directory's indent so the label aligns just after the chevron.
-fn file_row_indent(depth_indent: f32) -> f32 {
+pub fn file_row_indent(depth_indent: f32) -> f32 {
     depth_indent + tokens::TREE_INDENT
 }
 
