@@ -214,15 +214,20 @@ exclude_re = [
     # (requires binary fixture parsing). Remove when a fixture with Import/Export
     # class indices is available in the GUI test tree.
     'delete match arm PackageIndex::(Import|Export)\(n\) in class_name',
-    # `class_name -> String` whole-body replacements: the function returns a
-    # display string used as a label in export rows. The fixture-backed flatten
-    # tests (`flatten_collapsed_shows_only_export_rows`, `node_ids_are_stable_across_flattens`)
-    # do exercise class_name but only compare row counts / node-id equality, not
-    # the string value. Distinguishing "Class" from "xyzzy" would require asserting
-    # a specific label substring, which is fragile against future label-format
-    # changes. The Null arm (which produces "Class") IS the path exercised by the
-    # Demo fixture; the whole-body replacement is a valid gap since no test
-    # currently asserts the label content. Exclude rather than add a brittle
-    # fixture-label assertion. Remove when a label-content test is added.
-    'replace class_name -> String with ("xyzzy"|String::new)\(\)',
+    # `PackageIndex::Null` arm in `class_name`: produces "Class" for a null
+    # class_index. The Demo.uasset fixture's export uses a non-null class_index
+    # (Import arm, resolves to "Default__Object"), so the Null arm is genuinely
+    # unreachable for the GUI test fixture. The Import/Export arms that ARE
+    # exercised are excluded separately above. Remove when a GUI fixture with a
+    # null class_index export becomes available.
+    'delete match arm PackageIndex::Null in class_name',
+    # `flatten_property` whole-body replacement: this thin adapter (Property →
+    # PropertyValue) calls `push_value_row` directly; Property.name is pub(crate)
+    # and non-constructible from GUI unit tests. The full recursion it drives
+    # (Array/Set/Map/Struct expansion + depth + node_id arithmetic) is
+    # unit-tested via `push_value_row` directly (B4 tests). The real package
+    # path IS exercised by the fixture-backed `flatten_expanding_export_reveals_children`
+    # (Generic/Tree bag → flatten_property → push_value_row). Mirrors the CLI's
+    # documented forward-coverage stance for the same adapter layer.
+    'replace flatten_property with \(\)',
 ]

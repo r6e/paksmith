@@ -433,6 +433,8 @@ fn push_value_row(
         return;
     }
     let is_exp = expanded.contains(&node_id);
+    // Single depth-increment binding shared by all container arms — one mutation point.
+    let child_depth = depth + 1;
 
     match value {
         PropertyValue::Struct {
@@ -452,7 +454,7 @@ fn push_value_row(
             });
             if is_exp {
                 for child in properties {
-                    flatten_property(child, depth + 1, node_id, rows, expanded);
+                    flatten_property(child, child_depth, node_id, rows, expanded);
                 }
             }
         }
@@ -477,7 +479,7 @@ fn push_value_row(
             });
             if is_exp {
                 for (i, elem) in elements.iter().enumerate() {
-                    flatten_value(elem, depth + 1, node_id, i, rows, expanded);
+                    flatten_value(elem, child_depth, node_id, i, rows, expanded);
                 }
             }
         }
@@ -501,10 +503,10 @@ fn push_value_row(
                 for (i, entry) in entries.iter().enumerate() {
                     let key_id = element_node_id(node_id, i * 2);
                     let key_label = format!("[{i}].key");
-                    push_value_row(&entry.key, depth + 1, key_id, key_label, rows, expanded);
+                    push_value_row(&entry.key, child_depth, key_id, key_label, rows, expanded);
                     let val_id = element_node_id(node_id, i * 2 + 1);
                     let val_label = format!("[{i}].value");
-                    push_value_row(&entry.value, depth + 1, val_id, val_label, rows, expanded);
+                    push_value_row(&entry.value, child_depth, val_id, val_label, rows, expanded);
                 }
             }
         }
@@ -1360,26 +1362,49 @@ mod tests {
             Some("20"),
             "second element must display as \"20\""
         );
+
+        // (d) Element rows sit one level deeper than the branch — kills `child_depth` mutant.
+        assert_eq!(rows[0].depth, 0, "branch row must be at depth 0");
+        assert_eq!(
+            rows[1].depth, 1,
+            "array element must be at branch depth + 1"
+        );
+        assert_eq!(
+            rows[2].depth, 1,
+            "array element must be at branch depth + 1"
+        );
     }
 
     #[test]
     fn push_value_row_map_expanded_emits_branch_key_value_rows() {
         use paksmith_core::asset::property::primitives::{MapEntry, PropertyValue as V};
 
+        // Two-entry map: kills `i * 2` / `i * 2 + 1` arithmetic mutants by
+        // making entry-1's key/value occupy positions 2/3, not 0/1.
         let map_val = V::Map {
             key_type: "IntProperty".into(),
             value_type: "StrProperty".into(),
-            entries: vec![MapEntry {
-                key: V::Int(1),
-                value: V::Str("hello".into()),
-            }],
+            entries: vec![
+                MapEntry {
+                    key: V::Int(1),
+                    value: V::Str("a".into()),
+                },
+                MapEntry {
+                    key: V::Int(2),
+                    value: V::Str("b".into()),
+                },
+            ],
         };
 
         let branch_id: NodeId = 99;
         // push_value_row uses element_node_id(node_id, i * 2) for key,
         // element_node_id(node_id, i * 2 + 1) for value.
-        let key_id = element_node_id(branch_id, 0); // 0 * 2
-        let val_id = element_node_id(branch_id, 1); // 0 * 2 + 1
+        // entry 0: key @ position 0, value @ position 1
+        // entry 1: key @ position 2, value @ position 3
+        let key0_id = element_node_id(branch_id, 0); // 0 * 2
+        let val0_id = element_node_id(branch_id, 1); // 0 * 2 + 1
+        let key1_id = element_node_id(branch_id, 2); // 1 * 2
+        let val1_id = element_node_id(branch_id, 3); // 1 * 2 + 1
 
         let mut expanded = HashSet::new();
         #[allow(unused_results)]
@@ -1395,20 +1420,85 @@ mod tests {
             &expanded,
         );
 
-        // 1 branch + 2 rows (key + value for the single entry)
-        assert_eq!(rows.len(), 3, "expanded map must emit 1 branch + 2 rows");
+        // 1 branch + 4 rows (2 entries × key + value)
+        assert_eq!(
+            rows.len(),
+            5,
+            "expanded 2-entry map must emit 1 branch + 4 leaf rows"
+        );
         assert_eq!(rows[0].kind, PropKind::Branch);
-        assert_eq!(rows[1].kind, PropKind::Leaf);
-        assert_eq!(rows[2].kind, PropKind::Leaf);
+        for r in &rows[1..5] {
+            assert_eq!(r.kind, PropKind::Leaf);
+        }
 
-        // Distinct key/value node_ids (kills i*2/i*2+1 arithmetic mutants)
-        assert_ne!(rows[1].node_id, rows[2].node_id);
-        assert_eq!(rows[1].node_id, key_id);
-        assert_eq!(rows[2].node_id, val_id);
+        // All four leaf node_ids are distinct — kills `i * 2` and `i * 2 + 1`
+        // arithmetic mutants: e.g. `i / 2` would give entry-1.key position 0,
+        // colliding with entry-0.key.
+        let ids: std::collections::HashSet<NodeId> = rows[1..5].iter().map(|r| r.node_id).collect();
+        assert_eq!(
+            ids.len(),
+            4,
+            "all key/value node_ids across both entries must be distinct"
+        );
 
-        // Key renders as Int(1) = "1", value as Str("hello") = "\"hello\""
-        assert_eq!(rows[1].value.as_deref(), Some("1"));
-        assert_eq!(rows[2].value.as_deref(), Some("\"hello\""));
+        // Verify exact node_id positions match the formula.
+        assert_eq!(rows[1].node_id, key0_id, "entry 0 key at position i*2=0");
+        assert_eq!(
+            rows[2].node_id, val0_id,
+            "entry 0 value at position i*2+1=1"
+        );
+        assert_eq!(rows[3].node_id, key1_id, "entry 1 key at position i*2=2");
+        assert_eq!(
+            rows[4].node_id, val1_id,
+            "entry 1 value at position i*2+1=3"
+        );
+
+        // Value rendering
+        assert_eq!(
+            rows[1].value.as_deref(),
+            Some("1"),
+            "entry 0 key must render as 1"
+        );
+        assert_eq!(
+            rows[2].value.as_deref(),
+            Some("\"a\""),
+            "entry 0 value must render as \"a\""
+        );
+        assert_eq!(
+            rows[3].value.as_deref(),
+            Some("2"),
+            "entry 1 key must render as 2"
+        );
+        assert_eq!(
+            rows[4].value.as_deref(),
+            Some("\"b\""),
+            "entry 1 value must render as \"b\""
+        );
+
+        // key/value rows are one level deeper than the branch — kills `child_depth` mutant.
+        assert_eq!(rows[0].depth, 0, "branch at depth 0");
+        for r in &rows[1..5] {
+            assert_eq!(r.depth, 1, "map key/value rows must be at branch depth + 1");
+        }
+    }
+
+    #[test]
+    fn flatten_export_row_label_contains_resolved_class_name() {
+        // The Demo.uasset fixture has a single export whose class_index resolves
+        // via the Import or Export table to "Default__Object". An exact-match
+        // assertion on the full label kills:
+        //   - `class_name -> String with "xyzzy"` (label becomes "[0] Default__Object : xyzzy")
+        //   - `class_name -> String with String::new()` (label becomes "[0] Default__Object : ")
+        // The PackageIndex::Null arm (which would produce ": Class") is genuinely
+        // unreachable for this fixture; it is covered by an exclude_re entry.
+        let pkg = demo_package();
+        let rows = flatten(&pkg, &HashSet::new());
+        assert!(!rows.is_empty(), "at least one export row from Demo.uasset");
+        assert_eq!(
+            rows[0].label, "[0] Default__Object : Default__Object",
+            "export row label must include the resolved class name; got {:?}",
+            rows[0].label
+        );
     }
 
     #[test]
