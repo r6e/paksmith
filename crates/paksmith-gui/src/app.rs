@@ -410,30 +410,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::HexCopyRequested => {
-            // Triple-nested if-let chains can't be collapsed without let-chains (MSRV 1.88).
-            #[allow(clippy::collapsible_if)]
-            if let Some(tab) = app.tabs.active_tab_mut() {
-                if let crate::state::tabs::TabContent::Ready { bytes, .. } = &tab.content {
-                    if let Some(sel) = tab.hex.selection {
-                        let text = crate::state::hex_view::copy_hex(bytes, sel);
-                        return iced::clipboard::write::<Message>(text);
-                    }
-                }
-            }
-            Task::none()
+            copy_from_active_hex(&mut app.tabs, crate::state::hex_view::copy_hex)
         }
         Message::HexCopyAsciiRequested => {
-            // Triple-nested if-let chains can't be collapsed without let-chains (MSRV 1.88).
-            #[allow(clippy::collapsible_if)]
-            if let Some(tab) = app.tabs.active_tab_mut() {
-                if let crate::state::tabs::TabContent::Ready { bytes, .. } = &tab.content {
-                    if let Some(sel) = tab.hex.selection {
-                        let text = crate::state::hex_view::copy_ascii(bytes, sel);
-                        return iced::clipboard::write::<Message>(text);
-                    }
-                }
-            }
-            Task::none()
+            copy_from_active_hex(&mut app.tabs, crate::state::hex_view::copy_ascii)
         }
         Message::PropToggled(node_id) => {
             // Two-guard form: if-let + matches! can't be let-chained on MSRV 1.88.
@@ -452,6 +432,27 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
     }
+}
+
+/// Copy bytes from the active hex tab using the supplied formatting function.
+///
+/// Returns an [`iced::clipboard::write`] task when a selection is active on a
+/// `Ready` tab, or [`Task::none`] otherwise. Shared by
+/// [`Message::HexCopyRequested`] and [`Message::HexCopyAsciiRequested`].
+fn copy_from_active_hex(
+    tabs: &mut crate::state::tabs::Tabs,
+    copy_fn: fn(&[u8], crate::state::hex_view::Selection) -> String,
+) -> Task<Message> {
+    // Triple-nested if-let chains can't be collapsed without let-chains (MSRV 1.88).
+    #[allow(clippy::collapsible_if)]
+    if let Some(tab) = tabs.active_tab_mut() {
+        if let crate::state::tabs::TabContent::Ready { bytes, .. } = &tab.content {
+            if let Some(sel) = tab.hex.selection {
+                return iced::clipboard::write::<Message>(copy_fn(bytes, sel));
+            }
+        }
+    }
+    Task::none()
 }
 
 /// Move the keyboard cursor and mutate the tree based on a key press.
@@ -605,6 +606,17 @@ fn clamp_selected_row(selected_row: &mut Option<usize>, row_count: usize) {
     }
 }
 
+/// Returns `true` when the active tab is a Hex view (so the drag-release
+/// subscription should be active).
+///
+/// Extracted from [`subscription`] so the predicate is unit-testable.
+/// Kills the `== with !=` mutant on the `ViewMode::Hex` comparison.
+pub fn hex_drag_listener_active(app: &App) -> bool {
+    app.tabs
+        .active_tab()
+        .is_some_and(|t| t.view == crate::state::tabs::ViewMode::Hex)
+}
+
 /// Returns a [`Subscription`] that converts keyboard key-press events into
 /// [`Message::TreeKey`] while an archive is open, merged with the menu event
 /// bridge that polls the `muda` global channel.
@@ -617,6 +629,11 @@ fn clamp_selected_row(selected_row: &mut Option<usize>, row_count: usize) {
 /// modifier-only, and all non-keyboard events produce `None` and are dropped
 /// before the message queue — eliminating spurious `view` calls on every
 /// key release.
+// Iced event-wiring glue: the two match-arm-delete mutants (KeyPressed /
+// ButtonReleased arms) produce opaque `Subscription` values; no unit test can
+// inspect what events a Subscription will fire without a full headless runtime.
+// The testable predicate (`hex_drag_listener_active`) is extracted and tested.
+#[mutants::skip]
 pub fn subscription(app: &App) -> Subscription<Message> {
     let menu_sub = crate::menu::subscription();
 
@@ -632,11 +649,7 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     // Only subscribe to left-button-release when a Hex tab is active. Drag can
     // only start inside a Hex view, so firing this app-wide would cause
     // spurious update+view rebuilds on every click elsewhere.
-    let hex_drag_sub = if app
-        .tabs
-        .active_tab()
-        .is_some_and(|t| t.view == crate::state::tabs::ViewMode::Hex)
-    {
+    let hex_drag_sub = if hex_drag_listener_active(app) {
         iced::event::listen_with(|event, _status, _window| match event {
             Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
                 Some(Message::HexDragEnded)
@@ -1713,6 +1726,63 @@ mod tests {
         assert!(
             app.tabs.open[0].expanded.is_empty(),
             "PropToggled on a Loading tab must be a no-op"
+        );
+    }
+
+    // ── B8: hex_drag_listener_active predicate ────────────────────────────────
+
+    #[test]
+    fn hex_drag_listener_active_true_only_for_hex_view_tab() {
+        // A tab in Hex view → true (Kills `== with !=`).
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        let _ = update(
+            &mut app,
+            Message::ViewModeSet(crate::state::tabs::ViewMode::Hex),
+        );
+        assert!(
+            hex_drag_listener_active(&app),
+            "Hex-view active tab must return true"
+        );
+    }
+
+    #[test]
+    fn hex_drag_listener_active_false_for_properties_view() {
+        // Default view is Properties → false.
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        // Tab defaults to Properties.
+        assert_eq!(
+            app.tabs.active_tab().unwrap().view,
+            crate::state::tabs::ViewMode::Properties
+        );
+        assert!(
+            !hex_drag_listener_active(&app),
+            "Properties-view tab must return false"
+        );
+    }
+
+    #[test]
+    fn hex_drag_listener_active_false_when_no_tabs() {
+        // No tabs at all → false.
+        let app = App::default();
+        assert!(
+            !hex_drag_listener_active(&app),
+            "no active tab must return false"
+        );
+    }
+
+    #[test]
+    fn hex_drag_listener_active_false_for_info_view() {
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        let _ = update(
+            &mut app,
+            Message::ViewModeSet(crate::state::tabs::ViewMode::Info),
+        );
+        assert!(
+            !hex_drag_listener_active(&app),
+            "Info-view tab must return false"
         );
     }
 

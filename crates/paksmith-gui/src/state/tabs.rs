@@ -330,4 +330,37 @@ mod tests {
         t.activate(5);
         assert_eq!(t.active, Some(0));
     }
+
+    // ── B5: close / activate boundary ────────────────────────────────────────
+
+    #[test]
+    fn close_active_middle_repicks_via_min_not_decrement() {
+        // Tabs: A(0) B(1) C(2) D(3); active = 1.
+        // Close idx=1 (the active tab). a==idx falls through to the `_` arm:
+        //   idx.min(len - 1) = 1.min(2) = 1 → points at C.
+        // The `> with >=` mutant would trigger the `a >= idx` arm for `a == idx`,
+        // returning `a - 1 = 0` instead of 1 (wrong: A, not C).
+        let mut t = loading_tabs(&["A", "B", "C", "D"]);
+        t.activate(1);
+        t.close(1);
+        assert_eq!(
+            t.active,
+            Some(1),
+            "closing active middle tab must pick the new tab at that index"
+        );
+        assert_eq!(t.open[1].path, "C", "index 1 must now point at C");
+    }
+
+    #[test]
+    fn activate_exactly_at_len_is_rejected() {
+        // Tabs: ["A"]; len=1. activate(1) is one-past-the-end.
+        // `< with <=` mutant: would accept idx=1 → sets active=Some(1) (OOB).
+        let mut t = loading_tabs(&["A"]);
+        let original_active = t.active;
+        t.activate(1); // idx == len(1): `<` rejects, `<=` would accept (OOB)
+        assert_eq!(
+            t.active, original_active,
+            "activate at exactly len must be rejected (out of bounds)"
+        );
+    }
 }

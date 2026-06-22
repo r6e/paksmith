@@ -102,4 +102,29 @@ mod tests {
         assert!(!loaded.tree.is_empty());
         assert!(loaded.tree.len() <= loaded.entry_count); // tree dedups duplicate paths
     }
+
+    // ── B7: LoadedArchive Debug impl ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn loaded_archive_debug_contains_struct_name_and_reader_sentinel() {
+        // Kills `replace <impl std::fmt::Debug for LoadedArchive>::fmt -> std::fmt::Result
+        // with Ok(Default::default())`: a no-op fmt would produce an empty string,
+        // not containing "LoadedArchive" or "<PakReader>".
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/real_v8b_uasset.pak");
+        let loaded = crate::task::open::run(fixture, None).await.unwrap();
+        let debug_str = format!("{loaded:?}");
+        assert!(
+            debug_str.contains("LoadedArchive"),
+            "Debug must contain the struct name; got: {debug_str}"
+        );
+        assert!(
+            debug_str.contains("<PakReader>"),
+            "Debug must contain the reader sentinel; got: {debug_str}"
+        );
+    }
 }

@@ -377,11 +377,11 @@ pub fn flatten(pkg: &Package, expanded: &HashSet<NodeId>) -> Vec<PropRow> {
 }
 
 /// Recursively flatten one named [`Property`] into rows.
-#[allow(
-    clippy::too_many_lines,
-    reason = "property-type dispatch — one arm per UE container variant; \
-              splitting would obscure the per-type recursion structure"
-)]
+///
+/// Container arms delegate to [`push_value_row`] so that recursion
+/// arithmetic (depth + 1, element_node_id offsets) lives in a single
+/// place. The label is computed here from `prop.name()` before the
+/// delegation.
 fn flatten_property(
     prop: &Property,
     depth: usize,
@@ -394,101 +394,8 @@ fn flatten_property(
     }
 
     let node_id = child_node_id(parent_id, prop.name(), prop.array_index);
-    let is_exp = expanded.contains(&node_id);
-
-    match &prop.value {
-        PropertyValue::Struct {
-            struct_name,
-            properties,
-        } => {
-            let label = format!("{} ({})", prop.name(), struct_name);
-            rows.push(PropRow {
-                depth,
-                label,
-                value: None,
-                color: None,
-                node_id,
-                is_expandable: true,
-                expanded: is_exp,
-                kind: PropKind::Branch,
-            });
-            if is_exp {
-                for child in properties {
-                    flatten_property(child, depth + 1, node_id, rows, expanded);
-                }
-            }
-        }
-        PropertyValue::Array {
-            inner_type,
-            elements,
-        }
-        | PropertyValue::Set {
-            inner_type,
-            elements,
-        } => {
-            let label = format!("{} [{inner_type}] ({} items)", prop.name(), elements.len());
-            rows.push(PropRow {
-                depth,
-                label,
-                value: None,
-                color: None,
-                node_id,
-                is_expandable: true,
-                expanded: is_exp,
-                kind: PropKind::Branch,
-            });
-            if is_exp {
-                for (i, elem) in elements.iter().enumerate() {
-                    flatten_value(elem, depth + 1, node_id, i, rows, expanded);
-                }
-            }
-        }
-        PropertyValue::Map {
-            key_type,
-            value_type,
-            entries,
-        } => {
-            let label = format!(
-                "{} [{key_type} → {value_type}] ({} entries)",
-                prop.name(),
-                entries.len()
-            );
-            rows.push(PropRow {
-                depth,
-                label,
-                value: None,
-                color: None,
-                node_id,
-                is_expandable: true,
-                expanded: is_exp,
-                kind: PropKind::Branch,
-            });
-            if is_exp {
-                for (i, entry) in entries.iter().enumerate() {
-                    // Key
-                    let key_id = element_node_id(node_id, i * 2);
-                    let key_label = format!("[{i}].key");
-                    push_value_row(&entry.key, depth + 1, key_id, key_label, rows, expanded);
-                    // Value
-                    let val_id = element_node_id(node_id, i * 2 + 1);
-                    let val_label = format!("[{i}].value");
-                    push_value_row(&entry.value, depth + 1, val_id, val_label, rows, expanded);
-                }
-            }
-        }
-        other => {
-            // Scalar leaf — delegate to push_value_row (single source of truth for
-            // as_color + scalar_display leaf wiring, already unit-tested).
-            push_value_row(
-                other,
-                depth,
-                node_id,
-                prop.name().to_string(),
-                rows,
-                expanded,
-            );
-        }
-    }
+    let label = prop.name().to_string();
+    push_value_row(&prop.value, depth, node_id, label, rows, expanded);
 }
 
 /// Flatten an anonymous positional element (array/set item) into rows.
@@ -1232,5 +1139,303 @@ mod tests {
         push_value_row(&v, 0, 0, "X".to_string(), &mut rows, &HashSet::new());
         assert_eq!(rows.len(), 1);
         assert!(rows[0].color.is_none(), "Int leaf must have color = None");
+    }
+
+    // ── B1: node-id helpers ───────────────────────────────────────────────────
+
+    #[test]
+    fn root_node_ids_distinct_per_export() {
+        // Kills `replace root_node_id -> NodeId with Default::default()`:
+        // a const-0 collapses all exports to equal node ids.
+        assert_ne!(root_node_id(0), root_node_id(1));
+        assert_ne!(root_node_id(1), root_node_id(2));
+    }
+
+    #[test]
+    fn element_node_ids_distinct_by_position_and_parent() {
+        // Kills `replace element_node_id -> NodeId with Default::default()`:
+        // a const-0 collapses all elements to equal node ids.
+        assert_ne!(element_node_id(0, 0), element_node_id(0, 1));
+        assert_ne!(element_node_id(0, 1), element_node_id(0, 2));
+        // Parent matters: same position under different parents must differ.
+        assert_ne!(element_node_id(0, 0), element_node_id(99, 0));
+    }
+
+    // ── B2: scalar_display — missing variant arms ─────────────────────────────
+
+    #[test]
+    fn scalar_display_covers_remaining_scalar_variants() {
+        use paksmith_core::asset::property::primitives::MapEntry;
+        use paksmith_core::asset::property::primitives::PropertyValue as V;
+
+        // Byte
+        assert_eq!(
+            scalar_display(&V::Byte(7)).as_deref(),
+            Some("7"),
+            "Byte(7) must display as \"7\""
+        );
+        // Int8
+        assert_eq!(
+            scalar_display(&V::Int8(-3)).as_deref(),
+            Some("-3"),
+            "Int8(-3) must display as \"-3\""
+        );
+        // Int16
+        assert_eq!(
+            scalar_display(&V::Int16(-300)).as_deref(),
+            Some("-300"),
+            "Int16(-300) must display as \"-300\""
+        );
+        // Int64
+        assert_eq!(
+            scalar_display(&V::Int64(-5)).as_deref(),
+            Some("-5"),
+            "Int64(-5) must display as \"-5\""
+        );
+        // UInt16
+        assert_eq!(
+            scalar_display(&V::UInt16(60000)).as_deref(),
+            Some("60000"),
+            "UInt16(60000) must display as \"60000\""
+        );
+        // UInt32
+        assert_eq!(
+            scalar_display(&V::UInt32(4_000_000_000)).as_deref(),
+            Some("4000000000"),
+            "UInt32(4000000000) must display as \"4000000000\""
+        );
+        // UInt64
+        assert_eq!(
+            scalar_display(&V::UInt64(9_000_000_000)).as_deref(),
+            Some("9000000000"),
+            "UInt64(9000000000) must display as \"9000000000\""
+        );
+        // Double
+        assert_eq!(
+            scalar_display(&V::Double(1.5)).as_deref(),
+            Some("1.5"),
+            "Double(1.5) must display as \"1.5\""
+        );
+        // Name — Arc<str>
+        assert_eq!(
+            scalar_display(&V::Name("Foo".into())).as_deref(),
+            Some("Foo"),
+            "Name(\"Foo\") must display as \"Foo\""
+        );
+        // Unknown
+        assert_eq!(
+            scalar_display(&V::Unknown {
+                type_name: "SomeType".to_string(),
+                skipped_bytes: 42,
+            })
+            .as_deref(),
+            Some("<SomeType: 42 bytes>"),
+            "Unknown must display as <TypeName: N bytes>"
+        );
+        // Array (elements count summary)
+        assert_eq!(
+            scalar_display(&V::Array {
+                inner_type: "IntProperty".into(),
+                elements: vec![V::Int(1), V::Int(2)],
+            })
+            .as_deref(),
+            Some("[2]"),
+            "Array of 2 elements must display as \"[2]\""
+        );
+        // Set (elements count summary)
+        assert_eq!(
+            scalar_display(&V::Set {
+                inner_type: "IntProperty".into(),
+                elements: vec![V::Int(10), V::Int(20), V::Int(30)],
+            })
+            .as_deref(),
+            Some("[3]"),
+            "Set of 3 elements must display as \"[3]\""
+        );
+        // Map (entries count summary)
+        assert_eq!(
+            scalar_display(&V::Map {
+                key_type: "IntProperty".into(),
+                value_type: "StrProperty".into(),
+                entries: vec![MapEntry {
+                    key: V::Int(1),
+                    value: V::Str("a".into()),
+                }],
+            })
+            .as_deref(),
+            Some("[1]"),
+            "Map of 1 entry must display as \"[1]\""
+        );
+        // Struct (properties count summary)
+        assert_eq!(
+            scalar_display(&V::Struct {
+                struct_name: "MyStruct".into(),
+                properties: vec![],
+            })
+            .as_deref(),
+            Some("[0]"),
+            "Struct with 0 properties must display as \"[0]\""
+        );
+    }
+
+    // ── B3: payload_bag Generic arm ───────────────────────────────────────────
+
+    #[test]
+    fn payload_bag_generic_returns_some() {
+        use paksmith_core::asset::Asset;
+        use paksmith_core::asset::property::PropertyBag;
+        // An Asset::Generic with an empty Tree bag returns Some.
+        // Kills `replace payload_bag -> Option<&PropertyBag> with None`
+        // and `delete match arm Asset::Generic(bag)`.
+        let bag = PropertyBag::tree(vec![]);
+        let asset = Asset::Generic(bag);
+        assert!(
+            payload_bag(&asset).is_some(),
+            "Asset::Generic must yield Some from payload_bag"
+        );
+    }
+
+    // ── B4: push_value_row recursion via constructed Array/Map ───────────────
+
+    #[test]
+    fn push_value_row_array_expanded_emits_branch_and_elements() {
+        use paksmith_core::asset::property::primitives::PropertyValue as V;
+
+        let array_val = V::Array {
+            inner_type: "IntProperty".into(),
+            elements: vec![V::Int(10), V::Int(20)],
+        };
+
+        // Compute node_id for the array branch (same as push_value_row uses).
+        let parent_id: NodeId = 42;
+        let branch_id: NodeId = parent_id; // push_value_row receives node_id directly
+
+        // Pre-build element node ids so we can add them to `expanded`.
+        // push_value_row → flatten_value → element_node_id(branch_id, position)
+        let elem0_id = element_node_id(branch_id, 0);
+        let elem1_id = element_node_id(branch_id, 1);
+
+        let mut expanded = HashSet::new();
+        // Expand the branch so the elements are emitted.
+        #[allow(unused_results)]
+        expanded.insert(branch_id);
+
+        let mut rows: Vec<PropRow> = Vec::new();
+        push_value_row(
+            &array_val,
+            0,
+            branch_id,
+            "MyArray".to_string(),
+            &mut rows,
+            &expanded,
+        );
+
+        // 1 branch row + 2 element leaf rows
+        assert_eq!(
+            rows.len(),
+            3,
+            "expanded array must emit 1 branch + 2 leaves"
+        );
+        assert_eq!(rows[0].kind, PropKind::Branch, "first row must be a branch");
+        assert_eq!(rows[1].kind, PropKind::Leaf, "second row must be a leaf");
+        assert_eq!(rows[2].kind, PropKind::Leaf, "third row must be a leaf");
+
+        // (b) Distinct node_ids for the two elements (kills element-position arithmetic mutants)
+        assert_ne!(
+            rows[1].node_id, rows[2].node_id,
+            "element rows must have distinct node_ids"
+        );
+        // Confirm they match our expected ids.
+        assert_eq!(rows[1].node_id, elem0_id);
+        assert_eq!(rows[2].node_id, elem1_id);
+
+        // (c) Element values render via scalar_display
+        assert_eq!(
+            rows[1].value.as_deref(),
+            Some("10"),
+            "first element must display as \"10\""
+        );
+        assert_eq!(
+            rows[2].value.as_deref(),
+            Some("20"),
+            "second element must display as \"20\""
+        );
+    }
+
+    #[test]
+    fn push_value_row_map_expanded_emits_branch_key_value_rows() {
+        use paksmith_core::asset::property::primitives::{MapEntry, PropertyValue as V};
+
+        let map_val = V::Map {
+            key_type: "IntProperty".into(),
+            value_type: "StrProperty".into(),
+            entries: vec![MapEntry {
+                key: V::Int(1),
+                value: V::Str("hello".into()),
+            }],
+        };
+
+        let branch_id: NodeId = 99;
+        // push_value_row uses element_node_id(node_id, i * 2) for key,
+        // element_node_id(node_id, i * 2 + 1) for value.
+        let key_id = element_node_id(branch_id, 0); // 0 * 2
+        let val_id = element_node_id(branch_id, 1); // 0 * 2 + 1
+
+        let mut expanded = HashSet::new();
+        #[allow(unused_results)]
+        expanded.insert(branch_id);
+
+        let mut rows: Vec<PropRow> = Vec::new();
+        push_value_row(
+            &map_val,
+            0,
+            branch_id,
+            "MyMap".to_string(),
+            &mut rows,
+            &expanded,
+        );
+
+        // 1 branch + 2 rows (key + value for the single entry)
+        assert_eq!(rows.len(), 3, "expanded map must emit 1 branch + 2 rows");
+        assert_eq!(rows[0].kind, PropKind::Branch);
+        assert_eq!(rows[1].kind, PropKind::Leaf);
+        assert_eq!(rows[2].kind, PropKind::Leaf);
+
+        // Distinct key/value node_ids (kills i*2/i*2+1 arithmetic mutants)
+        assert_ne!(rows[1].node_id, rows[2].node_id);
+        assert_eq!(rows[1].node_id, key_id);
+        assert_eq!(rows[2].node_id, val_id);
+
+        // Key renders as Int(1) = "1", value as Str("hello") = "\"hello\""
+        assert_eq!(rows[1].value.as_deref(), Some("1"));
+        assert_eq!(rows[2].value.as_deref(), Some("\"hello\""));
+    }
+
+    #[test]
+    fn push_value_row_collapsed_branch_emits_only_branch_row() {
+        use paksmith_core::asset::property::primitives::PropertyValue as V;
+
+        let array_val = V::Array {
+            inner_type: "IntProperty".into(),
+            elements: vec![V::Int(1), V::Int(2)],
+        };
+
+        let branch_id: NodeId = 7;
+        // Empty expanded set → branch is collapsed.
+        let mut rows: Vec<PropRow> = Vec::new();
+        push_value_row(
+            &array_val,
+            0,
+            branch_id,
+            "MyArray".to_string(),
+            &mut rows,
+            &HashSet::new(),
+        );
+
+        // Only the branch row, no child rows.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, PropKind::Branch);
+        assert!(!rows[0].expanded);
+        assert!(rows[0].is_expandable);
     }
 }

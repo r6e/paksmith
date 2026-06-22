@@ -65,8 +65,8 @@ impl HexState {
     }
 }
 
-/// Selected bytes as uppercase, space-separated hex (`"C1 2A FF"`). Empty when
-/// the range lies entirely past the data.
+/// Selected bytes as uppercase, space-separated hex (`"C1 2A FF"`). Empty only
+/// when `bytes` is empty; any selection past the end clamps to the last byte.
 #[must_use]
 pub fn copy_hex(bytes: &[u8], sel: Selection) -> String {
     let (lo, hi) = clamped_range(bytes.len(), sel);
@@ -241,6 +241,70 @@ mod tests {
                 }
             ),
             ""
+        );
+    }
+
+    // ── B6: copy_hex / copy_ascii single-byte + clamped_range boundaries ─────
+
+    #[test]
+    fn copy_hex_single_byte_selection_returns_that_byte() {
+        // lo == hi (single-byte selection). Kills `> with ==` / `> with >=` in
+        // copy_hex: a wrong condition would return "" for an equal lo/hi.
+        let data = vec![0xAA, 0xBB, 0xCC];
+        let sel = Selection {
+            anchor: 1,
+            cursor: 1,
+        };
+        assert_eq!(
+            copy_hex(&data, sel),
+            "BB",
+            "single-byte selection must return that byte's hex"
+        );
+    }
+
+    #[test]
+    fn copy_ascii_single_byte_selection_returns_that_char() {
+        // Kills `> with >=` in copy_ascii.
+        let data = vec![b'A', b'B', b'C'];
+        let sel = Selection {
+            anchor: 0,
+            cursor: 0,
+        };
+        assert_eq!(
+            copy_ascii(&data, sel),
+            "A",
+            "single-byte selection must return that character"
+        );
+    }
+
+    #[test]
+    fn copy_hex_selection_past_end_clamps_to_last_byte() {
+        // cursor far past end exercises the `hi.min(len - 1)` clamp in
+        // clamped_range. Kills `- with +` and `- with /` on `len - 1`.
+        let data = vec![0x11, 0x22, 0x33];
+        let sel = Selection {
+            anchor: 2,
+            cursor: 50,
+        };
+        assert_eq!(
+            copy_hex(&data, sel),
+            "33",
+            "cursor past end must clamp to last byte"
+        );
+    }
+
+    #[test]
+    fn copy_hex_lo_also_clamped() {
+        // anchor past end: lo is clamped, hi is clamped, both land on last byte.
+        let data = vec![0x11, 0x22, 0x33];
+        let sel = Selection {
+            anchor: 100,
+            cursor: 200,
+        };
+        assert_eq!(
+            copy_hex(&data, sel),
+            "33",
+            "anchor past end: both lo and hi clamp to the last byte"
         );
     }
 }

@@ -11,7 +11,6 @@ use paksmith_core::container::pak::PakReader;
 /// successful entry read) plus the parse outcome (`Ok` for parseable UAssets,
 /// `Err(reason)` otherwise — the Hex/Info views still work from `bytes`).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AssetLoad {
     pub bytes: Vec<u8>,
     pub parsed: Result<Box<Package>, String>,
@@ -20,7 +19,6 @@ pub struct AssetLoad {
 /// Whether `path` looks like a parseable UAsset header (so we attempt a parse).
 /// Non-UAsset entries (`.uexp`, `.ubulk`, textures, raw files) skip the parse —
 /// they have no standalone property bag — and render Hex + Info only.
-#[allow(dead_code)]
 pub fn should_attempt_parse(path: &str) -> bool {
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     {
@@ -34,7 +32,10 @@ pub fn should_attempt_parse(path: &str) -> bool {
 /// `bytes` is whatever `read_entry` returns (empty on a read error). `parsed`
 /// is `Ok` only when the entry both looks parseable and parses cleanly; every
 /// failure path is stringified so the result stays `Clone` for `Message`.
-#[allow(dead_code, clippy::unused_async)]
+#[allow(
+    clippy::unused_async,
+    reason = "async required by iced Task::perform interface"
+)]
 pub async fn load(reader: Arc<PakReader>, path: String) -> AssetLoad {
     let bytes = reader.read_entry(&path).unwrap_or_default();
 

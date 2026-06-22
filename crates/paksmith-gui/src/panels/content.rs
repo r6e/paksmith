@@ -14,7 +14,9 @@ use crate::app::{Message, accent_button};
 use crate::panels::detail::{compression_ratio, human_size, kv_row};
 use crate::state::archive::EntryMeta;
 use crate::state::tabs::{TabContent, Tabs, ViewMode};
-use crate::theme::tokens::{SPACE_LG, SPACE_MD, SPACE_SM, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM};
+use crate::theme::tokens::{
+    SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM,
+};
 use crate::widgets::{hex_view, property_tree, tab_bar};
 
 // ── public entry-point ────────────────────────────────────────────────────────
@@ -49,7 +51,7 @@ pub fn view<'a>(
                     let meta = entries.get(tab.path.as_str());
                     match tab.view {
                         ViewMode::Info => info_view(tab.path.as_str(), bytes, parsed, meta),
-                        ViewMode::Properties => properties_view(parsed, &tab.expanded, accent),
+                        ViewMode::Properties => properties_view(parsed, &tab.expanded),
                         ViewMode::Hex => hex_view::view(bytes, &tab.hex, accent),
                     }
                 }
@@ -87,13 +89,13 @@ fn view_mode_switcher(active: ViewMode, accent: iced::Color) -> Element<'static,
             if is_active {
                 button(text(label).size(f32::from(TEXT_SM)))
                     .on_press(Message::ViewModeSet(mode))
-                    .padding([SPACE_XS_FLOAT, SPACE_SM])
+                    .padding([SPACE_XS, SPACE_SM])
                     .style(accent_button(accent))
                     .into()
             } else {
                 button(text(label).size(f32::from(TEXT_SM)))
                     .on_press(Message::ViewModeSet(mode))
-                    .padding([SPACE_XS_FLOAT, SPACE_SM])
+                    .padding([SPACE_XS, SPACE_SM])
                     .style(iced::widget::button::secondary)
                     .into()
             }
@@ -102,7 +104,7 @@ fn view_mode_switcher(active: ViewMode, accent: iced::Color) -> Element<'static,
 
     container(
         row(buttons)
-            .spacing(SPACE_XS_FLOAT)
+            .spacing(SPACE_XS)
             .align_y(iced::Alignment::Center),
     )
     .padding([SPACE_SM, SPACE_MD])
@@ -199,10 +201,9 @@ fn info_view(
 fn properties_view<'a>(
     parsed: &'a Result<Box<paksmith_core::asset::Package>, String>,
     expanded: &'a std::collections::HashSet<crate::state::property_view::NodeId>,
-    accent: iced::Color,
 ) -> Element<'a, Message> {
     match parsed {
-        Ok(pkg) => property_tree::view(pkg.as_ref(), expanded, accent),
+        Ok(pkg) => property_tree::view(pkg.as_ref(), expanded),
         Err(reason) => {
             let msg = format!("Not a parseable asset \u{2014} see Hex: {reason}");
             container(
@@ -221,8 +222,6 @@ fn properties_view<'a>(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-const SPACE_XS_FLOAT: f32 = crate::theme::tokens::SPACE_XS;
 
 #[mutants::skip]
 fn empty_state() -> Element<'static, Message> {

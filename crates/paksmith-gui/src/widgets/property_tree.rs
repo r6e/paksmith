@@ -50,8 +50,6 @@ const SWATCH_BORDER_ALPHA: f32 = 0.35;
 ///
 /// * `pkg`      — the parsed asset Package.
 /// * `expanded` — the set of currently-expanded node ids (from the active tab).
-/// * `_accent`  — reserved for a future row-selection highlight (mirrors file_tree's accent use);
-///   unused in 7a.
 ///
 /// # Known limitation
 ///
@@ -61,7 +59,6 @@ const SWATCH_BORDER_ALPHA: f32 = 0.35;
 pub fn view<'a>(
     pkg: &'a paksmith_core::asset::Package,
     expanded: &std::collections::HashSet<NodeId>,
-    _accent: iced::Color,
 ) -> Element<'a, Message> {
     let rows = flatten(pkg, expanded);
     let total = rows.len();
