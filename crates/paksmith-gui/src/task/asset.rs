@@ -22,13 +22,12 @@ pub const HEX_BYTES_CAP: usize = 16 * 1024;
 /// the prefix and [`overflowed`][CappedWriter::overflowed] indicates whether the
 /// entry was larger than the cap.
 ///
-/// Once the buffer is full and more data arrives, [`write`][std::io::Write::write]
-/// returns `Ok(0)`, which makes core's `write_all` / `io::copy` streaming loop
-/// stop with [`ErrorKind::WriteZero`][std::io::ErrorKind::WriteZero] instead of
-/// reading and decompressing the rest of the entry for bytes the UI will never
-/// render. [`load`] recognizes that induced stop (via [`overflowed`]
-/// [CappedWriter::overflowed]) as an intentional truncation rather than a read
-/// failure — see [`read_outcome_error`].
+/// Once the buffer is full and more data arrives, `write` returns `Ok(0)`, which
+/// makes core's `write_all` / `io::copy` streaming loop stop with
+/// `ErrorKind::WriteZero` instead of reading and decompressing the rest of the
+/// entry for bytes the UI will never render. [`load`] recognizes that induced
+/// stop (via [`CappedWriter::overflowed`]) as an intentional truncation rather
+/// than a read failure — see [`read_outcome_error`].
 struct CappedWriter {
     buf: Vec<u8>,
     cap: usize,
