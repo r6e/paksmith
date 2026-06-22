@@ -52,11 +52,11 @@ pub fn view<'a>(
                     // Close (×) button
                     let close_btn = button(text("\u{00D7}").size(f32::from(TEXT_SM)).style(
                         |theme: &iced::Theme| iced::widget::text::Style {
-                            color: Some(theme.palette().text.scale_alpha(0.6)),
+                            color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
                         },
                     ))
                     .on_press(Message::TabClosed(i))
-                    .padding([0, SPACE_XS_INT])
+                    .padding([0.0_f32, crate::theme::tokens::SPACE_XS])
                     .style(iced::widget::button::text);
 
                     let name_btn =
@@ -75,7 +75,7 @@ pub fn view<'a>(
                                     )),
                                     border: iced::Border {
                                         color: accent,
-                                        width: 0.0,
+                                        width: 1.0,
                                         radius: crate::theme::tokens::RADIUS.into(),
                                     },
                                     text_color: _theme.palette().text,
@@ -188,6 +188,14 @@ fn view_mode_switcher(active: ViewMode, accent: iced::Color) -> Element<'static,
             .align_y(iced::Alignment::Center),
     )
     .padding([SPACE_SM, SPACE_MD])
+    .style(|theme: &iced::Theme| iced::widget::container::Style {
+        border: iced::Border {
+            color: theme.palette().text.scale_alpha(0.1),
+            width: 1.0, // uniform hairline; iced 0.14 has no per-side border API
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    })
     .width(Length::Fill)
     .into()
 }
@@ -201,7 +209,7 @@ fn info_view(
     parsed: &Result<Box<paksmith_core::asset::Package>, String>,
     meta: Option<&EntryMeta>,
 ) -> Element<'static, Message> {
-    let mut rows: Vec<Element<'static, Message>> = Vec::new();
+    let mut entry_rows: Vec<Element<'static, Message>> = Vec::new();
 
     // ── entry-level rows (from EntryMeta) ────────────────────────────────────
     if let Some(m) = meta {
@@ -217,29 +225,30 @@ fn info_view(
         };
         let encrypted_label: &str = if m.is_encrypted { "Yes" } else { "No" };
 
-        rows.push(kv_row("Path", path.to_owned()));
-        rows.push(kv_row("Size", ucmp));
-        rows.push(kv_row("Compressed", compressed_label));
-        rows.push(kv_row("Encrypted", encrypted_label.to_owned()));
+        entry_rows.push(kv_row("Path", path.to_owned()));
+        entry_rows.push(kv_row("Size", ucmp));
+        entry_rows.push(kv_row("Compressed", compressed_label));
+        entry_rows.push(kv_row("Encrypted", encrypted_label.to_owned()));
     } else {
         // No EntryMeta — still show path.
-        rows.push(kv_row("Path", path.to_owned()));
+        entry_rows.push(kv_row("Path", path.to_owned()));
     }
 
     // ── package-level rows ────────────────────────────────────────────────────
+    let mut pkg_rows: Vec<Element<'static, Message>> = Vec::new();
     match parsed {
         Ok(pkg) => {
             let export_count = pkg.exports.exports.len().to_string();
             let name_count = pkg.names.names.len().to_string();
             let engine = pkg.summary.saved_by_engine_version.to_string();
 
-            rows.push(kv_row("Exports", export_count));
-            rows.push(kv_row("Names", name_count));
-            rows.push(kv_row("Engine", engine));
+            pkg_rows.push(kv_row("Exports", export_count));
+            pkg_rows.push(kv_row("Names", name_count));
+            pkg_rows.push(kv_row("Engine", engine));
         }
         Err(reason) => {
             // Muted "Properties unavailable" note.
-            rows.push(
+            pkg_rows.push(
                 text(format!("Properties unavailable: {reason}"))
                     .size(f32::from(TEXT_SM))
                     .style(|theme: &iced::Theme| iced::widget::text::Style {
@@ -250,7 +259,14 @@ fn info_view(
         }
     }
 
-    container(column(rows).spacing(SPACE_SM))
+    // Two groups separated by SPACE_MD so the card is scannable.
+    let card = column![
+        column(entry_rows).spacing(SPACE_SM),
+        column(pkg_rows).spacing(SPACE_SM),
+    ]
+    .spacing(SPACE_MD);
+
+    container(card)
         .padding(SPACE_LG)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -260,7 +276,6 @@ fn info_view(
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 const SPACE_XS_FLOAT: f32 = crate::theme::tokens::SPACE_XS;
-const SPACE_XS_INT: u16 = 4;
 
 #[mutants::skip]
 fn empty_state() -> Element<'static, Message> {
