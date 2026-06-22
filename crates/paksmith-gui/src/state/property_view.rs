@@ -1603,7 +1603,10 @@ mod tests {
             "fixture has ≥1 export, so cap=0 yields exactly 1 row"
         );
         // Truncation is detectable: rows.len() > cap.
-        assert!(!rows.is_empty(), "truncation detectable: rows.len() > cap=0");
+        assert!(
+            !rows.is_empty(),
+            "truncation detectable: rows.len() > cap=0"
+        );
     }
 
     #[test]
