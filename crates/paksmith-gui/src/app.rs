@@ -161,6 +161,8 @@ pub enum Message {
     HexCopyRequested,
     /// Copy the selected bytes as ASCII (non-printable → `'.'`) to the clipboard.
     HexCopyAsciiRequested,
+    /// Toggle expand/collapse of a property-tree node in the active tab.
+    PropToggled(crate::state::property_view::NodeId),
 }
 
 /// Processes a `Message` and updates the application state.
@@ -427,6 +429,22 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     if let Some(sel) = tab.hex.selection {
                         let text = crate::state::hex_view::copy_ascii(bytes, sel);
                         return iced::clipboard::write::<Message>(text);
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::PropToggled(node_id) => {
+            // Two-guard form: if-let + matches! can't be let-chained on MSRV 1.88.
+            // Guard: only act on an active tab that has a successfully-parsed asset.
+            #[allow(clippy::collapsible_if)]
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                if matches!(
+                    &tab.content,
+                    crate::state::tabs::TabContent::Ready { parsed: Ok(_), .. }
+                ) {
+                    if !tab.expanded.remove(&node_id) {
+                        let _ = tab.expanded.insert(node_id);
                     }
                 }
             }
@@ -1620,5 +1638,100 @@ mod tests {
         // Verify immutable access first, then mutable access — can't borrow both at once.
         assert_eq!(tabs.active_tab().unwrap().path, "a.uasset");
         assert_eq!(tabs.active_tab_mut().unwrap().path, "a.uasset");
+    }
+
+    // ── Task 10: PropToggled wiring ───────────────────────────────────────────
+
+    /// PropToggled inserts the id on first dispatch, then removes it on second
+    /// dispatch (toggle semantics). Requires a Ready+Ok tab so the guard passes.
+    #[tokio::test]
+    async fn prop_toggled_inserts_then_removes_from_expanded() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/real_v8b_uasset.pak");
+        let loaded = crate::task::open::run(fixture, None).await.unwrap();
+        let mut app = App {
+            archive: Some(loaded),
+            ..App::default()
+        };
+
+        // Open the tab (Loading state) then simulate the async load completing.
+        let _ = update(&mut app, Message::OpenAsset("Game/Maps/Demo.uasset".into()));
+        let reader = app.archive.as_ref().unwrap().reader.clone();
+        let load = crate::task::asset::load(reader, "Game/Maps/Demo.uasset".into()).await;
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "Game/Maps/Demo.uasset".into(),
+                load: Box::new(load),
+            },
+        );
+
+        // Confirm the tab is Ready with a parsed Ok(pkg).
+        assert!(
+            matches!(
+                app.tabs.open[0].content,
+                crate::state::tabs::TabContent::Ready { parsed: Ok(_), .. }
+            ),
+            "tab must be Ready+Ok before toggling"
+        );
+
+        // Use an arbitrary node_id — toggle is id-agnostic.
+        let test_id: crate::state::property_view::NodeId = 0xDEAD_BEEF_1234_5678;
+
+        // First dispatch: id must be inserted into expanded.
+        assert!(
+            app.tabs.open[0].expanded.is_empty(),
+            "expanded must be empty before first toggle"
+        );
+        let _ = update(&mut app, Message::PropToggled(test_id));
+        assert!(
+            app.tabs.open[0].expanded.contains(&test_id),
+            "PropToggled must insert the id on first dispatch"
+        );
+
+        // Second dispatch: id must be removed (toggle off).
+        let _ = update(&mut app, Message::PropToggled(test_id));
+        assert!(
+            !app.tabs.open[0].expanded.contains(&test_id),
+            "PropToggled must remove the id on second dispatch"
+        );
+    }
+
+    #[test]
+    fn prop_toggled_is_noop_on_loading_tab() {
+        // A Loading tab (no parsed content) must not crash or mutate expanded.
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        // Tab is Loading — no set_content call.
+        let test_id: crate::state::property_view::NodeId = 42;
+        let _ = update(&mut app, Message::PropToggled(test_id));
+        assert!(
+            app.tabs.open[0].expanded.is_empty(),
+            "PropToggled on a Loading tab must be a no-op"
+        );
+    }
+
+    #[test]
+    fn prop_toggled_is_noop_on_ready_err_tab() {
+        // A Ready+Err tab (failed parse) must not toggle expanded.
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        app.tabs.set_content(
+            "a.uasset",
+            crate::state::tabs::TabContent::Ready {
+                bytes: vec![],
+                parsed: Err("no parse".into()),
+            },
+        );
+        let test_id: crate::state::property_view::NodeId = 99;
+        let _ = update(&mut app, Message::PropToggled(test_id));
+        assert!(
+            app.tabs.open[0].expanded.is_empty(),
+            "PropToggled on a Ready+Err tab must be a no-op"
+        );
     }
 }

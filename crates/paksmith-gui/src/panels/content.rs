@@ -15,7 +15,7 @@ use crate::panels::detail::{compression_ratio, human_size, kv_row};
 use crate::state::archive::EntryMeta;
 use crate::state::tabs::{TabContent, Tabs, ViewMode};
 use crate::theme::tokens::{SPACE_LG, SPACE_MD, SPACE_SM, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM};
-use crate::widgets::{hex_view, tab_bar};
+use crate::widgets::{hex_view, property_tree, tab_bar};
 
 // ── public entry-point ────────────────────────────────────────────────────────
 
@@ -49,7 +49,7 @@ pub fn view<'a>(
                     let meta = entries.get(tab.path.as_str());
                     match tab.view {
                         ViewMode::Info => info_view(tab.path.as_str(), bytes, parsed, meta),
-                        ViewMode::Properties => muted_text("(properties view \u{2014} Task 10)"),
+                        ViewMode::Properties => properties_view(parsed, &tab.expanded, accent),
                         ViewMode::Hex => hex_view::view(bytes, &tab.hex, accent),
                     }
                 }
@@ -189,6 +189,33 @@ fn info_view(
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+// ── Properties view ───────────────────────────────────────────────────────────
+
+#[mutants::skip]
+fn properties_view<'a>(
+    parsed: &'a Result<Box<paksmith_core::asset::Package>, String>,
+    expanded: &'a std::collections::HashSet<crate::state::property_view::NodeId>,
+    accent: iced::Color,
+) -> Element<'a, Message> {
+    match parsed {
+        Ok(pkg) => property_tree::view(pkg.as_ref(), expanded, accent),
+        Err(reason) => {
+            let msg = format!("Not a parseable asset \u{2014} see Hex: {reason}");
+            container(
+                text(msg)
+                    .size(f32::from(TEXT_SM))
+                    .style(|theme: &iced::Theme| iced::widget::text::Style {
+                        color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
+                    }),
+            )
+            .padding(SPACE_LG)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        }
+    }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
