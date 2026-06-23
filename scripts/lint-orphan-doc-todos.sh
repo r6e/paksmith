@@ -8,7 +8,7 @@
 #
 # Deliberately NARROW to stay zero-noise on a mature tree:
 #   * only DOC-comment lines (`///`, `//!`) — ordinary `// TODO` in code is fine
-#   * only the conventional markers `TODO` / `FIXME`
+#   * only the conventional markers `TODO` / `FIXME`, matched as whole words
 #   * a tracked `TODO(scope)` / `FIXME(#123)` (anything with a following `(`) is
 #     allowed — that is a referenced, owned item, not an orphan
 #
@@ -21,18 +21,31 @@
 # Escape hatch: put `lint-allow-todo` on the same line for an intentional case.
 #
 # Usage:
-#   scripts/lint-orphan-doc-todos.sh [FILE ...]   # scan the given files
-#   scripts/lint-orphan-doc-todos.sh              # default: staged .rs files
-#   scripts/lint-orphan-doc-todos.sh --all        # scan all tracked .rs files
+#   scripts/lint-orphan-doc-todos.sh [FILE ...]   # scan the given files (worktree)
+#   scripts/lint-orphan-doc-todos.sh              # default: STAGED .rs, read from index
+#   scripts/lint-orphan-doc-todos.sh --all        # all tracked .rs (worktree)
 #
 # Exit 0 = clean, 1 = orphan marker(s) found.
 set -euo pipefail
 
 # Doc-comment line prefix (leading whitespace + `///` or `//!`).
 doc_prefix='^[[:space:]]*(///|//!)'
-# A bare TODO/FIXME: the marker NOT immediately followed by `(` (which would make
-# it a tracked `TODO(scope)`). `[^(]` or end-of-line after the marker word.
-orphan_marker='\b(TODO|FIXME)\b([^(]|$)'
+# Word-boundary matching is done with POSIX `grep -w`, NOT `\b`: `\b` is a GNU
+# extension; under POSIX ERE (BSD/macOS `grep -E`) it is a backspace escape, which
+# would silently make this lint a no-op. The detection is therefore two passes:
+#   1. `grep -wE marker_word`   — the marker as a whole word (so MYTODO/TODOLIST
+#                                  do not match), covering both bare and tracked.
+#   2. `grep -vE tracked_marker` — drop the tracked form `TODO(`/`FIXME(`, leaving
+#                                  only orphan markers.
+marker_word='(TODO|FIXME)'
+tracked_marker='(TODO|FIXME)\('
+
+# Default mode (no args) is the pre-commit case: scan STAGED `.rs` and read each
+# file's content FROM THE INDEX, so an unstaged working-tree edit neither masks a
+# staged orphan nor trips a failure on a marker that was never staged. `--all`
+# and explicit file args operate on the working tree instead.
+scan_from_index=0
+[ "$#" -eq 0 ] && scan_from_index=1
 
 select_files() {
   if [ "$#" -gt 0 ] && [ "$1" = "--all" ]; then
@@ -44,20 +57,31 @@ select_files() {
   fi
 }
 
+# Emit the content to scan for one path: the staged blob in index mode, else the
+# working-tree file (skipped if it has vanished, e.g. staged-then-deleted).
+file_content() {
+  if [ "$scan_from_index" -eq 1 ]; then
+    git show ":$1" 2>/dev/null || true
+  elif [ -f "$1" ]; then
+    cat -- "$1"
+  fi
+}
+
 hits=0
 while IFS= read -r f; do
-  # `[ -f ]` also covers blank/empty input (no producer emits blank lines, but
-  # a staged-then-deleted path can vanish before the scan).
-  [ -f "$f" ] || continue
-  # `grep -n` keeps the original line number; the allow-escape and marker filters
-  # run on the `lineno:content` stream so the number survives to the report.
+  [ -n "$f" ] || continue
+  # `grep -n` numbers the content stream from 1 (matches the file's line numbers);
+  # the allow-escape and marker filters run on the `lineno:content` stream so the
+  # number survives to the report.
   while IFS= read -r match; do
     echo "  $f:$match"
     hits=1
   done < <(
-    grep -nE "$doc_prefix" "$f" \
+    file_content "$f" \
+      | grep -nE "$doc_prefix" \
       | grep -ivE 'lint-allow-todo' \
-      | grep -E "$orphan_marker" || true
+      | grep -wE "$marker_word" \
+      | grep -vE "$tracked_marker" || true
   )
 done < <(select_files "$@")
 
