@@ -12,6 +12,10 @@
 #   * a tracked `TODO(scope)` / `FIXME(#123)` (anything with a following `(`) is
 #     allowed — that is a referenced, owned item, not an orphan
 #
+# Known limitation: detection is line-based, so a line carrying BOTH a bare and a
+# tracked marker (`/// TODO fix the TODO(x)`) is allowed — erring toward a false
+# negative on a pathological line rather than noise, consistent with the design.
+#
 # NOT detected on purpose: prose like "placeholder" / "stub" / "not yet
 # implemented". Those are legitimate technical vocabulary (a tree scan found 45
 # correct uses), so a grep cannot tell a stale lie from a real domain term —
@@ -69,7 +73,6 @@ file_content() {
 
 hits=0
 while IFS= read -r f; do
-  [ -n "$f" ] || continue
   # `grep -n` numbers the content stream from 1 (matches the file's line numbers);
   # the allow-escape and marker filters run on the `lineno:content` stream so the
   # number survives to the report.
