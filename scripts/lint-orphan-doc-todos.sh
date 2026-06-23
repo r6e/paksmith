@@ -4,13 +4,14 @@
 # a bare `TODO` / `FIXME` with no tracking reference. A public-API doc comment
 # carrying a bare TODO is the mechanically-detectable slice of the doc-rot class
 # PR #594 hit (e.g. R7's "the visible-row cap is a TODO" left in a doc comment
-# after the cap was implemented). It also enforces CLAUDE.md's "no orphan TODOs".
+# after the cap was implemented): an unfinished-work marker with no tracking
+# reference, surfacing in rendered API docs.
 #
 # Deliberately NARROW to stay zero-noise on a mature tree:
 #   * only DOC-comment lines (`///`, `//!`) — ordinary `// TODO` in code is fine
 #   * only the conventional markers `TODO` / `FIXME`, matched as whole words
-#   * a tracked `TODO(scope)` / `FIXME(#123)` (anything with a following `(`) is
-#     allowed — that is a referenced, owned item, not an orphan
+#   * a tracked `TODO(scope)` / `FIXME(#123)` (the marker followed by `(`, with
+#     any whitespace between) is allowed — a referenced, owned item, not an orphan
 #
 # Known limitation: detection is line-based, so a line carrying BOTH a bare and a
 # tracked marker (`/// TODO fix the TODO(x)`) is allowed — erring toward a false
@@ -39,10 +40,10 @@ doc_prefix='^[[:space:]]*(///|//!)'
 # would silently make this lint a no-op. The detection is therefore two passes:
 #   1. `grep -wE marker_word`   — the marker as a whole word (so MYTODO/TODOLIST
 #                                  do not match), covering both bare and tracked.
-#   2. `grep -vE tracked_marker` — drop the tracked form `TODO(`/`FIXME(`, leaving
-#                                  only orphan markers.
+#   2. `grep -vE tracked_marker` — drop the tracked form `TODO(`/`FIXME(` (any
+#                                  whitespace allowed before `(`), leaving orphans.
 marker_word='(TODO|FIXME)'
-tracked_marker='(TODO|FIXME)\('
+tracked_marker='(TODO|FIXME)[[:space:]]*\('
 
 # Default mode (no args) is the pre-commit case: scan STAGED `.rs` and read each
 # file's content FROM THE INDEX, so an unstaged working-tree edit neither masks a
