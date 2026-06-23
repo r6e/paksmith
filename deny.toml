@@ -6,6 +6,11 @@
 # gtk4-rs).  The gtk3 path is dormant on macOS and Windows; on Linux iced 0.14
 # exposes no window handle so the muda menu is never attached.  Removal
 # condition: when muda moves its Linux backend to gtk4.
+#
+# NOTE: cargo-audit (the .github/workflows/audit.yml job) has no equivalent
+# workspace-scoping option, so it mirrors this acceptance as an explicit per-ID
+# `ignore:` list. Keep the two in sync: a newly accepted transitive advisory
+# added here must also be added to that workflow's ignore list (and vice versa).
 unmaintained = "workspace"
 unsound = "all"
 yanked = "warn"
