@@ -28,3 +28,30 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Advisories consciously accepted: all are TRANSITIVE and
+          # unmaintained/unsound-INFO with no upgrade path (none is a CVE-class
+          # vulnerability) — the same set deny.toml already accepts (its
+          # [advisories] block details RUSTSEC-2024-0429; the rest fall under its
+          # workspace-scoped `unmaintained` policy). cargo-audit lacks
+          # cargo-deny's "scope unmaintained to workspace" option, so the IDs are
+          # listed explicitly here. These are per-ID ignores: a NEW (e.g. higher-
+          # severity) advisory in any of these crates would still open an issue.
+          #
+          #   gtk3-rs stack via `muda 0.19.x` → gtk 0.18 (gtk4-rs is the successor;
+          #   dormant on macOS/Windows, and on Linux iced 0.14 exposes no window
+          #   handle so muda's menu is never attached):
+          #     0412 gdk · 0413 atk · 0415 gtk · 0416 atk-sys · 0418 gdk-sys
+          #     0419 gtk3-macros · 0420 gtk-sys   (all "no longer maintained")
+          #     0429  glib::VariantStrIter unsoundness (paksmith never calls it;
+          #           menu strings are compile-time constants; fixed in glib 0.20+)
+          #     0370  proc-macro-error — build proc-macro of glib-macros + gtk3-macros 0.18
+          #   async-std (discontinued) via `dark-light 2.0.0` (latest; no fix avail):
+          #     2025-0052
+          #   paste (unmaintained) via `texture2ddecoder` in paksmith-core — a
+          #   build-time proc-macro, all platforms; 0.1.2 is texture2ddecoder's
+          #   latest, no patched paste exists (already tracked by closed issue #11):
+          #     2024-0436
+          #
+          # Removal condition: when muda moves its Linux backend to gtk4, dark-light
+          # drops async-std, and texture2ddecoder drops paste.
+          ignore: RUSTSEC-2024-0370,RUSTSEC-2024-0412,RUSTSEC-2024-0413,RUSTSEC-2024-0415,RUSTSEC-2024-0416,RUSTSEC-2024-0418,RUSTSEC-2024-0419,RUSTSEC-2024-0420,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2025-0052
