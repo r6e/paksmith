@@ -81,9 +81,12 @@ byteorder.workspace = true
 
 # AES-256 cipher for encrypting-fixture cross-validation tests (Task 6).
 # repak does NOT re-export `aes::Aes256`, so it must be declared directly.
-# The same `aes` crate (same feature set, same version) is already in the
-# dependency tree via paksmith-core, so this adds no new crate or license.
-aes = { workspace = true }
+# Pinned to "0.8" (NOT workspace = true) because the repak git dependency
+# also uses aes 0.8.x. Passing aes::Aes256 to repak::PakBuilder::key()
+# requires both sides to be compiled against the SAME version; mixing 0.8
+# and 0.9 produces a type-mismatch error since Cargo keeps them as separate
+# crates in the dependency graph.
+aes = "0.8"
 
 # Differential proptest harness (issue #244): sweeps random
 # `MinimalPackageSpec` combinations and asserts cross-parser
