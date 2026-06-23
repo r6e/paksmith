@@ -1,11 +1,11 @@
 //! System accent color. Each platform reads the user's accent and falls back to
 //! `DEFAULT_ACCENT` when unavailable. The accent drives selection/focus styling.
 //!
-//! The macOS implementation calls Objective-C APIs via `objc2-app-kit`. All
-//! `objc2` bindings are declared `unsafe fn` by the crate — the unsafety is
-//! bounded to this module and every call follows the Objective-C memory rules
-//! enforced by `objc2`'s `Retained<T>` smart pointer. Windows and Linux reads
-//! are deferred as follow-up work; both platforms fall back to `DEFAULT_ACCENT`.
+//! The macOS implementation calls Objective-C APIs via `objc2-app-kit`.
+//! Since objc2-app-kit 0.3.2 the relevant bindings are safe; every call
+//! follows the Objective-C memory rules enforced by `objc2`'s `Retained<T>`
+//! smart pointer. Windows and Linux reads are deferred as follow-up work;
+//! both platforms fall back to `DEFAULT_ACCENT`.
 
 // Dead-code: `DEFAULT_ACCENT` and `system_accent` are public API for later tasks
 // that haven't consumed them yet (same as tokens.rs). `platform_accent` is
@@ -13,20 +13,15 @@
 // because the `pub` items need it too.
 #![allow(dead_code)]
 
-// The macOS arm calls objc2 bindings, which are unconditionally `unsafe fn`.
-// The unsafety is bounded to this module; every site uses `Retained<T>` RAII
-// so there are no raw pointer leaks. Workspace-wide unsafe_code = "deny" is
-// overridden here because Objective-C interop has no safe alternative in the
-// objc2 0.5 API.
+// The macOS arm calls objc2 bindings. Since objc2-app-kit 0.3.2 the relevant
+// class methods are safe; no unsafe block is required. Workspace-wide
+// unsafe_code = "deny" is satisfied — no unsafe here.
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
 mod macos_impl {
     use iced::Color;
     use objc2_app_kit::{NSColor, NSColorSpace};
 
     pub(super) fn accent() -> Option<Color> {
-        // SAFETY:
-        //
         // Thread contract: these `NSColor`/`NSColorSpace` reads are intended
         // to run on the main thread at app startup — `system_accent()` is
         // called from `App::default`, which Iced invokes on the main thread.
@@ -45,22 +40,20 @@ mod macos_impl {
         // escapes the block. f64→f32 narrowing is intentional: f32 precision
         // is more than sufficient for an 8-bit-origin display color, and
         // `iced::Color` uses f32 throughout.
-        unsafe {
-            let srgb = NSColorSpace::sRGBColorSpace();
-            let raw = NSColor::controlAccentColor();
-            let converted = raw.colorUsingColorSpace(&srgb)?;
-            #[allow(clippy::cast_possible_truncation)]
-            // f64→f32: sRGB components are in [0.0, 1.0]; f32 is sufficient
-            // for color representation. iced::Color uses f32 throughout.
-            let r = converted.redComponent() as f32;
-            #[allow(clippy::cast_possible_truncation)]
-            let g = converted.greenComponent() as f32;
-            #[allow(clippy::cast_possible_truncation)]
-            let b = converted.blueComponent() as f32;
-            // Alpha is forced to 1.0 — controlAccentColor is always opaque,
-            // and constructing it from r/g/b keeps the f32 round-trip exact.
-            Some(Color { r, g, b, a: 1.0 })
-        }
+        let srgb = NSColorSpace::sRGBColorSpace();
+        let raw = NSColor::controlAccentColor();
+        let converted = raw.colorUsingColorSpace(&srgb)?;
+        #[allow(clippy::cast_possible_truncation)]
+        // f64→f32: sRGB components are in [0.0, 1.0]; f32 is sufficient
+        // for color representation. iced::Color uses f32 throughout.
+        let r = converted.redComponent() as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let g = converted.greenComponent() as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let b = converted.blueComponent() as f32;
+        // Alpha is forced to 1.0 — controlAccentColor is always opaque,
+        // and constructing it from r/g/b keeps the f32 round-trip exact.
+        Some(Color { r, g, b, a: 1.0 })
     }
 }
 
