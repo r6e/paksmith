@@ -56,8 +56,9 @@ fi
 # The script prints its own diagnostic + remediation, so the hook just relays
 # the exit status (no redundant message, unlike typos above which adds a hint).
 # Hook-only (not a CI job) on purpose: a CI step needs a ruleset required-check
-# entry that orphans on rename (see memory feedback_ci_job_rename_orphans_ruleset_check);
-# this gate is no weaker than the fmt/clippy/typos checks above, which are hook-only too.
+# entry that orphans on rename (see `feedback_ci_job_rename_orphans_ruleset_check.md`,
+# the same breadcrumb ci.yml / format-docs.yml cite); this gate is no weaker than
+# the fmt/clippy/typos checks above, which are hook-only too.
 if ! scripts/lint-orphan-doc-todos.sh; then
     exit 1
 fi

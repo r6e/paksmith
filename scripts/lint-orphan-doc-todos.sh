@@ -19,8 +19,8 @@
 # NOT detected on purpose: prose like "placeholder" / "stub" / "not yet
 # implemented". Those are legitimate technical vocabulary (a tree scan found 45
 # correct uses), so a grep cannot tell a stale lie from a real domain term —
-# that judgment belongs to the "verify the doc claim end-to-end" review step
-# (see memory feedback_trace_data_path_and_verify_claims), not to a lint.
+# that judgment belongs to a human "verify the doc claim end-to-end" review step,
+# not to a lint.
 #
 # Escape hatch: put `lint-allow-todo` on the same line for an intentional case.
 #
@@ -57,7 +57,10 @@ select_files() {
   elif [ "$#" -gt 0 ]; then
     printf '%s\n' "$@"
   else
-    git diff --cached --name-only --diff-filter=ACM -- '*.rs'
+    # ACMR = Added/Copied/Modified/Renamed — every status whose staged content
+    # lives at a readable path (a rename's NEW path). Excludes only D (deletion),
+    # which has no staged content to scan.
+    git diff --cached --name-only --diff-filter=ACMR -- '*.rs'
   fi
 }
 
