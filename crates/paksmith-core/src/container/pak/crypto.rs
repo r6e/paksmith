@@ -3,7 +3,7 @@
 //! padded to 16-byte alignment. Verified against trumank/repak.
 
 use aes::Aes256;
-use aes::cipher::{BlockDecrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, KeyInit};
 use zeroize::ZeroizeOnDrop;
 
 /// A 32-byte AES-256 key. Zeroized on drop; `Debug` is redacted so the key
@@ -109,7 +109,8 @@ pub(crate) fn aes256_ecb_decrypt(key: &AesKey, data: &mut [u8]) -> crate::Result
     // local-extractor threat model, this is an accepted trade-off.
     let cipher = Aes256::new(&key.0.into());
     for block in data.chunks_exact_mut(16) {
-        let block_arr = aes::Block::from_mut_slice(block);
+        let block_arr = <&mut aes::Block>::try_from(block)
+            .expect("chunks_exact_mut(16) guarantees 16-byte slices");
         cipher.decrypt_block(block_arr);
     }
     Ok(())
