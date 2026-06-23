@@ -48,4 +48,19 @@ if ! typos .; then
     exit 1
 fi
 
+# Orphan-doc-TODO check — flags a bare TODO/FIXME left in a `///`/`//!` doc
+# comment (no tracking ref), the mechanically-detectable slice of the doc-rot
+# class PR #594 hit repeatedly. Scans staged .rs only (its default); narrow on
+# purpose so it stays zero-noise — prose like "placeholder"/"stub" is NOT flagged
+# (legitimate domain vocabulary; that judgment is a review step, not a grep).
+# The script prints its own diagnostic + remediation, so the hook just relays
+# the exit status (no redundant message, unlike typos above which adds a hint).
+# Hook-only (not a CI job) on purpose: a CI step would need an entry in the
+# branch ruleset's required-status-checks, which silently breaks every PR if the
+# job is ever renamed. This gate is no weaker than the fmt/clippy/typos checks
+# above, which are hook-only too.
+if ! scripts/lint-orphan-doc-todos.sh; then
+    exit 1
+fi
+
 echo "Pre-commit checks passed."
