@@ -8,7 +8,7 @@ use iced::widget::{button, column, container, pane_grid, text};
 use iced::{Element, Event, Length, Subscription, Task};
 use zeroize::Zeroizing;
 
-use crate::panels::{detail, key_prompt, sidebar, status_bar, toolbar};
+use crate::panels::{content, key_prompt, sidebar, status_bar, toolbar};
 use crate::state::archive::{LoadedArchive, OpenError};
 use crate::state::keyflow::KeyFlow;
 use crate::state::profiles::{ProfileChoice, available};
@@ -65,6 +65,13 @@ pub struct App {
     /// When `Some`, `task::open::run` passes the profile id to key resolution
     /// so encrypted paks for that game auto-unlock without a prompt.
     pub active_game: Option<ProfileChoice>,
+    /// Open asset tabs in the content host.
+    pub tabs: crate::state::tabs::Tabs,
+    /// Monotonic counter bumped on every archive transition (tab clear). An async
+    /// asset load captures the generation at dispatch; a late `AssetLoaded` whose
+    /// generation no longer matches the current archive is ignored — prevents a
+    /// stale load from the previous archive populating a new archive's tab.
+    pub archive_generation: u64,
 }
 
 impl Default for App {
@@ -91,6 +98,8 @@ impl Default for App {
             about_visible: false,
             profiles: available(),
             active_game: None,
+            tabs: crate::state::tabs::Tabs::default(),
+            archive_generation: 0,
         }
     }
 }
@@ -132,6 +141,41 @@ pub enum Message {
     About,
     /// Dismiss the About banner (always closes, never re-opens).
     DismissAbout,
+    /// Open (or re-activate) an asset tab for the given entry path.
+    OpenAsset(String),
+    /// The async asset-load task completed.
+    AssetLoaded {
+        /// Entry path identifying which tab to populate.
+        path: String,
+        /// Boxed to keep `Message: Clone` via a `Box<AssetLoad>` (which is
+        /// `Clone` because `AssetLoad: Clone`).
+        load: Box<crate::task::asset::AssetLoad>,
+        /// The archive generation at the time the load was dispatched. If this
+        /// does not match `app.archive_generation` when the message is received,
+        /// the result belongs to a previous archive and is discarded.
+        generation: u64,
+    },
+    /// Switch the active tab.
+    TabActivated(usize),
+    /// Close the tab at the given index.
+    TabClosed(usize),
+    /// Change the view mode of the active tab.
+    ViewModeSet(crate::state::tabs::ViewMode),
+    /// Mouse pressed on byte at index `i` in the hex view — starts a drag-select.
+    HexBytePressed(usize),
+    /// Mouse entered byte at index `i` in the hex view — extends drag if dragging.
+    HexByteEntered(usize),
+    /// Left mouse button released (global) — ends any in-progress hex drag.
+    HexDragEnded,
+    /// Copy the selected bytes as uppercase hex to the clipboard.
+    HexCopyRequested,
+    /// Copy the selected bytes as ASCII (non-printable → `'.'`) to the clipboard.
+    HexCopyAsciiRequested,
+    /// Toggle expand/collapse of a property-tree node in the active tab.
+    PropToggled(crate::state::property_view::NodeId),
+    /// A file row was double-clicked (carries the visible-row index, not the path,
+    /// so the per-frame view doesn't clone a path String for every file row).
+    OpenAssetByRow(usize),
 }
 
 /// Processes a `Message` and updates the application state.
@@ -173,6 +217,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // inherit the previous selection cursor or filter query.
                 app.filter.clear();
                 app.selected_row = None;
+                // Clear tabs so they never reference a stale reader.
+                app.tabs.clear();
+                app.archive_generation = app.archive_generation.wrapping_add(1);
                 app.archive = Some(loaded);
                 Task::none()
             }
@@ -180,6 +227,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // Enter the key-entry flow: show the inline key-prompt panel.
                 app.keyflow.lock(path);
                 app.hex_input.clear();
+                // Clear any stale tabs from a previously-open archive.
+                app.tabs.clear();
+                app.archive_generation = app.archive_generation.wrapping_add(1);
                 Task::none()
             }
             Err(OpenError::Core(msg)) => {
@@ -307,7 +357,140 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             app.about_visible = false;
             Task::none()
         }
+        Message::OpenAsset(path) => {
+            // Re-opening an already-open asset only reactivates its tab; it keeps its
+            // loaded content and must NOT re-read/re-parse (tab dedupe per the spec).
+            // Branch on `was_open` directly (load in the `else`) rather than a
+            // negated `needs_load`: the dispatch decision isn't observable in a unit
+            // test (Task is opaque), so a `!` here would be an unkillable mutant —
+            // `is_open` carries the (tested) decision instead.
+            let was_open = app.tabs.is_open(&path);
+            let _ = app.tabs.open_or_activate(&path);
+            if was_open {
+                Task::none()
+            } else if let Some(archive) = &app.archive {
+                let reader = archive.reader.clone();
+                let generation = app.archive_generation;
+                Task::perform(
+                    crate::task::asset::load(reader, path.clone()),
+                    move |load| Message::AssetLoaded {
+                        path: path.clone(),
+                        load: Box::new(load),
+                        generation,
+                    },
+                )
+            } else {
+                Task::none()
+            }
+        }
+        Message::AssetLoaded {
+            path,
+            load,
+            generation,
+        } => {
+            use crate::state::tabs::TabContent;
+            if generation != app.archive_generation {
+                return Task::none(); // stale load from a previous archive — drop it
+            }
+            app.tabs.set_content(
+                &path,
+                TabContent::Ready {
+                    bytes: load.bytes,
+                    truncated: load.truncated,
+                    parsed: load.parsed,
+                },
+            );
+            app.tabs.pick_view_after_load(&path);
+            Task::none()
+        }
+        Message::TabActivated(i) => {
+            app.tabs.activate(i);
+            Task::none()
+        }
+        Message::TabClosed(i) => {
+            app.tabs.close(i);
+            Task::none()
+        }
+        Message::ViewModeSet(view) => {
+            if let Some(i) = app.tabs.active {
+                app.tabs.set_view(i, view);
+            }
+            Task::none()
+        }
+        Message::HexBytePressed(i) => {
+            // Two-guard form: if-let + matches! can't be let-chained on MSRV 1.88.
+            #[allow(clippy::collapsible_if)]
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                if matches!(tab.content, crate::state::tabs::TabContent::Ready { .. }) {
+                    tab.hex.press(i);
+                }
+            }
+            Task::none()
+        }
+        Message::HexByteEntered(i) => {
+            // Two-guard form: if-let + matches! can't be let-chained on MSRV 1.88.
+            #[allow(clippy::collapsible_if)]
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                if matches!(tab.content, crate::state::tabs::TabContent::Ready { .. }) {
+                    tab.hex.enter(i);
+                }
+            }
+            Task::none()
+        }
+        Message::HexDragEnded => {
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                tab.hex.end_drag();
+            }
+            Task::none()
+        }
+        Message::HexCopyRequested => {
+            copy_from_active_hex(&mut app.tabs, crate::state::hex_view::copy_hex)
+        }
+        Message::HexCopyAsciiRequested => {
+            copy_from_active_hex(&mut app.tabs, crate::state::hex_view::copy_ascii)
+        }
+        Message::PropToggled(node_id) => {
+            // Two-guard form: if-let + matches! can't be let-chained on MSRV 1.88.
+            // Guard: only act on an active tab that has a successfully-parsed asset.
+            #[allow(clippy::collapsible_if)]
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                if matches!(
+                    &tab.content,
+                    crate::state::tabs::TabContent::Ready { parsed: Ok(_), .. }
+                ) {
+                    if !tab.expanded.remove(&node_id) {
+                        let _ = tab.expanded.insert(node_id);
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::OpenAssetByRow(i) => match open_path_for_row(app, i) {
+            Some(path) => Task::done(Message::OpenAsset(path)),
+            None => Task::none(),
+        },
     }
+}
+
+/// Copy bytes from the active hex tab using the supplied formatting function.
+///
+/// Returns an [`iced::clipboard::write`] task when a selection is active on a
+/// `Ready` tab, or [`Task::none`] otherwise. Shared by
+/// [`Message::HexCopyRequested`] and [`Message::HexCopyAsciiRequested`].
+fn copy_from_active_hex(
+    tabs: &mut crate::state::tabs::Tabs,
+    copy_fn: fn(&[u8], crate::state::hex_view::Selection) -> String,
+) -> Task<Message> {
+    // Triple-nested if-let chains can't be collapsed without let-chains (MSRV 1.88).
+    #[allow(clippy::collapsible_if)]
+    if let Some(tab) = tabs.active_tab_mut() {
+        if let crate::state::tabs::TabContent::Ready { bytes, .. } = &tab.content {
+            if let Some(sel) = tab.hex.selection {
+                return iced::clipboard::write::<Message>(copy_fn(bytes, sel));
+            }
+        }
+    }
+    Task::none()
 }
 
 /// Move the keyboard cursor and mutate the tree based on a key press.
@@ -386,6 +569,10 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
                         );
                     } else {
                         archive.tree.select(i);
+                        // Open the file in a new asset tab.
+                        if let Some(path) = row.full_path {
+                            return Some(Task::done(Message::OpenAsset(path)));
+                        }
                     }
                 }
             }
@@ -457,6 +644,29 @@ fn clamp_selected_row(selected_row: &mut Option<usize>, row_count: usize) {
     }
 }
 
+/// The asset path to open for visible tree row `i`, if it is a file row with a
+/// path. Resolving here (once, on the actual open event) keeps the per-frame
+/// view from cloning a path String for every file row.
+pub fn open_path_for_row(app: &App, i: usize) -> Option<String> {
+    app.archive.as_ref().and_then(|a| {
+        a.tree
+            .visible_rows()
+            .get(i)
+            .and_then(|r| r.full_path.clone())
+    })
+}
+
+/// Returns `true` when the active tab is a Hex view (so the drag-release
+/// subscription should be active).
+///
+/// Extracted from [`subscription`] so the predicate is unit-testable.
+/// Kills the `== with !=` mutant on the `ViewMode::Hex` comparison.
+pub fn hex_drag_listener_active(app: &App) -> bool {
+    app.tabs
+        .active_tab()
+        .is_some_and(|t| t.view == crate::state::tabs::ViewMode::Hex)
+}
+
 /// Returns a [`Subscription`] that converts keyboard key-press events into
 /// [`Message::TreeKey`] while an archive is open, merged with the menu event
 /// bridge that polls the `muda` global channel.
@@ -469,6 +679,11 @@ fn clamp_selected_row(selected_row: &mut Option<usize>, row_count: usize) {
 /// modifier-only, and all non-keyboard events produce `None` and are dropped
 /// before the message queue — eliminating spurious `view` calls on every
 /// key release.
+// Iced event-wiring glue: the two match-arm-delete mutants (KeyPressed /
+// ButtonReleased arms) produce opaque `Subscription` values; no unit test can
+// inspect what events a Subscription will fire without a full headless runtime.
+// The testable predicate (`hex_drag_listener_active`) is extracted and tested.
+#[mutants::skip]
 pub fn subscription(app: &App) -> Subscription<Message> {
     let menu_sub = crate::menu::subscription();
 
@@ -476,15 +691,26 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         return menu_sub;
     }
 
-    let tree_key_sub = iced::event::listen_with(|event, _status, _window| {
-        if let Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) = event {
-            Some(Message::TreeKey(key))
-        } else {
-            None
-        }
+    let tree_key_sub = iced::event::listen_with(|event, _status, _window| match event {
+        Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) => Some(Message::TreeKey(key)),
+        _ => None,
     });
 
-    Subscription::batch([menu_sub, tree_key_sub])
+    // Only subscribe to left-button-release when a Hex tab is active. Drag can
+    // only start inside a Hex view, so firing this app-wide would cause
+    // spurious update+view rebuilds on every click elsewhere.
+    let hex_drag_sub = if hex_drag_listener_active(app) {
+        iced::event::listen_with(|event, _status, _window| match event {
+            Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                Some(Message::HexDragEnded)
+            }
+            _ => None,
+        })
+    } else {
+        Subscription::none()
+    };
+
+    Subscription::batch([menu_sub, tree_key_sub, hex_drag_sub])
 }
 
 /// Returns a button style closure that uses the system accent colour so that
@@ -601,20 +827,17 @@ pub fn view(app: &App) -> Element<'_, Message> {
         // drag-resize is cursor-accurate regardless of cursor speed.  The
         // `.on_resize` wiring gives a horizontal-resize cursor on hover and
         // emits `Message::PaneResized` only during an active drag.
-        let selected_meta = archive
-            .tree
-            .selected()
-            .and_then(|path| archive.entries.get(path).map(|meta| (path, meta)));
-
         // Capture locals for the pane_grid closure (can't borrow `app` inside).
         let tree = &archive.tree;
         let accent = app.accent;
         let selected_row = app.selected_row;
+        let tabs = &app.tabs;
+        let entries = &archive.entries;
 
         pane_grid(&app.panes, move |_pane, kind, _maximized| {
             let content: Element<'_, Message> = match kind {
                 PaneKind::Sidebar => sidebar::view(tree, accent, selected_row),
-                PaneKind::Detail => detail::view(selected_meta),
+                PaneKind::Detail => content::view(tabs, entries, accent),
             };
             pane_grid::Content::new(content)
         })
@@ -819,6 +1042,30 @@ mod tests {
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
+    /// Returns a shared `Arc<PakReader>` opened from the real_v8b_uasset fixture.
+    ///
+    /// The reader is opened exactly once per test binary via `OnceLock`; every
+    /// call clones the `Arc`, so 100+ `app_with_paths` calls pay only a single
+    /// disk-open.
+    fn shared_test_reader() -> std::sync::Arc<paksmith_core::container::pak::PakReader> {
+        use std::sync::{Arc, OnceLock};
+        static READER: OnceLock<Arc<paksmith_core::container::pak::PakReader>> = OnceLock::new();
+        READER
+            .get_or_init(|| {
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("tests/fixtures/real_v8b_uasset.pak");
+                Arc::new(
+                    paksmith_core::container::pak::PakReader::open(path)
+                        .expect("open fixture reader"),
+                )
+            })
+            .clone()
+    }
+
     /// Build a minimal `App` with a loaded archive whose tree is built from
     /// `paths` (forward-slash separated).  The archive has no real entries in
     /// the `entries` BTreeMap — keyboard-nav tests only need the tree rows.
@@ -838,12 +1085,14 @@ mod tests {
             );
         }
         let entry_count = paths.len();
+        let reader = shared_test_reader();
         let archive = LoadedArchive {
             path: PathBuf::from("test.pak"),
             entry_count,
             decrypted: false,
             tree,
             entries,
+            reader,
         };
         App {
             archive: Some(archive),
@@ -1198,6 +1447,130 @@ mod tests {
         );
     }
 
+    // ── Task 7: tabs + open-asset wiring ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn open_asset_creates_loading_tab_then_ready() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/real_v8b_uasset.pak");
+        let loaded = crate::task::open::run(fixture, None).await.unwrap();
+        let mut app = App {
+            archive: Some(loaded),
+            ..App::default()
+        };
+
+        let _ = update(&mut app, Message::OpenAsset("Game/Maps/Demo.uasset".into()));
+        assert_eq!(app.tabs.open.len(), 1);
+        assert!(matches!(
+            app.tabs.open[0].content,
+            crate::state::tabs::TabContent::Loading
+        ));
+
+        // Simulate the async result.
+        let reader = app.archive.as_ref().unwrap().reader.clone();
+        let load = crate::task::asset::load(reader, "Game/Maps/Demo.uasset".into()).await;
+        let current_gen = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "Game/Maps/Demo.uasset".into(),
+                load: Box::new(load),
+                generation: current_gen,
+            },
+        );
+        assert!(matches!(
+            app.tabs.open[0].content,
+            crate::state::tabs::TabContent::Ready { .. }
+        ));
+    }
+
+    #[test]
+    fn view_mode_set_changes_active_tab_view() {
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        let _ = update(
+            &mut app,
+            Message::ViewModeSet(crate::state::tabs::ViewMode::Hex),
+        );
+        assert_eq!(app.tabs.open[0].view, crate::state::tabs::ViewMode::Hex);
+    }
+
+    #[tokio::test]
+    async fn opening_new_archive_clears_tabs() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/real_v8b_uasset.pak");
+        let loaded = crate::task::open::run(fixture.clone(), None).await.unwrap();
+        let mut app = App {
+            archive: Some(loaded),
+            ..App::default()
+        };
+        let _ = update(&mut app, Message::OpenAsset("Game/Maps/Demo.uasset".into()));
+        assert_eq!(app.tabs.open.len(), 1);
+        // Re-open (same fixture) → tabs cleared.
+        let reloaded = crate::task::open::run(fixture, None).await.unwrap();
+        let _ = update(&mut app, Message::ArchiveOpened(Box::new(Ok(reloaded))));
+        assert!(
+            app.tabs.open.is_empty(),
+            "opening an archive must clear stale tabs"
+        );
+    }
+
+    #[test]
+    fn tab_closed_out_of_bounds_is_noop() {
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        let _ = update(&mut app, Message::TabClosed(99));
+        assert_eq!(app.tabs.open.len(), 1);
+    }
+
+    #[test]
+    fn tab_activated_changes_active() {
+        let mut app = app_with_paths(&["a.uasset", "b.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        let _ = update(&mut app, Message::OpenAsset("b.uasset".into()));
+        // active is 1 (b) — activate 0 (a).
+        let _ = update(&mut app, Message::TabActivated(0));
+        assert_eq!(app.tabs.active, Some(0));
+    }
+
+    #[test]
+    fn tab_closed_in_bounds_removes_tab() {
+        let mut app = app_with_paths(&["a.uasset", "b.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        let _ = update(&mut app, Message::OpenAsset("b.uasset".into()));
+        assert_eq!(app.tabs.open.len(), 2);
+        let _ = update(&mut app, Message::TabClosed(0));
+        assert_eq!(
+            app.tabs.open.len(),
+            1,
+            "in-bounds close must remove the tab"
+        );
+    }
+
+    #[test]
+    fn enter_on_file_returns_open_asset_task() {
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        // Expand Dir so file row is visible.
+        if let Some(ref mut a) = app.archive {
+            a.tree.toggle(0);
+        }
+        // file row is at index 1 (Dir=0, file.txt=1).
+        app.selected_row = Some(1);
+        let result = handle_tree_key(&mut app, &named_key(Named::Enter));
+        assert!(
+            result.is_some(),
+            "Enter on a file must return Some(Task) for OpenAsset"
+        );
+    }
+
     // ── scroll-offset helpers ────────────────────────────────────────────────
 
     #[test]
@@ -1238,5 +1611,381 @@ mod tests {
             tree_scroll_offset(3) > tree_scroll_offset(2),
             "scroll offset must grow with row index"
         );
+    }
+
+    // ── Task 9: hex view wiring ───────────────────────────────────────────────
+
+    /// Build an App whose active tab has `TabContent::Ready` bytes.
+    fn app_with_ready_tab(bytes: Vec<u8>) -> App {
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        // Directly set tab content to Ready (bypasses async I/O).
+        app.tabs.set_content(
+            "a.uasset",
+            crate::state::tabs::TabContent::Ready {
+                bytes,
+                truncated: false,
+                parsed: Err("no parse needed for hex test".into()),
+            },
+        );
+        app
+    }
+
+    #[test]
+    fn hex_byte_pressed_sets_selection_on_ready_tab() {
+        let mut app = app_with_ready_tab(vec![0x00; 32]);
+        // Before press: no selection.
+        assert!(app.tabs.active_tab().unwrap().hex.selection.is_none());
+        let _ = update(&mut app, Message::HexBytePressed(5));
+        let sel = app.tabs.active_tab().unwrap().hex.selection;
+        assert!(sel.is_some(), "HexBytePressed must set a selection");
+        assert_eq!(sel.unwrap().anchor, 5);
+        assert_eq!(sel.unwrap().cursor, 5);
+        assert!(
+            app.tabs.active_tab().unwrap().hex.dragging,
+            "HexBytePressed must set dragging = true"
+        );
+    }
+
+    #[test]
+    fn hex_byte_entered_extends_drag_while_dragging() {
+        let mut app = app_with_ready_tab(vec![0x00; 32]);
+        let _ = update(&mut app, Message::HexBytePressed(3));
+        let _ = update(&mut app, Message::HexByteEntered(10));
+        let sel = app.tabs.active_tab().unwrap().hex.selection.unwrap();
+        assert_eq!(sel.range(), (3, 10), "HexByteEntered must extend cursor");
+    }
+
+    #[test]
+    fn hex_drag_ended_clears_dragging_flag() {
+        let mut app = app_with_ready_tab(vec![0x00; 32]);
+        let _ = update(&mut app, Message::HexBytePressed(0));
+        assert!(app.tabs.active_tab().unwrap().hex.dragging);
+        let _ = update(&mut app, Message::HexDragEnded);
+        assert!(
+            !app.tabs.active_tab().unwrap().hex.dragging,
+            "HexDragEnded must clear dragging"
+        );
+    }
+
+    #[test]
+    fn hex_drag_ended_is_noop_when_no_tab() {
+        // No crash when there are no tabs at all.
+        let mut app = App::default();
+        let _ = update(&mut app, Message::HexDragEnded);
+        // If we get here without panic, the test passes.
+    }
+
+    #[test]
+    fn hex_byte_pressed_on_loading_tab_is_noop() {
+        // Pressing on a Loading tab must not set selection (no bytes to select).
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        // Tab is still Loading (no set_content call).
+        assert!(matches!(
+            app.tabs.active_tab().unwrap().content,
+            crate::state::tabs::TabContent::Loading
+        ));
+        let _ = update(&mut app, Message::HexBytePressed(0));
+        // Selection remains None.
+        assert!(app.tabs.active_tab().unwrap().hex.selection.is_none());
+    }
+
+    #[test]
+    fn active_tab_mut_returns_none_when_no_tabs() {
+        let mut tabs = crate::state::tabs::Tabs::default();
+        assert!(tabs.active_tab_mut().is_none());
+    }
+
+    #[test]
+    fn active_tab_mut_matches_active_tab() {
+        use crate::state::tabs::Tabs;
+        let mut tabs = Tabs::default();
+        let _ = tabs.open_or_activate("a.uasset");
+        // Verify immutable access first, then mutable access — can't borrow both at once.
+        assert_eq!(tabs.active_tab().unwrap().path, "a.uasset");
+        assert_eq!(tabs.active_tab_mut().unwrap().path, "a.uasset");
+    }
+
+    // ── Task 10: PropToggled wiring ───────────────────────────────────────────
+
+    /// PropToggled inserts the id on first dispatch, then removes it on second
+    /// dispatch (toggle semantics). Requires a Ready+Ok tab so the guard passes.
+    #[tokio::test]
+    async fn prop_toggled_inserts_then_removes_from_expanded() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/real_v8b_uasset.pak");
+        let loaded = crate::task::open::run(fixture, None).await.unwrap();
+        let mut app = App {
+            archive: Some(loaded),
+            ..App::default()
+        };
+
+        // Open the tab (Loading state) then simulate the async load completing.
+        let _ = update(&mut app, Message::OpenAsset("Game/Maps/Demo.uasset".into()));
+        let reader = app.archive.as_ref().unwrap().reader.clone();
+        let load = crate::task::asset::load(reader, "Game/Maps/Demo.uasset".into()).await;
+        let current_gen = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "Game/Maps/Demo.uasset".into(),
+                load: Box::new(load),
+                generation: current_gen,
+            },
+        );
+
+        // Confirm the tab is Ready with a parsed Ok(pkg).
+        assert!(
+            matches!(
+                app.tabs.open[0].content,
+                crate::state::tabs::TabContent::Ready { parsed: Ok(_), .. }
+            ),
+            "tab must be Ready+Ok before toggling"
+        );
+
+        // Use an arbitrary node_id — toggle is id-agnostic.
+        let test_id: crate::state::property_view::NodeId = 0xDEAD_BEEF_1234_5678;
+
+        // First dispatch: id must be inserted into expanded.
+        assert!(
+            app.tabs.open[0].expanded.is_empty(),
+            "expanded must be empty before first toggle"
+        );
+        let _ = update(&mut app, Message::PropToggled(test_id));
+        assert!(
+            app.tabs.open[0].expanded.contains(&test_id),
+            "PropToggled must insert the id on first dispatch"
+        );
+
+        // Second dispatch: id must be removed (toggle off).
+        let _ = update(&mut app, Message::PropToggled(test_id));
+        assert!(
+            !app.tabs.open[0].expanded.contains(&test_id),
+            "PropToggled must remove the id on second dispatch"
+        );
+    }
+
+    #[test]
+    fn prop_toggled_is_noop_on_loading_tab() {
+        // A Loading tab (no parsed content) must not crash or mutate expanded.
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        // Tab is Loading — no set_content call.
+        let test_id: crate::state::property_view::NodeId = 42;
+        let _ = update(&mut app, Message::PropToggled(test_id));
+        assert!(
+            app.tabs.open[0].expanded.is_empty(),
+            "PropToggled on a Loading tab must be a no-op"
+        );
+    }
+
+    // ── B8: hex_drag_listener_active predicate ────────────────────────────────
+
+    #[test]
+    fn hex_drag_listener_active_true_only_for_hex_view_tab() {
+        // A tab in Hex view → true (Kills `== with !=`).
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        let _ = update(
+            &mut app,
+            Message::ViewModeSet(crate::state::tabs::ViewMode::Hex),
+        );
+        assert!(
+            hex_drag_listener_active(&app),
+            "Hex-view active tab must return true"
+        );
+    }
+
+    #[test]
+    fn hex_drag_listener_active_false_for_properties_view() {
+        // Default view is Properties → false.
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        // Tab defaults to Properties.
+        assert_eq!(
+            app.tabs.active_tab().unwrap().view,
+            crate::state::tabs::ViewMode::Properties
+        );
+        assert!(
+            !hex_drag_listener_active(&app),
+            "Properties-view tab must return false"
+        );
+    }
+
+    #[test]
+    fn hex_drag_listener_active_false_when_no_tabs() {
+        // No tabs at all → false.
+        let app = App::default();
+        assert!(
+            !hex_drag_listener_active(&app),
+            "no active tab must return false"
+        );
+    }
+
+    #[test]
+    fn hex_drag_listener_active_false_for_info_view() {
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        let _ = update(
+            &mut app,
+            Message::ViewModeSet(crate::state::tabs::ViewMode::Info),
+        );
+        assert!(
+            !hex_drag_listener_active(&app),
+            "Info-view tab must return false"
+        );
+    }
+
+    #[test]
+    fn prop_toggled_is_noop_on_ready_err_tab() {
+        // A Ready+Err tab (failed parse) must not toggle expanded.
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        app.tabs.set_content(
+            "a.uasset",
+            crate::state::tabs::TabContent::Ready {
+                bytes: vec![],
+                truncated: false,
+                parsed: Err("no parse".into()),
+            },
+        );
+        let test_id: crate::state::property_view::NodeId = 99;
+        let _ = update(&mut app, Message::PropToggled(test_id));
+        assert!(
+            app.tabs.open[0].expanded.is_empty(),
+            "PropToggled on a Ready+Err tab must be a no-op"
+        );
+    }
+
+    // ── archive_generation guard (Copilot race fix) ───────────────────────────
+
+    #[test]
+    fn asset_loaded_with_stale_generation_is_ignored() {
+        use crate::state::tabs::TabContent;
+        let mut app = app_with_paths(&["a.uasset"]);
+        app.archive_generation = 5;
+        let _ = app.tabs.open_or_activate("a.uasset"); // Loading tab
+        let load = crate::task::asset::AssetLoad {
+            bytes: vec![1, 2, 3],
+            truncated: false,
+            parsed: Err("x".into()),
+        };
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "a.uasset".into(),
+                load: Box::new(load),
+                generation: 4, // stale
+            },
+        );
+        assert!(
+            matches!(app.tabs.open[0].content, TabContent::Loading),
+            "stale-generation AssetLoaded must be ignored (tab stays Loading)"
+        );
+    }
+
+    #[test]
+    fn asset_loaded_with_current_generation_applies() {
+        use crate::state::tabs::TabContent;
+        let mut app = app_with_paths(&["a.uasset"]);
+        app.archive_generation = 5;
+        let _ = app.tabs.open_or_activate("a.uasset");
+        let load = crate::task::asset::AssetLoad {
+            bytes: vec![1, 2, 3],
+            truncated: false,
+            parsed: Err("x".into()),
+        };
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "a.uasset".into(),
+                load: Box::new(load),
+                generation: 5, // current
+            },
+        );
+        assert!(
+            matches!(app.tabs.open[0].content, TabContent::Ready { .. }),
+            "current-generation AssetLoaded must populate the tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_archive_bumps_generation() {
+        // ArchiveOpened(Ok) must advance the generation so prior in-flight loads go stale.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/real_v8b_uasset.pak");
+        let mut app = App::default();
+        let before = app.archive_generation;
+        let loaded = crate::task::open::run(fixture, None).await.unwrap();
+        let _ = update(&mut app, Message::ArchiveOpened(Box::new(Ok(loaded))));
+        assert_eq!(
+            app.archive_generation,
+            before.wrapping_add(1),
+            "ArchiveOpened(Ok) must bump archive_generation by 1"
+        );
+    }
+
+    #[test]
+    fn opening_locked_archive_bumps_generation() {
+        // ArchiveOpened(Locked) also clears tabs, so it must bump the generation
+        // too — a load in flight when an encrypted archive is opened goes stale.
+        let mut app = App::default();
+        let before = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(crate::state::archive::OpenError::Locked {
+                path: std::path::PathBuf::from("x.pak"),
+            }))),
+        );
+        assert_eq!(
+            app.archive_generation,
+            before.wrapping_add(1),
+            "ArchiveOpened(Locked) must bump archive_generation by 1"
+        );
+    }
+
+    // ── open_path_for_row resolver ────────────────────────────────────────────
+
+    #[test]
+    fn open_path_for_row_resolves_file_row_path() {
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        // Row 0 is "Dir" (a dir row, collapsed). Expand it so "Dir/file.txt" appears.
+        if let Some(ref mut a) = app.archive {
+            a.tree.toggle(0); // expand Dir → file row appears at index 1
+        }
+        // Dir row (index 0) has no path → None.
+        assert_eq!(
+            open_path_for_row(&app, 0),
+            None,
+            "dir row must resolve to None"
+        );
+        // File row (index 1) has the path → Some.
+        assert_eq!(
+            open_path_for_row(&app, 1),
+            Some("Dir/file.txt".to_string()),
+            "file row must resolve to its full path"
+        );
+        // Out-of-bounds index → None (no panic, no path).
+        assert_eq!(
+            open_path_for_row(&app, 999),
+            None,
+            "out-of-bounds index must resolve to None"
+        );
+    }
+
+    #[test]
+    fn open_path_for_row_returns_none_without_archive() {
+        // No archive loaded → always None, regardless of index.
+        let app = App::default();
+        assert_eq!(open_path_for_row(&app, 0), None);
     }
 }
