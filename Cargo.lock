@@ -4017,7 +4017,7 @@ dependencies = [
  "iced",
  "muda",
  "mutants",
- "objc2-app-kit 0.2.2",
+ "objc2-app-kit 0.3.2",
  "paksmith-core",
  "rfd",
  "thiserror 2.0.18",
