@@ -1,19 +1,16 @@
-//! Detail pane — shows per-entry metadata for the selected file.
+//! Shared detail-pane helpers — `human_size`, `compression_ratio`, and
+//! `kv_row`.
 //!
-//! When no file is selected, renders a muted placeholder. When a file is
-//! selected, shows its path, sizes (human-formatted), compression status, and
-//! encryption status as a clean key/value metadata panel.
-//!
-//! This pane is the Phase 7 viewer host — metadata only for Phase 6.
+//! The original `view`/`empty_detail`/`entry_detail` functions that composed
+//! the Phase 6 detail pane were retired in Phase 7a when the tabbed content
+//! host (`panels::content`) took over.  The three pure helpers remain because
+//! `panels::content`'s Info view imports them directly.
 
-use iced::widget::{column, container, row, text};
+use iced::widget::{row, text};
 use iced::{Element, Length};
 
 use crate::app::Message;
-use crate::state::archive::EntryMeta;
-use crate::theme::tokens::{
-    DETAIL_LABEL_WIDTH, SPACE_LG, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM,
-};
+use crate::theme::tokens::{DETAIL_LABEL_WIDTH, SPACE_XS, TEXT_MUTED_ALPHA, TEXT_SM};
 
 // ── pure helpers ──────────────────────────────────────────────────────────────
 
@@ -84,71 +81,14 @@ pub fn compression_ratio(uncompressed: u64, compressed: u64) -> Option<String> {
     Some(format!("{pct}%"))
 }
 
-// ── view ─────────────────────────────────────────────────────────────────────
-
-/// Renders the detail pane for the selected entry.
-///
-/// `selected` is `Some((full_path, meta))` when a file row is selected and
-/// metadata is available, or `None` (no selection, or a directory is selected).
-pub fn view(selected: Option<(&str, &EntryMeta)>) -> Element<'static, Message> {
-    match selected {
-        None => empty_detail(),
-        Some((path, meta)) => entry_detail(path, meta),
-    }
-}
-
-// ── private helpers ───────────────────────────────────────────────────────────
-
-fn empty_detail() -> Element<'static, Message> {
-    container(
-        text("Select a file to inspect")
-            .size(f32::from(TEXT_MD))
-            .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
-            }),
-    )
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
-}
-
-fn entry_detail(path: &str, meta: &EntryMeta) -> Element<'static, Message> {
-    let ucmp = human_size(meta.uncompressed_size);
-    let cmp = human_size(meta.compressed_size);
-    let ratio_str = compression_ratio(meta.uncompressed_size, meta.compressed_size)
-        .unwrap_or_else(|| "\u{2014}".to_string());
-
-    let compressed_label: String = if meta.is_compressed {
-        format!("Yes ({cmp}, {ratio_str})")
-    } else {
-        "No".to_string()
-    };
-
-    let encrypted_label: &str = if meta.is_encrypted { "Yes" } else { "No" };
-
-    let content = column![
-        // Path — spans full width, may wrap on long paths.
-        kv_row("Path", path.to_owned()),
-        kv_row("Size", ucmp),
-        kv_row("Compressed", compressed_label),
-        kv_row("Encrypted", encrypted_label.to_owned()),
-    ]
-    .spacing(SPACE_SM);
-
-    container(content)
-        .padding(SPACE_LG)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-}
-
 /// Build one key/value row in the metadata panel.
 ///
 /// Both key and value are taken as owned `String` so the returned element
 /// is `'static` — the caller doesn't need to keep them alive beyond the call.
-fn kv_row(key: impl Into<String>, value: impl Into<String>) -> Element<'static, Message> {
+pub(crate) fn kv_row(
+    key: impl Into<String>,
+    value: impl Into<String>,
+) -> Element<'static, Message> {
     row![
         text(key.into())
             .size(f32::from(TEXT_SM))

@@ -61,7 +61,7 @@ jobs:
           # Full history needed for `git diff` against the PR base.
           fetch-depth: 0
       - uses: ./.github/actions/setup-rust
-      - uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2.81.11
+      - uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
           tool: cargo-mutants
       # Bind base ref via env so the value cannot be interpolated into
