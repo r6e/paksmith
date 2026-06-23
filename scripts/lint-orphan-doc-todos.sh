@@ -35,9 +35,11 @@ set -euo pipefail
 
 # Doc-comment line prefix (leading whitespace + `///` or `//!`).
 doc_prefix='^[[:space:]]*(///|//!)'
-# Word-boundary matching is done with POSIX `grep -w`, NOT `\b`: `\b` is a GNU
+# Word-boundary matching is done with `grep -w`, NOT `\b`: `\b` is a GNU
 # extension; under POSIX ERE (BSD/macOS `grep -E`) it is a backspace escape, which
-# would silently make this lint a no-op. The detection is therefore two passes:
+# would silently make this lint a no-op. Note: `grep -w` is not specified by POSIX,
+# but is supported by GNU grep and BSD/macOS grep (the intended targets for this hook).
+# The detection is therefore two passes:
 #   1. `grep -wE marker_word`   — the marker as a whole word (so MYTODO/TODOLIST
 #                                  do not match), covering both bare and tracked.
 #   2. `grep -vE tracked_marker` — drop the tracked form `TODO(`/`FIXME(` (any
