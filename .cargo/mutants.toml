@@ -191,4 +191,43 @@ exclude_re = [
     # `decode_hex_32` boundary exclude). The per-channel coefficient arithmetic in
     # the same fn IS killed by `readable_text_picks_dark_on_light_accent_and_light_on_dark`.
     'replace > with >= in readable_text_on',
+    #
+    # ── Phase 7a (GUI property-view) ───────────────────────────────────────────
+    #
+    # (f) Typed-asset payload arms in `payload_bag`. The GUI's only asset
+    # fixture (Demo.uasset) is an Asset::Generic (its class_index resolves via
+    # the Import arm to "Default__Object"); the Texture2D/SoundWave/StaticMesh/
+    # SkeletalMesh/DataTable arms require typed payloads which live in core's
+    # fixture suite (not available to GUI unit tests). The Generic arm, the None
+    # default, and the full recursion path ARE unit-tested (B3 asserts Generic
+    # returns Some; B4 exercises Array/Map recursion via push_value_row). Mirrors
+    # the CLI's identical forward-coverage exclusions for typed_variant_bag.
+    # Remove when the GUI gains typed-asset fixtures.
+    'delete match arm Asset::(DataTable|Texture2D|SoundWave|StaticMesh|SkeletalMesh)\(.\) in payload_bag',
+    #
+    # (g) Export class-index arm in `class_name`. The Demo.uasset fixture's
+    # export has its class_index resolved via the **Import** arm (to
+    # "Default__Object"), so the Import arm IS exercised and killed by
+    # `flatten_export_row_label*` (which asserts the exact export-row label
+    # including the resolved class name). The **Export** arm (class_index points
+    # into pkg.exports) has no GUI fixture that exercises it — that would require
+    # an export whose class is itself another export, which Demo.uasset does not
+    # provide. Remove when a fixture with an export-class-index is available in
+    # the GUI test tree.
+    'delete match arm PackageIndex::Export\(n\) in class_name',
+    # `PackageIndex::Null` arm in `class_name`: produces "Class" for a null
+    # class_index. The Demo.uasset fixture's export uses a non-null Import-
+    # resolved class_index, so the Null arm is genuinely unreachable for the GUI
+    # test fixture. Remove when a GUI fixture with a null class_index export
+    # becomes available.
+    'delete match arm PackageIndex::Null in class_name',
+    # `flatten_property` whole-body replacement: this thin adapter (Property →
+    # PropertyValue) calls `push_value_row` directly; Property.name is pub(crate)
+    # and non-constructible from GUI unit tests. The full recursion it drives
+    # (Array/Set/Map/Struct expansion + depth + node_id arithmetic) is
+    # unit-tested via `push_value_row` directly (B4 tests). The real package
+    # path IS exercised by the fixture-backed `flatten_expanding_export_reveals_children`
+    # (Generic/Tree bag → flatten_property → push_value_row). Mirrors the CLI's
+    # documented forward-coverage stance for the same adapter layer.
+    'replace flatten_property with \(\)',
 ]
