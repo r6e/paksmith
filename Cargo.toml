@@ -100,7 +100,7 @@ zeroize = { version = "1.7", features = ["zeroize_derive"] }
 toml = "0.8"
 # Phase 5b: resolve the platform config directory for the profile store
 # (`ProfileStore::config_path`). Pure-Rust, MIT/Apache-2.0.
-dirs = "5"
+dirs = "6"
 # Phase 5c: ed25519 signature verification for the registry payload. Default
 # features include the signing machinery (used by tests only — production
 # path is verify-only). MIT/Apache-2.0.
