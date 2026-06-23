@@ -97,7 +97,7 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 # Phase 5b: game-profile TOML store (ProfileStore round-trip via toml::to_string_pretty /
 # toml::from_str). MIT/Apache-2.0. Key material flows through the keys_serde adapter,
 # never through toml's own ser/de of AesKey.
-toml = "0.8"
+toml = "1.1"
 # Phase 5b: resolve the platform config directory for the profile store
 # (`ProfileStore::config_path`). Pure-Rust, MIT/Apache-2.0.
 dirs = "5"
