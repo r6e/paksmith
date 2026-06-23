@@ -45,7 +45,7 @@ thiserror = "2.0.12"
 # freshly allocates each Arc — sharing isn't reconstructed across
 # the wire. paksmith parses `.uasset` from binary, not JSON, so the
 # non-sharing on deserialize is non-functional for the hot path.
-serde = { version = "1.0.220", features = ["derive", "rc"] }
+serde = { version = "1.0.225", features = ["derive", "rc"] }
 serde_json = "1.0.150"
 byteorder = "1.5"
 tracing = "0.1.40"
