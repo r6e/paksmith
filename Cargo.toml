@@ -91,9 +91,9 @@ glam = { version = "0.33", default-features = false, features = ["std", "f64"] }
 # MIT/Apache-2.0.
 aes = { version = "0.9.1", features = ["zeroize"] }
 # Phase 5a: zero AES key material on drop (crypto-material hygiene). MIT/Apache-2.0.
-# Floor 1.7: `ZeroizeOnDrop` derive (needs the `zeroize_derive` feature) and a
-# minimal-versions floor at or above any transitive requirement.
-zeroize = { version = "1.7", features = ["zeroize_derive"] }
+# Floor 1.8: `aes 0.9.1` (cipher 0.5) requires `zeroize ^1.8`; floor raised to
+# keep the minimal-versions check green (was 1.7 which conflicts with aes 0.9.1).
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 # Phase 5b: game-profile TOML store (ProfileStore round-trip via toml::to_string_pretty /
 # toml::from_str). MIT/Apache-2.0. Key material flows through the keys_serde adapter,
 # never through toml's own ser/de of AesKey.
