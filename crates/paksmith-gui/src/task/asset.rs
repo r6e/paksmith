@@ -22,12 +22,12 @@ pub const HEX_BYTES_CAP: usize = 16 * 1024;
 /// the prefix and [`overflowed`][CappedWriter::overflowed] indicates whether the
 /// entry was larger than the cap.
 ///
-/// Once the buffer is full and more data arrives, `write` returns `Ok(0)`, which
-/// makes core's `write_all` / `io::copy` streaming loop stop with
-/// `ErrorKind::WriteZero` instead of reading and decompressing the rest of the
-/// entry for bytes the UI will never render. [`load`] recognizes that induced
-/// stop (via [`CappedWriter::overflowed`]) as an intentional truncation rather
-/// than a read failure — see [`read_outcome_error`].
+/// `write` returns the honest count of bytes it accepted. Once the buffer is
+/// full that count is `0`, which core's `write_all` / `io::copy` streaming loop
+/// turns into `ErrorKind::WriteZero` and stops — so it does not read and
+/// decompress the rest of the entry for bytes the UI will never render. [`load`]
+/// recognizes that induced stop (via [`CappedWriter::overflowed`]) as an
+/// intentional truncation rather than a read failure — see [`read_outcome_error`].
 struct CappedWriter {
     buf: Vec<u8>,
     cap: usize,
@@ -57,20 +57,19 @@ impl CappedWriter {
 
 impl std::io::Write for CappedWriter {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        // `total_seen` counts every byte OFFERED (not just accepted) so a straddle
+        // that re-offers its remainder still trips `overflowed()`. Keep `+= len`;
+        // switching to `+= take` would cap it at `cap` and lose truncation detection.
         self.total_seen = self.total_seen.saturating_add(data.len());
-        // Take only the remaining capacity (0 once full) via saturating_sub — no
-        // `<` guard, so there is no boundary-equivalent `< vs <=` mutant; when the
-        // buffer is already at the cap, `take == 0` and `&data[..0]` is a no-op.
+        // Accept only the remaining capacity (0 once full) via `saturating_sub`.
         let take = self.cap.saturating_sub(self.buf.len()).min(data.len());
         self.buf.extend_from_slice(&data[..take]);
-        if take < data.len() {
-            // Buffer is now full but the stream has more bytes. Returning `Ok(0)`
-            // makes core's `write_all` loop stop with `ErrorKind::WriteZero`, so
-            // it does not read/decompress the remainder of the entry. `total_seen`
-            // was already incremented above, so `overflowed()` is true and `load`
-            // treats the resulting error as an intentional truncation.
-            return Ok(0);
-        }
+        // Return the honest accepted count (`std::io::Write` contract). Once the
+        // buffer is full `take == 0`, so this is `Ok(0)`, which core's `write_all`
+        // / `io::copy` loop turns into `ErrorKind::WriteZero` and stops — that is
+        // what bounds the read/decompress work to ~one chunk past the cap. A
+        // partial straddling write returns `Ok(take)`; `write_all` then retries the
+        // remainder and the next call (full buffer) yields the `Ok(0)` stop.
         Ok(take)
     }
 
@@ -229,19 +228,16 @@ mod tests {
     }
 
     #[test]
-    fn capped_writer_straddling_write_returns_zero_to_stop() {
-        // A single direct `write` whose chunk crosses the cap (take > 0 AND
-        // take < data.len()) must return Ok(0) — NOT the partial take — so a
-        // `write_all` caller halts on the first call. Kills `< with >` on the
-        // `take < data.len()` guard (the mutant would return Ok(take) here).
+    fn capped_writer_straddling_write_returns_the_partial_count() {
+        // A single direct `write` whose chunk crosses the cap accepts only the
+        // remaining capacity and returns that honest partial count (NOT data.len(),
+        // NOT 0) — the `std::io::Write` contract. The full-buffer `Ok(0)` stop then
+        // comes on the next write (see `capped_writer_full_then_more_returns_zero`).
         let mut w = CappedWriter::new(100);
         let n = w.write(&[0u8; 110]).expect("write itself never errors");
-        assert_eq!(
-            n, 0,
-            "a straddling write signals stop with Ok(0), not the partial count"
-        );
-        assert_eq!(w.buf.len(), 100, "the cap-sized prefix is still captured");
-        assert!(w.overflowed());
+        assert_eq!(n, 100, "accepts exactly the remaining capacity");
+        assert_eq!(w.buf.len(), 100, "the cap-sized prefix is captured");
+        assert!(w.overflowed(), "offering 110 > cap flips overflow true");
     }
 
     #[test]
