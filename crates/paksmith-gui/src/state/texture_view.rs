@@ -73,16 +73,19 @@ pub const ZOOM_STEPS: &[f32] = &[
 ///   shorter than 4 (trailing partial pixel) are left unchanged.
 #[must_use]
 pub fn mask_rgba(src: &[u8], channels: ChannelSet) -> Vec<u8> {
-    let mut out = src.to_vec();
     let count = channels.active_count();
 
+    // All four channels on is the identity copy — skip the per-pixel loop.
+    if count == 4 {
+        return src.to_vec();
+    }
+
+    let mut out = src.to_vec();
     for px in out.chunks_mut(4) {
         if px.len() < 4 {
             continue;
         }
-        if count == 4 {
-            // All on — identity, nothing to do.
-        } else if count == 1 {
+        if count == 1 {
             // Single-channel grayscale.
             let val = if channels.r {
                 px[0]
