@@ -2336,4 +2336,43 @@ mod tests {
             "TextureZoomOut must decrease zoom"
         );
     }
+
+    #[test]
+    fn texture_zoom_in_disables_fit_to_window() {
+        let mut app = app_with_open_texture_tab();
+        // Default state is fit_to_window = true.
+        assert!(app.tabs.active_tab().unwrap().texture.fit_to_window);
+        let _ = update(&mut app, Message::TextureZoomIn);
+        assert!(
+            !app.tabs.active_tab().unwrap().texture.fit_to_window,
+            "manual zoom-in must exit fit-to-window mode"
+        );
+    }
+
+    #[test]
+    fn texture_zoom_out_disables_fit_to_window() {
+        let mut app = app_with_open_texture_tab();
+        if let Some(tab) = app.tabs.active_tab_mut() {
+            tab.texture.zoom = 4.0;
+            tab.texture.fit_to_window = true;
+        }
+        let _ = update(&mut app, Message::TextureZoomOut);
+        assert!(
+            !app.tabs.active_tab().unwrap().texture.fit_to_window,
+            "manual zoom-out must exit fit-to-window mode"
+        );
+    }
+
+    #[test]
+    fn texture_fit_to_window_re_enables_fit() {
+        let mut app = app_with_open_texture_tab();
+        // First drop into manual-zoom mode.
+        let _ = update(&mut app, Message::TextureZoomIn);
+        assert!(!app.tabs.active_tab().unwrap().texture.fit_to_window);
+        let _ = update(&mut app, Message::TextureFitToWindow);
+        assert!(
+            app.tabs.active_tab().unwrap().texture.fit_to_window,
+            "TextureFitToWindow must restore fit-to-window mode"
+        );
+    }
 }
