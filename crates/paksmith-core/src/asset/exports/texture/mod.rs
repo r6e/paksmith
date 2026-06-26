@@ -99,10 +99,12 @@ pub struct TextureInfo {
 /// export is present.
 ///
 /// "Decodable" means the pixel format has a registered decoder (or the virtual
-/// texture's layer-0 format does) **and** the export carries serialized mip
-/// bytes. A standard texture with `bSerializeMipData = false` keeps its mip
-/// dimensions but ships no bulk records, so it is reported as non-decodable —
-/// there are no bytes to decode. This function is **pure and allocation-cheap**:
+/// texture's layer-0 format does) **and** the export carries bulk records (mip
+/// bytes for a standard texture, chunk payloads for a virtual texture). A
+/// standard texture with `bSerializeMipData = false` keeps its mip dimensions
+/// but ships no bulk records, and a virtual texture with no chunks likewise has
+/// none; both are reported as non-decodable — there is nothing to decode. This
+/// function is **pure and allocation-cheap**:
 /// it checks only for the *presence* of bulk records (an O(1) map lookup) and
 /// never resolves them.
 ///
@@ -133,6 +135,16 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
                 // Virtual texture: decodable if layer-0 has a known format.
                 let layer0 = vt.layer_types.first().map_or("", String::as_str);
                 if !pixel_format::is_decodable(&PixelFormat::from_name(layer0)) {
+                    return None;
+                }
+                // Every parsed VT chunk appends one `FByteBulkData` record
+                // (`virtual_textures::read_chunks` pushes unconditionally, once
+                // per chunk), so a renderable VT — including all-special-fill
+                // (WHITE/BLACK/FLAT) chunks that need no payload bytes — always
+                // carries ≥1 bulk record. A VT with zero records therefore has
+                // no chunks at all and `flatten_virtual_texture` yields a blank
+                // image, so reject it here just like the standard branch.
+                if !package.has_bulk_records(export_idx) {
                     return None;
                 }
                 return Some(TextureInfo {
@@ -458,6 +470,25 @@ mod tests {
         assert!(
             classify_texture(&pkg).is_none(),
             "a VT whose layer-0 format is undecodable must yield None"
+        );
+    }
+
+    #[test]
+    fn classify_texture_virtual_no_bulk_records_is_none() {
+        // A VT with a decodable layer-0 format but zero bulk records has no
+        // chunks, so `flatten_virtual_texture` would yield a blank image. The
+        // VT branch must reject it (mirroring the standard-texture branch), not
+        // offer a Texture tab that decodes to nothing.
+        let mut pkg = pkg_with_virtual_texture("PF_DXT1");
+        let export_idx = classify_texture(&pkg)
+            .expect("a VT with bulk must classify before records are dropped")
+            .export_idx;
+        pkg.insert_bulk_records_for_test(export_idx, Vec::new())
+            .expect("dropping bulk records must succeed");
+
+        assert!(
+            classify_texture(&pkg).is_none(),
+            "a chunk-less virtual texture (no bulk records) must yield None"
         );
     }
 
