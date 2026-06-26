@@ -4,13 +4,15 @@ use std::collections::HashSet;
 
 use crate::state::hex_view;
 use crate::state::property_view::NodeId;
-use paksmith_core::asset::Package;
+use crate::state::texture_view;
+use paksmith_core::asset::{Package, classify_texture};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     Properties,
     Hex,
     Info,
+    Texture,
 }
 
 #[derive(Debug, Clone)]
@@ -31,7 +33,22 @@ pub struct Tab {
     pub view: ViewMode,
     pub content: TabContent,
     pub hex: hex_view::HexState,
+    pub texture: texture_view::TextureState,
     pub expanded: HashSet<NodeId>,
+}
+
+/// Returns `true` iff `tab` holds a successfully parsed `Package` that
+/// contains at least one decodable texture export.
+#[must_use]
+pub fn texture_available(tab: &Tab) -> bool {
+    if let TabContent::Ready {
+        parsed: Ok(pkg), ..
+    } = &tab.content
+    {
+        classify_texture(pkg.as_ref()).is_some()
+    } else {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -53,6 +70,7 @@ impl Tabs {
             view: ViewMode::Properties,
             content: TabContent::Loading,
             hex: hex_view::HexState::default(),
+            texture: texture_view::TextureState::default(),
             expanded: HashSet::new(),
         });
         let i = self.open.len() - 1;
@@ -98,17 +116,24 @@ impl Tabs {
         }
     }
 
-    /// After a load completes, demote the default view to Info for an unparsable
-    /// asset (so the user lands on useful metadata, not the Properties error).
-    /// Only acts when the tab is still on the default `Properties` view.
+    /// After a load completes, promote or demote the default view.
+    ///
+    /// - If the asset has a decodable texture, promote to `ViewMode::Texture`.
+    /// - If the asset failed to parse, demote to `ViewMode::Info`.
+    ///
+    /// Only acts when the tab is still on the default `Properties` view
+    /// (respects a user-initiated view switch).
     pub fn pick_view_after_load(&mut self, path: &str) {
-        if let Some(tab) = self.open.iter_mut().find(|t| t.path == path) {
-            #[allow(clippy::collapsible_if)]
-            if matches!(&tab.content, TabContent::Ready { parsed: Err(_), .. }) {
-                if tab.view == ViewMode::Properties {
-                    tab.view = ViewMode::Info;
-                }
-            }
+        let Some(tab) = self.open.iter_mut().find(|t| t.path == path) else {
+            return;
+        };
+        if tab.view != ViewMode::Properties {
+            return; // user already switched; respect their choice
+        }
+        if texture_available(tab) {
+            tab.view = ViewMode::Texture;
+        } else if matches!(&tab.content, TabContent::Ready { parsed: Err(_), .. }) {
+            tab.view = ViewMode::Info;
         }
     }
 
@@ -384,5 +409,132 @@ mod tests {
             t.active, original_active,
             "activate at exactly len must be rejected (out of bounds)"
         );
+    }
+
+    // ── ViewMode::Texture + texture_available (Phase 7b Task 3) ──────────────
+
+    /// Build a `TabContent::Ready` wrapping a decodable texture `Package`
+    /// (PF_DXT5 4×4 built by the __test_utils fixture builder).
+    fn ready_texture_content() -> TabContent {
+        let mp = paksmith_core::testing::uasset::build_minimal_with_decodable_texture2d();
+        let pkg =
+            paksmith_core::asset::Package::read_from(&mp.bytes, None, None, "Game/Tex.uasset")
+                .expect("build_minimal_with_decodable_texture2d must parse");
+        TabContent::Ready {
+            bytes: mp.bytes.clone(),
+            truncated: false,
+            parsed: Ok(Box::new(pkg)),
+        }
+    }
+
+    /// Build a `TabContent::Ready` wrapping a non-texture `Package`
+    /// (Generic export; classify_texture → None).
+    fn ready_non_texture_content() -> TabContent {
+        let mp = paksmith_core::testing::uasset::build_minimal_ue4_27();
+        let pkg =
+            paksmith_core::asset::Package::read_from(&mp.bytes, None, None, "Game/Foo.uasset")
+                .expect("build_minimal_ue4_27 must parse");
+        TabContent::Ready {
+            bytes: mp.bytes.clone(),
+            truncated: false,
+            parsed: Ok(Box::new(pkg)),
+        }
+    }
+
+    #[test]
+    fn pick_view_promotes_decodable_texture_to_texture_view() {
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate("Game/T_Rock.uasset");
+        t.set_content("Game/T_Rock.uasset", ready_texture_content());
+        t.pick_view_after_load("Game/T_Rock.uasset");
+        assert_eq!(
+            t.open[0].view,
+            ViewMode::Texture,
+            "decodable texture must be promoted to Texture view"
+        );
+    }
+
+    #[test]
+    fn pick_view_non_texture_ok_stays_properties() {
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate("a.uasset");
+        t.set_content("a.uasset", ready_non_texture_content());
+        t.pick_view_after_load("a.uasset");
+        assert_eq!(
+            t.open[0].view,
+            ViewMode::Properties,
+            "non-texture Ok must stay on Properties"
+        );
+    }
+
+    #[test]
+    fn pick_view_parse_err_still_demotes_to_info() {
+        // Regression guard: the Err→Info path must survive the texture-promotion branch.
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate("a.uasset");
+        t.set_content(
+            "a.uasset",
+            TabContent::Ready {
+                bytes: vec![],
+                truncated: false,
+                parsed: Err("boom".into()),
+            },
+        );
+        t.pick_view_after_load("a.uasset");
+        assert_eq!(
+            t.open[0].view,
+            ViewMode::Info,
+            "parse-Err tab must still demote to Info"
+        );
+    }
+
+    #[test]
+    fn texture_available_true_for_texture_false_for_non_texture_and_err() {
+        // texture case
+        {
+            let mut t = Tabs::default();
+            let _ = t.open_or_activate("tex.uasset");
+            t.set_content("tex.uasset", ready_texture_content());
+            assert!(
+                texture_available(&t.open[0]),
+                "texture_available must be true for a decodable texture Package"
+            );
+        }
+        // non-texture Ok
+        {
+            let mut t = Tabs::default();
+            let _ = t.open_or_activate("foo.uasset");
+            t.set_content("foo.uasset", ready_non_texture_content());
+            assert!(
+                !texture_available(&t.open[0]),
+                "texture_available must be false for a non-texture Package"
+            );
+        }
+        // Err
+        {
+            let mut t = Tabs::default();
+            let _ = t.open_or_activate("err.uasset");
+            t.set_content(
+                "err.uasset",
+                TabContent::Ready {
+                    bytes: vec![],
+                    truncated: false,
+                    parsed: Err("x".into()),
+                },
+            );
+            assert!(
+                !texture_available(&t.open[0]),
+                "texture_available must be false for a parse-Err tab"
+            );
+        }
+        // Loading
+        {
+            let mut t = Tabs::default();
+            let _ = t.open_or_activate("loading.uasset");
+            assert!(
+                !texture_available(&t.open[0]),
+                "texture_available must be false for a Loading tab"
+            );
+        }
     }
 }

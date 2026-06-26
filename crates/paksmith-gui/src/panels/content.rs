@@ -57,6 +57,8 @@ pub fn view<'a>(
                         ViewMode::Info => info_view(tab.path.as_str(), bytes, parsed, meta),
                         ViewMode::Properties => properties_view(parsed, &tab.expanded),
                         ViewMode::Hex => hex_view::view(bytes, *truncated, &tab.hex, accent),
+                        // Phase 7b Task 4 will wire the real texture widget here.
+                        ViewMode::Texture => muted_text("Texture viewer coming soon\u{2026}"),
                     }
                 }
             };
