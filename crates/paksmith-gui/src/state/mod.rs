@@ -4,4 +4,5 @@ pub mod keyflow;
 pub mod profiles;
 pub mod property_view;
 pub mod tabs;
+pub mod texture_view;
 pub mod tree;
