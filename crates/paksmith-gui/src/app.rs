@@ -593,7 +593,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // First: grab the path + pkg Arc from the active tab (if Ready+Ok).
             let dispatch = if let Some(tab) = app.tabs.active_tab_mut() {
                 tab.texture.selected_mip = m;
-                tab.texture.decoded = None;
+                // Keep the previously decoded mip on screen while the newly
+                // selected mip decodes asynchronously — clearing it here would
+                // blank the viewer on every mip change. The generation/stale-mip
+                // fence in `TextureDecoded` swaps in the new image when ready.
                 tab.texture.error = None;
                 // Try to extract what we need to dispatch a new decode task.
                 if let crate::state::tabs::TabContent::Ready {
@@ -2309,6 +2312,27 @@ mod tests {
             app.tabs.active_tab().unwrap().texture.selected_mip,
             1,
             "TextureMipSelected must update selected_mip on the active tab"
+        );
+    }
+
+    #[test]
+    fn texture_mip_selected_keeps_previous_decoded_visible() {
+        use crate::state::texture_view::DecodedMip;
+        let mut app = app_with_open_texture_tab();
+        // Seed a decoded mip and a second selectable mip.
+        if let Some(tab) = app.tabs.active_tab_mut() {
+            tab.texture.mips = vec![(64, 64), (32, 32)];
+            tab.texture.decoded = Some(DecodedMip {
+                width: 64,
+                height: 64,
+                rgba: vec![255u8; 64 * 64 * 4],
+            });
+        }
+        let _ = update(&mut app, Message::TextureMipSelected(1));
+        assert!(
+            app.tabs.active_tab().unwrap().texture.decoded.is_some(),
+            "selecting a new mip must keep the previous decoded image visible \
+             until the new mip finishes decoding"
         );
     }
 
