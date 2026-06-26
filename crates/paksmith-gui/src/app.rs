@@ -2337,6 +2337,20 @@ mod tests {
     }
 
     #[test]
+    fn texture_mip_selected_clears_prior_error() {
+        let mut app = app_with_open_texture_tab();
+        if let Some(tab) = app.tabs.active_tab_mut() {
+            tab.texture.mips = vec![(64, 64), (32, 32)];
+            tab.texture.error = Some("stale decode failure from a prior mip".into());
+        }
+        let _ = update(&mut app, Message::TextureMipSelected(1));
+        assert!(
+            app.tabs.active_tab().unwrap().texture.error.is_none(),
+            "selecting a new mip must clear the prior mip's error slate"
+        );
+    }
+
+    #[test]
     fn texture_zoom_in_increases_zoom() {
         let mut app = app_with_open_texture_tab();
         let before = app.tabs.active_tab().unwrap().texture.zoom;

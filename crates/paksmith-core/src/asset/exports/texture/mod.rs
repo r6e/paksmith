@@ -106,6 +106,11 @@ pub struct TextureInfo {
 /// it checks only for the *presence* of bulk records (an O(1) map lookup) and
 /// never resolves them.
 ///
+/// The bulk-presence check relies on the typed-reader path having populated the
+/// package's bulk records, which is guaranteed for any `Package` built via the
+/// `read_from*` constructors. A hand-assembled `Package` with `Texture2D`
+/// payloads but no `insert_bulk_records` call would classify as `None`.
+///
 /// # Return value
 ///
 /// `Some(info)` where `info.export_idx` is the index of the texture in
@@ -318,6 +323,20 @@ mod tests {
         Package::read_from(bytes, None, None, "Game/Tex.uasset").expect("parse package")
     }
 
+    /// Build a decodable `Texture2D` package, then drop its bulk records to
+    /// model a `bSerializeMipData = false` texture (mip dimensions populated, no
+    /// serialized bytes). Returns the package and the texture export index.
+    fn texture_pkg_with_bulk_dropped() -> (Package, usize) {
+        let fixture = build_minimal_with_decodable_texture2d();
+        let mut pkg = parse_pkg(&fixture.bytes);
+        let export_idx = classify_texture(&pkg)
+            .expect("fixture with bulk must classify before records are dropped")
+            .export_idx;
+        pkg.insert_bulk_records_for_test(export_idx, Vec::new())
+            .expect("dropping bulk records must succeed");
+        (pkg, export_idx)
+    }
+
     // ── classify_texture ─────────────────────────────────────────────────────
 
     #[test]
@@ -372,14 +391,7 @@ mod tests {
         // `bSerializeMipData = false`: the mip dimensions remain but no bytes
         // are serialized. classify must reject it so the GUI never offers a
         // Texture tab that would fail at decode time.
-        let fixture = build_minimal_with_decodable_texture2d();
-        let mut pkg = parse_pkg(&fixture.bytes);
-        let export_idx = classify_texture(&pkg)
-            .expect("fixture with bulk must classify before records are dropped")
-            .export_idx;
-
-        pkg.insert_bulk_records_for_test(export_idx, Vec::new())
-            .expect("dropping bulk records must succeed");
+        let (pkg, _export_idx) = texture_pkg_with_bulk_dropped();
 
         assert!(
             classify_texture(&pkg).is_none(),
@@ -536,12 +548,7 @@ mod tests {
         // dimensions are populated but whose bulk records were dropped. The empty
         // insert removes the entry, so `resolve_bulk_for_export` returns an empty
         // slice and the mip bytes can't be found.
-        let fixture = build_minimal_with_decodable_texture2d();
-        let mut pkg = parse_pkg(&fixture.bytes);
-        let export_idx = classify_texture(&pkg).expect("fixture has bulk").export_idx;
-
-        pkg.insert_bulk_records_for_test(export_idx, Vec::new())
-            .expect("dropping bulk records must succeed");
+        let (pkg, export_idx) = texture_pkg_with_bulk_dropped();
 
         let err = decode_texture_mip(&pkg, export_idx, 0)
             .expect_err("a texture with no serialized mip bytes must return Err");
