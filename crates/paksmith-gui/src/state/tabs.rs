@@ -1,4 +1,7 @@
-//! Pure tab-collection model for the content host. No `iced` imports.
+//! Tab-collection model for the content host. No direct `iced` imports, though
+//! a `Tab` transitively holds an iced render handle via the cached
+//! [`render`](crate::state::texture_view::TextureState::render) field on
+//! [`TextureState`](crate::state::texture_view::TextureState).
 
 use std::collections::HashSet;
 

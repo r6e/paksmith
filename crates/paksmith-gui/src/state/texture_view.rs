@@ -1,5 +1,9 @@
-//! Pure texture-view state: channel masking, zoom steps, and fit-to-viewport
-//! scaling. No `iced` imports — widget logic consumes this at a higher layer.
+//! Texture-view state: channel masking, zoom steps, and fit-to-viewport
+//! scaling. The logic functions ([`mask_rgba`], [`fit_zoom`], the zoom steps)
+//! are pure and iced-free so they unit-test without a renderer. The one iced
+//! type here is the cached render [`Handle`](iced::widget::image::Handle) on
+//! [`TextureState`] (see [`TextureState::render`] for why it is cached), built
+//! by [`TextureState::recompute_render`].
 
 /// A single decoded mip level: raw RGBA bytes + dimensions.
 #[derive(Debug, Clone, PartialEq)]
@@ -197,14 +201,18 @@ pub struct TextureState {
     pub decoded: Option<DecodedMip>,
     /// Error message from the most recent decode attempt, if any.
     pub error: Option<String>,
-    /// Cached channel-masked RGBA buffer for `decoded` under `channels`.
+    /// Cached iced render handle for `decoded` under `channels`.
     ///
-    /// Kept in sync with `(decoded, channels)` by [`Self::recompute_masked`],
+    /// Kept in sync with `(decoded, channels)` by [`Self::recompute_render`],
     /// which the message handlers call whenever either changes. The widget
-    /// builds its `image` handle from this buffer so the per-pixel mask pass
-    /// runs once per state change rather than on every `view()` (which fires on
-    /// every redraw — resize drags, hover, etc.). `None` whenever `decoded` is.
-    pub masked: Option<Vec<u8>>,
+    /// clones this handle each `view()` (which fires on every redraw — resize
+    /// drags, hover, etc.) instead of rebuilding it: the channel mask, the
+    /// buffer allocation, and the GPU upload all happen once per state change
+    /// rather than per frame. A cloned [`Handle`](iced::widget::image::Handle)
+    /// keeps the same `Id` (and its pixel `Bytes` are reference-counted, so the
+    /// clone is O(1)), which lets iced's raster cache reuse the existing upload.
+    /// `None` whenever `decoded` is.
+    pub render: Option<iced::widget::image::Handle>,
 }
 
 impl Default for TextureState {
@@ -218,25 +226,38 @@ impl Default for TextureState {
             fit_to_window: true,
             decoded: None,
             error: None,
-            masked: None,
+            render: None,
         }
     }
 }
 
+/// Build the iced render handle for a decoded mip under a channel set: apply
+/// the channel mask, then wrap the masked bytes as an RGBA image handle (which
+/// moves them in — no second copy retained). Shared by
+/// [`TextureState::recompute_render`] (the cached path) and the widget's
+/// cache-miss fallback so the two builds can never drift.
+pub(crate) fn render_handle(d: &DecodedMip, channels: ChannelSet) -> iced::widget::image::Handle {
+    iced::widget::image::Handle::from_rgba(d.width, d.height, mask_rgba(&d.rgba, channels))
+}
+
 impl TextureState {
-    /// Recompute the cached [`Self::masked`] buffer from the current `decoded`
+    /// Rebuild the cached [`Self::render`] handle from the current `decoded`
     /// mip and `channels`. Call after every mutation of `decoded` or `channels`
-    /// to preserve the invariant `masked == decoded.map(|d| mask_rgba(d, ch))`.
+    /// to preserve the invariant `render == decoded.map(|d| render_handle(d, ch))`.
+    ///
+    /// A fresh handle gets a fresh `Id`, so every call here invalidates iced's
+    /// raster cache exactly once, and intervening redraws (which clone the
+    /// handle) reuse the upload.
     ///
     /// Deliberately NOT called on mip *selection* (which leaves `decoded`
-    /// untouched until the new mip's async decode lands): the old masked buffer
-    /// still matches the still-displayed old mip, so the viewer keeps showing it
-    /// until `TextureDecoded` arrives and recomputes.
-    pub fn recompute_masked(&mut self) {
-        self.masked = self
+    /// untouched until the new mip's async decode lands): the old handle still
+    /// matches the still-displayed old mip, so the viewer keeps showing it
+    /// until `TextureDecoded` arrives and rebuilds.
+    pub fn recompute_render(&mut self) {
+        self.render = self
             .decoded
             .as_ref()
-            .map(|d| mask_rgba(&d.rgba, self.channels));
+            .map(|d| render_handle(d, self.channels));
     }
 }
 
@@ -509,7 +530,7 @@ mod tests {
         }
     }
 
-    // ── recompute_masked ───────────────────────────────────────────────────────
+    // ── recompute_render ───────────────────────────────────────────────────────
 
     fn one_pixel(rgba: [u8; 4]) -> DecodedMip {
         DecodedMip {
@@ -528,17 +549,32 @@ mod tests {
         assert_eq!(p.rgba, vec![9, 8, 7, 6]);
     }
 
-    #[test]
-    fn recompute_masked_is_none_without_decoded() {
-        let mut st = TextureState::default();
-        st.recompute_masked();
-        assert!(st.masked.is_none(), "no decoded mip → masked stays None");
+    /// Destructure a render handle into `(width, height, pixels)` so tests can
+    /// assert the cached upload's dimensions and masked bytes directly.
+    fn handle_parts(h: &iced::widget::image::Handle) -> (u32, u32, &[u8]) {
+        match h {
+            iced::widget::image::Handle::Rgba {
+                width,
+                height,
+                pixels,
+                ..
+            } => (*width, *height, pixels.as_ref()),
+            other => panic!("expected an Rgba handle, got {other:?}"),
+        }
     }
 
     #[test]
-    fn recompute_masked_equals_mask_rgba_of_decoded() {
+    fn recompute_render_is_none_without_decoded() {
+        let mut st = TextureState::default();
+        st.recompute_render();
+        assert!(st.render.is_none(), "no decoded mip → render stays None");
+    }
+
+    #[test]
+    fn recompute_render_builds_handle_from_masked_decoded() {
         // Isolate green so the result differs from the identity buffer — this
-        // proves the mask is actually applied, not just copied.
+        // proves the mask is actually applied, not just copied, and that the
+        // handle carries the decoded mip's dimensions.
         let mut st = TextureState {
             decoded: Some(one_pixel([10, 20, 30, 40])),
             channels: ChannelSet {
@@ -549,35 +585,65 @@ mod tests {
             },
             ..TextureState::default()
         };
-        st.recompute_masked();
+        st.recompute_render();
+        let handle = st.render.as_ref().expect("decoded mip → render is Some");
+        let (w, h, pixels) = handle_parts(handle);
+        assert_eq!((w, h), (1, 1), "handle must carry the decoded mip's dims");
         assert_eq!(
-            st.masked.as_deref(),
-            Some(mask_rgba(&[10, 20, 30, 40], st.channels).as_slice()),
-            "masked must equal mask_rgba(decoded.rgba, channels)"
+            pixels,
+            mask_rgba(&[10, 20, 30, 40], st.channels).as_slice(),
+            "handle pixels must equal mask_rgba(decoded.rgba, channels)"
         );
         assert_ne!(
-            st.masked.as_deref(),
-            Some([10u8, 20, 30, 40].as_slice()),
+            pixels,
+            [10u8, 20, 30, 40].as_slice(),
             "single-channel mask must not equal the unmasked source"
         );
     }
 
     #[test]
-    fn recompute_masked_clears_when_decoded_removed() {
+    fn recompute_render_rebuilds_with_fresh_id_on_channel_change() {
+        // The cache is keyed on handle identity: a rebuild must mint a fresh
+        // `Id` so iced re-uploads the newly masked pixels. A handle left in
+        // place (no rebuild) would keep its old `Id` and show stale pixels.
+        let mut st = TextureState {
+            decoded: Some(one_pixel([10, 20, 30, 40])),
+            ..TextureState::default()
+        };
+        st.recompute_render();
+        let id_before = st.render.as_ref().expect("render Some").id();
+
+        st.channels = ChannelSet {
+            r: false,
+            g: true,
+            b: false,
+            a: false,
+        };
+        st.recompute_render();
+        let id_after = st.render.as_ref().expect("render Some").id();
+
+        assert_ne!(
+            id_before, id_after,
+            "rebuilding the render handle must mint a fresh Id (cache invalidation)"
+        );
+    }
+
+    #[test]
+    fn recompute_render_clears_when_decoded_removed() {
         let mut st = TextureState {
             decoded: Some(one_pixel([1, 2, 3, 4])),
             ..TextureState::default()
         };
-        st.recompute_masked();
+        st.recompute_render();
         assert!(
-            st.masked.is_some(),
-            "masked populated while decoded is Some"
+            st.render.is_some(),
+            "render populated while decoded is Some"
         );
         st.decoded = None;
-        st.recompute_masked();
+        st.recompute_render();
         assert!(
-            st.masked.is_none(),
-            "masked must clear once decoded is removed"
+            st.render.is_none(),
+            "render must clear once decoded is removed"
         );
     }
 }

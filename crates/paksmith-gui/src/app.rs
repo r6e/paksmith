@@ -445,7 +445,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                         tab.texture.selected_mip = 0;
                         tab.texture.decoded = None;
                         tab.texture.error = None;
-                        tab.texture.recompute_masked();
+                        tab.texture.recompute_render();
                         // Extract Arc and path for the task closure.
                         let pkg = arc.clone();
                         let task_path = path.clone();
@@ -557,8 +557,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                             tab.texture.error = Some(msg);
                         }
                     }
-                    // `decoded` changed (either arm) — refresh the masked cache.
-                    tab.texture.recompute_masked();
+                    // `decoded` changed (either arm) — rebuild the render cache.
+                    tab.texture.recompute_render();
                 }
             }
             Task::none()
@@ -566,8 +566,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::TextureChannelToggled { channel } => {
             if let Some(tab) = app.tabs.active_tab_mut() {
                 tab.texture.channels.toggle(channel);
-                // Channel set changed — refresh the masked cache.
-                tab.texture.recompute_masked();
+                // Channel set changed — rebuild the render cache.
+                tab.texture.recompute_render();
             }
             Task::none()
         }
@@ -2391,8 +2391,26 @@ mod tests {
         );
     }
 
+    /// The masked RGBA bytes carried by a texture tab's cached render handle,
+    /// or `None` if no handle is cached.
+    fn render_pixels(tex: &crate::state::texture_view::TextureState) -> Option<Vec<u8>> {
+        tex.render.as_ref().map(|h| match h {
+            iced::widget::image::Handle::Rgba { pixels, .. } => pixels.as_ref().to_vec(),
+            other => panic!("expected an Rgba handle, got {other:?}"),
+        })
+    }
+
+    /// The `Id` of a texture tab's cached render handle, or `None` if uncached.
+    /// Returned opaquely (the `image::Id` type lives behind iced's `advanced`
+    /// feature, which the GUI does not enable) — callers only compare it.
+    fn render_id(
+        tex: &crate::state::texture_view::TextureState,
+    ) -> Option<impl PartialEq + std::fmt::Debug + use<>> {
+        tex.render.as_ref().map(iced::widget::image::Handle::id)
+    }
+
     #[test]
-    fn texture_decoded_recomputes_masked_cache() {
+    fn texture_decoded_rebuilds_render_cache() {
         use crate::state::texture_view::{DecodedMip, mask_rgba};
         let mut app = app_with_open_texture_tab();
         app.archive_generation = 5;
@@ -2412,14 +2430,14 @@ mod tests {
         );
         let tex = &app.tabs.active_tab().unwrap().texture;
         assert_eq!(
-            tex.masked.as_deref(),
+            render_pixels(tex).as_deref(),
             Some(mask_rgba(&mip.rgba, tex.channels).as_slice()),
-            "a current-generation decode must refresh the masked cache"
+            "a current-generation decode must rebuild the render cache"
         );
     }
 
     #[test]
-    fn texture_channel_toggle_recomputes_masked_cache() {
+    fn texture_channel_toggle_rebuilds_render_cache() {
         use crate::state::texture_view::{Channel, DecodedMip};
         let mut app = app_with_open_texture_tab();
         if let Some(tab) = app.tabs.active_tab_mut() {
@@ -2428,27 +2446,34 @@ mod tests {
                 height: 1,
                 rgba: vec![10, 20, 30, 40],
             });
-            tab.texture.recompute_masked();
+            tab.texture.recompute_render();
         }
-        let before = app.tabs.active_tab().unwrap().texture.masked.clone();
+        let pixels_before = render_pixels(&app.tabs.active_tab().unwrap().texture);
+        let id_before = render_id(&app.tabs.active_tab().unwrap().texture);
         let _ = update(
             &mut app,
             Message::TextureChannelToggled {
                 channel: Channel::G,
             },
         );
-        let after = app.tabs.active_tab().unwrap().texture.masked.clone();
+        let tex = &app.tabs.active_tab().unwrap().texture;
         assert_ne!(
-            before, after,
-            "toggling a channel must refresh the masked cache (not leave it stale)"
+            pixels_before,
+            render_pixels(tex),
+            "toggling a channel must re-mask the render cache (not leave it stale)"
+        );
+        assert_ne!(
+            id_before,
+            render_id(tex),
+            "the rebuilt handle must take a fresh Id so iced re-uploads it"
         );
     }
 
     #[test]
-    fn texture_mip_select_keeps_masked_until_new_decode_lands() {
+    fn texture_mip_select_keeps_render_until_new_decode_lands() {
         // Guards the recompute-on-write design against the keyed-cache bug:
-        // selecting a mip leaves `decoded` (and thus `masked`) on the old mip
-        // until the new mip's decode arrives, at which point `masked` must flip
+        // selecting a mip leaves `decoded` (and thus `render`) on the old mip
+        // until the new mip's decode arrives, at which point `render` must flip
         // to the NEW bytes — never serve the stale old-mip cache for the new mip.
         use crate::state::texture_view::{DecodedMip, mask_rgba};
         let mut app = app_with_open_texture_tab();
@@ -2460,19 +2485,20 @@ mod tests {
                 height: 1,
                 rgba: vec![10, 20, 30, 40],
             });
-            tab.texture.recompute_masked();
+            tab.texture.recompute_render();
         }
-        let mip0_masked = app.tabs.active_tab().unwrap().texture.masked.clone();
+        let mip0_id = render_id(&app.tabs.active_tab().unwrap().texture);
+        let mip0_pixels = render_pixels(&app.tabs.active_tab().unwrap().texture);
 
-        // Select mip 1 — decoded/masked must stay on mip 0 (C1: keep old image).
+        // Select mip 1 — decoded/render must stay on mip 0 (C1: keep old image).
         let _ = update(&mut app, Message::TextureMipSelected(1));
         assert_eq!(
-            app.tabs.active_tab().unwrap().texture.masked,
-            mip0_masked,
-            "mip select must not change masked before the new mip decodes"
+            render_id(&app.tabs.active_tab().unwrap().texture),
+            mip0_id,
+            "mip select must not rebuild the render handle before the new mip decodes"
         );
 
-        // Mip-1 decode lands with different bytes — masked must now reflect mip 1.
+        // Mip-1 decode lands with different bytes — render must now reflect mip 1.
         let mip1 = DecodedMip {
             width: 1,
             height: 1,
@@ -2489,9 +2515,14 @@ mod tests {
         );
         let tex = &app.tabs.active_tab().unwrap().texture;
         assert_eq!(
-            tex.masked.as_deref(),
+            render_pixels(tex).as_deref(),
             Some(mask_rgba(&mip1.rgba, tex.channels).as_slice()),
-            "once mip 1 decodes, masked must reflect mip 1, not the stale mip-0 cache"
+            "once mip 1 decodes, render must reflect mip 1, not the stale mip-0 cache"
+        );
+        assert_ne!(
+            render_pixels(tex),
+            mip0_pixels,
+            "the mip-1 render must differ from the mip-0 bytes"
         );
     }
 

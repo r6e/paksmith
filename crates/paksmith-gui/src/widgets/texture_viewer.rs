@@ -7,7 +7,7 @@ use iced::widget::{button, column, container, pick_list, row, scrollable, text};
 use iced::{Background, Border, Element, Length};
 
 use crate::app::{Message, readable_text_on};
-use crate::state::texture_view::{Channel, TextureState, mask_rgba};
+use crate::state::texture_view::{Channel, TextureState};
 use crate::theme::tokens::{
     RADIUS, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM,
 };
@@ -265,24 +265,18 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
     let zoom_snapshot = state.zoom;
     let fit_to_window = state.fit_to_window;
 
-    // Issue 3 (perf): the channel-masked RGBA buffer is cached on `TextureState`
-    // (`masked`), which the message handlers recompute only when `decoded` or the
-    // channel set changes — never per-frame.  `view()` runs on every redraw (e.g.
-    // throughout a window-resize drag); reading the cached bytes avoids re-running
-    // the O(n) per-pixel mask on each of those frames.  That CPU mask pass is the
-    // win — the `clone()` (a memcpy) and the GPU upload are unchanged: every call
-    // to `Handle::from_rgba` mints a fresh `Id`, so iced re-uploads the texture
-    // each frame regardless of caching.  (Only `from_path` yields a stable `Id` —
-    // a hash of the path, not the pixel bytes — that lets iced reuse an upload.)
-    // The `unwrap_or_else` is *not* a correctness guard: it cannot catch a stale
-    // `Some` (a `masked` left over from a prior mip/channel set) — that depends on
-    // the handlers recomputing on every `decoded`/`channels` write.  It only covers
-    // the `None` case (cache not yet populated) by degrading to a per-frame mask.
-    let masked = state
-        .masked
+    // Issue 3 (perf): the render handle is cached on `TextureState::render`
+    // (see its doc for why cloning a cached handle skips the per-frame re-mask,
+    // re-alloc, and GPU re-upload); `view()` clones it rather than rebuilding.
+    // The `unwrap_or_else` here is *not* a correctness guard: it cannot catch a
+    // stale `Some` (a `render` left over from a prior mip/channel set) — that
+    // depends on the handlers rebuilding on every `decoded`/`channels` write.
+    // It only covers the `None` case (cache not yet populated) by building the
+    // handle inline via the same `render_handle` builder the cache uses.
+    let handle = state
+        .render
         .clone()
-        .unwrap_or_else(|| mask_rgba(&decoded.rgba, state.channels));
-    let handle = iced::widget::image::Handle::from_rgba(img_w, img_h, masked);
+        .unwrap_or_else(|| crate::state::texture_view::render_handle(decoded, state.channels));
 
     // F2: the framed image box uses `background.strong` to distinguish it
     // visually from the controls bar (`background.weak`); a 1px
