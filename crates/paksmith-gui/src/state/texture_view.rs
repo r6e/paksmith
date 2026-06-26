@@ -326,6 +326,24 @@ mod tests {
         assert_eq!(out, vec![10, 0, 30, 255]);
     }
 
+    // Extra: all channels off (active_count == 0) → the multi-channel branch
+    // zeroes every colour channel and forces alpha opaque, yielding opaque
+    // black. Pins the "none" golden buffer (design doc) so the count==0 path
+    // can't regress (e.g. a stray `count == 0` special-case).
+    #[test]
+    fn mask_all_channels_off_is_opaque_black() {
+        let out = mask_rgba(
+            &[10, 20, 30, 40, 200, 150, 100, 50],
+            ChannelSet {
+                r: false,
+                g: false,
+                b: false,
+                a: false,
+            },
+        );
+        assert_eq!(out, vec![0, 0, 0, 255, 0, 0, 0, 255]);
+    }
+
     // Extra: single R channel grayscale.
     #[test]
     fn mask_single_r_channel_is_grayscale() {
