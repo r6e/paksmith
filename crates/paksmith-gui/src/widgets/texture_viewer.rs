@@ -265,20 +265,24 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
     let zoom_snapshot = state.zoom;
     let fit_to_window = state.fit_to_window;
 
-    // Issue 3 (perf): build the channel-masked image `Handle` ONCE per `view()`,
-    // here rather than inside the `Responsive` closure.  The mask pass + its
-    // allocation happens a single time per render; the closure (re-run on every
-    // layout tick, e.g. throughout a window-resize drag) only `clone()`s the
-    // handle.  A cloned `Handle` keeps the same cache id, so iced reuses the
-    // uploaded texture instead of re-uploading it per tick.  Caching the handle
-    // *across* `view()` calls would require storing an iced type in the pure
-    // `TextureState`, which the state layer forbids — re-masking once per
-    // `view()` is the accepted remaining cost.
-    let handle = iced::widget::image::Handle::from_rgba(
-        img_w,
-        img_h,
-        mask_rgba(&decoded.rgba, state.channels),
-    );
+    // Issue 3 (perf): the channel-masked RGBA buffer is cached on `TextureState`
+    // (`masked`), which the message handlers recompute only when `decoded` or the
+    // channel set changes — never per-frame.  `view()` runs on every redraw (e.g.
+    // throughout a window-resize drag); reading the cached bytes avoids re-running
+    // the O(n) per-pixel mask on each of those frames.  That CPU mask pass is the
+    // win — the `clone()` (a memcpy) and the GPU upload are unchanged: every call
+    // to `Handle::from_rgba` mints a fresh `Id`, so iced re-uploads the texture
+    // each frame regardless of caching.  (Only `from_path` yields a stable `Id` —
+    // a hash of the path, not the pixel bytes — that lets iced reuse an upload.)
+    // The `unwrap_or_else` is *not* a correctness guard: it cannot catch a stale
+    // `Some` (a `masked` left over from a prior mip/channel set) — that depends on
+    // the handlers recomputing on every `decoded`/`channels` write.  It only covers
+    // the `None` case (cache not yet populated) by degrading to a per-frame mask.
+    let masked = state
+        .masked
+        .clone()
+        .unwrap_or_else(|| mask_rgba(&decoded.rgba, state.channels));
+    let handle = iced::widget::image::Handle::from_rgba(img_w, img_h, masked);
 
     // F2: the framed image box uses `background.strong` to distinguish it
     // visually from the controls bar (`background.weak`); a 1px

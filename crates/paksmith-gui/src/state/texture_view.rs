@@ -189,6 +189,14 @@ pub struct TextureState {
     pub decoded: Option<DecodedMip>,
     /// Error message from the most recent decode attempt, if any.
     pub error: Option<String>,
+    /// Cached channel-masked RGBA buffer for `decoded` under `channels`.
+    ///
+    /// Kept in sync with `(decoded, channels)` by [`Self::recompute_masked`],
+    /// which the message handlers call whenever either changes. The widget
+    /// builds its `image` handle from this buffer so the per-pixel mask pass
+    /// runs once per state change rather than on every `view()` (which fires on
+    /// every redraw — resize drags, hover, etc.). `None` whenever `decoded` is.
+    pub masked: Option<Vec<u8>>,
 }
 
 impl Default for TextureState {
@@ -202,7 +210,25 @@ impl Default for TextureState {
             fit_to_window: true,
             decoded: None,
             error: None,
+            masked: None,
         }
+    }
+}
+
+impl TextureState {
+    /// Recompute the cached [`Self::masked`] buffer from the current `decoded`
+    /// mip and `channels`. Call after every mutation of `decoded` or `channels`
+    /// to preserve the invariant `masked == decoded.map(|d| mask_rgba(d, ch))`.
+    ///
+    /// Deliberately NOT called on mip *selection* (which leaves `decoded`
+    /// untouched until the new mip's async decode lands): the old masked buffer
+    /// still matches the still-displayed old mip, so the viewer keeps showing it
+    /// until `TextureDecoded` arrives and recomputes.
+    pub fn recompute_masked(&mut self) {
+        self.masked = self
+            .decoded
+            .as_ref()
+            .map(|d| mask_rgba(&d.rgba, self.channels));
     }
 }
 
@@ -455,5 +481,77 @@ mod tests {
             cs.toggle(ch);
             assert!(get(&cs, ch), "toggling {ch:?} twice must restore true");
         }
+    }
+
+    // ── recompute_masked ───────────────────────────────────────────────────────
+
+    fn one_pixel(rgba: [u8; 4]) -> DecodedMip {
+        DecodedMip {
+            width: 1,
+            height: 1,
+            rgba: rgba.to_vec(),
+        }
+    }
+
+    #[test]
+    fn one_pixel_helper_pins_emitted_fields() {
+        // `one_pixel`'s hardcoded dims aren't read by the mask tests, so this
+        // reads every emitted field to kill the struct-field-deletion mutants.
+        let p = one_pixel([9, 8, 7, 6]);
+        assert_eq!((p.width, p.height), (1, 1));
+        assert_eq!(p.rgba, vec![9, 8, 7, 6]);
+    }
+
+    #[test]
+    fn recompute_masked_is_none_without_decoded() {
+        let mut st = TextureState::default();
+        st.recompute_masked();
+        assert!(st.masked.is_none(), "no decoded mip → masked stays None");
+    }
+
+    #[test]
+    fn recompute_masked_equals_mask_rgba_of_decoded() {
+        // Isolate green so the result differs from the identity buffer — this
+        // proves the mask is actually applied, not just copied.
+        let mut st = TextureState {
+            decoded: Some(one_pixel([10, 20, 30, 40])),
+            channels: ChannelSet {
+                r: false,
+                g: true,
+                b: false,
+                a: false,
+            },
+            ..TextureState::default()
+        };
+        st.recompute_masked();
+        assert_eq!(
+            st.masked.as_deref(),
+            Some(mask_rgba(&[10, 20, 30, 40], st.channels).as_slice()),
+            "masked must equal mask_rgba(decoded.rgba, channels)"
+        );
+        assert_ne!(
+            st.masked.as_deref(),
+            Some([10u8, 20, 30, 40].as_slice()),
+            "single-channel mask must not equal the unmasked source"
+        );
+    }
+
+    #[test]
+    fn recompute_masked_clears_when_decoded_removed() {
+        let mut st = TextureState {
+            decoded: Some(one_pixel([1, 2, 3, 4])),
+            ..TextureState::default()
+        };
+        st.recompute_masked();
+        assert!(
+            st.masked.is_some(),
+            "masked populated while decoded is Some"
+        );
+        st.decoded = None;
+        st.recompute_masked();
+        assert!(
+            st.masked.is_none(),
+            "masked must clear once decoded is removed"
+        );
     }
 }

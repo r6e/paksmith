@@ -445,6 +445,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                         tab.texture.selected_mip = 0;
                         tab.texture.decoded = None;
                         tab.texture.error = None;
+                        tab.texture.recompute_masked();
                         // Extract Arc and path for the task closure.
                         let pkg = arc.clone();
                         let task_path = path.clone();
@@ -556,6 +557,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                             tab.texture.error = Some(msg);
                         }
                     }
+                    // `decoded` changed (either arm) — refresh the masked cache.
+                    tab.texture.recompute_masked();
                 }
             }
             Task::none()
@@ -563,6 +566,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::TextureChannelToggled { channel } => {
             if let Some(tab) = app.tabs.active_tab_mut() {
                 tab.texture.channels.toggle(channel);
+                // Channel set changed — refresh the masked cache.
+                tab.texture.recompute_masked();
             }
             Task::none()
         }
@@ -2347,6 +2352,110 @@ mod tests {
         assert!(
             app.tabs.active_tab().unwrap().texture.error.is_none(),
             "selecting a new mip must clear the prior mip's error slate"
+        );
+    }
+
+    #[test]
+    fn texture_decoded_recomputes_masked_cache() {
+        use crate::state::texture_view::{DecodedMip, mask_rgba};
+        let mut app = app_with_open_texture_tab();
+        app.archive_generation = 5;
+        let mip = DecodedMip {
+            width: 1,
+            height: 1,
+            rgba: vec![10, 20, 30, 40],
+        };
+        let _ = update(
+            &mut app,
+            Message::TextureDecoded {
+                path: "Game/T_Rock.uasset".into(),
+                mip: 0,
+                result: Ok(mip.clone()),
+                generation: 5,
+            },
+        );
+        let tex = &app.tabs.active_tab().unwrap().texture;
+        assert_eq!(
+            tex.masked.as_deref(),
+            Some(mask_rgba(&mip.rgba, tex.channels).as_slice()),
+            "a current-generation decode must refresh the masked cache"
+        );
+    }
+
+    #[test]
+    fn texture_channel_toggle_recomputes_masked_cache() {
+        use crate::state::texture_view::{Channel, DecodedMip};
+        let mut app = app_with_open_texture_tab();
+        if let Some(tab) = app.tabs.active_tab_mut() {
+            tab.texture.decoded = Some(DecodedMip {
+                width: 1,
+                height: 1,
+                rgba: vec![10, 20, 30, 40],
+            });
+            tab.texture.recompute_masked();
+        }
+        let before = app.tabs.active_tab().unwrap().texture.masked.clone();
+        let _ = update(
+            &mut app,
+            Message::TextureChannelToggled {
+                channel: Channel::G,
+            },
+        );
+        let after = app.tabs.active_tab().unwrap().texture.masked.clone();
+        assert_ne!(
+            before, after,
+            "toggling a channel must refresh the masked cache (not leave it stale)"
+        );
+    }
+
+    #[test]
+    fn texture_mip_select_keeps_masked_until_new_decode_lands() {
+        // Guards the recompute-on-write design against the keyed-cache bug:
+        // selecting a mip leaves `decoded` (and thus `masked`) on the old mip
+        // until the new mip's decode arrives, at which point `masked` must flip
+        // to the NEW bytes — never serve the stale old-mip cache for the new mip.
+        use crate::state::texture_view::{DecodedMip, mask_rgba};
+        let mut app = app_with_open_texture_tab();
+        app.archive_generation = 7;
+        if let Some(tab) = app.tabs.active_tab_mut() {
+            tab.texture.mips = vec![(1, 1), (1, 1)];
+            tab.texture.decoded = Some(DecodedMip {
+                width: 1,
+                height: 1,
+                rgba: vec![10, 20, 30, 40],
+            });
+            tab.texture.recompute_masked();
+        }
+        let mip0_masked = app.tabs.active_tab().unwrap().texture.masked.clone();
+
+        // Select mip 1 — decoded/masked must stay on mip 0 (C1: keep old image).
+        let _ = update(&mut app, Message::TextureMipSelected(1));
+        assert_eq!(
+            app.tabs.active_tab().unwrap().texture.masked,
+            mip0_masked,
+            "mip select must not change masked before the new mip decodes"
+        );
+
+        // Mip-1 decode lands with different bytes — masked must now reflect mip 1.
+        let mip1 = DecodedMip {
+            width: 1,
+            height: 1,
+            rgba: vec![99, 88, 77, 66],
+        };
+        let _ = update(
+            &mut app,
+            Message::TextureDecoded {
+                path: "Game/T_Rock.uasset".into(),
+                mip: 1,
+                result: Ok(mip1.clone()),
+                generation: 7,
+            },
+        );
+        let tex = &app.tabs.active_tab().unwrap().texture;
+        assert_eq!(
+            tex.masked.as_deref(),
+            Some(mask_rgba(&mip1.rgba, tex.channels).as_slice()),
+            "once mip 1 decodes, masked must reflect mip 1, not the stale mip-0 cache"
         );
     }
 
