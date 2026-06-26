@@ -197,15 +197,18 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
 /// `Package::resolve_bulk_for_export(export_idx)`, then decodes the mip at
 /// `mip_index` to an RGBA8 [`DecodedTextureRgba`].
 ///
-/// For virtual textures the `mip_index` argument is ignored — virtual textures
-/// are always flattened at full resolution (the single entry reported by
-/// [`classify_texture`]).
+/// Virtual textures expose a single mip (the one entry reported by
+/// [`classify_texture`]) and are always flattened at full resolution, so
+/// `mip_index` must be `0`; any other index is rejected as caller misuse
+/// rather than silently ignored, keeping the bounds contract consistent with
+/// the standard-texture path.
 ///
 /// # Errors
 ///
 /// - [`PaksmithError::InvalidArgument`] if `export_idx` is out of range or does
-///   not point to a `Texture2DData` export, or if `mip_index` is out of range
-///   for the texture's serialized mip list. These signal caller misuse.
+///   not point to a `Texture2DData` export, if `mip_index` is out of range for
+///   a standard texture's serialized mip list, or if `mip_index != 0` for a
+///   virtual texture. These signal caller misuse.
 /// - [`PaksmithError::UnsupportedFeature`] if the export carries no serialized
 ///   mip bytes for `mip_index` (e.g. a texture with `bSerializeMipData = false`).
 ///   [`classify_texture`] already screens these out, so a well-behaved GUI
@@ -239,8 +242,16 @@ pub fn decode_texture_mip(
     let is_normal_map = has_enum(data, "CompressionSettings", "TC_Normalmap");
     let bulk = package.resolve_bulk_for_export(export_idx)?;
 
-    // Virtual texture path: flatten layer 0, ignore mip_index.
+    // Virtual texture path: flatten layer 0. A VT exposes a single mip (index
+    // 0), so reject any other index as caller misuse rather than silently
+    // ignoring it — matching the standard branch's bounds contract below.
     if let Some(vt) = data.virtual_texture.as_deref() {
+        if mip_index != 0 {
+            return Err(PaksmithError::InvalidArgument {
+                arg: "mip_index",
+                reason: format!("virtual textures expose a single mip (index 0); got {mip_index}"),
+            });
+        }
         let decoded = flatten_virtual_texture(vt, bulk, is_normal_map)?;
         return Ok(decoded_texture_to_rgba(decoded));
     }
@@ -571,6 +582,29 @@ mod tests {
                 }
             ),
             "out-of-range mip_index is caller misuse → InvalidArgument(mip_index), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_texture_mip_virtual_nonzero_mip_is_invalid_argument() {
+        // A virtual texture exposes a single mip (index 0). A non-zero index is
+        // caller misuse and must be rejected before flatten, not silently
+        // ignored — keeping the bounds contract consistent with standard
+        // textures. Pins the `mip_index != 0` guard (the `!=` -> `==` mutant
+        // would reject the valid index 0 and accept everything else).
+        let pkg = pkg_with_virtual_texture("PF_DXT1");
+        let info = classify_texture(&pkg).expect("VT must classify");
+        let err = decode_texture_mip(&pkg, info.export_idx, 1)
+            .expect_err("mip_index != 0 on a virtual texture must return Err");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidArgument {
+                    arg: "mip_index",
+                    ..
+                }
+            ),
+            "non-zero VT mip_index is caller misuse → InvalidArgument(mip_index), got {err:?}"
         );
     }
 
