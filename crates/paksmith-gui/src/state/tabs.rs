@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use std::sync::Arc;
+
 use crate::state::hex_view;
 use crate::state::property_view::NodeId;
 use crate::state::texture_view;
@@ -23,7 +25,7 @@ pub enum TabContent {
         bytes: Vec<u8>,
         /// Whether the entry is larger than the cap (entry was truncated at read time).
         truncated: bool,
-        parsed: Result<Box<Package>, String>,
+        parsed: Result<Arc<Package>, String>,
     },
 }
 
@@ -312,7 +314,7 @@ mod tests {
             TabContent::Ready {
                 bytes,
                 truncated: false,
-                parsed: Ok(Box::new(pkg)),
+                parsed: Ok(Arc::new(pkg)),
             },
         );
         t
@@ -416,6 +418,7 @@ mod tests {
     /// Build a `TabContent::Ready` wrapping a decodable texture `Package`
     /// (PF_DXT5 4×4 built by the __test_utils fixture builder).
     fn ready_texture_content() -> TabContent {
+        use std::sync::Arc;
         let mp = paksmith_core::testing::uasset::build_minimal_with_decodable_texture2d();
         let pkg =
             paksmith_core::asset::Package::read_from(&mp.bytes, None, None, "Game/Tex.uasset")
@@ -423,13 +426,14 @@ mod tests {
         TabContent::Ready {
             bytes: mp.bytes.clone(),
             truncated: false,
-            parsed: Ok(Box::new(pkg)),
+            parsed: Ok(Arc::new(pkg)),
         }
     }
 
     /// Build a `TabContent::Ready` wrapping a non-texture `Package`
     /// (Generic export; classify_texture → None).
     fn ready_non_texture_content() -> TabContent {
+        use std::sync::Arc;
         let mp = paksmith_core::testing::uasset::build_minimal_ue4_27();
         let pkg =
             paksmith_core::asset::Package::read_from(&mp.bytes, None, None, "Game/Foo.uasset")
@@ -437,7 +441,7 @@ mod tests {
         TabContent::Ready {
             bytes: mp.bytes.clone(),
             truncated: false,
-            parsed: Ok(Box::new(pkg)),
+            parsed: Ok(Arc::new(pkg)),
         }
     }
 

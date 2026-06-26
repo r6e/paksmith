@@ -183,6 +183,16 @@ pub fn clamp_pan(pan: (f32, f32), scaled: (f32, f32), viewport: (f32, f32)) -> (
 /// All view state for the texture inspector panel.
 #[derive(Debug, Clone)]
 pub struct TextureState {
+    /// Export index within the `Package` that holds the texture.
+    ///
+    /// Set by the `AssetLoaded` handler via `classify_texture`; used when
+    /// dispatching a decode task. Defaults to `0` (harmless sentinel when no
+    /// texture is loaded — decode tasks are only dispatched when a real export
+    /// index is known).
+    pub export_idx: usize,
+    /// Available mip dimensions `(width, height)` for the loaded texture, in
+    /// highest-to-lowest resolution order.  Empty until a texture is loaded.
+    pub mips: Vec<(u32, u32)>,
     /// Index into the decoded mip chain.
     pub selected_mip: usize,
     /// Active channel visibility flags.
@@ -200,6 +210,8 @@ pub struct TextureState {
 impl Default for TextureState {
     fn default() -> Self {
         Self {
+            export_idx: 0,
+            mips: Vec::new(),
             selected_mip: 0,
             channels: ChannelSet::default(),
             zoom: 1.0,

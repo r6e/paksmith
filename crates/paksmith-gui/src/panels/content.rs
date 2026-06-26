@@ -134,7 +134,7 @@ fn view_mode_switcher(active: ViewMode, accent: iced::Color) -> Element<'static,
 fn info_view(
     path: &str,
     _bytes: &[u8],
-    parsed: &Result<Box<paksmith_core::asset::Package>, String>,
+    parsed: &Result<std::sync::Arc<paksmith_core::asset::Package>, String>,
     meta: Option<&EntryMeta>,
 ) -> Element<'static, Message> {
     let mut entry_rows: Vec<Element<'static, Message>> = Vec::new();
@@ -205,7 +205,7 @@ fn info_view(
 
 #[mutants::skip]
 fn properties_view<'a>(
-    parsed: &'a Result<Box<paksmith_core::asset::Package>, String>,
+    parsed: &'a Result<std::sync::Arc<paksmith_core::asset::Package>, String>,
     expanded: &'a std::collections::HashSet<crate::state::property_view::NodeId>,
 ) -> Element<'a, Message> {
     match parsed {

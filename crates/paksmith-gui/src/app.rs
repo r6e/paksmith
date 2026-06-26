@@ -176,6 +176,41 @@ pub enum Message {
     /// A file row was double-clicked (carries the visible-row index, not the path,
     /// so the per-frame view doesn't clone a path String for every file row).
     OpenAssetByRow(usize),
+    /// An async texture decode task completed.
+    TextureDecoded {
+        /// Entry path identifying which tab holds this decode result.
+        path: String,
+        /// The mip level that was decoded.
+        mip: usize,
+        /// The decoded RGBA data or a stringified error.
+        result: Result<crate::state::texture_view::DecodedMip, String>,
+        /// The archive generation at the time the decode was dispatched.
+        /// Results from a previous generation are silently dropped.
+        generation: u64,
+    },
+    /// A texture channel was toggled on/off in the active tab.
+    // Constructed by the texture viewer widget (Phase 7b Task 5). Not yet
+    // wired to the view — suppressed until Task 5 adds the widget.
+    #[allow(dead_code)]
+    TextureChannelToggled {
+        channel: crate::state::texture_view::Channel,
+    },
+    /// Zoom the active tab's texture viewer in one step.
+    // Constructed by the texture viewer widget (Phase 7b Task 5).
+    #[allow(dead_code)]
+    TextureZoomIn,
+    /// Zoom the active tab's texture viewer out one step.
+    // Constructed by the texture viewer widget (Phase 7b Task 5).
+    #[allow(dead_code)]
+    TextureZoomOut,
+    /// The user selected a different mip level in the active tab.
+    // Constructed by the texture viewer widget (Phase 7b Task 5).
+    #[allow(dead_code)]
+    TextureMipSelected(usize),
+    /// The user panned the texture in the active tab.
+    // Constructed by the texture viewer widget (Phase 7b Task 5).
+    #[allow(dead_code)]
+    TexturePan { dx: f32, dy: f32 },
 }
 
 /// Processes a `Message` and updates the application state.
@@ -401,6 +436,42 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 },
             );
             app.tabs.pick_view_after_load(&path);
+
+            // If the loaded tab has a decodable texture, store its metadata and
+            // dispatch an async decode for mip 0.
+            //
+            // Look up the tab by path (not active tab) — the user may have
+            // switched tabs while this load was in flight; operating on the
+            // path-keyed tab is always correct.
+            // Two-guard form: can't use let-chains on MSRV 1.88.
+            #[allow(clippy::collapsible_if)]
+            if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path) {
+                if let TabContent::Ready {
+                    parsed: Ok(arc), ..
+                } = &tab.content
+                {
+                    if let Some(info) = paksmith_core::asset::classify_texture(arc.as_ref()) {
+                        tab.texture.export_idx = info.export_idx;
+                        tab.texture.mips = info.mips;
+                        tab.texture.selected_mip = 0;
+                        tab.texture.decoded = None;
+                        tab.texture.error = None;
+                        // Extract Arc and path for the task closure.
+                        let pkg = arc.clone();
+                        let task_path = path.clone();
+                        let export_idx = info.export_idx;
+                        return Task::perform(
+                            crate::task::texture::decode(pkg, export_idx, 0),
+                            move |result| Message::TextureDecoded {
+                                path: task_path,
+                                mip: 0,
+                                result,
+                                generation,
+                            },
+                        );
+                    }
+                }
+            }
             Task::none()
         }
         Message::TabActivated(i) => {
@@ -469,6 +540,98 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Some(path) => Task::done(Message::OpenAsset(path)),
             None => Task::none(),
         },
+        Message::TextureDecoded {
+            path,
+            mip,
+            result,
+            generation,
+        } => {
+            // Generation fence: drop results from a previous archive.
+            if generation != app.archive_generation {
+                return Task::none();
+            }
+            // Find the tab by path, then write the result if the selected mip
+            // still matches — a stale mip result (user switched mips faster than
+            // the decode completed) is silently discarded.
+            // Two-guard form: can't use let-chains on MSRV 1.88.
+            #[allow(clippy::collapsible_if)]
+            if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path) {
+                if tab.texture.selected_mip == mip {
+                    match result {
+                        Ok(decoded) => {
+                            tab.texture.decoded = Some(decoded);
+                            tab.texture.error = None;
+                        }
+                        Err(msg) => {
+                            tab.texture.decoded = None;
+                            tab.texture.error = Some(msg);
+                        }
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::TextureChannelToggled { channel } => {
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                tab.texture.channels.toggle(channel);
+            }
+            Task::none()
+        }
+        Message::TextureZoomIn => {
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                tab.texture.zoom = crate::state::texture_view::zoom_in(tab.texture.zoom);
+            }
+            Task::none()
+        }
+        Message::TextureZoomOut => {
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                tab.texture.zoom = crate::state::texture_view::zoom_out(tab.texture.zoom);
+            }
+            Task::none()
+        }
+        Message::TextureMipSelected(m) => {
+            // Two-guard form: extract pkg Arc before mutating tab (borrow rules).
+            // First: grab the path + pkg Arc from the active tab (if Ready+Ok).
+            let dispatch = if let Some(tab) = app.tabs.active_tab_mut() {
+                tab.texture.selected_mip = m;
+                tab.texture.decoded = None;
+                tab.texture.error = None;
+                // Try to extract what we need to dispatch a new decode task.
+                if let crate::state::tabs::TabContent::Ready {
+                    parsed: Ok(arc), ..
+                } = &tab.content
+                {
+                    Some((tab.path.clone(), arc.clone(), tab.texture.export_idx))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some((path, pkg, export_idx)) = dispatch {
+                let generation = app.archive_generation;
+                Task::perform(
+                    crate::task::texture::decode(pkg, export_idx, m),
+                    move |result| Message::TextureDecoded {
+                        path,
+                        mip: m,
+                        result,
+                        generation,
+                    },
+                )
+            } else {
+                Task::none()
+            }
+        }
+        Message::TexturePan { dx, dy } => {
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                let (px, py) = tab.texture.pan;
+                // Clamp is deferred to the widget layer which knows viewport
+                // and scaled dimensions; here we just add the delta.
+                tab.texture.pan = (px + dx, py + dy);
+            }
+            Task::none()
+        }
     }
 }
 
@@ -1987,5 +2150,186 @@ mod tests {
         // No archive loaded → always None, regardless of index.
         let app = App::default();
         assert_eq!(open_path_for_row(&app, 0), None);
+    }
+
+    // ── Task 4: texture message wiring ────────────────────────────────────────
+
+    /// Build an App whose active tab is in `TabContent::Ready` with a parsed
+    /// texture `Package` (synthetic, from `__test_utils`).
+    fn app_with_open_texture_tab() -> App {
+        use crate::state::tabs::TabContent;
+        use std::sync::Arc;
+        let mp = paksmith_core::testing::uasset::build_minimal_with_decodable_texture2d();
+        let pkg =
+            paksmith_core::asset::Package::read_from(&mp.bytes, None, None, "Game/T_Rock.uasset")
+                .expect("build_minimal_with_decodable_texture2d must parse");
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("Game/T_Rock.uasset");
+        app.tabs.set_content(
+            "Game/T_Rock.uasset",
+            TabContent::Ready {
+                bytes: mp.bytes.clone(),
+                truncated: false,
+                parsed: Ok(Arc::new(pkg)),
+            },
+        );
+        app
+    }
+
+    #[test]
+    fn texture_decoded_stale_generation_is_dropped() {
+        use crate::state::texture_view::DecodedMip;
+        let mut app = app_with_open_texture_tab();
+        app.archive_generation = 3;
+        let stale = 2u64;
+        let _ = update(
+            &mut app,
+            Message::TextureDecoded {
+                path: "Game/T_Rock.uasset".into(),
+                mip: 0,
+                result: Ok(DecodedMip {
+                    width: 2,
+                    height: 2,
+                    rgba: vec![0u8; 16],
+                }),
+                generation: stale,
+            },
+        );
+        assert!(
+            app.tabs.active_tab().unwrap().texture.decoded.is_none(),
+            "a stale-generation decode must be ignored"
+        );
+    }
+
+    #[test]
+    fn texture_decoded_stale_mip_is_dropped() {
+        use crate::state::texture_view::DecodedMip;
+        let mut app = app_with_open_texture_tab();
+        // selected_mip defaults to 0; deliver a current-generation decode for mip 1.
+        assert_eq!(
+            app.tabs.active_tab().unwrap().texture.selected_mip,
+            0,
+            "selected_mip must start at 0"
+        );
+        let current_gen = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::TextureDecoded {
+                path: "Game/T_Rock.uasset".into(),
+                mip: 1,
+                result: Ok(DecodedMip {
+                    width: 2,
+                    height: 2,
+                    rgba: vec![0u8; 16],
+                }),
+                generation: current_gen,
+            },
+        );
+        assert!(
+            app.tabs.active_tab().unwrap().texture.decoded.is_none(),
+            "a decode for a non-selected mip must be dropped even when generation matches"
+        );
+    }
+
+    #[test]
+    fn texture_decoded_current_generation_writes_decoded() {
+        use crate::state::texture_view::DecodedMip;
+        let mut app = app_with_open_texture_tab();
+        app.archive_generation = 3;
+        let mip = DecodedMip {
+            width: 4,
+            height: 4,
+            rgba: vec![255u8; 64],
+        };
+        let _ = update(
+            &mut app,
+            Message::TextureDecoded {
+                path: "Game/T_Rock.uasset".into(),
+                mip: 0,
+                result: Ok(mip.clone()),
+                generation: 3,
+            },
+        );
+        assert_eq!(
+            app.tabs.active_tab().unwrap().texture.decoded.as_ref(),
+            Some(&mip),
+            "a current-generation decode must populate texture.decoded"
+        );
+    }
+
+    #[test]
+    fn texture_channel_toggle_updates_active_tab_state() {
+        use crate::state::texture_view::Channel;
+        let mut app = app_with_open_texture_tab();
+        let before = app.tabs.active_tab().unwrap().texture.channels.r;
+        let _ = update(
+            &mut app,
+            Message::TextureChannelToggled {
+                channel: Channel::R,
+            },
+        );
+        assert_ne!(
+            app.tabs.active_tab().unwrap().texture.channels.r,
+            before,
+            "TextureChannelToggled must flip the channel flag on the active tab"
+        );
+    }
+
+    #[test]
+    fn texture_mip_selected_updates_selected_mip() {
+        let mut app = app_with_open_texture_tab();
+        // Set up mips so mip index 1 is valid.
+        if let Some(tab) = app.tabs.active_tab_mut() {
+            tab.texture.mips = vec![(64, 64), (32, 32)];
+        }
+        let _ = update(&mut app, Message::TextureMipSelected(1));
+        assert_eq!(
+            app.tabs.active_tab().unwrap().texture.selected_mip,
+            1,
+            "TextureMipSelected must update selected_mip on the active tab"
+        );
+    }
+
+    #[test]
+    fn texture_zoom_in_increases_zoom() {
+        let mut app = app_with_open_texture_tab();
+        let before = app.tabs.active_tab().unwrap().texture.zoom;
+        let _ = update(&mut app, Message::TextureZoomIn);
+        assert!(
+            app.tabs.active_tab().unwrap().texture.zoom > before,
+            "TextureZoomIn must increase zoom"
+        );
+    }
+
+    #[test]
+    fn texture_zoom_out_decreases_zoom() {
+        let mut app = app_with_open_texture_tab();
+        // Start at a non-minimum zoom so zoom-out has room to move.
+        if let Some(tab) = app.tabs.active_tab_mut() {
+            tab.texture.zoom = 4.0;
+        }
+        let _ = update(&mut app, Message::TextureZoomOut);
+        assert!(
+            app.tabs.active_tab().unwrap().texture.zoom < 4.0,
+            "TextureZoomOut must decrease zoom"
+        );
+    }
+
+    #[test]
+    fn texture_pan_adds_delta_to_pan_offset() {
+        let mut app = app_with_open_texture_tab();
+        if let Some(tab) = app.tabs.active_tab_mut() {
+            tab.texture.pan = (10.0, 20.0);
+        }
+        let _ = update(&mut app, Message::TexturePan { dx: 5.0, dy: -3.0 });
+        let pan = app.tabs.active_tab().unwrap().texture.pan;
+        assert!(
+            (pan.0 - 15.0).abs() < f32::EPSILON,
+            "TexturePan must add dx to pan.0"
+        );
+        assert!(
+            (pan.1 - 17.0).abs() < f32::EPSILON,
+            "TexturePan must add dy to pan.1"
+        );
     }
 }
