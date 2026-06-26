@@ -95,6 +95,8 @@ pub use asset::{
     ExportTable, FGuid, FName, ImportTable, NameTable, ObjectExport, ObjectImport, Package,
     PackageIndex, PackageIndexError, PackageSummary, PropertyBag, Usmap,
 };
+// Phase 7b: public texture-decode API. GUI reaches these from the crate root.
+pub use asset::{DecodedTextureRgba, TextureInfo, classify_texture, decode_texture_mip};
 
 // Phase 3 export-pipeline public API. Consumers building format
 // handlers, registering custom handlers, or iterating typed Asset

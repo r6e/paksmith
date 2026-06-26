@@ -28,7 +28,7 @@ use crate::asset::Asset;
 use crate::asset::Texture2DData;
 use crate::asset::exports::texture::pixel_format::{PixelFormat, decode_mip};
 use crate::asset::exports::texture::virtual_textures::flatten_virtual_texture;
-use crate::asset::property::primitives::{Property, PropertyValue};
+use crate::asset::exports::texture::{has_enum, property_bool};
 use crate::export::{BulkData, FormatHandler};
 
 /// PNG deflate compression level for [`PngHandler`]. Trades encode speed against
@@ -180,44 +180,6 @@ fn srgb_tag(data: &Texture2DData, format: &PixelFormat) -> bool {
     is_hdr || property_bool(data, "SRGB").unwrap_or(true)
 }
 
-/// The scalar (`array_index == 0`) tagged property named `name`, if present.
-fn scalar_property<'a>(data: &'a Texture2DData, name: &str) -> Option<&'a Property> {
-    data.properties
-        .iter_properties()
-        .find(|p| p.name() == name && p.array_index == 0)
-}
-
-/// Read a scalar `BoolProperty` named `name` from the texture's tagged
-/// properties, if present.
-fn property_bool(data: &Texture2DData, name: &str) -> Option<bool> {
-    scalar_property(data, name).and_then(|p| match p.value {
-        PropertyValue::Bool(b) => Some(b),
-        _ => None,
-    })
-}
-
-/// Whether the scalar enum property `name` resolves to `variant`.
-///
-/// UE serializes tagged `EnumProperty` values as the **fully-qualified** FName
-/// `EnumType::Value` for namespaced / enum-class enums, and paksmith's own
-/// unversioned/`.usmap` decoder ([`crate::asset::property`]) emits the same
-/// qualified form. The `EnumType::` qualifier is stripped before comparison —
-/// mirroring CUE4Parse's `SubstringAfter("::")` — so both `"TC_Normalmap"` and
-/// `"TextureCompressionSettings::TC_Normalmap"` match `variant = "TC_Normalmap"`.
-fn has_enum(data: &Texture2DData, name: &str, variant: &str) -> bool {
-    scalar_property(data, name).is_some_and(|p| match &p.value {
-        PropertyValue::Enum { value, .. } => {
-            let stored = value.as_ref();
-            // Strip up to and including the first `::` (the enum-type qualifier).
-            let bare = stored
-                .split_once("::")
-                .map_or(stored, |(_, variant_name)| variant_name);
-            bare == variant
-        }
-        _ => false,
-    })
-}
-
 /// Encode a tightly-packed RGBA8 buffer (`rgba.len() == width × height × 4`,
 /// guaranteed by `decode_mip`) to PNG bytes at the given `compression` level,
 /// writing the `sRGB` chunk when `srgb` is set.
@@ -260,7 +222,7 @@ mod tests {
     use super::*;
     use crate::asset::Texture2DMipMap;
     use crate::asset::property::bag::PropertyBag;
-    use crate::asset::property::primitives::Property;
+    use crate::asset::property::primitives::{Property, PropertyValue};
     use crate::export::HandlerRegistry;
     use proptest::prelude::*;
 

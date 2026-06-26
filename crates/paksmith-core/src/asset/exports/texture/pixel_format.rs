@@ -430,6 +430,13 @@ fn codec_for(format: &PixelFormat) -> Option<Codec> {
     })
 }
 
+/// Returns `true` if `format` has a decoder (i.e. `codec_for` would return
+/// `Some`). Exposed to sibling modules via `pub(super)` so `classify_texture`
+/// can test decodability without leaking the private [`Codec`] type.
+pub(super) fn is_decodable(format: &PixelFormat) -> bool {
+    codec_for(format).is_some()
+}
+
 /// Build a 4×4-block BC [`Codec`].
 fn bc_codec(bytes_per_block: usize, decode: BlockDecoder) -> Codec {
     Codec::Block {

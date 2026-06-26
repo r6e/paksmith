@@ -47,3 +47,467 @@
 pub(crate) mod pixel_format;
 pub(crate) mod texture2d;
 pub(crate) mod virtual_textures;
+
+use crate::PaksmithError;
+use crate::asset::Asset;
+use crate::asset::Texture2DData;
+use crate::asset::exports::texture::pixel_format::{DecodedTexture, PixelFormat, decode_mip};
+use crate::asset::exports::texture::virtual_textures::flatten_virtual_texture;
+use crate::asset::package::Package;
+use crate::asset::property::primitives::{Property, PropertyValue};
+
+/// A decoded texture mip as a tightly-packed RGBA8 buffer.
+///
+/// Produced by [`decode_texture_mip`] and consumed by the GUI texture viewer
+/// (Phase 7b). `rgba.len() == width as usize * height as usize * 4`, guaranteed
+/// by the decode layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedTextureRgba {
+    /// Width of the decoded mip in pixels.
+    pub width: u32,
+    /// Height of the decoded mip in pixels.
+    pub height: u32,
+    /// Tightly-packed RGBA8 pixels, row-major, top-left origin.
+    /// Length is always `width as usize * height as usize * 4`.
+    pub rgba: Vec<u8>,
+}
+
+/// Lightweight summary of a texture export's decodable state.
+///
+/// Produced by [`classify_texture`] — a pure, cheap scan over `Package.payloads`
+/// that collects the metadata the GUI viewer needs to populate its tab headers and
+/// mip selectors without resolving bulk data. Bulk resolution and actual pixel
+/// decode happen in [`decode_texture_mip`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextureInfo {
+    /// Index into `Package.payloads` of the `Asset::Texture2D` export.
+    pub export_idx: usize,
+    /// Serialized mip dimensions in wire order (index 0 = top serialized mip).
+    /// For virtual textures this is `[(width, height)]` (one entry, full res).
+    pub mips: Vec<(u32, u32)>,
+    /// Human-readable pixel format label (`data.pixel_format` for standard
+    /// textures; `vt.layer_types[0]` for virtual textures).
+    pub format_label: String,
+    /// Whether the texture is a tangent-space normal map
+    /// (`CompressionSettings == TC_Normalmap`). Gates ASTC blue-channel
+    /// reconstruction.
+    pub is_normal_map: bool,
+}
+
+/// Find the first decodable `Asset::Texture2D` in `package.payloads` and return
+/// a lightweight [`TextureInfo`] summary, or `None` if no decodable texture
+/// export is present.
+///
+/// "Decodable" means the pixel format has a registered decoder (or the virtual
+/// texture's layer-0 format does). This function is **pure and allocation-cheap**
+/// — it does not resolve bulk data.
+///
+/// # Return value
+///
+/// `Some(info)` where `info.export_idx` is the index of the texture in
+/// `package.payloads`, `info.mips` lists each serialized mip's `(width, height)`
+/// (one entry for virtual textures), and `info.format_label` is the pixel-format
+/// string. Returns `None` if no matching export is found.
+pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
+    package
+        .payloads
+        .iter()
+        .enumerate()
+        .find_map(|(export_idx, asset)| {
+            let Asset::Texture2D(data) = asset else {
+                return None;
+            };
+
+            let is_normal_map = has_enum(data, "CompressionSettings", "TC_Normalmap");
+
+            if let Some(vt) = data.virtual_texture.as_deref() {
+                // Virtual texture: decodable if layer-0 has a known format.
+                let layer0 = vt.layer_types.first().map_or("", String::as_str);
+                if !pixel_format::is_decodable(&PixelFormat::from_name(layer0)) {
+                    return None;
+                }
+                return Some(TextureInfo {
+                    export_idx,
+                    mips: vec![(vt.width, vt.height)],
+                    format_label: layer0.to_string(),
+                    is_normal_map,
+                });
+            }
+
+            // Standard mip chain: need at least one mip with a decodable format.
+            if data.mips.is_empty() {
+                return None;
+            }
+            if !pixel_format::is_decodable(&PixelFormat::from_name(&data.pixel_format)) {
+                return None;
+            }
+
+            let mips = data.mips.iter().map(|m| (m.size_x, m.size_y)).collect();
+            Some(TextureInfo {
+                export_idx,
+                mips,
+                format_label: data.pixel_format.clone(),
+                is_normal_map,
+            })
+        })
+}
+
+/// Decode a specific mip of the first decodable texture export in `package`.
+///
+/// Resolves the export's bulk data internally via
+/// `Package::resolve_bulk_for_export(export_idx)`, then decodes the mip at
+/// `mip_index` to an RGBA8 [`DecodedTextureRgba`].
+///
+/// For virtual textures the `mip_index` argument is ignored — virtual textures
+/// are always flattened at full resolution (the single entry reported by
+/// [`classify_texture`]).
+///
+/// # Errors
+///
+/// - [`PaksmithError::Internal`] if `export_idx` does not point to a
+///   `Texture2DData` export.
+/// - [`PaksmithError::Internal`] if `mip_index` is out of range for the
+///   texture's serialized mip list.
+/// - [`PaksmithError::Internal`] if bulk data is empty (no serialized mip bytes).
+/// - Any decode error from the pixel-format decode layer
+///   (`pixel_format::decode_mip`) or the virtual-texture flatten
+///   (`flatten_virtual_texture`).
+pub fn decode_texture_mip(
+    package: &Package,
+    export_idx: usize,
+    mip_index: usize,
+) -> crate::Result<DecodedTextureRgba> {
+    let asset = package
+        .payloads
+        .get(export_idx)
+        .ok_or_else(|| PaksmithError::Internal {
+            context: format!(
+                "decode_texture_mip: export_idx {export_idx} out of range (payloads len {})",
+                package.payloads.len()
+            ),
+        })?;
+
+    let Asset::Texture2D(data) = asset else {
+        return Err(PaksmithError::Internal {
+            context: format!("decode_texture_mip: export {export_idx} is not a Texture2D"),
+        });
+    };
+
+    let is_normal_map = has_enum(data, "CompressionSettings", "TC_Normalmap");
+    let bulk = package.resolve_bulk_for_export(export_idx)?;
+
+    // Virtual texture path: flatten layer 0, ignore mip_index.
+    if let Some(vt) = data.virtual_texture.as_deref() {
+        let decoded = flatten_virtual_texture(vt, bulk, is_normal_map)?;
+        return Ok(decoded_texture_to_rgba(decoded));
+    }
+
+    // Standard mip chain.
+    let mip_record = data
+        .mips
+        .get(mip_index)
+        .ok_or_else(|| PaksmithError::Internal {
+            context: format!(
+                "decode_texture_mip: mip_index {mip_index} out of range (mips len {})",
+                data.mips.len()
+            ),
+        })?;
+    let bulk_record = bulk.get(mip_index).ok_or_else(|| PaksmithError::Internal {
+        context: format!(
+            "decode_texture_mip: mip_index {mip_index} out of range (bulk len {}; \
+             texture may have bSerializeMipData = false)",
+            bulk.len()
+        ),
+    })?;
+
+    let format = PixelFormat::from_name(&data.pixel_format);
+    let decoded = decode_mip(
+        &format,
+        &bulk_record.bytes,
+        mip_record.size_x,
+        mip_record.size_y,
+        is_normal_map,
+        "<texture mip>",
+    )?;
+    Ok(decoded_texture_to_rgba(decoded))
+}
+
+/// Convert the internal [`DecodedTexture`] to the public [`DecodedTextureRgba`].
+fn decoded_texture_to_rgba(decoded: DecodedTexture) -> DecodedTextureRgba {
+    DecodedTextureRgba {
+        width: decoded.width,
+        height: decoded.height,
+        rgba: decoded.rgba,
+    }
+}
+
+// ─── Shared property-access helpers ───────────────────────────────────────────
+//
+// These helpers were originally private in `crate::export::texture`. They are
+// promoted here (`pub(super)`) so both this module and `export/texture.rs` share
+// a single implementation rather than parallel copies.
+
+/// The scalar (`array_index == 0`) tagged property named `name`, if present.
+pub(crate) fn scalar_property<'a>(data: &'a Texture2DData, name: &str) -> Option<&'a Property> {
+    data.properties
+        .iter_properties()
+        .find(|p| p.name() == name && p.array_index == 0)
+}
+
+/// Read a scalar `BoolProperty` named `name` from the texture's tagged
+/// properties, if present.
+pub(crate) fn property_bool(data: &Texture2DData, name: &str) -> Option<bool> {
+    scalar_property(data, name).and_then(|p| match p.value {
+        PropertyValue::Bool(b) => Some(b),
+        _ => None,
+    })
+}
+
+/// Whether the scalar enum property `name` resolves to `variant`.
+///
+/// UE serializes tagged `EnumProperty` values as the **fully-qualified** FName
+/// `EnumType::Value` for namespaced / enum-class enums, and paksmith's own
+/// unversioned/`.usmap` decoder emits the same qualified form. The `EnumType::`
+/// qualifier is stripped before comparison — mirroring CUE4Parse's
+/// `SubstringAfter("::")` — so both `"TC_Normalmap"` and
+/// `"TextureCompressionSettings::TC_Normalmap"` match `variant = "TC_Normalmap"`.
+pub(crate) fn has_enum(data: &Texture2DData, name: &str, variant: &str) -> bool {
+    scalar_property(data, name).is_some_and(|p| match &p.value {
+        PropertyValue::Enum { value, .. } => {
+            let stored = value.as_ref();
+            // Strip up to and including the first `::` (the enum-type qualifier).
+            let bare = stored
+                .split_once("::")
+                .map_or(stored, |(_, variant_name)| variant_name);
+            bare == variant
+        }
+        _ => false,
+    })
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(all(test, feature = "__test_utils"))]
+mod tests {
+    use super::*;
+    use crate::asset::package::Package;
+    use crate::testing::uasset::{build_minimal_ue4_27, build_minimal_with_decodable_texture2d};
+
+    fn parse_pkg(bytes: &[u8]) -> Package {
+        Package::read_from(bytes, None, None, "Game/Tex.uasset").expect("parse package")
+    }
+
+    // ── classify_texture ─────────────────────────────────────────────────────
+
+    #[test]
+    fn classify_texture_returns_info_for_a_decodable_texture2d() {
+        let fixture = build_minimal_with_decodable_texture2d();
+        let pkg = parse_pkg(&fixture.bytes);
+
+        let info = classify_texture(&pkg).expect("decodable texture must classify as Some");
+
+        // The decodable fixture is 4×4 PF_DXT5 with one mip.
+        assert!(!info.mips.is_empty(), "must report at least one mip");
+        assert_eq!(
+            info.mips[0],
+            (4, 4),
+            "top mip dimensions must match the 4×4 fixture"
+        );
+        assert_eq!(info.format_label, "PF_DXT5");
+        assert!(
+            !info.is_normal_map,
+            "fixture has no CompressionSettings property"
+        );
+    }
+
+    #[test]
+    fn classify_texture_export_idx_points_to_the_texture_asset() {
+        let fixture = build_minimal_with_decodable_texture2d();
+        let pkg = parse_pkg(&fixture.bytes);
+
+        let info = classify_texture(&pkg).expect("must classify");
+
+        assert!(
+            matches!(pkg.payloads.get(info.export_idx), Some(Asset::Texture2D(_))),
+            "export_idx must point at an Asset::Texture2D"
+        );
+    }
+
+    #[test]
+    fn classify_texture_none_for_non_texture() {
+        // build_minimal_ue4_27 produces a package with a Generic export (no Texture2D).
+        let fixture = build_minimal_ue4_27();
+        let pkg = parse_pkg(&fixture.bytes);
+
+        assert!(
+            classify_texture(&pkg).is_none(),
+            "a non-texture package must yield None"
+        );
+    }
+
+    // ── decode_texture_mip ───────────────────────────────────────────────────
+
+    #[test]
+    fn decode_texture_mip_yields_rgba_of_expected_size() {
+        let fixture = build_minimal_with_decodable_texture2d();
+        let pkg = parse_pkg(&fixture.bytes);
+
+        let info = classify_texture(&pkg).expect("must classify");
+        let out = decode_texture_mip(&pkg, info.export_idx, 0).expect("mip 0 must decode");
+
+        assert_eq!(
+            out.rgba.len() as u64,
+            u64::from(out.width) * u64::from(out.height) * 4,
+            "rgba len must equal width * height * 4"
+        );
+        assert_eq!(
+            (out.width, out.height),
+            info.mips[0],
+            "decoded dimensions must match classify_texture mips[0]"
+        );
+    }
+
+    #[test]
+    fn decode_texture_mip_out_of_range_is_err_not_panic() {
+        let fixture = build_minimal_with_decodable_texture2d();
+        let pkg = parse_pkg(&fixture.bytes);
+
+        let info = classify_texture(&pkg).expect("must classify");
+        assert!(
+            decode_texture_mip(&pkg, info.export_idx, info.mips.len() + 99).is_err(),
+            "out-of-range mip_index must return Err"
+        );
+    }
+
+    #[test]
+    fn decode_texture_mip_bad_export_idx_is_err() {
+        let fixture = build_minimal_with_decodable_texture2d();
+        let pkg = parse_pkg(&fixture.bytes);
+
+        assert!(
+            decode_texture_mip(&pkg, 9999, 0).is_err(),
+            "out-of-range export_idx must return Err"
+        );
+    }
+
+    #[test]
+    fn decode_texture_mip_non_texture_export_is_err() {
+        // The Generic export lives at index 0 in the minimal packages.
+        let fixture = build_minimal_with_decodable_texture2d();
+        let pkg = parse_pkg(&fixture.bytes);
+
+        assert!(
+            decode_texture_mip(&pkg, 0, 0).is_err(),
+            "calling on a non-Texture2D export must return Err"
+        );
+    }
+
+    // ── property helpers: mutant guards ──────────────────────────────────────
+    //
+    // These mirror the guards in `export/texture.rs` but exercise the helpers
+    // from their new canonical home so moves + dedup don't silently drop coverage.
+
+    fn mip_data(w: u32, h: u32) -> crate::asset::Texture2DMipMap {
+        crate::asset::Texture2DMipMap {
+            size_x: w,
+            size_y: h,
+            size_z: 1,
+        }
+    }
+
+    fn texture_data(format: &str, props: Vec<Property>) -> Texture2DData {
+        Texture2DData {
+            pixel_format: format.to_string(),
+            size_x: 4,
+            size_y: 4,
+            mip_count: 1,
+            mips: vec![mip_data(4, 4)],
+            properties: crate::asset::property::bag::PropertyBag::tree(props),
+            ..Texture2DData::empty()
+        }
+    }
+
+    fn bool_prop(name: &str, value: bool) -> Property {
+        Property {
+            name: name.into(),
+            array_index: 0,
+            guid: None,
+            value: PropertyValue::Bool(value),
+        }
+    }
+
+    fn enum_prop(name: &str, array_index: i32, variant: &str) -> Property {
+        Property {
+            name: name.into(),
+            array_index,
+            guid: None,
+            value: PropertyValue::Enum {
+                type_name: "TextureCompressionSettings".into(),
+                value: variant.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn property_bool_respects_name_and_array_index() {
+        let props = vec![
+            bool_prop("OtherFlag", true), // decoy: idx 0, wrong name
+            Property {
+                name: "SRGB".into(),
+                array_index: 1,
+                guid: None,
+                value: PropertyValue::Bool(true),
+            }, // decoy: right name, idx 1
+            bool_prop("SRGB", false),     // the real scalar SRGB
+        ];
+        assert_eq!(
+            property_bool(&texture_data("PF_DXT5", props), "SRGB"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn property_bool_absent_is_none() {
+        assert_eq!(
+            property_bool(&texture_data("PF_DXT5", vec![]), "SRGB"),
+            None
+        );
+    }
+
+    #[test]
+    fn has_enum_matches_only_the_named_scalar_variant() {
+        let props = vec![
+            bool_prop("OtherFlag", true),                        // idx 0, wrong name
+            enum_prop("CompressionSettings", 1, "TC_Default"),   // right name, idx 1
+            enum_prop("CompressionSettings", 0, "TC_Normalmap"), // the real scalar
+        ];
+        let t = texture_data("PF_DXT5", props);
+        assert!(has_enum(&t, "CompressionSettings", "TC_Normalmap"));
+        assert!(!has_enum(&t, "CompressionSettings", "TC_Default"));
+        assert!(!has_enum(
+            &texture_data("PF_DXT5", vec![]),
+            "CompressionSettings",
+            "TC_Normalmap"
+        ));
+    }
+
+    #[test]
+    fn has_enum_matches_fully_qualified_value() {
+        let props = vec![enum_prop(
+            "CompressionSettings",
+            0,
+            "TextureCompressionSettings::TC_Normalmap",
+        )];
+        let t = texture_data("PF_DXT5", props);
+        assert!(has_enum(&t, "CompressionSettings", "TC_Normalmap"));
+        let other = texture_data(
+            "PF_DXT5",
+            vec![enum_prop(
+                "CompressionSettings",
+                0,
+                "TextureCompressionSettings::TC_Default",
+            )],
+        );
+        assert!(!has_enum(&other, "CompressionSettings", "TC_Normalmap"));
+    }
+}
