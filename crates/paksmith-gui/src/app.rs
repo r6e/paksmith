@@ -594,23 +594,36 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::TextureMipSelected(m) => {
-            // Two-guard form: extract pkg Arc before mutating tab (borrow rules).
-            // First: grab the path + pkg Arc from the active tab (if Ready+Ok).
+            // Compute `dispatch` (the decode-task inputs) within a single tab
+            // borrow: validate the index, update view state, then extract the
+            // path + pkg Arc + export_idx. The `Task::perform` runs after the
+            // borrow ends so it can read `app.archive_generation`, matching the
+            // single-return funnel the sibling texture arms use.
             let dispatch = if let Some(tab) = app.tabs.active_tab_mut() {
-                tab.texture.selected_mip = m;
-                // Keep the previously decoded mip on screen while the newly
-                // selected mip decodes asynchronously — clearing it here would
-                // blank the viewer on every mip change. The generation/stale-mip
-                // fence in `TextureDecoded` swaps in the new image when ready.
-                tab.texture.error = None;
-                // Try to extract what we need to dispatch a new decode task.
-                if let crate::state::tabs::TabContent::Ready {
-                    parsed: Ok(arc), ..
-                } = &tab.content
-                {
-                    Some((tab.path.clone(), arc.clone(), tab.texture.export_idx))
-                } else {
+                // Guard against an out-of-range index (a stale `pick_list`
+                // message, or one raced against a content swap that shrank the
+                // mip list): committing an invalid `selected_mip` would wedge the
+                // tab — the decode would fail and the stale-mip fence in
+                // `TextureDecoded` could then drop later valid results. Ignore
+                // anything past the current mip list.
+                if m >= tab.texture.mips.len() {
                     None
+                } else {
+                    tab.texture.selected_mip = m;
+                    // Keep the previously decoded mip on screen while the newly
+                    // selected mip decodes asynchronously — clearing it here would
+                    // blank the viewer on every mip change. The generation/stale-mip
+                    // fence in `TextureDecoded` swaps in the new image when ready.
+                    tab.texture.error = None;
+                    // Try to extract what we need to dispatch a new decode task.
+                    if let crate::state::tabs::TabContent::Ready {
+                        parsed: Ok(arc), ..
+                    } = &tab.content
+                    {
+                        Some((tab.path.clone(), arc.clone(), tab.texture.export_idx))
+                    } else {
+                        None
+                    }
                 }
             } else {
                 None
@@ -2317,6 +2330,29 @@ mod tests {
             app.tabs.active_tab().unwrap().texture.selected_mip,
             1,
             "TextureMipSelected must update selected_mip on the active tab"
+        );
+    }
+
+    #[test]
+    fn texture_mip_selected_out_of_range_is_ignored() {
+        // A stale / out-of-range index (e.g. a pick_list message raced against a
+        // content swap) must not commit an invalid `selected_mip` that would
+        // wedge the tab. The handler ignores anything at or past the current mip
+        // list length. Test the exact boundary `m == mips.len()` (the first
+        // invalid index) so the `>=` guard is pinned tight — paired with the
+        // valid `m = 1` case in `texture_mip_selected_updates_selected_mip`, this
+        // kills the `>=` → `>` / `<` / `<=` mutants and the guard deletion.
+        let mut app = app_with_open_texture_tab();
+        if let Some(tab) = app.tabs.active_tab_mut() {
+            tab.texture.mips = vec![(64, 64), (32, 32)];
+            tab.texture.selected_mip = 0;
+        }
+        let len = app.tabs.active_tab().unwrap().texture.mips.len();
+        let _ = update(&mut app, Message::TextureMipSelected(len));
+        assert_eq!(
+            app.tabs.active_tab().unwrap().texture.selected_mip,
+            0,
+            "a mip index == mips.len() (first out-of-range) must leave selected_mip unchanged"
         );
     }
 
