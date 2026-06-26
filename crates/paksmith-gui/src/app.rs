@@ -189,32 +189,17 @@ pub enum Message {
         generation: u64,
     },
     /// A texture channel was toggled on/off in the active tab.
-    // Constructed by the texture viewer widget (Phase 7b Task 5). Not yet
-    // wired to the view — suppressed until Task 5 adds the widget.
-    #[allow(dead_code)]
     TextureChannelToggled {
         channel: crate::state::texture_view::Channel,
     },
     /// Zoom the active tab's texture viewer in one step.
-    // Constructed by the texture viewer widget (Phase 7b Task 5).
-    #[allow(dead_code)]
     TextureZoomIn,
     /// Zoom the active tab's texture viewer out one step.
-    // Constructed by the texture viewer widget (Phase 7b Task 5).
-    #[allow(dead_code)]
     TextureZoomOut,
     /// Fit the texture to the available viewport in the active tab.
-    // Constructed by the texture viewer widget (Phase 7b UI/UX fix F3).
-    #[allow(dead_code)]
     TextureFitToWindow,
     /// The user selected a different mip level in the active tab.
-    // Constructed by the texture viewer widget (Phase 7b Task 5).
-    #[allow(dead_code)]
     TextureMipSelected(usize),
-    /// The user panned the texture in the active tab.
-    // Constructed by the texture viewer widget (Phase 7b Task 5).
-    #[allow(dead_code)]
-    TexturePan { dx: f32, dy: f32 },
 }
 
 /// Processes a `Message` and updates the application state.
@@ -636,15 +621,6 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             } else {
                 Task::none()
             }
-        }
-        Message::TexturePan { dx, dy } => {
-            if let Some(tab) = app.tabs.active_tab_mut() {
-                let (px, py) = tab.texture.pan;
-                // Clamp is deferred to the widget layer which knows viewport
-                // and scaled dimensions; here we just add the delta.
-                tab.texture.pan = (px + dx, py + dy);
-            }
-            Task::none()
         }
     }
 }
@@ -2326,24 +2302,6 @@ mod tests {
         assert!(
             app.tabs.active_tab().unwrap().texture.zoom < 4.0,
             "TextureZoomOut must decrease zoom"
-        );
-    }
-
-    #[test]
-    fn texture_pan_adds_delta_to_pan_offset() {
-        let mut app = app_with_open_texture_tab();
-        if let Some(tab) = app.tabs.active_tab_mut() {
-            tab.texture.pan = (10.0, 20.0);
-        }
-        let _ = update(&mut app, Message::TexturePan { dx: 5.0, dy: -3.0 });
-        let pan = app.tabs.active_tab().unwrap().texture.pan;
-        assert!(
-            (pan.0 - 15.0).abs() < f32::EPSILON,
-            "TexturePan must add dx to pan.0"
-        );
-        assert!(
-            (pan.1 - 17.0).abs() < f32::EPSILON,
-            "TexturePan must add dy to pan.1"
         );
     }
 }

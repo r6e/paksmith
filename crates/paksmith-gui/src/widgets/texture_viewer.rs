@@ -97,7 +97,8 @@ fn inactive_channel_style()
 /// - An attention-coloured error message when `state.error` is set (decode failed).
 /// - A muted "Decoding…" placeholder when `state.decoded` is `None` (still in flight).
 /// - Otherwise: a controls row (R/G/B/A toggles + Fit + zoom +/− + mip dropdown)
-///   above the scaled image inside a `scrollable` panning container.
+///   above the scaled image — centred in fit mode, or inside a `scrollable`
+///   panning container when manually zoomed.
 ///
 /// `accent` is the system accent colour; active-channel buttons are styled with
 /// an accent fill **plus** accent border for colour-blind accessibility (F1).
@@ -145,9 +146,20 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
 
     // F5: wrap the zoom % label in a container with padding so it optically
     // groups with its flanking buttons.
+    //
+    // Issue 1: in fit mode `state.zoom` is not the rendered scale (the real
+    // scale is computed per-layout by `fit_zoom`), so showing a percentage
+    // would be a lie.  Render the literal "Fit" instead.  Pressing +/− snaps to
+    // a discrete `ZOOM_STEPS` entry from `state.zoom` and exits fit mode — the
+    // standard image-viewer behaviour (Preview / browsers); the first manual
+    // step is not relative to the fit scale, which is an accepted limitation.
+    let zoom_label_text = if state.fit_to_window {
+        "Fit".to_string()
+    } else {
+        format!("{:.0}%", state.zoom * 100.0)
+    };
     let zoom_label =
-        container(text(format!("{:.0}%", state.zoom * 100.0)).size(f32::from(TEXT_SM)))
-            .padding([SPACE_XS, SPACE_SM]);
+        container(text(zoom_label_text).size(f32::from(TEXT_SM))).padding([SPACE_XS, SPACE_SM]);
 
     let zoom_in_btn = button(text("+").size(f32::from(TEXT_SM)))
         .on_press(Message::TextureZoomIn)
@@ -246,31 +258,41 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
     .width(Length::Fill);
 
     // ── image area ────────────────────────────────────────────────────────────
-    // Snapshot values needed inside the `Responsive` closure (avoids borrowing
-    // `state` inside a `Fn` closure after it's already moved into the column).
+    // Snapshot the Copy values needed inside the `Responsive` closure (avoids
+    // borrowing `state` inside a `Fn` closure after it's moved into the column).
     let img_w = decoded.width;
     let img_h = decoded.height;
-    let channels = state.channels;
-    let rgba = decoded.rgba.clone();
     let zoom_snapshot = state.zoom;
     let fit_to_window = state.fit_to_window;
 
-    // F2: the image area uses `background.strong` to distinguish it visually
-    // from the controls bar (`background.weak`).  A 1px `text.scale_alpha(0.15)`
-    // border marks the image boundary so alpha edges are clearly framed.
+    // Issue 3 (perf): build the channel-masked image `Handle` ONCE per `view()`,
+    // here rather than inside the `Responsive` closure.  The mask pass + its
+    // allocation happens a single time per render; the closure (re-run on every
+    // layout tick, e.g. throughout a window-resize drag) only `clone()`s the
+    // handle.  A cloned `Handle` keeps the same cache id, so iced reuses the
+    // uploaded texture instead of re-uploading it per tick.  Caching the handle
+    // *across* `view()` calls would require storing an iced type in the pure
+    // `TextureState`, which the state layer forbids — re-masking once per
+    // `view()` is the accepted remaining cost.
+    let handle = iced::widget::image::Handle::from_rgba(
+        img_w,
+        img_h,
+        mask_rgba(&decoded.rgba, state.channels),
+    );
+
+    // F2: the framed image box uses `background.strong` to distinguish it
+    // visually from the controls bar (`background.weak`); a 1px
+    // `text.scale_alpha(0.15)` border marks the image boundary so alpha edges
+    // read clearly.  (The `canvas` feature is NOT enabled, so a true per-pixel
+    // checkerboard is unavailable this pass; the distinct background + boundary
+    // border is the approved fallback.)
     //
-    // Note: the `canvas` feature is NOT enabled in paksmith-gui's Cargo.toml,
-    // so a true per-pixel checkerboard is not available in this pass.  The
-    // distinct background + visible boundary border is the approved fallback.
-    //
-    // F3: `iced::widget::Responsive` measures the available space at layout
-    // time and passes it into the closure.  When `fit_to_window` is true the
-    // closure calls `fit_zoom` to scale the texture to fill the area; otherwise
-    // it uses the manual `zoom` value from state.
-    //
-    // `Responsive` is placed OUTSIDE `scrollable` intentionally: inside a
-    // scrollable it would measure infinite content space and produce a garbage
-    // zoom.  The scroll widget sits inside the `Responsive`-produced element.
+    // F3: `iced::widget::Responsive` measures the available space at layout time
+    // and passes it into the closure.  When `fit_to_window` is true the closure
+    // calls `fit_zoom` to scale the texture to fill the area; otherwise it uses
+    // the manual `zoom` value.  `Responsive` is placed OUTSIDE any `scrollable`
+    // intentionally: inside one it would measure infinite content space and
+    // produce a garbage zoom.
     let image_area: Element<'_, Message> =
         iced::widget::Responsive::new(move |size: iced::Size| {
             let actual_zoom = if fit_to_window {
@@ -279,9 +301,7 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
                 zoom_snapshot
             };
 
-            let pixels = mask_rgba(&rgba, channels);
-            let handle = iced::widget::image::Handle::from_rgba(img_w, img_h, pixels);
-            let img = iced::widget::image(handle)
+            let img = iced::widget::image(handle.clone())
                 .filter_method(iced::widget::image::FilterMethod::Nearest)
                 .width(Length::Fixed(img_w as f32 * actual_zoom))
                 .height(Length::Fixed(img_h as f32 * actual_zoom));
@@ -302,10 +322,24 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
                 .width(Length::Shrink)
                 .height(Length::Shrink);
 
-            scrollable(image_container)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+            // Issue 2: in fit mode the image is ≤ viewport on both axes
+            // (`fit_zoom` = min of the axis scales), so CENTER it with no
+            // scrollbar.  In manual-zoom mode wrap it in a `scrollable`, which
+            // owns panning natively (scrollbars + trackpad/wheel, clamped to the
+            // content bounds) — there is no separate pan offset to track.
+            if fit_to_window {
+                container(image_container)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            } else {
+                scrollable(image_container)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            }
         })
         .width(Length::Fill)
         .height(Length::Fill)

@@ -158,28 +158,6 @@ pub fn zoom_out(z: f32) -> f32 {
         .unwrap_or_else(|| *ZOOM_STEPS.first().expect("ZOOM_STEPS is non-empty"))
 }
 
-/// Clamp `pan` so the scaled image cannot scroll completely off-screen.
-///
-/// Sign convention: `pan` is the top-left offset of the image within the
-/// viewport (positive = image moved right/down). When the image is larger than
-/// the viewport, pan is clamped to `[0.0, scaled - viewport]` per axis so at
-/// least one pixel of the image is always visible. When the image is smaller
-/// than the viewport the offset is clamped to 0.
-///
-/// `scaled` = (img_width * zoom, img_height * zoom).
-/// `viewport` = (viewport_width, viewport_height).
-#[must_use]
-pub fn clamp_pan(pan: (f32, f32), scaled: (f32, f32), viewport: (f32, f32)) -> (f32, f32) {
-    let clamp_axis = |p: f32, s: f32, v: f32| -> f32 {
-        let max_pan = (s - v).max(0.0);
-        p.clamp(0.0, max_pan)
-    };
-    (
-        clamp_axis(pan.0, scaled.0, viewport.0),
-        clamp_axis(pan.1, scaled.1, viewport.1),
-    )
-}
-
 /// All view state for the texture inspector panel.
 #[derive(Debug, Clone)]
 pub struct TextureState {
@@ -202,9 +180,11 @@ pub struct TextureState {
     /// When `true`, the image area uses `fit_zoom` to scale the texture to fill
     /// the available space.  Automatically reverts to `false` when the user
     /// manually zooms in or out via the `+`/`−` buttons.
+    ///
+    /// In manual-zoom mode the image is wrapped in a `scrollable`, which owns
+    /// panning natively (scrollbars + trackpad/wheel, clamped to content bounds)
+    /// — the widget keeps no separate pan offset.
     pub fit_to_window: bool,
-    /// Pan offset (top-left corner of image in viewport space).
-    pub pan: (f32, f32),
     /// Decoded pixel data for the currently displayed mip, if available.
     pub decoded: Option<DecodedMip>,
     /// Error message from the most recent decode attempt, if any.
@@ -220,7 +200,6 @@ impl Default for TextureState {
             channels: ChannelSet::default(),
             zoom: 1.0,
             fit_to_window: true,
-            pan: (0.0, 0.0),
             decoded: None,
             error: None,
         }
@@ -365,39 +344,6 @@ mod tests {
         let z = 1.0;
         assert!(zoom_in(z) > z);
         assert!(zoom_out(zoom_in(z)) <= zoom_in(z));
-    }
-
-    #[test]
-    fn clamp_pan_keeps_image_in_view() {
-        // image larger than viewport: pan clamped so an edge cannot pass the far side
-        let p = clamp_pan((10_000.0, 0.0), (400.0, 400.0), (100.0, 100.0));
-        assert!(p.0 <= (400.0 - 100.0)); // cannot scroll past the right edge
-    }
-
-    // Extra: lower pan clamp.
-    #[test]
-    #[allow(clippy::float_cmp)]
-    fn clamp_pan_lower_bound_is_zero() {
-        let p = clamp_pan((-500.0, -200.0), (400.0, 400.0), (100.0, 100.0));
-        assert_eq!(p.0, 0.0);
-        assert_eq!(p.1, 0.0);
-    }
-
-    // Extra: image smaller than viewport clamps to zero.
-    #[test]
-    #[allow(clippy::float_cmp)]
-    fn clamp_pan_small_image_clamps_to_zero() {
-        // scaled image (50x50) < viewport (100x100) → pan forced to 0
-        let p = clamp_pan((999.0, 999.0), (50.0, 50.0), (100.0, 100.0));
-        assert_eq!(p.0, 0.0);
-        assert_eq!(p.1, 0.0);
-    }
-
-    // Extra: y-axis clamping.
-    #[test]
-    fn clamp_pan_y_axis() {
-        let p = clamp_pan((0.0, 10_000.0), (400.0, 400.0), (100.0, 100.0));
-        assert!(p.1 <= (400.0 - 100.0));
     }
 
     // Extra: zoom_out saturates at minimum.
