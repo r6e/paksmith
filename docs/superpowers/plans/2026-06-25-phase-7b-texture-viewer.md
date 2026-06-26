@@ -12,7 +12,7 @@
 
 - **GUI-only PLUS exactly one public-API addition in `paksmith-core`** (`classify_texture`, `decode_texture_mip`, public `DecodedTextureRgba`, public `TextureInfo`). No other core behavior changes — the decode logic is *reused* from existing internals, not rewritten.
 - **CPU render path only.** No wgpu, no `iced::widget::shader`, no WGSL, no iced `wgpu`/`advanced` feature.
-- **Enable iced's `image` feature** in `crates/paksmith-gui/Cargo.toml` (`features = ["tokio", "image"]`). This is a feature of the existing `iced` dependency, not a new direct dependency; it pulls the `image` crate transitively — note for the cargo-deny / cargo-audit gates.
+- **Enable iced's codec-free `image-without-codecs` feature** in `crates/paksmith-gui/Cargo.toml` (`features = ["tokio", "image-without-codecs"]`). This is a feature of the existing `iced` dependency, not a new direct dependency. The full `image` feature force-enables all `image`-crate codecs (AVIF/rav1e → cargo-deny licenses+bans FAIL); the viewer only needs `Handle::from_rgba` raw pixels, so the codec-free variant suffices. It still pulls BSD-2-Clause `kamadak-exif` + `mutate_once` transitively → scoped `deny.toml` `[[licenses.exceptions]]` — note for the cargo-deny / cargo-audit gates.
 - **No other new third-party dependencies.**
 - **No panics in core** — all fallible paths return `Result<T, PaksmithError>`.
 - **MSRV 1.88** — no let-chains, no `if let` match guards (plain `if EXPR` guards OK); use let-else / nested `if` + `#[allow(clippy::collapsible_if)]`.
