@@ -331,12 +331,61 @@ mod tests {
         assert_eq!(mask_rgba(&[], ChannelSet::default()), Vec::<u8>::new());
     }
 
+    // Extra: a trailing partial pixel (< 4 bytes) is passed through untouched.
+    // Pins the `px.len() < 4` guard: the `< -> >` mutant would fail to skip the
+    // 1-byte chunk and index past it (panic on px[0..]).
+    #[test]
+    fn mask_partial_trailing_pixel_left_unchanged() {
+        // one full RGBA pixel + a 1-byte partial.
+        let src = vec![10, 20, 30, 40, 99];
+        let out = mask_rgba(
+            &src,
+            ChannelSet {
+                r: true,
+                g: false,
+                b: false,
+                a: false,
+            },
+        );
+        assert_eq!(out.len(), 5, "length must be preserved");
+        assert_eq!(out[4], 99, "trailing partial byte must be left unchanged");
+    }
+
     // ── zoom / fit ───────────────────────────────────────────────────────────
 
     #[test]
     fn fit_zoom_scales_to_fit_smaller_axis() {
         // 200x100 image into 100x100 viewport → fit = 0.5
         assert!((fit_zoom((200, 100), (100.0, 100.0)) - 0.5).abs() < f32::EPSILON);
+    }
+
+    // Extra: a taller-than-wide image is limited by its height axis. Pins the
+    // `sy = vh / ih` division: the `/ -> *` mutant would make sy huge so the
+    // width axis (1.0) would win, returning 1.0 instead of 0.5.
+    #[test]
+    fn fit_zoom_scales_to_fit_taller_axis() {
+        // 100x200 image into 100x100 viewport → height-limited → fit = 0.5
+        assert!((fit_zoom((100, 200), (100.0, 100.0)) - 0.5).abs() < f32::EPSILON);
+    }
+
+    // Extra: each degenerate condition independently returns 1.0. Pins the three
+    // `||` operators in the guard — a `|| -> &&` flip on any one would let a
+    // single-zero case fall through to a divide-by-zero scale.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn fit_zoom_single_zero_dimension_returns_one() {
+        assert_eq!(fit_zoom((0, 5), (100.0, 100.0)), 1.0, "zero width only");
+        assert_eq!(fit_zoom((5, 0), (100.0, 100.0)), 1.0, "zero height only");
+        assert_eq!(
+            fit_zoom((100, 100), (0.0, 100.0)),
+            1.0,
+            "zero viewport width only"
+        );
+        assert_eq!(
+            fit_zoom((100, 100), (100.0, 0.0)),
+            1.0,
+            "zero viewport height only"
+        );
     }
 
     #[test]
@@ -389,14 +438,22 @@ mod tests {
         assert!(TextureState::default().fit_to_window);
     }
 
-    // Extra: toggle flips individual channels.
+    // Extra: toggle flips each channel independently (covers all four match
+    // arms so the `delete !` mutant survives on none of them).
     #[test]
-    fn channel_set_toggle_flips_channel() {
-        let mut cs = ChannelSet::default();
-        cs.toggle(Channel::G);
-        assert!(!cs.g);
-        assert!(cs.r && cs.b && cs.a);
-        cs.toggle(Channel::G);
-        assert!(cs.g);
+    fn channel_set_toggle_flips_each_channel() {
+        let get = |cs: &ChannelSet, ch: Channel| match ch {
+            Channel::R => cs.r,
+            Channel::G => cs.g,
+            Channel::B => cs.b,
+            Channel::A => cs.a,
+        };
+        for ch in [Channel::R, Channel::G, Channel::B, Channel::A] {
+            let mut cs = ChannelSet::default(); // all on
+            cs.toggle(ch);
+            assert!(!get(&cs, ch), "toggling {ch:?} once must set it false");
+            cs.toggle(ch);
+            assert!(get(&cs, ch), "toggling {ch:?} twice must restore true");
+        }
     }
 }

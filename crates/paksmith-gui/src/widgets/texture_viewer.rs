@@ -399,3 +399,22 @@ fn error_placeholder(msg: String) -> Element<'static, Message> {
     .height(Length::Fill)
     .into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MipChoice;
+
+    // `MipChoice`'s `Display` is the one bit of non-`#[mutants::skip]` logic in
+    // this widget (it formats the mip-dropdown label), so it earns a unit test:
+    // pins the `"{index} — {w}×{h}"` format against the stub-return mutant.
+    #[test]
+    fn mip_choice_display_formats_index_and_dims() {
+        let label = MipChoice {
+            index: 2,
+            w: 64,
+            h: 32,
+        }
+        .to_string();
+        assert_eq!(label, "2 \u{2014} 64\u{d7}32");
+    }
+}

@@ -244,7 +244,7 @@ fn decoded_texture_to_rgba(decoded: DecodedTexture) -> DecodedTextureRgba {
 // ─── Shared property-access helpers ───────────────────────────────────────────
 //
 // These helpers were originally private in `crate::export::texture`. They are
-// promoted here (`pub(super)`) so both this module and `export/texture.rs` share
+// promoted here (`pub(crate)`) so both this module and `export/texture.rs` share
 // a single implementation rather than parallel copies.
 
 /// The scalar (`array_index == 0`) tagged property named `name`, if present.
@@ -345,6 +345,68 @@ mod tests {
         );
     }
 
+    // ── classify_texture: virtual-texture branch ─────────────────────────────
+
+    /// A minimal `VirtualTextureData` whose layer-0 format is `layer0` and whose
+    /// full-resolution dimensions are 8×8.
+    fn vt_with_layer0(
+        layer0: &str,
+    ) -> crate::asset::exports::texture::virtual_textures::VirtualTextureData {
+        // Only the fields `classify_texture` reads are set explicitly (width,
+        // height, layer_types); the rest default. Setting an unread field (e.g.
+        // num_layers) would leave a struct-field-deletion mutant unkilled.
+        crate::asset::exports::texture::virtual_textures::VirtualTextureData {
+            width: 8,
+            height: 8,
+            layer_types: vec![layer0.to_string()],
+            ..Default::default()
+        }
+    }
+
+    /// Parse the decodable fixture, then promote its `Texture2D` payload to a
+    /// virtual texture carrying `layer0` as its sole layer format.
+    fn pkg_with_virtual_texture(layer0: &str) -> Package {
+        let fixture = build_minimal_with_decodable_texture2d();
+        let mut pkg = parse_pkg(&fixture.bytes);
+        let tex = pkg
+            .payloads
+            .iter_mut()
+            .find_map(|a| match a {
+                Asset::Texture2D(d) => Some(d),
+                _ => None,
+            })
+            .expect("fixture must contain a Texture2D");
+        tex.virtual_texture = Some(Box::new(vt_with_layer0(layer0)));
+        pkg
+    }
+
+    #[test]
+    fn classify_texture_virtual_decodable_layer0_is_some() {
+        let pkg = pkg_with_virtual_texture("PF_DXT1");
+        let info =
+            classify_texture(&pkg).expect("a VT with a decodable layer-0 must classify as Some");
+        assert_eq!(
+            info.mips,
+            vec![(8, 8)],
+            "a virtual texture reports its full-resolution dims as the single mip"
+        );
+        assert_eq!(info.format_label, "PF_DXT1");
+    }
+
+    #[test]
+    fn classify_texture_virtual_undecodable_layer0_is_none() {
+        // An unknown EPixelFormat name decodes to PixelFormat::Unknown, which is
+        // not decodable. This pins the VT-branch decodability guard: it kills
+        // both the `delete !` mutant on the `if !is_decodable(...)` guard and the
+        // `is_decodable -> true` body mutant (either flip would wrongly classify
+        // this undecodable VT as Some).
+        let pkg = pkg_with_virtual_texture("PF_NotARealFormat");
+        assert!(
+            classify_texture(&pkg).is_none(),
+            "a VT whose layer-0 format is undecodable must yield None"
+        );
+    }
+
     // ── decode_texture_mip ───────────────────────────────────────────────────
 
     #[test]
@@ -425,6 +487,23 @@ mod tests {
             properties: crate::asset::property::bag::PropertyBag::tree(props),
             ..Texture2DData::empty()
         }
+    }
+
+    #[test]
+    fn texture_data_helper_pins_emitted_fields() {
+        // The `texture_data` / `mip_data` helpers hardcode field values that the
+        // property-helper tests below never read, so the struct-field-deletion
+        // mutant genus (which cargo-mutants' exclude_re cannot target — see
+        // MEMORY) survives on them. This test reads every emitted field so each
+        // deletion mutant is killed.
+        let t = texture_data("PF_DXT5", vec![]);
+        assert_eq!(t.pixel_format, "PF_DXT5");
+        assert_eq!(t.size_x, 4);
+        assert_eq!(t.size_y, 4);
+        assert_eq!(t.mip_count, 1);
+        assert_eq!(t.mips.len(), 1);
+        let m = &t.mips[0];
+        assert_eq!((m.size_x, m.size_y, m.size_z), (4, 4, 1));
     }
 
     fn bool_prop(name: &str, value: bool) -> Property {

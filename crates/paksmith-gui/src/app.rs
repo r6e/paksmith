@@ -2067,6 +2067,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn asset_loaded_decodable_texture_populates_path_keyed_tab() {
+        use std::sync::Arc;
+        // Drives the classify+dispatch branch, which looks up the destination
+        // tab by `t.path == path`. With the `==`->`!=` mutant the sole matching
+        // tab is skipped, so no texture metadata is stored — `mips` stays empty.
+        let mut app = app_with_paths(&["Game/T_Rock.uasset"]);
+        let _ = app.tabs.open_or_activate("Game/T_Rock.uasset");
+        let mp = paksmith_core::testing::uasset::build_minimal_with_decodable_texture2d();
+        let pkg =
+            paksmith_core::asset::Package::read_from(&mp.bytes, None, None, "Game/T_Rock.uasset")
+                .expect("fixture must parse");
+        let load = crate::task::asset::AssetLoad {
+            bytes: mp.bytes.clone(),
+            truncated: false,
+            parsed: Ok(Arc::new(pkg)),
+        };
+        let generation = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "Game/T_Rock.uasset".into(),
+                load: Box::new(load),
+                generation,
+            },
+        );
+        assert!(
+            !app.tabs.open[0].texture.mips.is_empty(),
+            "a decodable-texture load must populate texture.mips on the path-keyed tab"
+        );
+    }
+
     #[tokio::test]
     async fn opening_archive_bumps_generation() {
         // ArchiveOpened(Ok) must advance the generation so prior in-flight loads go stale.
