@@ -551,14 +551,22 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                         Ok(decoded) => {
                             tab.texture.decoded = Some(decoded);
                             tab.texture.error = None;
+                            // `decoded` changed — rebuild the render cache. Only
+                            // the Ok arm rebuilds: the Err arm below keeps the
+                            // last-good `decoded` unchanged, so rebuilding would
+                            // mint a fresh handle Id and force a needless GPU
+                            // re-upload of the same pixels.
+                            tab.texture.recompute_render();
                         }
                         Err(msg) => {
-                            tab.texture.decoded = None;
+                            // C18: keep the previously decoded mip on screen so a
+                            // failed re-select doesn't blank the last-good image;
+                            // surface only the error. The widget renders it as a
+                            // banner above the retained image and keeps the
+                            // controls so the user can pick another mip to recover.
                             tab.texture.error = Some(msg);
                         }
                     }
-                    // `decoded` changed (either arm) — rebuild the render cache.
-                    tab.texture.recompute_render();
                 }
             }
             Task::none()
@@ -2523,6 +2531,56 @@ mod tests {
             render_pixels(tex),
             mip0_pixels,
             "the mip-1 render must differ from the mip-0 bytes"
+        );
+    }
+
+    #[test]
+    fn texture_decode_error_keeps_last_good_decoded() {
+        // C18: a decode error for the *selected* mip must keep the previously
+        // decoded image (so the viewer doesn't blank the last-good mip) and only
+        // set `error`. The Err arm must NOT rebuild the render cache — `decoded`
+        // is unchanged, so the cached handle's Id is preserved and iced skips a
+        // needless GPU re-upload of the same pixels.
+        use crate::state::texture_view::DecodedMip;
+        let mut app = app_with_open_texture_tab();
+        app.archive_generation = 9;
+        let mip0 = DecodedMip {
+            width: 1,
+            height: 1,
+            rgba: vec![10, 20, 30, 40],
+        };
+        if let Some(tab) = app.tabs.active_tab_mut() {
+            tab.texture.decoded = Some(mip0.clone());
+            tab.texture.recompute_render();
+        }
+        let id_before = render_id(&app.tabs.active_tab().unwrap().texture);
+
+        // The currently selected mip (0) fails to decode.
+        let _ = update(
+            &mut app,
+            Message::TextureDecoded {
+                path: "Game/T_Rock.uasset".into(),
+                mip: 0,
+                result: Err("decode blew up".to_string()),
+                generation: 9,
+            },
+        );
+
+        let tex = &app.tabs.active_tab().unwrap().texture;
+        assert_eq!(
+            tex.decoded.as_ref(),
+            Some(&mip0),
+            "a failed decode for the selected mip must retain the last-good decoded image (C18)"
+        );
+        assert_eq!(
+            tex.error.as_deref(),
+            Some("decode blew up"),
+            "a failed decode must surface the error message"
+        );
+        assert_eq!(
+            render_id(tex),
+            id_before,
+            "the Err arm must not rebuild the render cache (decoded unchanged → no re-upload)"
         );
     }
 

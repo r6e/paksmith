@@ -93,12 +93,19 @@ fn inactive_channel_style()
 
 /// Render the texture inspector panel for the given `state`.
 ///
-/// Returns:
-/// - An attention-coloured error message when `state.error` is set (decode failed).
-/// - A muted "Decoding…" placeholder when `state.decoded` is `None` (still in flight).
-/// - Otherwise: a controls row (R/G/B/A toggles + Fit + zoom +/− + mip dropdown)
-///   above the scaled image — centred in fit mode, or inside a `scrollable`
-///   panning container when manually zoomed.
+/// The controls row (R/G/B/A toggles + Fit + zoom +/− + mip dropdown) is
+/// **always** rendered in texture mode; the area below it shows, in order:
+/// - the scaled image when `state.decoded` is `Some` — centred in fit mode, or
+///   inside a `scrollable` panning container when manually zoomed;
+/// - an attention-coloured error placeholder when the decode failed and there is
+///   no retained image (`decoded` is `None` and `error` is `Some`);
+/// - a muted "Decoding…" placeholder while the first decode is in flight.
+///
+/// Keeping the controls visible on error (C19) lets the user pick a different mip
+/// to recover when the initial mip fails (e.g. mip 0 exceeds the decode cap) —
+/// `TextureMipSelected` clears the error and redispatches. When a *re-selected*
+/// mip fails the previous image is retained (C18) and the error is surfaced as a
+/// compact banner above it rather than replacing the whole view.
 ///
 /// `accent` is the system accent colour; active-channel buttons are styled with
 /// an accent fill **plus** accent border for colour-blind accessibility (F1).
@@ -106,17 +113,6 @@ fn inactive_channel_style()
 #[allow(clippy::cast_precision_loss)] // texture dims ≤ 16384 are exact in f32
 #[allow(clippy::too_many_lines)] // single view fn; splitting would obscure the layout
 pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Message> {
-    // ── error state ───────────────────────────────────────────────────────────
-    // F4: error is distinct from "Decoding…" — uses danger colour, not muted.
-    if let Some(err) = &state.error {
-        return error_placeholder(err.clone());
-    }
-
-    // ── decoding in-flight ────────────────────────────────────────────────────
-    let Some(decoded) = &state.decoded else {
-        return muted_placeholder("Decoding\u{2026}".to_string());
-    };
-
     // ── controls row ─────────────────────────────────────────────────────────
     let channel_buttons: Vec<Element<'_, Message>> = [
         (Channel::R, "R", state.channels.r),
@@ -199,14 +195,13 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
     };
 
     // F7: when there is only one mip (picker hidden), show a non-interactive
-    // "{w}×{h}" size label so the user knows the resolution.
+    // "{w}×{h}" size label so the user knows the resolution. Driven off
+    // `state.mips` (not `decoded`) so the controls render even before the first
+    // decode lands or after a decode error — in texture mode `classify_texture`
+    // always populates at least one mip, so the label is present whenever a
+    // single-mip texture is shown.
     let single_mip_size: Option<Element<'_, Message>> = if state.mips.len() <= 1 {
-        let (w, h) = state
-            .mips
-            .first()
-            .copied()
-            .unwrap_or((decoded.width, decoded.height));
-        Some(
+        state.mips.first().map(|&(w, h)| {
             container(
                 text(format!("{w}\u{d7}{h}"))
                     .size(f32::from(TEXT_SM))
@@ -215,8 +210,8 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
                     }),
             )
             .padding([SPACE_XS, SPACE_SM])
-            .into(),
-        )
+            .into()
+        })
     } else {
         None
     };
@@ -257,41 +252,45 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
     })
     .width(Length::Fill);
 
-    // ── image area ────────────────────────────────────────────────────────────
-    // Snapshot the Copy values needed inside the `Responsive` closure (avoids
-    // borrowing `state` inside a `Fn` closure after it's moved into the column).
-    let img_w = decoded.width;
-    let img_h = decoded.height;
-    let zoom_snapshot = state.zoom;
-    let fit_to_window = state.fit_to_window;
+    // ── content area below the controls ───────────────────────────────────────
+    // Renders the image when a decoded mip is present (including a retained
+    // last-good mip after a failed re-select, C18), otherwise an error or the
+    // in-flight placeholder. The controls above are built unconditionally so the
+    // mip picker stays reachable for recovery even on a fresh decode failure (C19).
+    let content: Element<'_, Message> = if let Some(decoded) = &state.decoded {
+        // Snapshot the Copy values needed inside the `Responsive` closure (avoids
+        // borrowing `state` inside a `Fn` closure after it's moved into the column).
+        let img_w = decoded.width;
+        let img_h = decoded.height;
+        let zoom_snapshot = state.zoom;
+        let fit_to_window = state.fit_to_window;
 
-    // Issue 3 (perf): the render handle is cached on `TextureState::render`
-    // (see its doc for why cloning a cached handle skips the per-frame re-mask,
-    // re-alloc, and GPU re-upload); `view()` clones it rather than rebuilding.
-    // The `unwrap_or_else` here is *not* a correctness guard: it cannot catch a
-    // stale `Some` (a `render` left over from a prior mip/channel set) — that
-    // depends on the handlers rebuilding on every `decoded`/`channels` write.
-    // It only covers the `None` case (cache not yet populated) by building the
-    // handle inline via the same `render_handle` builder the cache uses.
-    let handle = state
-        .render
-        .clone()
-        .unwrap_or_else(|| crate::state::texture_view::render_handle(decoded, state.channels));
+        // Issue 3 (perf): the render handle is cached on `TextureState::render`
+        // (see its doc for why cloning a cached handle skips the per-frame re-mask,
+        // re-alloc, and GPU re-upload); `view()` clones it rather than rebuilding.
+        // The `unwrap_or_else` here is *not* a correctness guard: it cannot catch a
+        // stale `Some` (a `render` left over from a prior mip/channel set) — that
+        // depends on the handlers rebuilding on every `decoded`/`channels` write.
+        // It only covers the `None` case (cache not yet populated) by building the
+        // handle inline via the same `render_handle` builder the cache uses.
+        let handle = state
+            .render
+            .clone()
+            .unwrap_or_else(|| crate::state::texture_view::render_handle(decoded, state.channels));
 
-    // F2: the framed image box uses `background.strong` to distinguish it
-    // visually from the controls bar (`background.weak`); a 1px
-    // `text.scale_alpha(0.15)` border marks the image boundary so alpha edges
-    // read clearly.  (The `canvas` feature is NOT enabled, so a true per-pixel
-    // checkerboard is unavailable this pass; the distinct background + boundary
-    // border is the approved fallback.)
-    //
-    // F3: `iced::widget::Responsive` measures the available space at layout time
-    // and passes it into the closure.  When `fit_to_window` is true the closure
-    // calls `fit_zoom` to scale the texture to fill the area; otherwise it uses
-    // the manual `zoom` value.  `Responsive` is placed OUTSIDE any `scrollable`
-    // intentionally: inside one it would measure infinite content space and
-    // produce a garbage zoom.
-    let image_area: Element<'_, Message> =
+        // F2: the framed image box uses `background.strong` to distinguish it
+        // visually from the controls bar (`background.weak`); a 1px
+        // `text.scale_alpha(0.15)` border marks the image boundary so alpha edges
+        // read clearly.  (The `canvas` feature is NOT enabled, so a true per-pixel
+        // checkerboard is unavailable this pass; the distinct background + boundary
+        // border is the approved fallback.)
+        //
+        // F3: `iced::widget::Responsive` measures the available space at layout time
+        // and passes it into the closure.  When `fit_to_window` is true the closure
+        // calls `fit_zoom` to scale the texture to fill the area; otherwise it uses
+        // the manual `zoom` value.  `Responsive` is placed OUTSIDE any `scrollable`
+        // intentionally: inside one it would measure infinite content space and
+        // produce a garbage zoom.
         iced::widget::Responsive::new(move |size: iced::Size| {
             let actual_zoom = if fit_to_window {
                 crate::state::texture_view::fit_zoom((img_w, img_h), (size.width, size.height))
@@ -350,9 +349,33 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
         })
         .width(Length::Fill)
         .height(Length::Fill)
-        .into();
+        .into()
+    } else if let Some(err) = &state.error {
+        // F4: decode failed and there is no retained image — show the error in
+        // the content area (danger colour, distinct from "Decoding…"). The
+        // controls above remain so the user can select a different mip (C19).
+        error_placeholder(err.clone())
+    } else {
+        muted_placeholder("Decoding\u{2026}".to_string())
+    };
 
-    column![controls, image_area]
+    // C18: a *re-selected* mip that fails keeps the previous image (`decoded`
+    // still `Some`); surface its error as a compact banner above the retained
+    // image rather than discarding it. When no image is retained the error
+    // already fills the content area above, so a banner would be redundant.
+    let error_banner: Option<Element<'_, Message>> = state
+        .decoded
+        .as_ref()
+        .and(state.error.as_ref())
+        .map(|err| error_banner_row(err.clone()));
+
+    let mut children: Vec<Element<'_, Message>> = vec![controls.into()];
+    if let Some(banner) = error_banner {
+        children.push(banner);
+    }
+    children.push(content);
+
+    column(children)
         .spacing(0)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -375,6 +398,28 @@ fn muted_placeholder(msg: String) -> Element<'static, Message> {
     .center_y(Length::Fill)
     .width(Length::Fill)
     .height(Length::Fill)
+    .into()
+}
+
+/// Compact full-width error banner shown *above* a retained last-good image
+/// (C18) when a re-selected mip fails to decode. Unlike [`error_placeholder`] it
+/// does not fill the viewport — it sits between the controls and the kept image
+/// so the failure is visible without discarding what the user was looking at.
+#[mutants::skip]
+fn error_banner_row(msg: String) -> Element<'static, Message> {
+    container(
+        text(msg)
+            .size(f32::from(TEXT_SM))
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(theme.palette().danger),
+            }),
+    )
+    .padding([SPACE_XS, SPACE_MD])
+    .width(Length::Fill)
+    .style(|theme: &iced::Theme| iced::widget::container::Style {
+        background: Some(Background::Color(theme.palette().danger.scale_alpha(0.12))),
+        ..Default::default()
+    })
     .into()
 }
 
