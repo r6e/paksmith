@@ -359,14 +359,16 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
         muted_placeholder("Decoding\u{2026}".to_string())
     };
 
-    // C18: a *re-selected* mip that fails keeps the previous image (`decoded`
-    // still `Some`); surface its error as a compact banner above the retained
-    // image rather than discarding it. When no image is retained the error
-    // already fills the content area above, so a banner would be redundant.
+    // C18: a *re-selected* mip that fails keeps the previous image; surface its
+    // error as a compact banner above the retained image rather than discarding
+    // it. When no image is retained the error already fills the content area
+    // above, so a banner would be redundant. The banner-vs-placeholder decision
+    // lives in the unit-tested `TextureState::has_retained_error` so it is not
+    // buried in this `#[mutants::skip]` view.
     let error_banner: Option<Element<'_, Message>> = state
-        .decoded
+        .error
         .as_ref()
-        .and(state.error.as_ref())
+        .filter(|_| state.has_retained_error())
         .map(|err| error_banner_row(err.clone()));
 
     let mut children: Vec<Element<'_, Message>> = vec![controls.into()];
@@ -384,14 +386,19 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Centered muted text placeholder (in-flight decode state).
+/// A message centered in the full viewport, its colour chosen by `color` from
+/// the active theme. Shared scaffold for [`muted_placeholder`] (in-flight) and
+/// [`error_placeholder`] (decode failed), which differ only in that colour.
 #[mutants::skip]
-fn muted_placeholder(msg: String) -> Element<'static, Message> {
+fn centered_placeholder(
+    msg: String,
+    color: impl Fn(&iced::Theme) -> iced::Color + 'static,
+) -> Element<'static, Message> {
     container(
         text(msg)
             .size(f32::from(TEXT_MD))
-            .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
+            .style(move |theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(color(theme)),
             }),
     )
     .center_x(Length::Fill)
@@ -399,6 +406,14 @@ fn muted_placeholder(msg: String) -> Element<'static, Message> {
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+/// Centered muted text placeholder (in-flight decode state).
+#[mutants::skip]
+fn muted_placeholder(msg: String) -> Element<'static, Message> {
+    centered_placeholder(msg, |theme| {
+        theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)
+    })
 }
 
 /// Compact full-width error banner shown *above* a retained last-good image
@@ -429,18 +444,7 @@ fn error_banner_row(msg: String) -> Element<'static, Message> {
 /// "Decoding…" state and communicate that user action may be required.
 #[mutants::skip]
 fn error_placeholder(msg: String) -> Element<'static, Message> {
-    container(
-        text(msg)
-            .size(f32::from(TEXT_MD))
-            .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().danger),
-            }),
-    )
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    centered_placeholder(msg, |theme| theme.palette().danger)
 }
 
 #[cfg(test)]

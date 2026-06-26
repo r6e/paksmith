@@ -559,11 +559,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                             tab.texture.recompute_render();
                         }
                         Err(msg) => {
-                            // C18: keep the previously decoded mip on screen so a
-                            // failed re-select doesn't blank the last-good image;
-                            // surface only the error. The widget renders it as a
-                            // banner above the retained image and keeps the
-                            // controls so the user can pick another mip to recover.
+                            // C18: keep the previously decoded mip (don't blank the
+                            // last-good image on a failed re-select) and set only
+                            // the error. `decoded` is intentionally left untouched,
+                            // so the render cache stays valid and is not rebuilt
+                            // here — see `TextureState::error` for when it clears.
                             tab.texture.error = Some(msg);
                         }
                     }

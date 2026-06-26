@@ -197,9 +197,19 @@ pub struct TextureState {
     /// panning natively (scrollbars + trackpad/wheel, clamped to content bounds)
     /// — the widget keeps no separate pan offset.
     pub fit_to_window: bool,
-    /// Decoded pixel data for the currently displayed mip, if available.
+    /// Decoded pixel data for the currently displayed mip, if available. A
+    /// successful decode sets this; a *failed* decode leaves the previous value
+    /// in place (C18) so the last-good image stays on screen, so `decoded` and
+    /// [`Self::error`] can both be `Some` at once — see [`Self::has_retained_error`].
     pub decoded: Option<DecodedMip>,
-    /// Error message from the most recent decode attempt, if any.
+    /// Error message from the most recent decode attempt, if any. Set when a
+    /// decode fails; cleared by a *successful* decode (the `TextureDecoded` Ok
+    /// arm) or by selecting another mip (`TextureMipSelected`, which clears it
+    /// before redispatching), and — like every field here — implicitly reset
+    /// when `Tabs::set_content` replaces the tab's content on a content swap.
+    /// It is otherwise independent of [`Self::decoded`]: toggling channels on a
+    /// retained image re-masks the image but leaves the error (and its banner)
+    /// standing, because the failed mip is still failed.
     pub error: Option<String>,
     /// Cached iced render handle for `decoded` under `channels`.
     ///
@@ -258,6 +268,20 @@ impl TextureState {
             .decoded
             .as_ref()
             .map(|d| render_handle(d, self.channels));
+    }
+
+    /// Whether a decoded image is retained *and* a new decode error is pending
+    /// (both [`Self::decoded`] and [`Self::error`] are `Some`). This is the
+    /// "failed re-select" case: the viewer keeps the last-good image (C18) and
+    /// the widget surfaces the error as a compact banner above it. When no image
+    /// is retained (`decoded` is `None`) the error fills the content area
+    /// instead, so no banner is shown.
+    ///
+    /// Lives here, not inline in the `#[mutants::skip]` widget, so the
+    /// banner-vs-placeholder decision is unit-testable and mutation-covered.
+    #[must_use]
+    pub fn has_retained_error(&self) -> bool {
+        self.decoded.is_some() && self.error.is_some()
     }
 }
 
@@ -644,6 +668,58 @@ mod tests {
         assert!(
             st.render.is_none(),
             "render must clear once decoded is removed"
+        );
+    }
+
+    // `has_retained_error` is the banner-vs-placeholder decision (C18). All four
+    // (decoded, error) combinations are pinned so the `&&` and both `is_some()`
+    // operands are mutation-covered: only the retained-image-plus-error case is
+    // true, every other case is false.
+    #[test]
+    fn has_retained_error_true_only_with_image_and_error() {
+        let st = TextureState {
+            decoded: Some(one_pixel([1, 2, 3, 4])),
+            error: Some("boom".to_string()),
+            ..TextureState::default()
+        };
+        assert!(
+            st.has_retained_error(),
+            "a retained image plus a decode error must report a retained error"
+        );
+    }
+
+    #[test]
+    fn has_retained_error_false_with_image_and_no_error() {
+        let st = TextureState {
+            decoded: Some(one_pixel([1, 2, 3, 4])),
+            error: None,
+            ..TextureState::default()
+        };
+        assert!(
+            !st.has_retained_error(),
+            "an image with no error is the normal state, not a retained error"
+        );
+    }
+
+    #[test]
+    fn has_retained_error_false_with_error_and_no_image() {
+        let st = TextureState {
+            decoded: None,
+            error: Some("boom".to_string()),
+            ..TextureState::default()
+        };
+        assert!(
+            !st.has_retained_error(),
+            "an error with no retained image fills the content area, not a banner"
+        );
+    }
+
+    #[test]
+    fn has_retained_error_false_when_empty() {
+        let st = TextureState::default();
+        assert!(
+            !st.has_retained_error(),
+            "neither image nor error must not report a retained error"
         );
     }
 }
