@@ -335,7 +335,16 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
                     .height(Length::Fill)
                     .into()
             } else {
+                // `Direction::Both` is required: a zoomed-in image overflows on
+                // BOTH axes, and iced's default scrollable is vertical-only —
+                // which would leave the horizontal extent of any wide image
+                // unreachable.  Mirrors the explicit-direction pattern in
+                // `tab_bar.rs`.
                 scrollable(image_container)
+                    .direction(scrollable::Direction::Both {
+                        vertical: scrollable::Scrollbar::new(),
+                        horizontal: scrollable::Scrollbar::new(),
+                    })
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into()

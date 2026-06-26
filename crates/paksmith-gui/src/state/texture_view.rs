@@ -1,5 +1,5 @@
-//! Pure texture-view state: channel masking, zoom steps, fit-to-viewport, pan
-//! clamping. No `iced` imports — widget logic consumes this at a higher layer.
+//! Pure texture-view state: channel masking, zoom steps, and fit-to-viewport
+//! scaling. No `iced` imports — widget logic consumes this at a higher layer.
 
 /// A single decoded mip level: raw RGBA bytes + dimensions.
 #[derive(Debug, Clone, PartialEq)]
@@ -331,7 +331,7 @@ mod tests {
         assert_eq!(mask_rgba(&[], ChannelSet::default()), Vec::<u8>::new());
     }
 
-    // ── zoom / fit / pan ───────────────────────────────────────────────────────
+    // ── zoom / fit ───────────────────────────────────────────────────────────
 
     #[test]
     fn fit_zoom_scales_to_fit_smaller_axis() {
