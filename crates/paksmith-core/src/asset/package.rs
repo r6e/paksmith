@@ -1065,6 +1065,22 @@ impl Package {
         self.insert_bulk_records(export_idx, records)
     }
 
+    /// Whether `export_idx` has any serialized bulk-data records.
+    ///
+    /// Cheap O(1) map lookup that performs **no resolution and no I/O** —
+    /// it only reports whether records were registered, not whether they
+    /// resolve. Used by `classify_texture` to reject textures whose mip
+    /// dimensions are populated but whose mip bytes were never serialized
+    /// (`bSerializeMipData = false`); such textures would otherwise
+    /// classify as decodable yet have no bytes to decode.
+    ///
+    /// Relies on the `insert_bulk_records` invariant that an empty record
+    /// list removes the entry ("no records present == no entry"), so a
+    /// present key always carries at least one record.
+    pub(crate) fn has_bulk_records(&self, export_idx: usize) -> bool {
+        self.bulk_data.contains_key(&export_idx)
+    }
+
     /// Phase 3b: resolve all bulk-data records for `export_idx`. On
     /// first call, walks the export's records through the resolver
     /// and caches the result in a `OnceLock`. Subsequent calls return

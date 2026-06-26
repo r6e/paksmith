@@ -99,8 +99,12 @@ pub struct TextureInfo {
 /// export is present.
 ///
 /// "Decodable" means the pixel format has a registered decoder (or the virtual
-/// texture's layer-0 format does). This function is **pure and allocation-cheap**
-/// — it does not resolve bulk data.
+/// texture's layer-0 format does) **and** the export carries serialized mip
+/// bytes. A standard texture with `bSerializeMipData = false` keeps its mip
+/// dimensions but ships no bulk records, so it is reported as non-decodable —
+/// there are no bytes to decode. This function is **pure and allocation-cheap**:
+/// it checks only for the *presence* of bulk records (an O(1) map lookup) and
+/// never resolves them.
 ///
 /// # Return value
 ///
@@ -141,6 +145,13 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
             if !pixel_format::is_decodable(&PixelFormat::from_name(&data.pixel_format)) {
                 return None;
             }
+            // `bSerializeMipData = false` leaves the mip dimensions populated but
+            // serializes no bulk records, so the mip bytes can never be resolved.
+            // Such a texture is not decodable; reject it here (cheap, no I/O)
+            // rather than letting `decode_texture_mip` fail later.
+            if !package.has_bulk_records(export_idx) {
+                return None;
+            }
 
             let mips = data.mips.iter().map(|m| (m.size_x, m.size_y)).collect();
             Some(TextureInfo {
@@ -152,7 +163,7 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
         })
 }
 
-/// Decode a specific mip of the first decodable texture export in `package`.
+/// Decode a specific mip of the texture export at `export_idx` in `package`.
 ///
 /// Resolves the export's bulk data internally via
 /// `Package::resolve_bulk_for_export(export_idx)`, then decodes the mip at
@@ -164,11 +175,13 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
 ///
 /// # Errors
 ///
-/// - [`PaksmithError::Internal`] if `export_idx` does not point to a
-///   `Texture2DData` export.
-/// - [`PaksmithError::Internal`] if `mip_index` is out of range for the
-///   texture's serialized mip list.
-/// - [`PaksmithError::Internal`] if bulk data is empty (no serialized mip bytes).
+/// - [`PaksmithError::InvalidArgument`] if `export_idx` is out of range or does
+///   not point to a `Texture2DData` export, or if `mip_index` is out of range
+///   for the texture's serialized mip list. These signal caller misuse.
+/// - [`PaksmithError::UnsupportedFeature`] if the export carries no serialized
+///   mip bytes for `mip_index` (e.g. a texture with `bSerializeMipData = false`).
+///   [`classify_texture`] already screens these out, so a well-behaved GUI
+///   caller never hits this path.
 /// - Any decode error from the pixel-format decode layer
 ///   (`pixel_format::decode_mip`) or the virtual-texture flatten
 ///   (`flatten_virtual_texture`).
@@ -180,16 +193,18 @@ pub fn decode_texture_mip(
     let asset = package
         .payloads
         .get(export_idx)
-        .ok_or_else(|| PaksmithError::Internal {
-            context: format!(
-                "decode_texture_mip: export_idx {export_idx} out of range (payloads len {})",
+        .ok_or_else(|| PaksmithError::InvalidArgument {
+            arg: "export_idx",
+            reason: format!(
+                "out of range (payloads len {}); got {export_idx}",
                 package.payloads.len()
             ),
         })?;
 
     let Asset::Texture2D(data) = asset else {
-        return Err(PaksmithError::Internal {
-            context: format!("decode_texture_mip: export {export_idx} is not a Texture2D"),
+        return Err(PaksmithError::InvalidArgument {
+            arg: "export_idx",
+            reason: format!("export {export_idx} is not a Texture2D"),
         });
     };
 
@@ -206,19 +221,25 @@ pub fn decode_texture_mip(
     let mip_record = data
         .mips
         .get(mip_index)
-        .ok_or_else(|| PaksmithError::Internal {
-            context: format!(
-                "decode_texture_mip: mip_index {mip_index} out of range (mips len {})",
+        .ok_or_else(|| PaksmithError::InvalidArgument {
+            arg: "mip_index",
+            reason: format!(
+                "out of range (mips len {}); got {mip_index}",
                 data.mips.len()
             ),
         })?;
-    let bulk_record = bulk.get(mip_index).ok_or_else(|| PaksmithError::Internal {
-        context: format!(
-            "decode_texture_mip: mip_index {mip_index} out of range (bulk len {}; \
-             texture may have bSerializeMipData = false)",
-            bulk.len()
-        ),
-    })?;
+    // `mip_index` is in range for the mip list but the bulk records fall short:
+    // the mip bytes were not serialized (e.g. `bSerializeMipData = false`). This
+    // is a capability gap on well-formed input, not caller misuse.
+    let bulk_record = bulk
+        .get(mip_index)
+        .ok_or_else(|| PaksmithError::UnsupportedFeature {
+            context: format!(
+                "texture export {export_idx} has no serialized bytes for mip {mip_index} \
+                 (bulk len {}; the texture may have bSerializeMipData = false)",
+                bulk.len()
+            ),
+        })?;
 
     let format = PixelFormat::from_name(&data.pixel_format);
     let decoded = decode_mip(
@@ -345,6 +366,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn classify_texture_none_when_no_bulk_records() {
+        // A decodable texture whose bulk records were dropped models
+        // `bSerializeMipData = false`: the mip dimensions remain but no bytes
+        // are serialized. classify must reject it so the GUI never offers a
+        // Texture tab that would fail at decode time.
+        let fixture = build_minimal_with_decodable_texture2d();
+        let mut pkg = parse_pkg(&fixture.bytes);
+        let export_idx = classify_texture(&pkg)
+            .expect("fixture with bulk must classify before records are dropped")
+            .export_idx;
+
+        pkg.insert_bulk_records_for_test(export_idx, Vec::new())
+            .expect("dropping bulk records must succeed");
+
+        assert!(
+            classify_texture(&pkg).is_none(),
+            "a texture with mip dims but no serialized bulk bytes must yield None"
+        );
+    }
+
     // ── classify_texture: virtual-texture branch ─────────────────────────────
 
     /// A minimal `VirtualTextureData` whose layer-0 format is `layer0` and whose
@@ -430,37 +472,82 @@ mod tests {
     }
 
     #[test]
-    fn decode_texture_mip_out_of_range_is_err_not_panic() {
+    fn decode_texture_mip_out_of_range_is_invalid_argument() {
         let fixture = build_minimal_with_decodable_texture2d();
         let pkg = parse_pkg(&fixture.bytes);
 
         let info = classify_texture(&pkg).expect("must classify");
+        let err = decode_texture_mip(&pkg, info.export_idx, info.mips.len() + 99)
+            .expect_err("out-of-range mip_index must return Err");
         assert!(
-            decode_texture_mip(&pkg, info.export_idx, info.mips.len() + 99).is_err(),
-            "out-of-range mip_index must return Err"
+            matches!(
+                err,
+                PaksmithError::InvalidArgument {
+                    arg: "mip_index",
+                    ..
+                }
+            ),
+            "out-of-range mip_index is caller misuse → InvalidArgument(mip_index), got {err:?}"
         );
     }
 
     #[test]
-    fn decode_texture_mip_bad_export_idx_is_err() {
+    fn decode_texture_mip_bad_export_idx_is_invalid_argument() {
         let fixture = build_minimal_with_decodable_texture2d();
         let pkg = parse_pkg(&fixture.bytes);
 
+        let err =
+            decode_texture_mip(&pkg, 9999, 0).expect_err("out-of-range export_idx must return Err");
         assert!(
-            decode_texture_mip(&pkg, 9999, 0).is_err(),
-            "out-of-range export_idx must return Err"
+            matches!(
+                err,
+                PaksmithError::InvalidArgument {
+                    arg: "export_idx",
+                    ..
+                }
+            ),
+            "out-of-range export_idx is caller misuse → InvalidArgument(export_idx), got {err:?}"
         );
     }
 
     #[test]
-    fn decode_texture_mip_non_texture_export_is_err() {
+    fn decode_texture_mip_non_texture_export_is_invalid_argument() {
         // The Generic export lives at index 0 in the minimal packages.
         let fixture = build_minimal_with_decodable_texture2d();
         let pkg = parse_pkg(&fixture.bytes);
 
+        let err = decode_texture_mip(&pkg, 0, 0)
+            .expect_err("calling on a non-Texture2D export must return Err");
         assert!(
-            decode_texture_mip(&pkg, 0, 0).is_err(),
-            "calling on a non-Texture2D export must return Err"
+            matches!(
+                err,
+                PaksmithError::InvalidArgument {
+                    arg: "export_idx",
+                    ..
+                }
+            ),
+            "a non-Texture2D export is caller misuse → InvalidArgument(export_idx), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_texture_mip_no_bulk_records_is_unsupported_feature() {
+        // Simulate `bSerializeMipData = false`: a decodable texture whose mip
+        // dimensions are populated but whose bulk records were dropped. The empty
+        // insert removes the entry, so `resolve_bulk_for_export` returns an empty
+        // slice and the mip bytes can't be found.
+        let fixture = build_minimal_with_decodable_texture2d();
+        let mut pkg = parse_pkg(&fixture.bytes);
+        let export_idx = classify_texture(&pkg).expect("fixture has bulk").export_idx;
+
+        pkg.insert_bulk_records_for_test(export_idx, Vec::new())
+            .expect("dropping bulk records must succeed");
+
+        let err = decode_texture_mip(&pkg, export_idx, 0)
+            .expect_err("a texture with no serialized mip bytes must return Err");
+        assert!(
+            matches!(err, PaksmithError::UnsupportedFeature { .. }),
+            "missing serialized mip bytes is a capability gap → UnsupportedFeature, got {err:?}"
         );
     }
 
