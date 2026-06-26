@@ -170,6 +170,17 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
                 return None;
             }
 
+            // Every reported mip is decodable: `read_mip_records` gates the
+            // per-mip `FByteBulkData` push on the texture-level
+            // `serialize_mip_data` flag, so the bulk-record vector is either
+            // empty or exactly `data.mips.len()` (never a partial subset); the
+            // `has_bulk_records` check above already ruled out the empty case;
+            // and `resolve_bulk_for_export` is count-preserving (one `BulkData`
+            // per record, errors propagate rather than dropping entries). So
+            // `decode_texture_mip` can resolve every index in this list —
+            // truncating the list to the bulk-record count would be a no-op.
+            // The `bulk_data[idx].len() == data.mips.len()` invariant is pinned
+            // by `decodable_texture_has_one_bulk_record_per_mip`.
             let mips = data.mips.iter().map(|m| (m.size_x, m.size_y)).collect();
             Some(TextureInfo {
                 export_idx,
@@ -382,6 +393,35 @@ mod tests {
         assert!(
             matches!(pkg.payloads.get(info.export_idx), Some(Asset::Texture2D(_))),
             "export_idx must point at an Asset::Texture2D"
+        );
+    }
+
+    #[test]
+    fn decodable_texture_has_one_bulk_record_per_mip() {
+        // Invariant that `classify_texture` reports only decodable mips and that
+        // `decode_texture_mip` can resolve every reported index: a decodable
+        // standard texture registers exactly one bulk record per serialized mip.
+        // `read_mip_records` gates the per-mip bulk push on the texture-level
+        // `serialize_mip_data` flag (all-or-nothing), so the record vector is
+        // never a partial subset of `mips`. If a future parser change broke that,
+        // the mip picker would offer mips `decode_texture_mip` cannot decode —
+        // this pin fails first.
+        let fixture = build_minimal_with_decodable_texture2d();
+        let pkg = parse_pkg(&fixture.bytes);
+        let idx = classify_texture(&pkg).expect("must classify").export_idx;
+
+        let Asset::Texture2D(data) = &pkg.payloads[idx] else {
+            panic!("export_idx must point at a Texture2D");
+        };
+        let raw_record_count = pkg
+            .bulk_data
+            .get(&idx)
+            .map_or(0, |(records, _)| records.len());
+
+        assert_eq!(
+            raw_record_count,
+            data.mips.len(),
+            "a decodable texture must register exactly one bulk record per mip"
         );
     }
 
