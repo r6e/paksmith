@@ -41,8 +41,23 @@ pub struct Tab {
 
 /// Returns `true` iff `tab` holds a successfully parsed `Package` that
 /// contains at least one decodable texture export.
+///
+/// `texture_available` runs on every per-frame view render (see
+/// `panels/content.rs`), so it takes a fast path when the tab's decodable-mip
+/// cache (`tab.texture.mips`, populated by the `AssetLoaded` handler) is already
+/// non-empty — avoiding a per-frame [`classify_texture`] call, which allocates a
+/// `TextureInfo`. The cache cannot read stale-true: tabs are single-load-per-path
+/// (created with empty `mips`, loaded exactly once — `open_or_activate`
+/// re-activates an open path without reloading) and cleared on every archive
+/// swap, so `mips` is non-empty iff the current content is a decodable texture.
 #[must_use]
 pub fn texture_available(tab: &Tab) -> bool {
+    if !tab.texture.mips.is_empty() {
+        return true;
+    }
+    // Fallback: during the initial post-load promotion `pick_view_after_load`
+    // runs before the cache is populated, and non-texture / parse-Err tabs never
+    // populate it. Classify directly (returns `None` → `false` for both).
     if let TabContent::Ready {
         parsed: Ok(pkg), ..
     } = &tab.content
@@ -540,5 +555,26 @@ mod tests {
                 "texture_available must be false for a Loading tab"
             );
         }
+    }
+
+    #[test]
+    fn texture_available_fast_path_short_circuits_on_cached_mips() {
+        // A loaded decodable texture caches its mip list on the tab; the
+        // per-frame fast path returns `true` from that cache without
+        // re-classifying. Pin it on a tab whose content would otherwise
+        // classify `false` (non-texture): a `true` result proves the cached
+        // `mips` short-circuits the fallback `classify_texture` call.
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate("cached.uasset");
+        t.set_content("cached.uasset", ready_non_texture_content());
+        assert!(
+            !texture_available(&t.open[0]),
+            "precondition: non-texture content classifies false via the fallback"
+        );
+        t.open[0].texture.mips = vec![(64, 64)];
+        assert!(
+            texture_available(&t.open[0]),
+            "non-empty cached mips must short-circuit to true (fast path)"
+        );
     }
 }
