@@ -170,6 +170,11 @@ pub struct TextureState {
     pub export_idx: usize,
     /// Available mip dimensions `(width, height)` for the loaded texture, in
     /// highest-to-lowest resolution order.  Empty until a texture is loaded.
+    ///
+    /// Also serves as the per-frame "decodable texture loaded" signal for
+    /// [`texture_available`](crate::state::tabs::texture_available): non-empty
+    /// iff the tab's current content is a decodable texture. `Tabs::set_content`
+    /// resets this state on any content swap, keeping that equivalence coherent.
     pub mips: Vec<(u32, u32)>,
     /// Index into the decoded mip chain.
     pub selected_mip: usize,

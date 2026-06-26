@@ -46,10 +46,11 @@ pub struct Tab {
 /// `panels/content.rs`), so it takes a fast path when the tab's decodable-mip
 /// cache (`tab.texture.mips`, populated by the `AssetLoaded` handler) is already
 /// non-empty — avoiding a per-frame [`classify_texture`] call, which allocates a
-/// `TextureInfo`. The cache cannot read stale-true: tabs are single-load-per-path
-/// (created with empty `mips`, loaded exactly once — `open_or_activate`
-/// re-activates an open path without reloading) and cleared on every archive
-/// swap, so `mips` is non-empty iff the current content is a decodable texture.
+/// `TextureInfo`. The cache cannot read stale-true: `Tabs::set_content` resets
+/// `tab.texture` on every content swap (so the cache is invalidated at the
+/// mutation site), tabs are cleared on every archive swap, and `open_or_activate`
+/// re-activates an open path without reloading — so `mips` is non-empty iff the
+/// tab's current content is a decodable texture.
 #[must_use]
 pub fn texture_available(tab: &Tab) -> bool {
     if !tab.texture.mips.is_empty() {
@@ -130,6 +131,14 @@ impl Tabs {
     pub fn set_content(&mut self, path: &str, content: TabContent) {
         if let Some(t) = self.open.iter_mut().find(|t| t.path == path) {
             t.content = content;
+            // Invalidate the per-content texture cache at the mutation site so
+            // `texture_available`'s fast path (which reads `t.texture.mips` as a
+            // "decodable texture loaded" signal) can never observe state left
+            // over from the tab's previous content. The `AssetLoaded` handler
+            // repopulates it immediately after for a decodable texture, so this
+            // costs nothing in the normal flow while keeping the no-stale-true
+            // invariant self-enforcing for any future in-place reload (Phase 7c).
+            t.texture = texture_view::TextureState::default();
         }
     }
 
@@ -575,6 +584,32 @@ mod tests {
         assert!(
             texture_available(&t.open[0]),
             "non-empty cached mips must short-circuit to true (fast path)"
+        );
+    }
+
+    #[test]
+    fn set_content_resets_stale_texture_cache() {
+        // `set_content` invalidates the per-content texture cache so the
+        // `texture_available` fast path cannot read stale-true after a content
+        // swap (the Phase 7c in-place-reload hazard). Populate the cache, swap to
+        // non-texture content, and assert it is cleared and the tab no longer
+        // offers a Texture view.
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate("a.uasset");
+        t.open[0].texture.mips = vec![(64, 64)];
+        t.open[0].texture.selected_mip = 3;
+        t.set_content("a.uasset", ready_non_texture_content());
+        assert!(
+            t.open[0].texture.mips.is_empty(),
+            "set_content must reset the texture cache on content swap"
+        );
+        assert_eq!(
+            t.open[0].texture.selected_mip, 0,
+            "set_content must reset the full texture state, not just mips"
+        );
+        assert!(
+            !texture_available(&t.open[0]),
+            "after a swap to non-texture content the Texture tab must not be offered"
         );
     }
 }
