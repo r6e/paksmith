@@ -281,13 +281,17 @@ pub fn decode_texture_mip(
         })?;
 
     let format = PixelFormat::from_name(&data.pixel_format);
+    // Thread the export/mip identity into the decode context so a codec error
+    // (unsupported pixel format, size mismatch, over-cap dimensions) names which
+    // export and mip failed instead of the opaque "<texture mip>" placeholder —
+    // this is a public API, so its errors surface directly to callers.
     let decoded = decode_mip(
         &format,
         &bulk_record.bytes,
         mip_record.size_x,
         mip_record.size_y,
         is_normal_map,
-        "<texture mip>",
+        &format!("texture export {export_idx} mip {mip_index}"),
     )?;
     Ok(decoded_texture_to_rgba(decoded))
 }
@@ -351,7 +355,9 @@ pub(crate) fn has_enum(data: &Texture2DData, name: &str, variant: &str) -> bool 
 mod tests {
     use super::*;
     use crate::asset::package::Package;
-    use crate::testing::uasset::{build_minimal_ue4_27, build_minimal_with_decodable_texture2d};
+    use crate::testing::uasset::{
+        build_minimal_ue4_27, build_minimal_with_decodable_texture2d, build_minimal_with_texture2d,
+    };
 
     fn parse_pkg(bytes: &[u8]) -> Package {
         Package::read_from(bytes, None, None, "Game/Tex.uasset").expect("parse package")
@@ -660,6 +666,34 @@ mod tests {
         assert!(
             matches!(err, PaksmithError::UnsupportedFeature { .. }),
             "missing serialized mip bytes is a capability gap → UnsupportedFeature, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_texture_mip_decode_error_context_names_export_and_mip() {
+        // `build_minimal_with_texture2d` is a 64×64 PF_DXT5 whose single inline
+        // mip resolves to only 8 bytes (a deliberately fake mip, not a real
+        // 4096-byte DXT5 block), so the bulk-resolve and range guards pass and
+        // the failure lands in the decode layer (size mismatch). The error
+        // context must name the failing export and mip (C20) instead of the
+        // opaque "<texture mip>" placeholder, so a caller can tell which mip of
+        // which export the public `decode_texture_mip` rejected.
+        let fixture = build_minimal_with_texture2d();
+        let pkg = parse_pkg(&fixture.bytes);
+        let info = classify_texture(&pkg)
+            .expect("a 64×64 PF_DXT5 with a bulk record present must classify");
+
+        let err = decode_texture_mip(&pkg, info.export_idx, 0).expect_err(
+            "a 64×64 texture whose mip resolves to 8 bytes must fail the decode size check",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("texture export {}", info.export_idx)),
+            "decode error context must name the failing export; got: {msg}"
+        );
+        assert!(
+            msg.contains("mip 0"),
+            "decode error context must name the failing mip; got: {msg}"
         );
     }
 
