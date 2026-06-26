@@ -10,7 +10,7 @@ use crate::state::texture_view::DecodedMip;
 ///
 /// The CPU decode work runs off the UI thread via `iced::Task::perform`.
 /// The result is mapped into the GUI's [`DecodedMip`] type or a stringified
-/// error so the caller can store it directly on [`TextureState`].
+/// error so the caller can store it directly on [`crate::state::texture_view::TextureState`].
 // `async` is required by `iced::Task::perform` even though the body is sync.
 #[allow(clippy::unused_async, reason = "async required by iced Task::perform")]
 pub async fn decode(

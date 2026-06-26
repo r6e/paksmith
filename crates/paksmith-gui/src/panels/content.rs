@@ -1,9 +1,10 @@
 //! Content host panel — the right-hand pane when an archive is open.
 //!
-//! Renders the tab bar, a `Properties | Hex | Info` view-mode switcher, and
-//! the active tab's body: the type-aware property tree (`widgets/property_tree`),
-//! the virtualized hex view (`widgets/hex_view`), or the Info metadata view
-//! (implemented here).
+//! Renders the tab bar, a `Properties | Hex | Info | Texture` view-mode
+//! switcher, and the active tab's body: the type-aware property tree
+//! (`widgets/property_tree`), the virtualized hex view (`widgets/hex_view`),
+//! the Info metadata view (implemented here), or the texture inspector
+//! (`widgets/texture_viewer`).
 
 use std::collections::BTreeMap;
 
@@ -13,11 +14,11 @@ use iced::{Element, Length};
 use crate::app::{Message, accent_button};
 use crate::panels::detail::{compression_ratio, human_size, kv_row};
 use crate::state::archive::EntryMeta;
-use crate::state::tabs::{TabContent, Tabs, ViewMode};
+use crate::state::tabs::{TabContent, Tabs, ViewMode, texture_available};
 use crate::theme::tokens::{
     SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM,
 };
-use crate::widgets::{hex_view, property_tree, tab_bar};
+use crate::widgets::{hex_view, property_tree, tab_bar, texture_viewer};
 
 // ── public entry-point ────────────────────────────────────────────────────────
 
@@ -44,7 +45,8 @@ pub fn view<'a>(
     let body: Element<'_, Message> = match tabs.active_tab() {
         None => muted_text("No active tab"),
         Some(tab) => {
-            let switcher = view_mode_switcher(tab.view, accent);
+            let show_texture = texture_available(tab);
+            let switcher = view_mode_switcher(tab.view, accent, show_texture);
             let content = match &tab.content {
                 TabContent::Loading => muted_text("Loading\u{2026}"),
                 TabContent::Ready {
@@ -57,8 +59,7 @@ pub fn view<'a>(
                         ViewMode::Info => info_view(tab.path.as_str(), bytes, parsed, meta),
                         ViewMode::Properties => properties_view(parsed, &tab.expanded),
                         ViewMode::Hex => hex_view::view(bytes, *truncated, &tab.hex, accent),
-                        // Phase 7b Task 4 will wire the real texture widget here.
-                        ViewMode::Texture => muted_text("Texture viewer coming soon\u{2026}"),
+                        ViewMode::Texture => texture_viewer::view(&tab.texture, accent),
                     }
                 }
             };
@@ -81,12 +82,19 @@ pub fn view<'a>(
 // ── view-mode switcher ────────────────────────────────────────────────────────
 
 #[mutants::skip]
-fn view_mode_switcher(active: ViewMode, accent: iced::Color) -> Element<'static, Message> {
-    let modes = [
+fn view_mode_switcher(
+    active: ViewMode,
+    accent: iced::Color,
+    show_texture: bool,
+) -> Element<'static, Message> {
+    let mut modes: Vec<(ViewMode, &'static str)> = vec![
         (ViewMode::Properties, "Properties"),
         (ViewMode::Hex, "Hex"),
         (ViewMode::Info, "Info"),
     ];
+    if show_texture {
+        modes.push((ViewMode::Texture, "Texture"));
+    }
 
     let buttons: Vec<Element<'_, Message>> = modes
         .into_iter()

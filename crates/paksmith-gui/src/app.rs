@@ -203,6 +203,10 @@ pub enum Message {
     // Constructed by the texture viewer widget (Phase 7b Task 5).
     #[allow(dead_code)]
     TextureZoomOut,
+    /// Fit the texture to the available viewport in the active tab.
+    // Constructed by the texture viewer widget (Phase 7b UI/UX fix F3).
+    #[allow(dead_code)]
+    TextureFitToWindow,
     /// The user selected a different mip level in the active tab.
     // Constructed by the texture viewer widget (Phase 7b Task 5).
     #[allow(dead_code)]
@@ -580,12 +584,22 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::TextureZoomIn => {
             if let Some(tab) = app.tabs.active_tab_mut() {
                 tab.texture.zoom = crate::state::texture_view::zoom_in(tab.texture.zoom);
+                // Manual zoom disables fit-to-window.
+                tab.texture.fit_to_window = false;
             }
             Task::none()
         }
         Message::TextureZoomOut => {
             if let Some(tab) = app.tabs.active_tab_mut() {
                 tab.texture.zoom = crate::state::texture_view::zoom_out(tab.texture.zoom);
+                // Manual zoom disables fit-to-window.
+                tab.texture.fit_to_window = false;
+            }
+            Task::none()
+        }
+        Message::TextureFitToWindow => {
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                tab.texture.fit_to_window = true;
             }
             Task::none()
         }

@@ -199,6 +199,10 @@ pub struct TextureState {
     pub channels: ChannelSet,
     /// Current zoom factor (1.0 = 100 %).
     pub zoom: f32,
+    /// When `true`, the image area uses `fit_zoom` to scale the texture to fill
+    /// the available space.  Automatically reverts to `false` when the user
+    /// manually zooms in or out via the `+`/`−` buttons.
+    pub fit_to_window: bool,
     /// Pan offset (top-left corner of image in viewport space).
     pub pan: (f32, f32),
     /// Decoded pixel data for the currently displayed mip, if available.
@@ -215,6 +219,7 @@ impl Default for TextureState {
             selected_mip: 0,
             channels: ChannelSet::default(),
             zoom: 1.0,
+            fit_to_window: true,
             pan: (0.0, 0.0),
             decoded: None,
             error: None,
@@ -430,6 +435,12 @@ mod tests {
     #[allow(clippy::float_cmp)]
     fn texture_state_default_zoom_is_one() {
         assert_eq!(TextureState::default().zoom, 1.0);
+    }
+
+    // Extra: TextureState default has fit_to_window = true.
+    #[test]
+    fn texture_state_default_fit_to_window_is_true() {
+        assert!(TextureState::default().fit_to_window);
     }
 
     // Extra: toggle flips individual channels.
