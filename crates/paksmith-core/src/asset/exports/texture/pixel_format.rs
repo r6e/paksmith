@@ -109,6 +109,21 @@ const RGBA8_BYTES_PER_PIXEL: u64 = 4;
 pub(super) const MAX_DECODED_TEXTURE_BYTES: u64 =
     (MAX_TEXTURE_DIMENSION as u64) * (MAX_TEXTURE_DIMENSION as u64) * RGBA8_BYTES_PER_PIXEL;
 
+/// The RGBA8 byte size of decoding a `width × height` image, or `None` if that
+/// size overflows `u64` or exceeds the per-call cap [`MAX_DECODED_TEXTURE_BYTES`].
+///
+/// Single source of truth for "does an RGBA8 decode fit the cap": [`decode_mip`]
+/// enforces it before allocating, and `classify_texture` screens with it up
+/// front so the GUI never offers a Texture view whose decode the cap would
+/// reject. Keeping both callers on this one function prevents the two checks
+/// from drifting (a `<`/`<=` slip, or a dropped overflow guard).
+pub(super) fn decoded_rgba_bytes_within_cap(width: u32, height: u32) -> Option<u64> {
+    u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(RGBA8_BYTES_PER_PIXEL))
+        .filter(|&bytes| bytes <= MAX_DECODED_TEXTURE_BYTES)
+}
+
 /// A decoded texture mip: a tightly-packed row-major RGBA8 buffer plus its
 /// pixel dimensions. `rgba.len() == width * height * 4`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -316,22 +331,23 @@ pub(crate) fn decode_mip(
     };
 
     // RGBA8 output size = pixels × 4 (for every format — BC decodes to the same
-    // pixel count). Reject overflow / over-cap BEFORE allocating. (Dimensions
-    // reaching the texture reader are capped at MAX_TEXTURE_DIMENSION; this
-    // also guards a future/other caller passing arbitrary dimensions.)
+    // pixel count). Reject overflow / over-cap BEFORE allocating, via the shared
+    // `decoded_rgba_bytes_within_cap` predicate that `classify_texture` also uses
+    // so the two never disagree. (Dimensions reaching the texture reader are
+    // capped at MAX_TEXTURE_DIMENSION; this also guards a future/other caller
+    // passing arbitrary dimensions.)
     let pixels = u64::from(width).checked_mul(u64::from(height));
-    let decoded_bytes = pixels.and_then(|p| p.checked_mul(RGBA8_BYTES_PER_PIXEL));
-    let decoded_bytes = match decoded_bytes {
-        Some(bytes) if bytes <= MAX_DECODED_TEXTURE_BYTES => bytes,
-        other => {
-            return Err(fault(
-                asset_path,
-                AssetParseFault::DecodedTextureBytesExceeded {
-                    bytes: other.unwrap_or(u64::MAX),
-                    cap: MAX_DECODED_TEXTURE_BYTES,
-                },
-            ));
-        }
+    let Some(decoded_bytes) = decoded_rgba_bytes_within_cap(width, height) else {
+        // Report the attempted size (saturating on overflow) so the fault names
+        // how far past the cap the decode would have reached.
+        let attempted = pixels.and_then(|p| p.checked_mul(RGBA8_BYTES_PER_PIXEL));
+        return Err(fault(
+            asset_path,
+            AssetParseFault::DecodedTextureBytesExceeded {
+                bytes: attempted.unwrap_or(u64::MAX),
+                cap: MAX_DECODED_TEXTURE_BYTES,
+            },
+        ));
     };
 
     // Encoded size depends on the codec class. Both compute checked so an

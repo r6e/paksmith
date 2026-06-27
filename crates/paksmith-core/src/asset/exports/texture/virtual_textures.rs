@@ -442,7 +442,18 @@ impl VirtualTextureData {
     /// (attacker-controlled, uncapped) `num_mips`: no level beyond the data
     /// arrays could resolve a grid anyway (`tile_grid_for` returns `None`), so a
     /// huge `num_mips` can't drive a multi-billion-iteration scan.
-    fn min_level(&self) -> Option<usize> {
+    ///
+    /// `classify_texture` shares this as its virtual-texture decodability gate
+    /// (`Some` ⇒ at least one level's bitmap fits the cap, so `flatten` will not
+    /// fail the [`min_level`](Self::min_level) check). It is the deliberate
+    /// fidelity line between classify and decode: the flatten's *second*,
+    /// independent cap on total per-tile decode work (a small-bitmap / huge-border
+    /// grid) is NOT replicated here, so a pathological VT that passes `min_level`
+    /// but trips that cap still classifies as decodable and then fails the decode
+    /// cleanly (a bounded `UnsupportedFeature`, never an OOM). Mirroring that
+    /// rarely-hit second cap into classify would couple it to the flatten's tile
+    /// math for no safety gain.
+    pub(super) fn min_level(&self) -> Option<usize> {
         let data_levels = self
             .tile_offset_data
             .len()

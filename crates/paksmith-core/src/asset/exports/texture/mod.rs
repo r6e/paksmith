@@ -99,14 +99,25 @@ pub struct TextureInfo {
 /// export is present.
 ///
 /// "Decodable" means the pixel format has a registered decoder (or the virtual
-/// texture's layer-0 format does) **and** the export carries bulk records (mip
-/// bytes for a standard texture, chunk payloads for a virtual texture). A
-/// standard texture with `bSerializeMipData = false` keeps its mip dimensions
-/// but ships no bulk records, and a virtual texture with no chunks likewise has
-/// none; both are reported as non-decodable — there is nothing to decode. This
-/// function is **pure and allocation-cheap**:
-/// it checks only for the *presence* of bulk records (an O(1) map lookup) and
-/// never resolves them.
+/// texture's layer-0 format does), the export carries bulk records (mip bytes
+/// for a standard texture, chunk payloads for a virtual texture), **and** the
+/// decode fits the per-call RGBA8 cap (`MAX_DECODED_TEXTURE_BYTES`). A standard
+/// texture with `bSerializeMipData = false` keeps its mip dimensions but ships no
+/// bulk records, and a virtual texture with no chunks likewise has none; both are
+/// reported as non-decodable — there is nothing to decode.
+///
+/// The cap screen keeps classify in agreement with [`decode_texture_mip`]: both
+/// go through the one `pixel_format::decoded_rgba_bytes_within_cap` predicate
+/// (standard) / `VirtualTextureData::min_level` gate (virtual). For standard
+/// textures the screen is exact. For virtual textures it gates on the
+/// bitmap-area cap that drives the decode's allocation; the flatten's separate,
+/// rarely-hit cap on total per-tile decode work is not mirrored here, so a
+/// pathological VT (a tile border disproportionate to its tile size) can still
+/// pass classify and then fail the decode — but cleanly, with a bounded
+/// `UnsupportedFeature`, never an OOM. This function is **pure and does no I/O**
+/// — it never resolves bulk data. It is allocation-cheap: an `O(1)` bulk-presence
+/// map lookup, plus, for a virtual texture, a bounded grid scan (`min_level`)
+/// over the per-mip tile-offset arrays.
 ///
 /// The bulk-presence check relies on the typed-reader path having populated the
 /// package's bulk records, which is guaranteed for any `Package` built via the
@@ -147,6 +158,17 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
                 if !package.has_bulk_records(export_idx) {
                     return None;
                 }
+                // Decoding flattens the VT at the highest-resolution level whose
+                // RGBA8 bitmap fits the decode cap; if no level fits (`min_level`
+                // is `None`), `flatten` errors. Screen that up front with the
+                // shared `min_level` gate (a bounded, no-I/O grid scan) so the GUI
+                // never offers a Texture view for a VT whose decode the cap would
+                // reject. Note this reports `(vt.width, vt.height)` — the logical
+                // full-res size — as the single mip; the decode itself picks the
+                // fitting level, so a huge VT with a smaller fitting level is
+                // still decodable. (The level index itself is unused here — only
+                // its existence gates decodability.)
+                let _ = vt.min_level()?;
                 return Some(TextureInfo {
                     export_idx,
                     mips: vec![(vt.width, vt.height)],
@@ -167,6 +189,24 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
             // Such a texture is not decodable; reject it here (cheap, no I/O)
             // rather than letting `decode_texture_mip` fail later.
             if !package.has_bulk_records(export_idx) {
+                return None;
+            }
+
+            // Every reported mip index must decode within the cap. `decode_mip`
+            // rejects an over-cap mip with `DecodedTextureBytesExceeded`, and the
+            // GUI's mip picker indexes this list 1:1 into `data.mips`, so a single
+            // over-cap mip cannot be silently dropped without shifting the indices
+            // — reject the whole export instead, via the same
+            // `decoded_rgba_bytes_within_cap` predicate `decode_mip` enforces.
+            // (Reader-parsed mips are each ≤ MAX_TEXTURE_DIMENSION, so
+            // width·height·4 ≤ the cap and this never fires for a parsed asset; it
+            // guards hand-assembled or future uncapped inputs, keeping
+            // classify⟂decode agreement explicit.)
+            if !data
+                .mips
+                .iter()
+                .all(|m| pixel_format::decoded_rgba_bytes_within_cap(m.size_x, m.size_y).is_some())
+            {
                 return None;
             }
 
@@ -363,10 +403,22 @@ pub(crate) fn has_enum(data: &Texture2DData, name: &str, variant: &str) -> bool 
 #[cfg(all(test, feature = "__test_utils"))]
 mod tests {
     use super::*;
+    use crate::asset::exports::texture::virtual_textures::{TileOffsetData, VirtualTextureData};
     use crate::asset::package::Package;
     use crate::testing::uasset::{
         build_minimal_ue4_27, build_minimal_with_decodable_texture2d, build_minimal_with_texture2d,
     };
+
+    /// The sole `Texture2DData` payload of a fixture-built package, mutably.
+    fn sole_texture2d_mut(pkg: &mut Package) -> &mut Texture2DData {
+        pkg.payloads
+            .iter_mut()
+            .find_map(|a| match a {
+                Asset::Texture2D(d) => Some(d),
+                _ => None,
+            })
+            .expect("fixture must contain a Texture2D")
+    }
 
     fn parse_pkg(bytes: &[u8]) -> Package {
         Package::read_from(bytes, None, None, "Game/Tex.uasset").expect("parse package")
@@ -477,22 +529,94 @@ mod tests {
         );
     }
 
+    #[test]
+    fn classify_texture_standard_over_cap_mip_is_none() {
+        // A standard texture whose mip would decode past MAX_DECODED_TEXTURE_BYTES
+        // must not classify as decodable: `decode_mip` rejects it with
+        // DecodedTextureBytesExceeded, so offering a Texture view would strand the
+        // GUI on a guaranteed decode failure. Reader-parsed mips can't reach this
+        // (each dim ≤ MAX_TEXTURE_DIMENSION), so inject over-cap dims directly
+        // into a parsed fixture's payload. 20000×20000×4 ≈ 1.6 GiB > 1 GiB cap.
+        let fixture = build_minimal_with_decodable_texture2d();
+        let mut pkg = parse_pkg(&fixture.bytes);
+        sole_texture2d_mut(&mut pkg).mips = vec![mip_data(20_000, 20_000)];
+
+        assert!(
+            classify_texture(&pkg).is_none(),
+            "an over-cap standard mip must yield None"
+        );
+    }
+
+    #[test]
+    fn classify_texture_standard_mip_exactly_at_cap_is_some() {
+        // The cap is inclusive (`<=`): a mip whose decode is EXACTLY
+        // MAX_DECODED_TEXTURE_BYTES (16384×16384×4 == 1 GiB) must classify as
+        // decodable. This pins the boundary — a `<=` → `<` mutant in the shared
+        // `decoded_rgba_bytes_within_cap` predicate would wrongly reject it. (Pure
+        // classify check; nothing decodes, so no 1 GiB allocation occurs.)
+        let fixture = build_minimal_with_decodable_texture2d();
+        let mut pkg = parse_pkg(&fixture.bytes);
+        sole_texture2d_mut(&mut pkg).mips = vec![mip_data(16_384, 16_384)];
+
+        assert!(
+            classify_texture(&pkg).is_some(),
+            "a mip exactly at the cap must classify as Some"
+        );
+    }
+
     // ── classify_texture: virtual-texture branch ─────────────────────────────
 
-    /// A minimal `VirtualTextureData` whose layer-0 format is `layer0` and whose
-    /// full-resolution dimensions are 8×8.
-    fn vt_with_layer0(
-        layer0: &str,
-    ) -> crate::asset::exports::texture::virtual_textures::VirtualTextureData {
-        // Only the fields `classify_texture` reads are set explicitly (width,
-        // height, layer_types); the rest default. Setting an unread field (e.g.
-        // num_layers) would leave a struct-field-deletion mutant unkilled.
-        crate::asset::exports::texture::virtual_textures::VirtualTextureData {
+    /// A minimal decodable `VirtualTextureData` whose layer-0 format is `layer0`
+    /// and whose full-resolution dimensions are 8×8.
+    ///
+    /// Sets exactly the fields `classify_texture` reads: `width`/`height` (the
+    /// reported single mip) and `layer_types` (decodability), plus a one-level
+    /// tile grid (`num_mips`/`tile_size`/`tile_offset_data`) so that `min_level`
+    /// finds a cap-fitting level and the VT classifies as decodable — without it,
+    /// the (now `min_level`-gated) classifier would reject every fixture VT. Each
+    /// emitted field is pinned by `vt_with_layer0_helper_pins_fields` so the
+    /// struct-field-deletion mutant genus is killed (see MEMORY).
+    fn vt_with_layer0(layer0: &str) -> VirtualTextureData {
+        VirtualTextureData {
             width: 8,
             height: 8,
             layer_types: vec![layer0.to_string()],
+            num_mips: 1,
+            tile_size: 4,
+            tile_offset_data: vec![TileOffsetData {
+                width: 2,
+                height: 2,
+                max_address: 1,
+                addresses: vec![0],
+                offsets: vec![0],
+            }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn vt_with_layer0_helper_pins_fields() {
+        // Read every field the helper sets so a field-deletion mutant (value →
+        // Default) fails an assert; `min_level` only observes `tile_size` and the
+        // grid's `width`/`height`, so those need an explicit value check that
+        // their small magnitude (any positive value fits the cap) can't provide.
+        let vt = vt_with_layer0("PF_DXT1");
+        assert_eq!((vt.width, vt.height), (8, 8));
+        assert_eq!(vt.layer_types, vec!["PF_DXT1".to_string()]);
+        assert_eq!(vt.num_mips, 1);
+        assert_eq!(vt.tile_size, 4);
+        assert_eq!(vt.tile_offset_data.len(), 1);
+        let tod = &vt.tile_offset_data[0];
+        assert_eq!((tod.width, tod.height, tod.max_address), (2, 2, 1));
+        assert_eq!(
+            (tod.addresses.as_slice(), tod.offsets.as_slice()),
+            (&[0][..], &[0][..])
+        );
+        assert_eq!(
+            vt.min_level(),
+            Some(0),
+            "the helper grid must yield a cap-fitting level so the VT classifies as decodable"
+        );
     }
 
     /// Parse the decodable fixture, then promote its `Texture2D` payload to a
@@ -500,15 +624,7 @@ mod tests {
     fn pkg_with_virtual_texture(layer0: &str) -> Package {
         let fixture = build_minimal_with_decodable_texture2d();
         let mut pkg = parse_pkg(&fixture.bytes);
-        let tex = pkg
-            .payloads
-            .iter_mut()
-            .find_map(|a| match a {
-                Asset::Texture2D(d) => Some(d),
-                _ => None,
-            })
-            .expect("fixture must contain a Texture2D");
-        tex.virtual_texture = Some(Box::new(vt_with_layer0(layer0)));
+        sole_texture2d_mut(&mut pkg).virtual_texture = Some(Box::new(vt_with_layer0(layer0)));
         pkg
     }
 
@@ -555,6 +671,39 @@ mod tests {
         assert!(
             classify_texture(&pkg).is_none(),
             "a chunk-less virtual texture (no bulk records) must yield None"
+        );
+    }
+
+    #[test]
+    fn classify_texture_virtual_no_cap_fitting_level_is_none() {
+        // A VT whose every tile-grid level decodes past the cap has no fitting
+        // level (`min_level` is None), so `flatten` would error rather than
+        // allocate. classify must reject it via the shared `min_level` gate
+        // instead of offering an undecodable Texture view — the virtual-texture
+        // analogue of `classify_texture_standard_over_cap_mip_is_none`. A naive
+        // `vt.width × vt.height ≤ cap` check would instead WRONGLY reject a huge
+        // VT that decodes fine at a lower level, which is why the gate is
+        // `min_level`, not the logical dimensions.
+        let mut pkg = pkg_with_virtual_texture("PF_DXT1");
+        let vt = sole_texture2d_mut(&mut pkg)
+            .virtual_texture
+            .as_deref_mut()
+            .expect("pkg_with_virtual_texture promoted a VT");
+        // tile_size 256, one 50000×50000-tile level → bitmap ≫ 1 GiB at every
+        // level → `min_level` is None.
+        vt.num_mips = 1;
+        vt.tile_size = 256;
+        vt.tile_offset_data = vec![TileOffsetData {
+            width: 50_000,
+            height: 50_000,
+            max_address: 1,
+            addresses: vec![0],
+            offsets: vec![0],
+        }];
+
+        assert!(
+            classify_texture(&pkg).is_none(),
+            "a virtual texture with no cap-fitting level must yield None"
         );
     }
 
