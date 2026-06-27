@@ -208,7 +208,9 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
 /// - [`PaksmithError::InvalidArgument`] if `export_idx` is out of range or does
 ///   not point to a `Texture2DData` export, if `mip_index` is out of range for
 ///   a standard texture's serialized mip list, or if `mip_index != 0` for a
-///   virtual texture. These signal caller misuse.
+///   virtual texture. These signal caller misuse and are checked before any
+///   bulk I/O is attempted, so a misuse error is never masked by a
+///   bulk-resolution fault.
 /// - [`PaksmithError::UnsupportedFeature`] if the export carries no serialized
 ///   mip bytes for `mip_index` (e.g. a texture with `bSerializeMipData = false`).
 ///   [`classify_texture`] already screens these out, so a well-behaved GUI
@@ -240,7 +242,12 @@ pub fn decode_texture_mip(
     };
 
     let is_normal_map = has_enum(data, "CompressionSettings", "TC_Normalmap");
-    let bulk = package.resolve_bulk_for_export(export_idx)?;
+
+    // Validate `mip_index` BEFORE resolving bulk data. `resolve_bulk_for_export`
+    // can perform `.ubulk` I/O (and surface I/O faults), so caller misuse — a
+    // non-zero mip for a virtual texture, or an out-of-range standard mip — is
+    // rejected up front, cheaply and deterministically, never doing needless I/O
+    // nor letting a bulk-resolution error mask the intended `InvalidArgument`.
 
     // Virtual texture path: flatten layer 0. A VT exposes a single mip (index
     // 0), so reject any other index as caller misuse rather than silently
@@ -252,6 +259,7 @@ pub fn decode_texture_mip(
                 reason: format!("virtual textures expose a single mip (index 0); got {mip_index}"),
             });
         }
+        let bulk = package.resolve_bulk_for_export(export_idx)?;
         let decoded = flatten_virtual_texture(vt, bulk, is_normal_map)?;
         return Ok(decoded_texture_to_rgba(decoded));
     }
@@ -267,6 +275,7 @@ pub fn decode_texture_mip(
                 data.mips.len()
             ),
         })?;
+    let bulk = package.resolve_bulk_for_export(export_idx)?;
     // `mip_index` is in range for the mip list but the bulk records fall short:
     // the mip bytes were not serialized (e.g. `bSerializeMipData = false`). This
     // is a capability gap on well-formed input, not caller misuse.
@@ -666,6 +675,86 @@ mod tests {
         assert!(
             matches!(err, PaksmithError::UnsupportedFeature { .. }),
             "missing serialized mip bytes is a capability gap → UnsupportedFeature, got {err:?}"
+        );
+    }
+
+    /// A streaming-tier (`FLAG_PAYLOAD_IN_SEPARATE_FILE = 0x100`) bulk record
+    /// whose `.ubulk` companion the stub loaders can't find, so
+    /// `resolve_bulk_for_export` fails with `MissingCompanionFile`. Mirrors the
+    /// seam in `package.rs::resolve_bulk_for_export_propagates_per_record_error`.
+    fn failing_streaming_bulk_record() -> crate::asset::bulk_data::FByteBulkData {
+        crate::asset::bulk_data::FByteBulkData {
+            flags: crate::asset::bulk_data::BulkDataFlags::from(0x0000_0100u32),
+            element_count: 8,
+            size_on_disk: 8,
+            offset_in_file: 0,
+        }
+    }
+
+    /// Replace an export's bulk records with a single streaming record whose
+    /// `.ubulk` companion is missing, then assert resolution now fails — so a
+    /// passing ordering test genuinely distinguishes validate-before-resolve from
+    /// the old resolve-first order (failures aren't cached — see the sibling
+    /// `resolve_bulk_for_export_propagates_per_record_error`).
+    fn inject_failing_bulk_and_assert_unresolvable(pkg: &mut Package, export_idx: usize) {
+        pkg.insert_bulk_records_for_test(export_idx, vec![failing_streaming_bulk_record()])
+            .expect("injecting a streaming bulk record must succeed");
+        assert!(
+            pkg.resolve_bulk_for_export(export_idx).is_err(),
+            "precondition: the injected streaming record must make bulk resolution fail"
+        );
+    }
+
+    #[test]
+    fn decode_texture_mip_out_of_range_validated_before_bulk_resolution() {
+        // Ordering guard: `mip_index` is validated BEFORE bulk data is resolved,
+        // so caller misuse is rejected deterministically even when bulk
+        // resolution would fail (and do `.ubulk` I/O). Replace the texture's bulk
+        // records with one whose companion file is missing, then request an
+        // out-of-range mip: the result must be `InvalidArgument(mip_index)`, not
+        // the `MissingCompanionFile` fault the old resolve-bulk-first order
+        // surfaced.
+        let fixture = build_minimal_with_decodable_texture2d();
+        let mut pkg = parse_pkg(&fixture.bytes);
+        let info = classify_texture(&pkg).expect("must classify");
+        inject_failing_bulk_and_assert_unresolvable(&mut pkg, info.export_idx);
+
+        let err = decode_texture_mip(&pkg, info.export_idx, info.mips.len() + 99)
+            .expect_err("out-of-range mip_index must return Err even when bulk would fail");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidArgument {
+                    arg: "mip_index",
+                    ..
+                }
+            ),
+            "mip_index must be validated before bulk resolution → InvalidArgument(mip_index), \
+             got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_texture_mip_virtual_nonzero_validated_before_bulk_resolution() {
+        // Same ordering guard for the virtual-texture branch: a non-zero mip
+        // index is rejected before bulk resolution, so a failing `.ubulk` resolve
+        // cannot mask the `InvalidArgument(mip_index)`.
+        let mut pkg = pkg_with_virtual_texture("PF_DXT1");
+        let info = classify_texture(&pkg).expect("VT must classify");
+        inject_failing_bulk_and_assert_unresolvable(&mut pkg, info.export_idx);
+
+        let err = decode_texture_mip(&pkg, info.export_idx, 1)
+            .expect_err("non-zero VT mip_index must return Err even when bulk would fail");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidArgument {
+                    arg: "mip_index",
+                    ..
+                }
+            ),
+            "VT mip_index must be validated before bulk resolution → InvalidArgument(mip_index), \
+             got {err:?}"
         );
     }
 
