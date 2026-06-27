@@ -16,7 +16,7 @@
 - **No other new third-party dependencies.**
 - **No panics in core** — all fallible paths return `Result<T, PaksmithError>`.
 - **MSRV 1.88** — no let-chains, no `if let` match guards (plain `if EXPR` guards OK); use let-else / nested `if` + `#[allow(clippy::collapsible_if)]`.
-- **Pure `state/` (no `iced` imports) · thin `#[mutants::skip]` `widgets/` · async `task/`** — the Phase 7a discipline.
+- **Pure-logic `state/` (helpers iced-free; `TextureState` caches one iced `Handle`) · thin `#[mutants::skip]` `widgets/` · async `task/`** — the Phase 7a discipline.
 - **`archive_generation` fence** on every async result (drop if `generation != app.archive_generation`).
 - **Decoded RGBA is displayed as-is** (no gamma/sRGB re-encoding, no HDR tonemap controls — the decoder already tonemaps HDR to RGBA8).
 - Conventional commits; the standing adversarial review panel + **standing UI/UX reviewer** on the widget; `cargo mutants --in-diff <merge-base..HEAD> -p <pkg> --all-features` to **0 missed** before push; `cargo fmt`/`clippy --all-targets --all-features -D warnings`/`test`/`RUSTDOCFLAGS=-D warnings cargo doc`/`typos` all green before push.
@@ -29,7 +29,7 @@
 - `crates/paksmith-core/src/asset/mod.rs` or `lib.rs` — `pub use` the new types/functions at a discoverable path (`paksmith_core::asset::texture::*` or alongside `Texture2DData`).
 
 **GUI:**
-- `crates/paksmith-gui/src/state/texture_view.rs` — **new**, pure: `ChannelSet`, `mask_rgba`, zoom/fit/pan math, `TextureState`, `DecodedMip`.
+- `crates/paksmith-gui/src/state/texture_view.rs` — **new**: pure helpers (`ChannelSet`, `mask_rgba`, zoom/fit math, `DecodedMip`) + `TextureState`, which caches one iced `Handle` (its only iced dependency).
 - `crates/paksmith-gui/src/state/tabs.rs` — `ViewMode::Texture`; `Tab.texture: TextureState`; `pick_view_after_load` promotion; `texture_available`; `TabContent::Ready.parsed` `Box`→`Arc`.
 - `crates/paksmith-gui/src/state/mod.rs` — register `texture_view`.
 - `crates/paksmith-gui/src/task/texture.rs` — **new**, async decode → `DecodedMip`.
@@ -142,7 +142,7 @@ git commit -m "feat(core): public texture decode API (classify_texture + decode_
 - Test: in `texture_view.rs` `#[cfg(test)]`
 
 **Interfaces:**
-- Consumes: nothing iced; `paksmith_core::asset::DecodedTextureRgba` only for the `DecodedMip` newtype dimensions (store `width`/`height`/`rgba` directly — do **not** import iced here).
+- Consumes: `paksmith_core::asset::DecodedTextureRgba` for the `DecodedMip` newtype dimensions (store `width`/`height`/`rgba` directly). The pure helpers (`mask_rgba`, zoom/fit math) import no iced and stay fully unit-testable; the **one** iced dependency is a cached `iced::widget::image::Handle` field on `TextureState` — a per-frame GPU-upload-skip optimization added during implementation, built by a small `render_handle`/`recompute_render` pair.
 - Produces:
   - `pub struct ChannelSet { pub r: bool, pub g: bool, pub b: bool, pub a: bool }` with `Default` = all true, and `pub fn toggle(&mut self, ch: Channel)`, `pub enum Channel { R, G, B, A }`.
   - `pub fn mask_rgba(src: &[u8], channels: ChannelSet) -> Vec<u8>` — see semantics below.
@@ -221,7 +221,7 @@ fn clamp_pan_keeps_image_in_view() {
 }
 ```
 
-- [ ] **Step 5: Run → FAIL, implement, Run → PASS.** Keep all functions pure (no iced).
+- [ ] **Step 5: Run → FAIL, implement, Run → PASS.** Keep the logic helpers pure (no iced); the lone iced touch is the cached-`Handle` builder added later (`render_handle`/`recompute_render`).
 
 - [ ] **Step 6: Gate + commit**
 

@@ -43,8 +43,9 @@ paksmith-core/src/asset/exports/texture/
   (new public fns)       # classify_texture(...) + decode_texture_mip(...)
 
 paksmith-gui/src/
-  state/texture_view.rs  # PURE: zoom/fit/pan math, channel set, selected mip,
-                         #       mask_rgba(); no iced imports; fully unit-tested
+  state/texture_view.rs  # PURE math (zoom/fit, channel set, selected mip) +
+                         #       mask_rgba(), fully unit-tested. Caches one iced
+                         #       image Handle on TextureState (its only iced dep)
   widgets/texture_viewer.rs  # THIN #[mutants::skip]: image(Handle) + zoom/pan
                              #       container + R/G/B/A toggles + mip dropdown
   task/texture.rs        # async: resolve bulk + decode mip -> DecodedTexture
@@ -69,7 +70,7 @@ The exact factoring (free functions vs. methods, where `TextureInfo` lives) is a
 1. Tab opens → existing Phase 7a async load → parsed `Package` in `TabContent::Ready` (unchanged).
 2. On load, the GUI runs `classify_texture`. If `Some`, `pick_view_after_load` promotes the tab to `ViewMode::Texture` and the GUI dispatches an async decode of mip 0.
 3. The async task (`task/texture.rs`) holds the tab's `Arc<PakReader>` + `Package` and calls `decode_texture_mip(&package, export_idx, mip)` (which resolves the export's bulk records internally), then returns a `DecodedTextureRgba` (or a stringified error) via a `TextureDecoded { generation, mip, result }` message — guarded by the same `archive_generation` fence Phase 7a uses for stale async results.
-4. The tab's texture state stores the decoded RGBA for the current mip plus a cached channel-masked buffer. The widget builds `image(Handle::from_rgba(w, h, displayed))` where `displayed` is that cached buffer (the pure `mask_rgba` over the held RGBA — recomputed only when the decoded mip or channel set changes, never per-frame).
+4. The tab's texture state stores the decoded RGBA for the current mip plus a cached `iced::widget::image::Handle` built from the channel-masked buffer (`Handle::from_rgba(w, h, mask_rgba(rgba, channels))`). It is recomputed only when the decoded mip or channel set changes, never per-frame; the widget clones that cached handle each `view()`, so the mask, the buffer allocation, and the GPU upload happen once per state change. (Caching the `Handle` itself — not just the masked `Vec` — is the one iced type `TextureState` holds; the pure math/`mask_rgba` helpers stay iced-free.)
 5. **Channel toggle** → recompute `mask_rgba` on the held buffer → new `Handle`. No re-decode.
 6. **Mip select** → dispatch a fresh async decode for that mip index; on `TextureDecoded`, replace the held RGBA.
 
