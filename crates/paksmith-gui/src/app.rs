@@ -424,15 +424,18 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     parsed: load.parsed,
                 },
             );
-            app.tabs.pick_view_after_load(&path);
 
-            // If the loaded tab has a decodable texture, store its metadata and
-            // dispatch an async decode for mip 0.
+            // Classify the loaded asset and populate the per-tab decodable-mip
+            // cache (`tab.texture.mips`) BEFORE picking the view. Both
+            // `pick_view_after_load` and every later per-frame `texture_available`
+            // read that cache instead of re-classifying, so it must be set first
+            // — this is the single `classify_texture` call per load.
             //
             // Look up the tab by path (not active tab) — the user may have
             // switched tabs while this load was in flight; operating on the
             // path-keyed tab is always correct.
-            // Two-guard form: can't use let-chains on MSRV 1.88.
+            // Three-guard form: can't use let-chains on MSRV 1.88.
+            let mut decode_task = Task::none();
             #[allow(clippy::collapsible_if)]
             if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path) {
                 if let TabContent::Ready {
@@ -442,15 +445,19 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     if let Some(info) = paksmith_core::asset::classify_texture(arc.as_ref()) {
                         tab.texture.export_idx = info.export_idx;
                         tab.texture.mips = info.mips;
+                        // `set_content` above already reset the rest of the texture
+                        // state to defaults; restate the post-classify baseline here
+                        // so this block fully owns the cache it populates (decode of
+                        // mip 0 is dispatched below; `render` stays `None` until the
+                        // async `TextureDecoded` lands and rebuilds it).
                         tab.texture.selected_mip = 0;
                         tab.texture.decoded = None;
                         tab.texture.error = None;
-                        tab.texture.recompute_render();
                         // Extract Arc and path for the task closure.
                         let pkg = arc.clone();
                         let task_path = path.clone();
                         let export_idx = info.export_idx;
-                        return Task::perform(
+                        decode_task = Task::perform(
                             crate::task::texture::decode(pkg, export_idx, 0),
                             move |result| Message::TextureDecoded {
                                 path: task_path,
@@ -462,7 +469,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     }
                 }
             }
-            Task::none()
+            // INVARIANT: the decodable-mip cache was populated (or left empty for
+            // a non-texture) just above, so the view picker reads `mips` rather
+            // than re-classifying. This ordering is `pick_view_after_load`'s
+            // documented precondition — do not move it before the populate block.
+            app.tabs.pick_view_after_load(&path);
+            decode_task
         }
         Message::TabActivated(i) => {
             app.tabs.activate(i);
@@ -2126,6 +2138,157 @@ mod tests {
             !app.tabs.open[0].texture.mips.is_empty(),
             "a decodable-texture load must populate texture.mips on the path-keyed tab"
         );
+        // Ordering guard: the handler must populate the decodable-mip cache
+        // BEFORE `pick_view_after_load` reads it. If the two are reordered, the
+        // cache is empty when `pick_view` runs and the view stays Properties.
+        assert_eq!(
+            app.tabs.open[0].view,
+            crate::state::tabs::ViewMode::Texture,
+            "a decodable-texture load must promote the tab to Texture view"
+        );
+    }
+
+    #[test]
+    fn asset_loaded_non_texture_leaves_mips_empty_and_view_properties() {
+        use std::sync::Arc;
+        // A non-texture Ok load must classify as `None`: the decodable-mip cache
+        // stays empty and the view is not promoted. This pins the classify→None
+        // correctness now that `texture_available` no longer re-classifies.
+        let mut app = app_with_paths(&["Game/Foo.uasset"]);
+        let _ = app.tabs.open_or_activate("Game/Foo.uasset");
+        let mp = paksmith_core::testing::uasset::build_minimal_ue4_27();
+        let pkg =
+            paksmith_core::asset::Package::read_from(&mp.bytes, None, None, "Game/Foo.uasset")
+                .expect("fixture must parse");
+        let load = crate::task::asset::AssetLoad {
+            bytes: mp.bytes.clone(),
+            truncated: false,
+            parsed: Ok(Arc::new(pkg)),
+        };
+        let generation = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "Game/Foo.uasset".into(),
+                load: Box::new(load),
+                generation,
+            },
+        );
+        assert!(
+            app.tabs.open[0].texture.mips.is_empty(),
+            "a non-texture load must leave texture.mips empty"
+        );
+        assert_eq!(
+            app.tabs.open[0].view,
+            crate::state::tabs::ViewMode::Properties,
+            "a non-texture load must not promote the tab to Texture view"
+        );
+    }
+
+    #[test]
+    fn asset_loaded_non_texture_over_texture_clears_mip_cache() {
+        use std::sync::Arc;
+        // Integration guard for the no-stale-true invariant through the full
+        // `update` path: a texture load populates the decodable-mip cache, then a
+        // second `AssetLoaded` for the SAME path with non-texture content must
+        // clear it (via `set_content`'s reset). Pins the reset inside the handler
+        // context, not just the direct-`set_content` unit test. The view stays
+        // `Texture` here — `pick_view_after_load` only promotes from `Properties`,
+        // never demotes; auto-demote-on-reload is the deferred Phase 7c seam.
+        let mut app = app_with_paths(&["Game/Reload.uasset"]);
+        let _ = app.tabs.open_or_activate("Game/Reload.uasset");
+        let generation = app.archive_generation;
+
+        let tex = paksmith_core::testing::uasset::build_minimal_with_decodable_texture2d();
+        let tex_pkg =
+            paksmith_core::asset::Package::read_from(&tex.bytes, None, None, "Game/Reload.uasset")
+                .expect("texture fixture must parse");
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "Game/Reload.uasset".into(),
+                load: Box::new(crate::task::asset::AssetLoad {
+                    bytes: tex.bytes.clone(),
+                    truncated: false,
+                    parsed: Ok(Arc::new(tex_pkg)),
+                }),
+                generation,
+            },
+        );
+        assert!(
+            !app.tabs.open[0].texture.mips.is_empty(),
+            "precondition: the texture load must populate the mip cache"
+        );
+
+        let plain = paksmith_core::testing::uasset::build_minimal_ue4_27();
+        let plain_pkg = paksmith_core::asset::Package::read_from(
+            &plain.bytes,
+            None,
+            None,
+            "Game/Reload.uasset",
+        )
+        .expect("non-texture fixture must parse");
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "Game/Reload.uasset".into(),
+                load: Box::new(crate::task::asset::AssetLoad {
+                    bytes: plain.bytes.clone(),
+                    truncated: false,
+                    parsed: Ok(Arc::new(plain_pkg)),
+                }),
+                generation,
+            },
+        );
+        assert!(
+            app.tabs.open[0].texture.mips.is_empty(),
+            "reloading non-texture content over a texture must clear the mip cache"
+        );
+        // Pin the no-demote contract: `pick_view_after_load` only promotes from
+        // `Properties`, so a tab already in `Texture` view stays there even though
+        // the new content has no texture. Auto-demote-on-reload is the deferred
+        // Phase 7c seam; a future demotion path must not regress this silently.
+        assert_eq!(
+            app.tabs.open[0].view,
+            crate::state::tabs::ViewMode::Texture,
+            "reload must not auto-demote a tab already in Texture view (Phase 7c seam)"
+        );
+    }
+
+    #[test]
+    fn asset_loaded_after_tab_close_same_generation_is_noop() {
+        use std::sync::Arc;
+        // Race guard: the user opens a file, then closes the tab while the load is
+        // still in flight. The late `AssetLoaded` arrives with the SAME generation
+        // (no archive swap), so the generation fence does not drop it — instead the
+        // handler's path lookups must all no-op against the now-closed tab. Pins
+        // that the late load neither re-opens the tab nor panics.
+        let mut app = app_with_paths(&["Game/Gone.uasset"]);
+        let _ = app.tabs.open_or_activate("Game/Gone.uasset");
+        app.tabs.close(0);
+        assert!(app.tabs.open.is_empty(), "precondition: the tab is closed");
+
+        let mp = paksmith_core::testing::uasset::build_minimal_with_decodable_texture2d();
+        let pkg =
+            paksmith_core::asset::Package::read_from(&mp.bytes, None, None, "Game/Gone.uasset")
+                .expect("fixture must parse");
+        let generation = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "Game/Gone.uasset".into(),
+                load: Box::new(crate::task::asset::AssetLoad {
+                    bytes: mp.bytes.clone(),
+                    truncated: false,
+                    parsed: Ok(Arc::new(pkg)),
+                }),
+                generation,
+            },
+        );
+        assert!(
+            app.tabs.open.is_empty(),
+            "a late AssetLoaded for a closed tab must not re-open it"
+        );
     }
 
     #[tokio::test]
@@ -2207,6 +2370,11 @@ mod tests {
 
     /// Build an App whose active tab is in `TabContent::Ready` with a parsed
     /// texture `Package` (synthetic, from `__test_utils`).
+    ///
+    /// Note: this bypasses the `AssetLoaded` classify pipeline, so the tab's
+    /// `texture.mips` cache is empty and `texture_available` reads `false`. Tests
+    /// needing a populated cache (mip selection, render) must seed
+    /// `tab.texture.mips` directly.
     fn app_with_open_texture_tab() -> App {
         use crate::state::tabs::TabContent;
         use std::sync::Arc;
@@ -2305,6 +2473,37 @@ mod tests {
             app.tabs.active_tab().unwrap().texture.decoded.as_ref(),
             Some(&mip),
             "a current-generation decode must populate texture.decoded"
+        );
+    }
+
+    #[test]
+    fn texture_decoded_after_tab_close_same_generation_is_noop() {
+        use crate::state::texture_view::DecodedMip;
+        // Race guard mirroring `asset_loaded_after_tab_close_same_generation_is_noop`:
+        // a decode finishes after its tab was closed. The result carries the SAME
+        // generation (no archive swap), so the fence does not drop it — the
+        // handler's path lookup must no-op against the closed tab. Pins no re-open
+        // and no panic.
+        let mut app = app_with_open_texture_tab();
+        app.tabs.close(0);
+        assert!(app.tabs.open.is_empty(), "precondition: the tab is closed");
+        let generation = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::TextureDecoded {
+                path: "Game/T_Rock.uasset".into(),
+                mip: 0,
+                result: Ok(DecodedMip {
+                    width: 4,
+                    height: 4,
+                    rgba: vec![255u8; 64],
+                }),
+                generation,
+            },
+        );
+        assert!(
+            app.tabs.open.is_empty(),
+            "a late TextureDecoded for a closed tab must not re-open it"
         );
     }
 
