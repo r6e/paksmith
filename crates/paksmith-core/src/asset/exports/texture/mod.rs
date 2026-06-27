@@ -110,11 +110,12 @@ pub struct TextureInfo {
 /// go through the one `pixel_format::decoded_rgba_bytes_within_cap` predicate
 /// (standard) / `VirtualTextureData::min_level` gate (virtual). For standard
 /// textures the screen is exact. For virtual textures it gates on the
-/// bitmap-area cap that drives the decode's allocation; the flatten's separate,
-/// rarely-hit cap on total per-tile decode work is not mirrored here, so a
-/// pathological VT (a tile border disproportionate to its tile size) can still
-/// pass classify and then fail the decode — but cleanly, with a bounded
-/// `UnsupportedFeature`, never an OOM. This function is **pure and does no I/O**
+/// bitmap-area cap that drives the decode's allocation; the flatten's further
+/// per-tile sizing checks (bounding total tile-decode work, and rejecting a
+/// per-tile encoded size that overflows) are not mirrored here, so a
+/// pathological VT — a tile border wildly disproportionate to its tile size —
+/// can still pass classify and then fail the decode, but always cleanly: a
+/// bounded `UnsupportedFeature`, never an OOM. This function is **pure and does no I/O**
 /// — it never resolves bulk data. It is allocation-cheap: an `O(1)` bulk-presence
 /// map lookup, plus, for a virtual texture, a bounded grid scan (`min_level`)
 /// over the per-mip tile-offset arrays.
@@ -127,9 +128,18 @@ pub struct TextureInfo {
 /// # Return value
 ///
 /// `Some(info)` where `info.export_idx` is the index of the texture in
-/// `package.payloads`, `info.mips` lists each serialized mip's `(width, height)`
-/// (one entry for virtual textures), and `info.format_label` is the pixel-format
-/// string. Returns `None` if no matching export is found.
+/// `package.payloads` and `info.format_label` is the pixel-format string.
+/// `info.mips` lists each decodable mip's `(width, height)`:
+///
+/// - Standard textures: one entry per serialized mip, in the order
+///   [`decode_texture_mip`] indexes them.
+/// - Virtual textures: a single entry holding the *flattened* bitmap
+///   dimensions the decode produces — the highest-resolution mip level whose
+///   RGBA8 image fits the decode cap (`grid_tiles × tile_size`), which can be
+///   smaller than the logical `(vt.width, vt.height)`. Legacy (UE4) VTs and
+///   VTs with no cap-fitting level are not decodable and yield `None`.
+///
+/// Returns `None` if no matching (decodable) texture export is found.
 pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
     package
         .payloads
@@ -158,20 +168,24 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
                 if !package.has_bulk_records(export_idx) {
                     return None;
                 }
-                // Decoding flattens the VT at the highest-resolution level whose
-                // RGBA8 bitmap fits the decode cap; if no level fits (`min_level`
-                // is `None`), `flatten` errors. Screen that up front with the
-                // shared `min_level` gate (a bounded, no-I/O grid scan) so the GUI
-                // never offers a Texture view for a VT whose decode the cap would
-                // reject. Note this reports `(vt.width, vt.height)` — the logical
-                // full-res size — as the single mip; the decode itself picks the
-                // fitting level, so a huge VT with a smaller fitting level is
-                // still decodable. (The level index itself is unused here — only
-                // its existence gates decodability.)
-                let _ = vt.min_level()?;
+                // `flatten_geometry` is the *same* helper the decode uses to size
+                // its output bitmap: it rejects (via `.ok()? → None`) every VT the
+                // flatten would reject before producing pixels — legacy (UE4) data
+                // (which `flatten` deterministically refuses), a zero tile size, or
+                // no cap-fitting `min_level` — and otherwise yields the exact
+                // `(width, height)` the decode emits: the flattened bitmap of the
+                // highest-resolution level whose RGBA8 image fits the decode cap
+                // (`grid_tiles × tile_size`), NOT the logical `(vt.width,
+                // vt.height)`. Reporting those bitmap dims keeps the GUI's
+                // advertised size in lock-step with the decoded image. (Residual:
+                // `flatten`'s further per-tile sizing checks — the decode-work cap
+                // and the encoded-size-overflow guard, both keyed on an extreme
+                // tile border — are not mirrored here, so a pathological VT can
+                // still fail the decode cleanly, never an OOM. See `min_level`.)
+                let geom = vt.flatten_geometry().ok()?;
                 return Some(TextureInfo {
                     export_idx,
-                    mips: vec![(vt.width, vt.height)],
+                    mips: vec![(geom.bitmap_w, geom.bitmap_h)],
                     format_label: layer0.to_string(),
                     is_normal_map,
                 });
@@ -238,10 +252,13 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
 /// `mip_index` to an RGBA8 [`DecodedTextureRgba`].
 ///
 /// Virtual textures expose a single mip (the one entry reported by
-/// [`classify_texture`]) and are always flattened at full resolution, so
-/// `mip_index` must be `0`; any other index is rejected as caller misuse
-/// rather than silently ignored, keeping the bounds contract consistent with
-/// the standard-texture path.
+/// [`classify_texture`]) and are flattened at the highest-resolution mip level
+/// whose RGBA8 bitmap fits the decode cap — which may be coarser than full
+/// resolution — so `mip_index` must be `0`; any other index is rejected as
+/// caller misuse rather than silently ignored, keeping the bounds contract
+/// consistent with the standard-texture path. The decoded dimensions are those
+/// [`classify_texture`] reported in `info.mips[0]` (the flattened bitmap size),
+/// not the logical `(vt.width, vt.height)`.
 ///
 /// # Errors
 ///
@@ -578,8 +595,14 @@ mod tests {
     /// struct-field-deletion mutant genus is killed (see MEMORY).
     fn vt_with_layer0(layer0: &str) -> VirtualTextureData {
         VirtualTextureData {
-            width: 8,
-            height: 8,
+            // Logical full-res (16×16) deliberately differs from the flattened
+            // min_level bitmap (grid 2×2 tiles × tile_size 4 = 8×8) so a dims test
+            // that asserts the bitmap size fails against any code that reports the
+            // logical `(width, height)` instead. (For a UE5.0+ VT `width`/`height`
+            // drive only the legacy `width_in_tiles` path, unused here, so a value
+            // independent of the grid is well-formed.)
+            width: 16,
+            height: 16,
             layer_types: vec![layer0.to_string()],
             num_mips: 1,
             tile_size: 4,
@@ -601,7 +624,7 @@ mod tests {
         // grid's `width`/`height`, so those need an explicit value check that
         // their small magnitude (any positive value fits the cap) can't provide.
         let vt = vt_with_layer0("PF_DXT1");
-        assert_eq!((vt.width, vt.height), (8, 8));
+        assert_eq!((vt.width, vt.height), (16, 16));
         assert_eq!(vt.layer_types, vec!["PF_DXT1".to_string()]);
         assert_eq!(vt.num_mips, 1);
         assert_eq!(vt.tile_size, 4);
@@ -633,10 +656,14 @@ mod tests {
         let pkg = pkg_with_virtual_texture("PF_DXT1");
         let info =
             classify_texture(&pkg).expect("a VT with a decodable layer-0 must classify as Some");
+        // The fixture's logical dims are 16×16 but the flattened min_level bitmap
+        // is grid(2×2) × tile_size(4) = 8×8; classify must report the *bitmap*
+        // dims the decode produces, NOT the logical `(vt.width, vt.height)`. This
+        // fails against the prior `vec![(vt.width, vt.height)]` behavior.
         assert_eq!(
             info.mips,
             vec![(8, 8)],
-            "a virtual texture reports its full-resolution dims as the single mip"
+            "a virtual texture reports its flattened min_level bitmap dims as the single mip"
         );
         assert_eq!(info.format_label, "PF_DXT1");
     }
@@ -704,6 +731,30 @@ mod tests {
         assert!(
             classify_texture(&pkg).is_none(),
             "a virtual texture with no cap-fitting level must yield None"
+        );
+    }
+
+    #[test]
+    fn classify_texture_legacy_virtual_is_none() {
+        // `flatten_virtual_texture` deterministically rejects legacy (UE4) VTs
+        // (they are not yet renderable). classify must not offer a Texture view
+        // for one — otherwise the GUI promotes a tab whose decode always fails.
+        // A non-empty `tile_offset_in_chunk` marks the VT as legacy
+        // (`is_legacy_data`), which `flatten_geometry` refuses up front.
+        let mut pkg = pkg_with_virtual_texture("PF_DXT1");
+        assert!(
+            classify_texture(&pkg).is_some(),
+            "the UE5.0+ fixture VT must classify before being made legacy"
+        );
+        sole_texture2d_mut(&mut pkg)
+            .virtual_texture
+            .as_deref_mut()
+            .expect("pkg_with_virtual_texture promoted a VT")
+            .tile_offset_in_chunk = vec![0];
+
+        assert!(
+            classify_texture(&pkg).is_none(),
+            "a legacy (UE4) virtual texture must yield None — its decode always fails"
         );
     }
 

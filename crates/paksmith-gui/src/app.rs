@@ -552,13 +552,26 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             if generation != app.archive_generation {
                 return Task::none();
             }
-            // Find the tab by path, then write the result if the selected mip
-            // still matches — a stale mip result (user switched mips faster than
-            // the decode completed) is silently discarded.
+            // Find the tab by path, then write the result only if it still
+            // applies. Two guards:
+            //   * `mip < mips.len()` — the tab's content must still be the texture
+            //     this decode was dispatched for. `set_content` resets `texture`
+            //     to default (`mips` empty, `selected_mip` 0) on a content swap,
+            //     so an in-flight mip-0 decode landing after a reset/demotion would
+            //     otherwise pass the `selected_mip == mip` check (both 0) and write
+            //     onto a non-texture tab. An empty `mips` fails `mip < 0`. Mirrors
+            //     the same bound the `TextureMipSelected` dispatch applies.
+            //   * `selected_mip == mip` — drop a stale mip result (user switched
+            //     mips faster than the decode completed).
+            // This closes the content-reset race reachable in 7b. A same-path
+            // texture→texture in-place reload (both tabs non-empty, both mip 0)
+            // is NOT distinguished here; that path doesn't exist until the Phase
+            // 7c in-place reload, which will add a per-tab content generation
+            // counter (mirroring `archive_generation`) as its fence.
             // Two-guard form: can't use let-chains on MSRV 1.88.
             #[allow(clippy::collapsible_if)]
             if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path) {
-                if tab.texture.selected_mip == mip {
+                if mip < tab.texture.mips.len() && tab.texture.selected_mip == mip {
                     match result {
                         Ok(decoded) => {
                             tab.texture.decoded = Some(decoded);
@@ -2371,10 +2384,12 @@ mod tests {
     /// Build an App whose active tab is in `TabContent::Ready` with a parsed
     /// texture `Package` (synthetic, from `__test_utils`).
     ///
-    /// Note: this bypasses the `AssetLoaded` classify pipeline, so the tab's
-    /// `texture.mips` cache is empty and `texture_available` reads `false`. Tests
-    /// needing a populated cache (mip selection, render) must seed
-    /// `tab.texture.mips` directly.
+    /// Mirrors the `AssetLoaded` handler's postcondition: it classifies the
+    /// package and populates `tab.texture.mips` from `classify_texture`, so
+    /// `texture_available` reads `true` and a mip-0 decode passes the
+    /// `mip < mips.len()` guard. Tests needing a specific mip configuration
+    /// (e.g. multi-mip selection) may still seed `tab.texture.mips` directly to
+    /// override the single-mip fixture default.
     fn app_with_open_texture_tab() -> App {
         use crate::state::tabs::TabContent;
         use std::sync::Arc;
@@ -2382,6 +2397,10 @@ mod tests {
         let pkg =
             paksmith_core::asset::Package::read_from(&mp.bytes, None, None, "Game/T_Rock.uasset")
                 .expect("build_minimal_with_decodable_texture2d must parse");
+        // Classify before moving `pkg` into the Arc so the helper can populate
+        // the decodable-mip cache exactly as the `AssetLoaded` handler does.
+        let info = paksmith_core::asset::classify_texture(&pkg)
+            .expect("the fixture texture must classify as decodable");
         let mut app = App::default();
         let _ = app.tabs.open_or_activate("Game/T_Rock.uasset");
         app.tabs.set_content(
@@ -2392,6 +2411,20 @@ mod tests {
                 parsed: Ok(Arc::new(pkg)),
             },
         );
+        // Mirror the `AssetLoaded` handler: `set_content` reset `texture` to
+        // default (empty `mips`), so restate the post-classify cache here. Without
+        // this the tab would be a texture tab with an empty mip list — an
+        // unrealistic state in which `texture_available` is false and a mip-0
+        // decode would be dropped by the `mip < mips.len()` guard.
+        if let Some(tab) = app
+            .tabs
+            .open
+            .iter_mut()
+            .find(|t| t.path == "Game/T_Rock.uasset")
+        {
+            tab.texture.export_idx = info.export_idx;
+            tab.texture.mips = info.mips;
+        }
         app
     }
 
@@ -2424,6 +2457,11 @@ mod tests {
     fn texture_decoded_stale_mip_is_dropped() {
         use crate::state::texture_view::DecodedMip;
         let mut app = app_with_open_texture_tab();
+        // Give the tab ≥2 mips so the delivered mip 1 is *in-bounds*: this test
+        // pins the stale-mip guard (`selected_mip == mip`), not the bounds guard
+        // (`mip < mips.len()`), which would otherwise drop mip 1 for the wrong
+        // reason on a single-mip fixture.
+        app.tabs.active_tab_mut().unwrap().texture.mips = vec![(4, 4), (2, 2)];
         // selected_mip defaults to 0; deliver a current-generation decode for mip 1.
         assert_eq!(
             app.tabs.active_tab().unwrap().texture.selected_mip,
@@ -2504,6 +2542,46 @@ mod tests {
         assert!(
             app.tabs.open.is_empty(),
             "a late TextureDecoded for a closed tab must not re-open it"
+        );
+    }
+
+    #[test]
+    fn texture_decoded_after_content_reset_is_dropped() {
+        use crate::state::texture_view::DecodedMip;
+        // A mip-0 decode is dispatched, then the tab's content is swapped/reset
+        // (e.g. an in-place reload) before it lands. `set_content` resets the
+        // texture cache to default (`mips` empty, `selected_mip` 0), so the
+        // arriving result still satisfies `selected_mip == mip` (both 0) — only
+        // the `mip < mips.len()` bound (0 < 0 is false) stops it from being
+        // written onto the now-non-texture tab. Same archive generation, so the
+        // generation fence does NOT cover this; the bound guard is what does.
+        let mut app = app_with_open_texture_tab();
+        let generation = app.archive_generation;
+        // Reset the tab's content in place (mirrors a reload): texture → default.
+        app.tabs.set_content(
+            "Game/T_Rock.uasset",
+            crate::state::tabs::TabContent::Loading,
+        );
+        assert!(
+            app.tabs.active_tab().unwrap().texture.mips.is_empty(),
+            "precondition: set_content reset the mip cache to empty"
+        );
+        let _ = update(
+            &mut app,
+            Message::TextureDecoded {
+                path: "Game/T_Rock.uasset".into(),
+                mip: 0,
+                result: Ok(DecodedMip {
+                    width: 4,
+                    height: 4,
+                    rgba: vec![255u8; 64],
+                }),
+                generation,
+            },
+        );
+        assert!(
+            app.tabs.active_tab().unwrap().texture.decoded.is_none(),
+            "a decode landing after a content reset must not write onto the reset tab"
         );
     }
 
