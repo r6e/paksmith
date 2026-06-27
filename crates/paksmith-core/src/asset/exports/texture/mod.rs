@@ -892,17 +892,18 @@ mod tests {
     }
 
     /// Replace an export's bulk records with a single streaming record whose
-    /// `.ubulk` companion is missing, then assert resolution now fails — so a
-    /// passing ordering test genuinely distinguishes validate-before-resolve from
-    /// the old resolve-first order (failures aren't cached — see the sibling
-    /// `resolve_bulk_for_export_propagates_per_record_error`).
-    fn inject_failing_bulk_and_assert_unresolvable(pkg: &mut Package, export_idx: usize) {
+    /// `.ubulk` companion is missing, so that bulk resolution now fails. Each
+    /// caller asserts that precondition *inline* in its own body rather than via
+    /// a wrapper: the only effect of this helper is the `pkg` mutation, which is
+    /// invisible to a caller that just reads `decode_texture_mip`'s error — so an
+    /// all-in-one inject-and-assert helper (or any second assert-only helper)
+    /// could be `cargo-mutants`-replaced with `()` and survive. The inline assert
+    /// observes the injection and kills that mutant (see the test-helper-mutation
+    /// note in MEMORY); failures aren't cached, see the sibling
+    /// `resolve_bulk_for_export_propagates_per_record_error`.
+    fn inject_failing_bulk(pkg: &mut Package, export_idx: usize) {
         pkg.insert_bulk_records_for_test(export_idx, vec![failing_streaming_bulk_record()])
             .expect("injecting a streaming bulk record must succeed");
-        assert!(
-            pkg.resolve_bulk_for_export(export_idx).is_err(),
-            "precondition: the injected streaming record must make bulk resolution fail"
-        );
     }
 
     #[test]
@@ -917,7 +918,14 @@ mod tests {
         let fixture = build_minimal_with_decodable_texture2d();
         let mut pkg = parse_pkg(&fixture.bytes);
         let info = classify_texture(&pkg).expect("must classify");
-        inject_failing_bulk_and_assert_unresolvable(&mut pkg, info.export_idx);
+        inject_failing_bulk(&mut pkg, info.export_idx);
+        // Inline precondition (NOT in a helper — see `inject_failing_bulk`): the
+        // injected record must make resolution fail, else this ordering test is
+        // vacuous (the assert below would pass even under resolve-first order).
+        assert!(
+            pkg.resolve_bulk_for_export(info.export_idx).is_err(),
+            "precondition: the injected streaming record must make bulk resolution fail"
+        );
 
         let err = decode_texture_mip(&pkg, info.export_idx, info.mips.len() + 99)
             .expect_err("out-of-range mip_index must return Err even when bulk would fail");
@@ -941,7 +949,14 @@ mod tests {
         // cannot mask the `InvalidArgument(mip_index)`.
         let mut pkg = pkg_with_virtual_texture("PF_DXT1");
         let info = classify_texture(&pkg).expect("VT must classify");
-        inject_failing_bulk_and_assert_unresolvable(&mut pkg, info.export_idx);
+        inject_failing_bulk(&mut pkg, info.export_idx);
+        // Inline precondition (NOT in a helper — see `inject_failing_bulk`): the
+        // injected record must make resolution fail, else this ordering test is
+        // vacuous (the assert below would pass even under resolve-first order).
+        assert!(
+            pkg.resolve_bulk_for_export(info.export_idx).is_err(),
+            "precondition: the injected streaming record must make bulk resolution fail"
+        );
 
         let err = decode_texture_mip(&pkg, info.export_idx, 1)
             .expect_err("non-zero VT mip_index must return Err even when bulk would fail");
