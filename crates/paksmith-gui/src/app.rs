@@ -2415,16 +2415,15 @@ mod tests {
         // default (empty `mips`), so restate the post-classify cache here. Without
         // this the tab would be a texture tab with an empty mip list — an
         // unrealistic state in which `texture_available` is false and a mip-0
-        // decode would be dropped by the `mip < mips.len()` guard.
-        if let Some(tab) = app
+        // decode would be dropped by the `mip < mips.len()` guard. The just-opened
+        // path is the active tab (`open_or_activate` activated it; `set_content`
+        // does not change `active`).
+        let tab = app
             .tabs
-            .open
-            .iter_mut()
-            .find(|t| t.path == "Game/T_Rock.uasset")
-        {
-            tab.texture.export_idx = info.export_idx;
-            tab.texture.mips = info.mips;
-        }
+            .active_tab_mut()
+            .expect("the just-opened texture tab must be active");
+        tab.texture.export_idx = info.export_idx;
+        tab.texture.mips = info.mips;
         app
     }
 
