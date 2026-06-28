@@ -4,9 +4,9 @@
 use std::time::Duration;
 
 /// Auto-dismiss delay for a success toast.
-pub const SUCCESS_TTL: Duration = Duration::from_secs(4);
+const SUCCESS_TTL: Duration = Duration::from_secs(4);
 /// Auto-dismiss delay for an error toast — longer, so failures can be read.
-pub const ERROR_TTL: Duration = Duration::from_secs(8);
+const ERROR_TTL: Duration = Duration::from_secs(8);
 
 /// Toast severity — drives tint and auto-dismiss duration. No `Info`: no
 /// agreed trigger produces one (see the Phase 7c design spec).

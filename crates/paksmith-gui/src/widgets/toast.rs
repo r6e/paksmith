@@ -29,13 +29,13 @@ pub fn overlay(toasts: &Toasts) -> Element<'_, Message> {
 }
 
 #[mutants::skip]
-fn card(id: u64, severity: Severity, message: &str) -> Element<'static, Message> {
+fn card(id: u64, severity: Severity, message: &str) -> Element<'_, Message> {
     let dismiss = button(text("\u{00d7}").size(f32::from(TEXT_SM)))
         .padding([0.0, SPACE_SM])
         .style(iced::widget::button::text)
         .on_press(Message::ToastDismissed(id));
 
-    let body = row![text(message.to_owned()).size(f32::from(TEXT_SM)), dismiss]
+    let body = row![text(message).size(f32::from(TEXT_SM)), dismiss]
         .spacing(SPACE_SM)
         .align_y(iced::Alignment::Center);
 
