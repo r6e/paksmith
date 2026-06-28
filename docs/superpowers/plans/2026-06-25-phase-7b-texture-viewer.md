@@ -4,9 +4,9 @@
 
 **Goal:** Add a fourth in-tab view mode, `Texture`, that decodes a `UTexture2D` (standard or virtual) to RGBA8 and displays it with zoom/pan, R/G/B/A channel isolation, and a mip-level selector — using iced's CPU `image` widget, no wgpu.
 
-**Architecture:** One public core decode API (a cheap `classify_texture` + a `decode_texture_mip` returning `{width, height, rgba}`, reusing the existing `pub(crate)` `decode_mip` / `flatten_virtual_texture` / `DecodedTexture` internals). GUI side mirrors the Phase 7a split: pure `state/texture_view.rs` (zoom/fit/pan math, channel masking, selected mip) + thin `#[mutants::skip]` `widgets/texture_viewer.rs` (iced `image` + controls) + async `task/texture.rs` (off-thread decode, `archive_generation`-fenced). A new `ViewMode::Texture` slots into the existing tab seam.
+**Architecture:** One public core decode API (a cheap `classify_texture` + a `decode_texture_mip` returning `{width, height, rgba}`, reusing the existing `pub(crate)` `decode_mip` / `flatten_virtual_texture` / `DecodedTexture` internals). GUI side mirrors the Phase 7a split: pure `state/texture_view.rs` (zoom/fit math, channel masking, selected mip) + thin `#[mutants::skip]` `widgets/texture_viewer.rs` (iced `image` + controls; manual-zoom panning via a native `scrollable(Direction::Both)`) + async `task/texture.rs` (off-thread decode, `archive_generation`-fenced). A new `ViewMode::Texture` slots into the existing tab seam.
 
-**Tech Stack:** Rust, iced 0.14 (enable the `image` feature), paksmith-core texture decoder (Phase 3e), `#[mutants::skip]` + `mutants` crate, `thiserror`, `tracing`.
+**Tech Stack:** Rust, iced 0.14 (enable the codec-free `image-without-codecs` feature — see Constraints), paksmith-core texture decoder (Phase 3e), `#[mutants::skip]` + `mutants` crate, `thiserror`, `tracing`.
 
 ## Global Constraints
 
@@ -24,7 +24,7 @@
 ## File Structure
 
 **Core (one change):**
-- `crates/paksmith-core/src/asset/exports/texture/pixel_format.rs` — make `DecodedTexture` reachable; add the public `decode_texture_mip` low-level wrapper.
+- `crates/paksmith-core/src/asset/exports/texture/pixel_format.rs` — make `DecodedTexture` + `decode_mip` reachable to the new module surface (the public `classify_texture`/`decode_texture_mip` themselves live in `mod.rs`, below).
 - `crates/paksmith-core/src/asset/exports/texture/mod.rs` — add `classify_texture` + `decode_texture_mip` + `TextureInfo` + `DecodedTextureRgba` as the public module surface; re-export from a stable path.
 - `crates/paksmith-core/src/asset/mod.rs` or `lib.rs` — `pub use` the new types/functions at a discoverable path (`paksmith_core::asset::texture::*` or alongside `Texture2DData`).
 
@@ -34,11 +34,11 @@
 - `crates/paksmith-gui/src/state/mod.rs` — register `texture_view`.
 - `crates/paksmith-gui/src/task/texture.rs` — **new**, async decode → `DecodedMip`.
 - `crates/paksmith-gui/src/task/mod.rs` — register `texture`.
-- `crates/paksmith-gui/src/widgets/texture_viewer.rs` — **new**, thin `#[mutants::skip]`: `image` + zoom/pan + R/G/B/A toggles + mip dropdown.
+- `crates/paksmith-gui/src/widgets/texture_viewer.rs` — **new**, thin `#[mutants::skip]`: `image` + zoom + `scrollable` panning + R/G/B/A toggles + mip dropdown.
 - `crates/paksmith-gui/src/widgets/mod.rs` — register `texture_viewer`.
 - `crates/paksmith-gui/src/panels/content.rs` — `ViewMode::Texture` arm + conditional switcher entry.
-- `crates/paksmith-gui/src/app.rs` — `Message` variants + `update` wiring (decode dispatch, `TextureDecoded` handler, channel/zoom/pan/mip messages).
-- `crates/paksmith-gui/Cargo.toml` — enable iced `image` feature.
+- `crates/paksmith-gui/src/app.rs` — `Message` variants + `update` wiring (decode dispatch, `TextureDecoded` handler, channel/zoom/fit/mip messages; panning needs no message — `scrollable` owns it).
+- `crates/paksmith-gui/Cargo.toml` — enable iced `image-without-codecs` feature.
 
 ---
 
@@ -59,7 +59,7 @@
   - `pub fn decode_texture_mip(package: &Package, export_idx: usize, mip_index: usize) -> crate::Result<DecodedTextureRgba>`.
 
 **Design notes (read before implementing):**
-- `classify_texture` is a **pure, cheap** scan: find the first `package.payloads` index that is `Asset::Texture2D(data)` where the texture is decodable. Decodable = (`data.virtual_texture.is_some()` with a decodable layer-0 format) OR (`!data.mips.is_empty()` AND `codec_for(&PixelFormat::from_name(&data.pixel_format)).is_some()`). Build `mips` from the per-mip dimensions: for the standard path use the serialized-mip dimensions (mirror the existing `selected_mip_dimensions` logic — `data.mips[i]`'s SizeX/SizeY); for virtual textures use the single full-resolution `(width, height)`. `is_normal_map` mirrors the existing `has_enum(data, "CompressionSettings", "TC_Normalmap")` check on `data.properties`. Do **not** resolve bulk here (no reader/borrow needed; keep it pure over `&Package`).
+- `classify_texture` is a **pure, cheap** scan: find the first `package.payloads` index that is `Asset::Texture2D(data)` where the texture is decodable. Decodable = (`data.virtual_texture.is_some()` with a decodable layer-0 format) OR (`!data.mips.is_empty()` AND `codec_for(&PixelFormat::from_name(&data.pixel_format)).is_some()`). Build `mips` from the per-mip dimensions: for the standard path use the serialized-mip dimensions (mirror the existing `selected_mip_dimensions` logic — `data.mips[i]`'s SizeX/SizeY); for virtual textures use the single **flattened min_level bitmap** `(width, height)` the decode actually emits (`grid_tiles × tile_size`), NOT the logical `(vt.width, vt.height)` — so the dims classify advertises match what `decode_texture_mip` returns. (A virtual texture also classifies as `None` if it is legacy/UE4 or no mip level fits the decode cap.) `is_normal_map` mirrors the existing `has_enum(data, "CompressionSettings", "TC_Normalmap")` check on `data.properties`. Do **not** resolve bulk here (no reader/borrow needed; keep it pure over `&Package`).
 - `decode_texture_mip` resolves bulk **internally** via `package.resolve_bulk_for_export(export_idx)`, extracts `Asset::Texture2D(data)`, then dispatches exactly like `PngHandler::export`: virtual → `flatten_virtual_texture(vt, bulk, is_normal_map)`; standard → `decode_mip(&format, &bulk[mip_index].bytes, w, h, is_normal_map, "<texture mip>")` with `(w, h)` from the serialized mip dimensions. Convert the resulting `DecodedTexture` into `DecodedTextureRgba`. Return `PaksmithError` on: export not a texture, `mip_index` out of range, empty bulk (no serialized mip), or any decode fault — never panic.
 - DRY: factor the `is_normal_map` / `selected_mip_dimensions` logic so Task 1 and the existing `export/texture.rs` share it rather than duplicating (extract to the texture module if not already shared).
 
@@ -147,9 +147,8 @@ git commit -m "feat(core): public texture decode API (classify_texture + decode_
   - `pub struct ChannelSet { pub r: bool, pub g: bool, pub b: bool, pub a: bool }` with `Default` = all true, and `pub fn toggle(&mut self, ch: Channel)`, `pub enum Channel { R, G, B, A }`.
   - `pub fn mask_rgba(src: &[u8], channels: ChannelSet) -> Vec<u8>` — see semantics below.
   - `pub struct DecodedMip { pub width: u32, pub height: u32, pub rgba: Vec<u8> }`.
-  - `pub struct TextureState { pub selected_mip: usize, pub channels: ChannelSet, pub zoom: f32, pub pan: (f32, f32), pub decoded: Option<DecodedMip>, pub error: Option<String> }` with `Default`.
+  - `pub struct TextureState { pub export_idx: usize, pub mips: Vec<(u32, u32)>, pub selected_mip: usize, pub channels: ChannelSet, pub zoom: f32, pub fit_to_window: bool, pub decoded: Option<DecodedMip>, pub error: Option<String>, pub render: Option<iced::widget::image::Handle> }` with `Default`. **No `pan` field** — manual-zoom panning is owned natively by a `scrollable(Direction::Both)` in the widget, so the state's responsibilities are fit/zoom + channel mask + the cached render `Handle`, not pan/clamp math.
   - `pub fn fit_zoom(img: (u32, u32), viewport: (f32, f32)) -> f32`.
-  - `pub fn clamp_pan(pan: (f32, f32), scaled: (f32, f32), viewport: (f32, f32)) -> (f32, f32)`.
   - `pub const ZOOM_STEPS: &[f32]` + `pub fn zoom_in(z: f32) -> f32` / `zoom_out(z: f32) -> f32` (snap to neighbouring step).
 
 **`mask_rgba` semantics (pin exactly with tests):**
@@ -197,7 +196,9 @@ fn mask_preserves_length() {
 
 - [ ] **Step 2: Run → FAIL** (`cargo test -p paksmith-gui mask_`), then implement `mask_rgba` + `ChannelSet`/`Channel`, then **Step 3: Run → PASS**.
 
-- [ ] **Step 4: Write failing tests for zoom/fit/pan math**
+- [ ] **Step 4: Write failing tests for zoom/fit math**
+
+(No pan/clamp tests — panning is delegated to iced's `scrollable`, which clamps to content bounds natively, so there is no custom pan algorithm to unit-test.)
 
 ```rust
 #[test]
@@ -212,13 +213,6 @@ fn zoom_in_then_out_returns_to_neighbourhood() {
     assert!(zoom_in(z) > z);
     assert!(zoom_out(zoom_in(z)) <= zoom_in(z));
 }
-
-#[test]
-fn clamp_pan_keeps_image_in_view() {
-    // image larger than viewport: pan clamped so an edge cannot pass the far side
-    let p = clamp_pan((10_000.0, 0.0), (400.0, 400.0), (100.0, 100.0));
-    assert!(p.0 <= (400.0 - 100.0)); // cannot scroll past the right edge
-}
 ```
 
 - [ ] **Step 5: Run → FAIL, implement, Run → PASS.** Keep the logic helpers pure (no iced); the lone iced touch is the cached-`Handle` builder added later (`render_handle`/`recompute_render`).
@@ -228,7 +222,7 @@ fn clamp_pan_keeps_image_in_view() {
 ```bash
 cargo fmt --all && cargo clippy -p paksmith-gui --all-targets --all-features -- -D warnings && cargo test -p paksmith-gui texture_view
 git add crates/paksmith-gui/src/state/
-git commit -m "feat(gui): pure texture-view state (channel mask, zoom/fit/pan math)"
+git commit -m "feat(gui): pure texture-view state (channel mask, zoom/fit math)"
 ```
 
 ---
@@ -321,25 +315,25 @@ git commit -m "feat(gui): ViewMode::Texture seam + promotion + Arc<Package> tab 
 - Create: `crates/paksmith-gui/src/task/texture.rs`
 - Modify: `crates/paksmith-gui/src/task/mod.rs`
 - Modify: `crates/paksmith-gui/src/app.rs`
-- Modify: `crates/paksmith-gui/Cargo.toml` (enable iced `image` feature)
+- Modify: `crates/paksmith-gui/Cargo.toml` (enable iced `image-without-codecs` feature)
 - Test: `app.rs` `#[cfg(test)]`
 
 **Interfaces:**
 - Consumes: `paksmith_core::asset::{classify_texture, decode_texture_mip}`, `crate::state::tabs::{TabContent, ViewMode, texture_available}`, `crate::state::texture_view::DecodedMip`, `app.archive_generation`, existing `Message::AssetLoaded` flow.
 - Produces:
   - `task/texture.rs`: `pub async fn decode(pkg: std::sync::Arc<Package>, export_idx: usize, mip: usize) -> Result<DecodedMip, String>` — calls `decode_texture_mip(&pkg, export_idx, mip)`, maps to `DecodedMip`/stringified error. `#[allow(clippy::unused_async, reason = "async required by iced Task::perform")]` if it ends up sync-bodied; otherwise leave the CPU decode in the async body so `Task::perform` runs it off the UI thread.
-  - `Message::DecodeTextureMip { path: String, mip: usize, generation: u64 }` (internal trigger) and `Message::TextureDecoded { path: String, mip: usize, result: Result<DecodedMip, String>, generation: u64 }`.
-  - `Message::TextureChannelToggled { channel: Channel }`, `Message::TextureZoomIn`, `Message::TextureZoomOut`, `Message::TextureMipSelected(usize)`, `Message::TexturePan { dx: f32, dy: f32 }` (active-tab-scoped; mutate the active tab's `TextureState`).
+  - `Message::TextureDecoded { path: String, mip: usize, result: Result<DecodedMip, String>, generation: u64 }` (the async decode-completion message; the decode is dispatched inline via `Task::perform` from the `AssetLoaded` and `TextureMipSelected` handlers — no separate intermediate trigger message).
+  - `Message::TextureChannelToggled { channel: Channel }`, `Message::TextureZoomIn`, `Message::TextureZoomOut`, `Message::TextureMipSelected(usize)`, `Message::TextureFitToWindow` (active-tab-scoped; mutate the active tab's `TextureState`). No pan message — `scrollable` owns panning.
   - In `Message::AssetLoaded` handling: after `set_content` + `pick_view_after_load`, if `texture_available(active tab)`, read `classify_texture(pkg).export_idx`, store it on the tab's `TextureState` (add `export_idx: usize` to `TextureState`), and dispatch `Task::perform(task::texture::decode(pkg.clone(), export_idx, 0), move |result| Message::TextureDecoded { path, mip: 0, result, generation })`.
   - `Message::TextureDecoded`: drop if `generation != app.archive_generation`; else write `decoded`/`error` into the matching tab's `TextureState` (only if `mip` still equals the tab's `selected_mip`, else stale mip — drop).
   - `Message::TextureMipSelected(m)`: set `selected_mip = m` on the active tab, dispatch a fresh `decode` for `m`.
-  - Channel/zoom/pan messages: mutate the active tab's `TextureState` via a `Tabs::active_tab_mut()` helper (add it if absent); these need no async.
+  - Channel/zoom/fit messages: mutate the active tab's `TextureState` via a `Tabs::active_tab_mut()` helper (add it if absent); these need no async.
 
 **`Arc<Package>` note:** `pkg.clone()` is a cheap `Arc` clone (Task 3 made `parsed` an `Arc`). Extract `Arc<Package>` from `TabContent::Ready { parsed: Ok(arc), .. }` to move into the task.
 
-- [ ] **Step 1: Enable the iced image feature**
+- [ ] **Step 1: Enable the iced image-without-codecs feature**
 
-In `crates/paksmith-gui/Cargo.toml`: `iced = { version = "0.14", features = ["tokio", "image"] }`. Run `cargo build -p paksmith-gui` to confirm it resolves.
+In `crates/paksmith-gui/Cargo.toml`: `iced = { version = "0.14", features = ["tokio", "image-without-codecs"] }` (the codec-free variant — see Constraints for why the full `image` feature is rejected by cargo-deny). Run `cargo build -p paksmith-gui` to confirm it resolves.
 
 - [ ] **Step 2: Write a failing test for the decode dispatch + generation fence**
 
@@ -391,13 +385,13 @@ git commit -m "feat(gui): async texture decode + message wiring (generation-fenc
 - Test: thin widget is `#[mutants::skip]`; rely on Task 2/4 state tests. Add a content `view` smoke build only.
 
 **Interfaces:**
-- Consumes: `crate::state::texture_view::{TextureState, ChannelSet, Channel, mask_rgba}`, `crate::state::tabs::{Tab, ViewMode, texture_available}`, `Message::{TextureChannelToggled, TextureZoomIn, TextureZoomOut, TextureMipSelected}`, the active accent `iced::Color`.
+- Consumes: `crate::state::texture_view::{TextureState, ChannelSet, Channel, mask_rgba}`, `crate::state::tabs::{Tab, ViewMode, texture_available}`, `Message::{TextureChannelToggled, TextureZoomIn, TextureZoomOut, TextureFitToWindow, TextureMipSelected}`, the active accent `iced::Color`.
 - Produces: `pub fn view<'a>(state: &TextureState, accent: iced::Color) -> iced::Element<'a, Message>` (the `#[mutants::skip]` widget) following the existing `widgets/hex_view.rs` / `widgets/property_tree.rs` idioms for layout, theming, and message emission.
 
 **Implementation guidance (match the existing widgets — do not invent a new style):**
 - Build the image: `iced::widget::image(iced::widget::image::Handle::from_rgba(w, h, mask_rgba(&decoded.rgba, state.channels))).filter_method(iced::widget::image::FilterMethod::Nearest)`. (Constructor is `from_rgba`, NOT `from_rgba8`.)
 - Wrap in a fixed pixel size derived from `(w, h) * state.zoom`, inside a `scrollable` (the pan affordance) over a neutral/checkered `container` background.
-- Controls row: R/G/B/A toggle buttons (highlight active per `state.channels`, using the accent like the existing view-mode switcher), zoom +/- buttons, and a `pick_list` mip dropdown listing `format!("{i} — {w}×{h}")` from `state.decoded`/the tab's mip list, emitting `Message::TextureMipSelected(i)`.
+- Controls row: R/G/B/A toggle buttons (highlight active per `state.channels`, using the accent like the existing view-mode switcher), a zoom label, zoom +/- buttons, a **Fit** button (emits `Message::TextureFitToWindow`, visually active in fit mode; the label shows "Fit" rather than a percentage in fit mode, since `state.zoom` isn't the rendered scale there), and a `pick_list` mip dropdown listing `format!("{i} — {w}×{h}")` from the tab's mip list, emitting `Message::TextureMipSelected(i)`.
 - Empty/decoding state: when `state.decoded.is_none() && state.error.is_none()`, show a muted "Decoding…" placeholder; when `state.error.is_some()`, show the reason (the post-classification failure path).
 - Reuse `widgets/hex_view.rs`'s mouse/scroll handling patterns where applicable; keep ALL arithmetic in `state/texture_view.rs` (the widget only reads state + emits messages).
 
@@ -435,11 +429,11 @@ git commit -m "feat(gui): TextureViewer widget + content integration"
 - [ ] `cargo mutants --in-diff <git merge-base main HEAD..HEAD> -p paksmith-core --all-features` → 0 missed (Task 1 surface)
 - [ ] `cargo mutants --in-diff <…> -p paksmith-gui --all-features` → 0 missed (Tasks 2–5 surface)
 - [ ] Adversarial review panel (code-reviewer + architect + simplifier) **+ standing UI/UX reviewer** on `widgets/texture_viewer.rs` + a wire/format-aware reviewer on the core decode API (bounds, OOM cap, virtual-texture path). Converge before push.
-- [ ] cargo-deny / cargo-audit note: the iced `image` feature pulls the `image` crate transitively — confirm no NEW advisory fires (or, if an unmaintained-transitive does, handle per the `audit.yml` ignore precedent).
+- [ ] cargo-deny / cargo-audit note: the iced `image-without-codecs` feature pulls the `image` crate transitively — confirm no NEW advisory fires (or, if an unmaintained-transitive does, handle per the `audit.yml` ignore precedent). The full `image` feature is rejected outright (AVIF/rav1e license+ban failures — see Constraints).
 
 ## Self-Review (author's check against the spec)
 
-1. **Spec coverage:** display (T5 image), zoom/pan (T2 math + T5 container), channel isolation (T2 `mask_rgba` + T5 toggles), mip selector (T1 mip list + T4 re-decode + T5 dropdown), public core API (T1), async + generation fence (T4), `ViewMode::Texture`/promotion/fallback (T3), pure-state/thin-view/async split (T2/T5/T4) — all mapped.
+1. **Spec coverage:** display (T5 image), zoom (T2 fit/zoom math) + pan (T5 `scrollable` container — no pan state), channel isolation (T2 `mask_rgba` + T5 toggles), mip selector (T1 mip list + T4 re-decode + T5 dropdown), public core API (T1), async + generation fence (T4), `ViewMode::Texture`/promotion/fallback (T3), pure-state/thin-view/async split (T2/T5/T4) — all mapped.
 2. **Placeholders:** none — every type/fn is named with a concrete signature; test bodies are concrete (fixture helpers reference the existing texture test fixtures the implementer must locate in Step 1 of Task 1).
 3. **Type consistency:** `DecodedTextureRgba`/`DecodedMip`/`TextureInfo`/`ChannelSet`/`Channel`/`TextureState` names are used identically across tasks; `parsed: Arc<Package>` introduced in T3 and consumed in T4; `classify_texture`/`decode_texture_mip` signatures fixed in T1 and consumed in T3/T4.
 4. **Scope:** one view mode + one core API; no GPU; single plan, no decomposition needed.
