@@ -122,8 +122,8 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail (do not compile)**
 
-Run: `cargo test -p paksmith-gui --lib state::toast`
-Expected: FAIL — `cannot find type 'Toasts'`, `'Severity'` (types not defined yet). Also add `pub mod toast;` to `crates/paksmith-gui/src/state/mod.rs` now (alphabetical position, after `pub mod tabs;` / before `pub mod texture_view;`) or the module isn't compiled — without it the test target won't even see the file.
+Run: `cargo test -p paksmith-gui state::toast`
+Expected: FAIL — `cannot find type 'Toasts'`, `'Severity'` (types not defined yet). Also add `pub mod toast;` to `crates/paksmith-gui/src/state/mod.rs` now (alphabetical position: `toast` sorts after `texture_view`; `cargo fmt` enforces this) or the module isn't compiled — without it the test target won't even see the file.
 
 `crates/paksmith-gui/src/state/mod.rs` after edit:
 
@@ -134,8 +134,8 @@ pub mod keyflow;
 pub mod profiles;
 pub mod property_view;
 pub mod tabs;
-pub mod toast;
 pub mod texture_view;
+pub mod toast;
 pub mod tree;
 ```
 
@@ -218,7 +218,7 @@ impl Toasts {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p paksmith-gui --lib state::toast`
+Run: `cargo test -p paksmith-gui state::toast`
 Expected: PASS — 6 tests.
 
 - [ ] **Step 5: fmt + clippy + commit**
@@ -291,7 +291,7 @@ fn open_error_with_no_archive_uses_banner_not_toast() {
 fn open_error_mid_keyflow_sets_keyflow_error_no_toast() {
     // Mid key-entry (wrong manual key): the error belongs inside the key panel.
     let mut app = App::default();
-    app.keyflow.lock("locked.pak".to_string());
+    app.keyflow.lock(PathBuf::from("locked.pak"));
     let _ = update(
         &mut app,
         Message::ArchiveOpened(Box::new(Err(OpenError::Core("bad key".to_string())))),
@@ -311,7 +311,7 @@ fn toast_dismissed_removes_the_targeted_toast() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p paksmith-gui --lib app::tests::open_error_while_archive_loaded_pushes_error_toast_not_banner`
+Run: `cargo test -p paksmith-gui app::tests::open_error_while_archive_loaded_pushes_error_toast_not_banner`
 Expected: FAIL — `no field 'toasts' on type '&App'` / `no variant 'ToastDismissed'`.
 
 - [ ] **Step 3: Add the `toasts` field + default**
@@ -402,7 +402,7 @@ Replace the existing `Err(OpenError::Core(msg))` arm inside `Message::ArchiveOpe
 
 - [ ] **Step 8: Run the new tests + the full gui lib tests**
 
-Run: `cargo test -p paksmith-gui --lib`
+Run: `cargo test -p paksmith-gui`
 Expected: PASS — the 4 new tests plus all pre-existing tests (≥ 296 + 6 from Task 1 + 4 here).
 
 - [ ] **Step 9: fmt + clippy + commit**
@@ -539,7 +539,7 @@ Run:
 ```bash
 cargo build -p paksmith-gui
 cargo clippy -p paksmith-gui --all-targets --all-features -- -D warnings
-cargo test -p paksmith-gui --lib
+cargo test -p paksmith-gui
 ```
 Expected: builds clean, no clippy warnings, all tests pass.
 
