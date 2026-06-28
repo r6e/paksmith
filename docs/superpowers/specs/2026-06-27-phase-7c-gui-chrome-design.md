@@ -184,7 +184,7 @@ lives) is a plan-level detail; the contract above is fixed. **No other core chan
 
 ### 3. Export As… (PR3)
 
-- **Picker entries.** From the parsed `Package`, compute `available_formats(®istry,
+- **Picker entries.** From the parsed `Package`, compute `available_formats(registry,
   package)`; the picker shows one entry per `ExportFormat` (label = uppercased
   extension, e.g. `PNG`, `GLB`, `CSV`, `JSON`, `WAV`, `OGG`) **plus a "Raw bytes"**
   entry that is always present (writes the entry's decompressed bytes — works even for
