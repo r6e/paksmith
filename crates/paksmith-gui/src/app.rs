@@ -279,7 +279,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                         format!("Couldn't open file: {msg}"),
                     )
                 } else {
-                    // No archive: the empty-state banner (with retry CTA) is right.
+                    // No archive: the empty-state banner (with retry CTA) is the
+                    // right home. The open began with `keyflow.begin()` (→
+                    // `Resolving`); reset to `Idle` so `view` falls through to the
+                    // banner instead of showing the "Opening…" spinner forever
+                    // (the `Resolving` branch precedes the `app.error` branch).
+                    app.keyflow.reset();
                     app.error = Some(msg);
                     Task::none()
                 }
@@ -732,6 +737,11 @@ fn push_toast(
 ) -> Task<Message> {
     let id = app.toasts.push(severity, message);
     let ttl = severity.ttl();
+    // The `async move {}` wrapper is load-bearing: it defers the
+    // `tokio::time::sleep(ttl)` call until the future is polled by the iced
+    // runtime. Calling `sleep` eagerly here would panic ("no reactor running")
+    // whenever `push_toast` runs outside a tokio runtime — e.g. in the unit
+    // tests that drive `update` directly.
     Task::perform(async move { tokio::time::sleep(ttl).await }, move |()| {
         Message::ToastDismissed(id)
     })
@@ -1334,6 +1344,30 @@ mod tests {
         );
         assert!(app.toasts.is_empty(), "no toast in the empty state");
         assert_eq!(app.error.as_deref(), Some("nope"), "banner error is set");
+    }
+
+    #[test]
+    fn open_error_no_archive_after_resolving_shows_banner_not_spinner() {
+        // Realistic flow: OpenPathChosen runs `keyflow.begin()` → Resolving before
+        // the async open completes. A Core error with no archive must leave
+        // Resolving (else `view`'s Resolving branch — which precedes the error
+        // branch — shows "Opening…" forever and swallows the banner).
+        let mut app = App::default();
+        app.keyflow.begin();
+        assert!(matches!(
+            app.keyflow,
+            crate::state::keyflow::KeyFlow::Resolving
+        ));
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Core("boom".to_string())))),
+        );
+        assert!(
+            !matches!(app.keyflow, crate::state::keyflow::KeyFlow::Resolving),
+            "keyflow must leave Resolving on a terminal no-archive error"
+        );
+        assert_eq!(app.error.as_deref(), Some("boom"), "banner error is set");
+        assert!(app.toasts.is_empty(), "no toast in the empty state");
     }
 
     #[test]
