@@ -52,6 +52,13 @@ fn row_is_selected(row_idx: usize, selected: Option<usize>) -> bool {
     selected == Some(row_idx)
 }
 
+/// Whether to render the inline context-menu strip immediately after visible
+/// row `row_idx`. The strip belongs only to the file row that currently owns
+/// the menu; directory rows and path-less rows never get one.
+fn show_strip_after(context_row: Option<usize>, row_idx: usize, row: &VisibleRow) -> bool {
+    context_row == Some(row_idx) && !row.is_dir && row.full_path.is_some()
+}
+
 /// The glyph string rendered before the label for a directory row.
 ///
 /// Directories show a chevron (▸ collapsed, ▾ expanded). File rows render no
@@ -76,17 +83,38 @@ pub fn glyph_for_row(row: &VisibleRow) -> Option<&'static str> {
 /// * `selected_row` — the currently highlighted visible-row index (the
 ///   keyboard cursor).  May point at either a dir or a file.  `None` means
 ///   no cursor.
+/// * `context_row` — the visible-row index whose inline action strip (Open /
+///   Copy Path) is shown, or `None`. The strip is rendered immediately after
+///   that row (file rows only).
 ///
 /// Each row emits:
 /// * `Message::RowToggled(i)` when a directory row is clicked.
 /// * `Message::RowSelected(i)` when a file row is clicked.
-pub fn view(tree: &Tree, accent: Color, selected_row: Option<usize>) -> Element<'_, Message> {
+/// * `Message::RowContextOpened(i)` when a file row is right-clicked.
+// Pure iced view composition (like the sibling `tab_bar`/`hex_view`/`property_tree`
+// view fns). The one decision — which row gets the inline strip — is extracted
+// into the unit-tested `show_strip_after`; this fn only wires the result into the
+// opaque scrollable `Element`, so there is nothing here a unit test can observe.
+#[mutants::skip]
+pub fn view(
+    tree: &Tree,
+    accent: Color,
+    selected_row: Option<usize>,
+    context_row: Option<usize>,
+) -> Element<'_, Message> {
     let rows = tree.visible_rows();
-    let items: Vec<Element<'_, Message>> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, row)| build_row(i, row, accent, selected_row))
-        .collect();
+    // `+ 1`: when a context menu is open the loop pushes one extra element (the
+    // action strip), so reserving `rows.len() + 1` avoids a reallocation in that
+    // case. Safe to spell out the arithmetic here because `view` is
+    // `#[mutants::skip]` — an off-by-one in a capacity hint changes no behaviour
+    // and would otherwise be an unkillable mutant.
+    let mut items: Vec<Element<'_, Message>> = Vec::with_capacity(rows.len() + 1);
+    for (i, row) in rows.iter().enumerate() {
+        items.push(build_row(i, row, accent, selected_row, context_row));
+        if show_strip_after(context_row, i, row) {
+            items.push(crate::widgets::context_menu::action_strip(i));
+        }
+    }
 
     scrollable(column(items).width(Length::Fill))
         .id(TREE_SCROLL_ID.clone())
@@ -106,8 +134,13 @@ fn build_row(
     row: &VisibleRow,
     accent: Color,
     selected_row: Option<usize>,
+    context_row: Option<usize>,
 ) -> Element<'_, Message> {
     let is_selected = row_is_selected(i, selected_row);
+    // The file row whose inline context menu is open. Reuses the same index-match
+    // predicate as keyboard selection; only ever true for a file row (the menu
+    // can only open on files).
+    let is_context_owner = row_is_selected(i, context_row);
     let indent = row_indent(row.depth);
 
     // The row content: optional accent left-border + indent spacer + optional
@@ -211,38 +244,60 @@ fn build_row(
             .width(Length::Fill)
             .style(move |theme: &iced::Theme, status| {
                 let palette = theme.palette();
-                if is_selected {
-                    iced::widget::button::Style {
-                        background: Some(Background::Color(accent.scale_alpha(0.18))),
-                        text_color: palette.text,
-                        border: iced::Border {
-                            color: accent,
-                            width: selection_border_width,
-                            radius: 0.0.into(),
-                        },
-                        ..Default::default()
-                    }
+                // Fill and border are chosen independently so the two cues compose:
+                //
+                //   • Fill — the context-menu owner takes the strip band's
+                //     `background.weak` surface so the row and the strip directly
+                //     beneath it read as one block, and this wins even when the row
+                //     is ALSO the keyboard cursor (select-then-right-click the same
+                //     row). A selected non-owner gets the accent wash; otherwise the
+                //     hover tint, or no fill.
+                //   • Border — the 3-px accent left edge marks the keyboard cursor
+                //     (`is_selected`) and is applied regardless of the fill, so a
+                //     selected owner keeps its selection border over the band surface.
+                let background = if is_context_owner {
+                    Some(Background::Color(
+                        theme.extended_palette().background.weak.color,
+                    ))
+                } else if is_selected {
+                    Some(Background::Color(accent.scale_alpha(0.18)))
                 } else {
                     match status {
                         iced::widget::button::Status::Hovered
-                        | iced::widget::button::Status::Pressed => iced::widget::button::Style {
-                            background: Some(Background::Color(palette.text.scale_alpha(0.07))),
-                            text_color: palette.text,
-                            ..Default::default()
-                        },
-                        _ => iced::widget::button::Style {
-                            text_color: palette.text,
-                            ..Default::default()
-                        },
+                        | iced::widget::button::Status::Pressed => {
+                            Some(Background::Color(palette.text.scale_alpha(0.07)))
+                        }
+                        _ => None,
                     }
+                };
+                let border = if is_selected {
+                    iced::Border {
+                        color: accent,
+                        width: selection_border_width,
+                        radius: 0.0.into(),
+                    }
+                } else {
+                    iced::Border::default()
+                };
+                iced::widget::button::Style {
+                    background,
+                    text_color: palette.text,
+                    border,
+                    ..Default::default()
                 }
             });
         // Wire double-click-to-open using the row index — path resolution happens
         // once in `update` (via `open_path_for_row`), not per-frame here.
         // Rows with no path (the `full_path: None` case) are handled in `update`:
         // `OpenAssetByRow` resolves to `None` and is silently ignored.
+        //
+        // A right-press toggles the inline context-menu strip for this file row
+        // (`Message::RowContextOpened`). The inner `button` only captures LEFT
+        // clicks, so right-presses fall through to this `mouse_area`. Files only —
+        // directory rows are a plain `button` (no `mouse_area`) and get no menu.
         mouse_area(btn)
             .on_double_click(Message::OpenAssetByRow(i))
+            .on_right_press(Message::RowContextOpened(i))
             .into()
     }
 }
@@ -351,5 +406,42 @@ mod tests {
     #[test]
     fn row_is_selected_none_is_false() {
         assert!(!row_is_selected(2, None));
+    }
+
+    // ── show_strip_after ──────────────────────────────────────────────────────
+
+    #[test]
+    fn show_strip_after_owning_file_row_is_true() {
+        assert!(show_strip_after(Some(0), 0, &file_row()));
+    }
+
+    #[test]
+    fn show_strip_after_other_row_is_false() {
+        // context_row points elsewhere — kills `== with !=`.
+        assert!(!show_strip_after(Some(1), 0, &file_row()));
+    }
+
+    #[test]
+    fn show_strip_after_none_is_false() {
+        assert!(!show_strip_after(None, 0, &file_row()));
+    }
+
+    #[test]
+    fn show_strip_after_dir_row_is_false() {
+        // Directories never get a menu — kills `delete !` / `&& with ||`.
+        assert!(!show_strip_after(Some(0), 0, &dir_row(false)));
+    }
+
+    #[test]
+    fn show_strip_after_file_without_path_is_false() {
+        // A file row carrying no path can't be acted on — kills `is_some -> is_none`.
+        let row = VisibleRow {
+            depth: 1,
+            label: "x".to_string(),
+            is_dir: false,
+            expanded: false,
+            full_path: None,
+        };
+        assert!(!show_strip_after(Some(0), 0, &row));
     }
 }

@@ -75,6 +75,11 @@ pub struct App {
     /// Live transient notifications (errors + action feedback), rendered as a
     /// non-blocking overlay. See [`crate::state::toast`].
     pub toasts: crate::state::toast::Toasts,
+    /// Visible-row index whose inline context-menu strip (Open / Copy Path) is
+    /// currently shown, or `None`. A *visible-row* index like
+    /// [`App::selected_row`]; cleared on every tree-mutating or selection path
+    /// so a stale index can never address the wrong row.
+    pub context_row: Option<usize>,
 }
 
 impl Default for App {
@@ -104,6 +109,7 @@ impl Default for App {
             tabs: crate::state::tabs::Tabs::default(),
             archive_generation: 0,
             toasts: crate::state::toast::Toasts::default(),
+            context_row: None,
         }
     }
 }
@@ -207,6 +213,14 @@ pub enum Message {
     /// Remove the toast with this id — used by both the `×` button and the
     /// scheduled auto-expiry task.
     ToastDismissed(u64),
+    /// A file row was right-clicked — toggle its inline context-menu strip.
+    /// Carries the *visible-row* index (no coordinates: `on_right_press` gives
+    /// none, and the inline strip needs none).
+    RowContextOpened(usize),
+    /// Copy the path of the file at the given visible-row index to the clipboard.
+    /// The path is resolved in `update` via `open_path_for_row` so the per-frame
+    /// view never clones a path String.
+    CopyPathRequested(usize),
 }
 
 /// Processes a `Message` and updates the application state.
@@ -248,6 +262,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // inherit the previous selection cursor or filter query.
                 app.filter.clear();
                 app.selected_row = None;
+                app.context_row = None;
                 // Clear tabs so they never reference a stale reader.
                 app.tabs.clear();
                 app.archive_generation = app.archive_generation.wrapping_add(1);
@@ -258,6 +273,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // Enter the key-entry flow: show the inline key-prompt panel.
                 app.keyflow.lock(path);
                 app.hex_input.clear();
+                // The old archive is kept while the key prompt shows, so clear the
+                // stale context-menu index too.
+                app.context_row = None;
                 // Clear any stale tabs from a previously-open archive.
                 app.tabs.clear();
                 app.archive_generation = app.archive_generation.wrapping_add(1);
@@ -354,6 +372,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::RowToggled(i) => {
+            app.context_row = None;
             if let Some(archive) = &mut app.archive {
                 archive.tree.toggle(i);
                 // After a toggle the row count may have changed; clamp the
@@ -368,6 +387,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::RowSelected(i) => {
+            app.context_row = None;
             if let Some(archive) = &mut app.archive {
                 archive.tree.select(i);
                 // Move the keyboard cursor to the selected file.
@@ -383,6 +403,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             scroll_task.unwrap_or_else(Task::none)
         }
         Message::FilterChanged(query) => {
+            app.context_row = None;
             app.filter.clone_from(&query);
             if let Some(archive) = &mut app.archive {
                 archive.tree.set_filter(&query);
@@ -416,7 +437,30 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             app.toasts.remove(id);
             Task::none()
         }
+        Message::RowContextOpened(i) => {
+            app.context_row = toggle_context_row(app.context_row, i);
+            Task::none()
+        }
+        Message::CopyPathRequested(i) => match open_path_for_row(app, i) {
+            Some(path) => {
+                // The action completes here, so close the inline menu.
+                app.context_row = None;
+                Task::batch([
+                    iced::clipboard::write::<Message>(path),
+                    push_toast(
+                        app,
+                        crate::state::toast::Severity::Success,
+                        "Copied path".to_string(),
+                    ),
+                ])
+            }
+            // No resolvable path (out-of-range, or a dir row) — silent no-op.
+            None => Task::none(),
+        },
         Message::OpenAsset(path) => {
+            // Opening any asset (button, double-click, Enter, or the context-menu
+            // strip) dismisses the inline menu.
+            app.context_row = None;
             // Re-opening an already-open asset only reactivates its tab; it keeps its
             // loaded content and must NOT re-read/re-parse (tab dedupe per the spec).
             // Branch on `was_open` directly (load in the `else`) rather than a
@@ -771,6 +815,17 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
     };
     let named = *named;
 
+    // Any tree-key navigation (arrows, Enter, Escape, or any other *named* key —
+    // bare character keys already returned via the `else` guard above) dismisses
+    // the inline context menu. This is load-bearing, not just cosmetic: the strip
+    // inserts an extra row that shifts the Y of every row below it, which would
+    // desync the keyboard auto-scroll's `row_idx * row_height` math at the bottom
+    // of this function. Clearing here (before that scroll offset is computed) keeps
+    // row height uniform. Disjoint-field write — `archive` borrows `app.archive`,
+    // this writes `app.context_row` (same pattern as the `app.selected_row = …`
+    // writes below).
+    app.context_row = None;
+
     let prev_selected = app.selected_row;
 
     match named {
@@ -903,6 +958,18 @@ fn clamp_selected_row(selected_row: &mut Option<usize>, row_count: usize) {
         if i >= row_count {
             *selected_row = Some(row_count - 1);
         }
+    }
+}
+
+/// The new `context_row` after a right-press on visible row `clicked`.
+///
+/// Right-pressing the row that already owns the inline menu closes it (toggle);
+/// right-pressing any other row moves the menu to that row.
+fn toggle_context_row(current: Option<usize>, clicked: usize) -> Option<usize> {
+    if current == Some(clicked) {
+        None
+    } else {
+        Some(clicked)
     }
 }
 
@@ -1093,12 +1160,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
         let tree = &archive.tree;
         let accent = app.accent;
         let selected_row = app.selected_row;
+        let context_row = app.context_row;
         let tabs = &app.tabs;
         let entries = &archive.entries;
 
         pane_grid(&app.panes, move |_pane, kind, _maximized| {
             let content: Element<'_, Message> = match kind {
-                PaneKind::Sidebar => sidebar::view(tree, accent, selected_row),
+                PaneKind::Sidebar => sidebar::view(tree, accent, selected_row, context_row),
                 PaneKind::Detail => content::view(tabs, entries, accent),
             };
             pane_grid::Content::new(content)
@@ -1408,6 +1476,124 @@ mod tests {
         assert!(app.toasts.is_empty(), "dismiss removes the toast");
     }
 
+    // ── Message::RowContextOpened ─────────────────────────────────────────────
+    #[test]
+    fn row_context_opened_toggles_the_strip() {
+        let mut app = app_with_paths(&["file.txt"]);
+        let _ = update(&mut app, Message::RowContextOpened(0));
+        assert_eq!(
+            app.context_row,
+            Some(0),
+            "first right-press opens the strip"
+        );
+        let _ = update(&mut app, Message::RowContextOpened(0));
+        assert_eq!(
+            app.context_row, None,
+            "second right-press on same row closes it"
+        );
+    }
+
+    // ── context_row clear triggers ────────────────────────────────────────────
+    #[test]
+    fn row_toggled_clears_context_row() {
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::RowToggled(0));
+        assert_eq!(app.context_row, None, "toggling a dir clears the menu");
+    }
+
+    #[test]
+    fn row_selected_clears_context_row() {
+        let mut app = app_with_paths(&["file.txt"]);
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::RowSelected(0));
+        assert_eq!(app.context_row, None, "selecting a row clears the menu");
+    }
+
+    #[test]
+    fn filter_changed_clears_context_row() {
+        let mut app = app_with_paths(&["file.txt"]);
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::FilterChanged("f".to_string()));
+        assert_eq!(app.context_row, None, "filtering clears the menu");
+    }
+
+    #[test]
+    fn open_asset_clears_context_row() {
+        let mut app = app_with_paths(&["file.txt"]);
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::OpenAsset("file.txt".to_string()));
+        assert_eq!(app.context_row, None, "opening an asset clears the menu");
+    }
+
+    #[test]
+    fn archive_opened_ok_clears_context_row() {
+        let mut app = app_with_paths(&["old.uasset"]);
+        app.context_row = Some(0);
+        // Move a freshly-built loaded archive out of a throwaway App and swap it in.
+        let new_archive = app_with_paths(&["new.uasset"]).archive.unwrap();
+        let _ = update(&mut app, Message::ArchiveOpened(Box::new(Ok(new_archive))));
+        assert_eq!(app.context_row, None, "archive swap clears the menu");
+    }
+
+    #[test]
+    fn archive_opened_locked_clears_context_row() {
+        // Opening a locked pak keeps the old archive but enters the key flow; the
+        // stale menu index must still be cleared (the "archive swap" trigger covers
+        // both the Ok and the Locked transition).
+        let mut app = app_with_paths(&["old.uasset"]);
+        app.context_row = Some(0);
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
+                path: PathBuf::from("locked.pak"),
+            }))),
+        );
+        assert_eq!(
+            app.context_row, None,
+            "entering the key flow clears the menu"
+        );
+    }
+
+    #[test]
+    fn arrow_down_clears_context_row() {
+        let mut app = app_with_paths(&["a.txt", "b.txt"]);
+        app.context_row = Some(0);
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowDown));
+        assert_eq!(app.context_row, None, "keyboard navigation clears the menu");
+    }
+
+    #[test]
+    fn escape_clears_context_row() {
+        let mut app = app_with_paths(&["file.txt"]);
+        app.context_row = Some(0);
+        let _ = handle_tree_key(&mut app, &named_key(Named::Escape));
+        assert_eq!(app.context_row, None, "Escape clears the menu");
+    }
+
+    // ── Message::CopyPathRequested ────────────────────────────────────────────
+    #[test]
+    fn copy_path_requested_pushes_success_toast_and_closes_menu() {
+        let mut app = app_with_paths(&["file.txt"]);
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::CopyPathRequested(0));
+        assert_eq!(app.toasts.items().len(), 1, "one success toast pushed");
+        assert_eq!(app.toasts.items()[0].severity, Severity::Success);
+        assert!(
+            app.toasts.items()[0].message.contains("Copied"),
+            "toast confirms the copy"
+        );
+        assert_eq!(app.context_row, None, "copy closes the menu");
+    }
+
+    #[test]
+    fn copy_path_requested_oob_does_nothing() {
+        // An index with no resolvable path is a silent no-op — no toast, no panic.
+        let mut app = app_with_paths(&["file.txt"]);
+        let _ = update(&mut app, Message::CopyPathRequested(999));
+        assert!(app.toasts.is_empty(), "no toast when the row has no path");
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     /// Returns a shared `Arc<PakReader>` opened from the real_v8b_uasset fixture.
@@ -1518,6 +1704,24 @@ mod tests {
         let mut sel: Option<usize> = None;
         clamp_selected_row(&mut sel, 3);
         assert_eq!(sel, None);
+    }
+
+    // ── toggle_context_row ────────────────────────────────────────────────────
+    #[test]
+    fn toggle_context_row_from_none_opens_clicked() {
+        assert_eq!(toggle_context_row(None, 3), Some(3));
+    }
+
+    #[test]
+    fn toggle_context_row_from_other_moves_to_clicked() {
+        // Right-clicking a different row moves the menu there (not a toggle-off).
+        assert_eq!(toggle_context_row(Some(2), 3), Some(3));
+    }
+
+    #[test]
+    fn toggle_context_row_same_row_closes() {
+        // Second right-press on the same row closes it. Kills `== with !=`.
+        assert_eq!(toggle_context_row(Some(3), 3), None);
     }
 
     // ── handle_tree_key: ArrowDown ────────────────────────────────────────────

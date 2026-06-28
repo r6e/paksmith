@@ -25,14 +25,20 @@ use crate::widgets::file_tree;
 /// * `tree` – the archive's file-tree model.
 /// * `accent` – system accent color (forwarded to `file_tree::view`).
 /// * `selected_row` – keyboard cursor position.
-pub fn view(tree: &Tree, accent: iced::Color, selected_row: Option<usize>) -> Element<'_, Message> {
+/// * `context_row` – visible-row index whose inline action strip is shown.
+pub fn view(
+    tree: &Tree,
+    accent: iced::Color,
+    selected_row: Option<usize>,
+    context_row: Option<usize>,
+) -> Element<'_, Message> {
     let header = text("EXPLORER")
         .size(f32::from(TEXT_SM))
         .style(|theme: &iced::Theme| iced::widget::text::Style {
             color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
         });
 
-    let tree_view = file_tree::view(tree, accent, selected_row);
+    let tree_view = file_tree::view(tree, accent, selected_row, context_row);
 
     container(
         column![header, tree_view]
