@@ -222,6 +222,10 @@ pub struct TextureState {
     /// keeps the same `Id` (and its pixel `Bytes` are reference-counted, so the
     /// clone is O(1)), which lets iced's raster cache reuse the existing upload.
     /// `None` whenever `decoded` is.
+    ///
+    /// This handle owns the channel-masked pixel buffer — a second full-size
+    /// allocation that coexists with [`Self::decoded`]. See the `render_handle`
+    /// builder's `# Memory` note for the resulting per-mip memory tradeoff.
     pub render: Option<iced::widget::image::Handle>,
 }
 
@@ -241,11 +245,34 @@ impl Default for TextureState {
     }
 }
 
-/// Build the iced render handle for a decoded mip under a channel set: apply
-/// the channel mask, then wrap the masked bytes as an RGBA image handle (which
-/// moves them in — no second copy retained). Shared by
-/// [`TextureState::recompute_render`] (the cached path) and the widget's
-/// cache-miss fallback so the two builds can never drift.
+/// Build the iced render handle for a decoded mip under a channel set:
+/// [`mask_rgba`] produces the display buffer, which is then moved into an RGBA
+/// image handle. Shared by [`TextureState::recompute_render`] (the cached path)
+/// and the widget's cache-miss fallback so the two builds can never drift.
+///
+/// # Memory
+/// [`mask_rgba`] always returns a fresh buffer the same length as its input
+/// (even the all-channels-on identity branch copies), and that buffer is
+/// *moved* — not copied — into the handle. It coexists with the source pixels
+/// still held in [`TextureState::decoded`], so at rest one open texture tab
+/// holds ≈ 2× a single decoded mip (retained source + masked handle). During a
+/// rebuild ([`TextureState::recompute_render`] or a landing decode) the peak is
+/// ≈ 3× for one mip: Rust evaluates the new masked buffer before dropping the
+/// old handle, so source, old handle, and new buffer are briefly all live. Each
+/// decoded mip is bounded by the core `MAX_DECODED_TEXTURE_BYTES` cap (1 GiB at
+/// the 16384² worst case), making the transient ceiling ≈ 3 GiB; only one mip is
+/// ever retained — selecting another replaces `decoded`, it does not accumulate.
+///
+/// This is a deliberate space-for-time tradeoff: retaining `decoded` lets a
+/// channel toggle re-mask instantly with no re-decode, and caching the handle
+/// (see [`TextureState::render`]) lets every redraw skip the mask and GPU
+/// upload. For any actual channel isolation the masked bytes differ from the
+/// source, so the second allocation is inherent regardless of API or
+/// dependencies; only the all-channels-on identity copy could be shared, and
+/// that alone would need `bytes::Bytes` as a direct dependency (`iced` exposes
+/// no public path to its `Bytes` type), which the crate's no-new-dependencies
+/// constraint rules out. The behavioural alternatives — re-decoding per toggle
+/// or a GPU shader mask — are the slower / explicitly-rejected `wgpu` paths.
 pub(crate) fn render_handle(d: &DecodedMip, channels: ChannelSet) -> iced::widget::image::Handle {
     iced::widget::image::Handle::from_rgba(d.width, d.height, mask_rgba(&d.rgba, channels))
 }
