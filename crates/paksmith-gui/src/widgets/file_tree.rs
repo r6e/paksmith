@@ -241,8 +241,14 @@ fn build_row(
         // once in `update` (via `open_path_for_row`), not per-frame here.
         // Rows with no path (the `full_path: None` case) are handled in `update`:
         // `OpenAssetByRow` resolves to `None` and is silently ignored.
+        //
+        // A right-press toggles the inline context-menu strip for this file row
+        // (`Message::RowContextOpened`). The inner `button` only captures LEFT
+        // clicks, so right-presses fall through to this `mouse_area`. Files only —
+        // directory rows are a plain `button` (no `mouse_area`) and get no menu.
         mouse_area(btn)
             .on_double_click(Message::OpenAssetByRow(i))
+            .on_right_press(Message::RowContextOpened(i))
             .into()
     }
 }

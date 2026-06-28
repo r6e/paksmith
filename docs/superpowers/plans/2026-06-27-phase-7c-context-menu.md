@@ -166,14 +166,27 @@ In `update`'s match (after the `ToastDismissed` arm):
 - [ ] **Step 9: Run the tests to verify they pass**
 
 Run: `cargo test -p paksmith-gui`
-Expected: PASS (all existing + new). The build is green: `context_row` is read in the `RowContextOpened` arm (the RHS `app.context_row`), so no `dead_code` warning.
+Expected: PASS (all existing + new). NOTE: `Message` lives in a **binary** crate, so a variant that is matched but never *constructed* is flagged `dead_code` under `clippy -D warnings`. `RowContextOpened` is matched here but not yet constructed — so its constructor (the `on_right_press` wiring) must land in **this same commit** (Step 10) rather than in the render task.
 
-- [ ] **Step 10: Lint + commit**
+- [ ] **Step 10: Wire the right-press trigger in `build_row`**
+
+In `crates/paksmith-gui/src/widgets/file_tree.rs`, in `build_row`'s file-row `else` branch (the `mouse_area(btn)` wrapper), add `.on_right_press`:
+
+```rust
+        mouse_area(btn)
+            .on_double_click(Message::OpenAssetByRow(i))
+            .on_right_press(Message::RowContextOpened(i))
+            .into()
+```
+
+(`build_row` is `#[mutants::skip]`; the inner `button` captures only LEFT clicks, so the right-press falls through to the `mouse_area`. Directory rows are a plain `button` with no `mouse_area`, so they get no menu.)
+
+- [ ] **Step 11: Lint + commit**
 
 ```bash
 cargo fmt --all
 cargo clippy -p paksmith-gui --all-targets --all-features -- -D warnings
-git add crates/paksmith-gui/src/app.rs
+git add crates/paksmith-gui/src/app.rs crates/paksmith-gui/src/widgets/file_tree.rs
 git commit -m "feat(gui): add context_row state and right-press toggle (phase 7c)"
 ```
 
@@ -367,6 +380,8 @@ git commit -m "feat(gui): clear context_row on tree mutation and navigation (pha
 
 ## Task 3: Copy Path action — clipboard write + success toast
 
+> **Shared commit with Task 4.** `Message::CopyPathRequested` is *matched* by the arm below but *constructed* only by Task 4's "Copy Path" button. In this binary crate, a variant matched-but-never-constructed is a `dead_code` error under `clippy -D warnings`. So **do not commit at the end of Task 3** — implement Task 3's code, then Task 4's code, and commit once (Task 4's final commit covers both). Tests for both can run together at the end.
+
 **Files:**
 - Modify: `crates/paksmith-gui/src/app.rs` (`Message`, `update` arm, tests)
 
@@ -440,23 +455,14 @@ In `update`'s match (after the `RowContextOpened` arm):
         },
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 4: Build (do NOT commit yet — variant has no constructor until Task 4)**
 
-Run: `cargo test -p paksmith-gui`
-Expected: PASS (all existing + 2 new).
-
-- [ ] **Step 5: Lint + commit**
-
-```bash
-cargo fmt --all
-cargo clippy -p paksmith-gui --all-targets --all-features -- -D warnings
-git add crates/paksmith-gui/src/app.rs
-git commit -m "feat(gui): add Copy Path action with success toast (phase 7c)"
-```
+Run: `cargo build -p paksmith-gui`
+Expected: builds, but `cargo clippy -- -D warnings` would fail with `variant CopyPathRequested is never constructed` — that constructor arrives in Task 4. The CopyPathRequested tests will pass once compiled; run them with the Task 4 suite. Proceed directly to Task 4 and commit both together.
 
 ---
 
-## Task 4: Inline strip widget + file-tree render + right-press wiring
+## Task 4: Inline strip widget + file-tree render (commits Task 3 + Task 4)
 
 **Files:**
 - Create: `crates/paksmith-gui/src/widgets/context_menu.rs`
@@ -629,16 +635,9 @@ pub fn view(
 }
 ```
 
-- [ ] **Step 8: Wire the right-press on file rows**
+- [ ] **Step 8: (Right-press wiring already done in Task 1)**
 
-In `build_row` (the `else` branch that wraps the file-row `button` in a `mouse_area`), add `.on_right_press`:
-
-```rust
-        mouse_area(btn)
-            .on_double_click(Message::OpenAssetByRow(i))
-            .on_right_press(Message::RowContextOpened(i))
-            .into()
-```
+The `.on_right_press(Message::RowContextOpened(i))` on the file-row `mouse_area` was added in Task 1 Step 10 (it had to ship with the variant to avoid the binary-crate `dead_code` error). Nothing to do here — verify it's present in `build_row`.
 
 - [ ] **Step 9: Update `sidebar::view`**
 
@@ -678,9 +677,9 @@ In `crates/paksmith-gui/src/app.rs`, in `view`, capture the local beside `select
 - [ ] **Step 11: Build + run the full GUI test suite**
 
 Run: `cargo test -p paksmith-gui`
-Expected: PASS (all tests, including the 5 new `show_strip_after` tests). The build is green — `context_row` is now read end-to-end (`view` → `sidebar::view` → `file_tree::view` → `show_strip_after`).
+Expected: PASS (all tests, including the 5 new `show_strip_after` tests **and** Task 3's 2 `copy_path_requested` tests). The build is green — `context_row` is now read end-to-end (`view` → `sidebar::view` → `file_tree::view` → `show_strip_after`) and `CopyPathRequested` is now constructed by `action_strip`.
 
-- [ ] **Step 12: Lint + commit**
+- [ ] **Step 12: Lint + commit (Task 3 + Task 4 together)**
 
 ```bash
 cargo fmt --all
@@ -690,7 +689,7 @@ git add crates/paksmith-gui/src/widgets/context_menu.rs \
         crates/paksmith-gui/src/widgets/file_tree.rs \
         crates/paksmith-gui/src/panels/sidebar.rs \
         crates/paksmith-gui/src/app.rs
-git commit -m "feat(gui): render inline context-menu strip on file right-click (phase 7c)"
+git commit -m "feat(gui): render inline context-menu strip with Copy Path (phase 7c)"
 ```
 
 ---

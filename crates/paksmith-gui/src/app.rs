@@ -75,6 +75,11 @@ pub struct App {
     /// Live transient notifications (errors + action feedback), rendered as a
     /// non-blocking overlay. See [`crate::state::toast`].
     pub toasts: crate::state::toast::Toasts,
+    /// Visible-row index whose inline context-menu strip (Open / Copy Path) is
+    /// currently shown, or `None`. A *visible-row* index like
+    /// [`App::selected_row`]; cleared on every tree-mutating or selection path
+    /// so a stale index can never address the wrong row.
+    pub context_row: Option<usize>,
 }
 
 impl Default for App {
@@ -104,6 +109,7 @@ impl Default for App {
             tabs: crate::state::tabs::Tabs::default(),
             archive_generation: 0,
             toasts: crate::state::toast::Toasts::default(),
+            context_row: None,
         }
     }
 }
@@ -207,6 +213,10 @@ pub enum Message {
     /// Remove the toast with this id — used by both the `×` button and the
     /// scheduled auto-expiry task.
     ToastDismissed(u64),
+    /// A file row was right-clicked — toggle its inline context-menu strip.
+    /// Carries the *visible-row* index (no coordinates: `on_right_press` gives
+    /// none, and the inline strip needs none).
+    RowContextOpened(usize),
 }
 
 /// Processes a `Message` and updates the application state.
@@ -414,6 +424,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::ToastDismissed(id) => {
             app.toasts.remove(id);
+            Task::none()
+        }
+        Message::RowContextOpened(i) => {
+            app.context_row = toggle_context_row(app.context_row, i);
             Task::none()
         }
         Message::OpenAsset(path) => {
@@ -903,6 +917,18 @@ fn clamp_selected_row(selected_row: &mut Option<usize>, row_count: usize) {
         if i >= row_count {
             *selected_row = Some(row_count - 1);
         }
+    }
+}
+
+/// The new `context_row` after a right-press on visible row `clicked`.
+///
+/// Right-pressing the row that already owns the inline menu closes it (toggle);
+/// right-pressing any other row moves the menu to that row.
+fn toggle_context_row(current: Option<usize>, clicked: usize) -> Option<usize> {
+    if current == Some(clicked) {
+        None
+    } else {
+        Some(clicked)
     }
 }
 
@@ -1408,6 +1434,23 @@ mod tests {
         assert!(app.toasts.is_empty(), "dismiss removes the toast");
     }
 
+    // ── Message::RowContextOpened ─────────────────────────────────────────────
+    #[test]
+    fn row_context_opened_toggles_the_strip() {
+        let mut app = app_with_paths(&["file.txt"]);
+        let _ = update(&mut app, Message::RowContextOpened(0));
+        assert_eq!(
+            app.context_row,
+            Some(0),
+            "first right-press opens the strip"
+        );
+        let _ = update(&mut app, Message::RowContextOpened(0));
+        assert_eq!(
+            app.context_row, None,
+            "second right-press on same row closes it"
+        );
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     /// Returns a shared `Arc<PakReader>` opened from the real_v8b_uasset fixture.
@@ -1518,6 +1561,24 @@ mod tests {
         let mut sel: Option<usize> = None;
         clamp_selected_row(&mut sel, 3);
         assert_eq!(sel, None);
+    }
+
+    // ── toggle_context_row ────────────────────────────────────────────────────
+    #[test]
+    fn toggle_context_row_from_none_opens_clicked() {
+        assert_eq!(toggle_context_row(None, 3), Some(3));
+    }
+
+    #[test]
+    fn toggle_context_row_from_other_moves_to_clicked() {
+        // Right-clicking a different row moves the menu there (not a toggle-off).
+        assert_eq!(toggle_context_row(Some(2), 3), Some(3));
+    }
+
+    #[test]
+    fn toggle_context_row_same_row_closes() {
+        // Second right-press on the same row closes it. Kills `== with !=`.
+        assert_eq!(toggle_context_row(Some(3), 3), None);
     }
 
     // ── handle_tree_key: ArrowDown ────────────────────────────────────────────
