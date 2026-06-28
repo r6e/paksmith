@@ -147,9 +147,9 @@ Prepend to `crates/paksmith-gui/src/state/toast.rs` (above the test module):
 use std::time::Duration;
 
 /// Auto-dismiss delay for a success toast.
-pub const SUCCESS_TTL: Duration = Duration::from_secs(4);
+const SUCCESS_TTL: Duration = Duration::from_secs(4);
 /// Auto-dismiss delay for an error toast — longer, so failures can be read.
-pub const ERROR_TTL: Duration = Duration::from_secs(8);
+const ERROR_TTL: Duration = Duration::from_secs(8);
 
 /// Toast severity — drives tint and auto-dismiss duration. No `Info`: no
 /// agreed trigger produces one (see the Phase 7c design spec).
@@ -254,10 +254,12 @@ use crate::state::toast::Severity;
 
 #[test]
 fn open_error_while_archive_loaded_pushes_error_toast_not_banner() {
-    // An archive is already open. A failed open of another file would set
-    // `app.error`, but `view` shows the archive (the Some(archive) branch wins),
-    // so the banner never renders — the error is swallowed. It must become a toast.
+    // An archive is already open and an open of another file is in flight
+    // (keyflow.begin() → Resolving). The failed open would set `app.error`,
+    // but `view` shows the archive (the Some(archive) branch wins), so the
+    // banner never renders — the error is swallowed. It must become a toast.
     let mut app = app_with_paths(&["Game/A.uasset"]);
+    app.keyflow.begin();
     let _ = update(
         &mut app,
         Message::ArchiveOpened(Box::new(Err(OpenError::Core("boom".to_string())))),
@@ -272,6 +274,12 @@ fn open_error_while_archive_loaded_pushes_error_toast_not_banner() {
         app.error.is_none(),
         "no full-area banner when an archive is open"
     );
+    // The completed open must leave Resolving; the archive stays loaded, so
+    // keyflow returns to the loaded-archive state (Unlocked).
+    assert!(
+        matches!(app.keyflow, crate::state::keyflow::KeyFlow::Unlocked),
+        "keyflow must leave Resolving when an archive stays loaded"
+    );
 }
 
 #[test]
@@ -285,6 +293,26 @@ fn open_error_with_no_archive_uses_banner_not_toast() {
     );
     assert!(app.toasts.is_empty(), "no toast in the empty state");
     assert_eq!(app.error.as_deref(), Some("nope"), "banner error is set");
+}
+
+#[test]
+fn open_error_no_archive_after_resolving_shows_banner_not_spinner() {
+    // Realistic flow: OpenPathChosen runs keyflow.begin() → Resolving before the
+    // async open completes. A Core error with no archive must leave Resolving,
+    // else `view`'s Resolving branch (which precedes the error branch) shows
+    // "Opening…" forever and swallows the banner.
+    let mut app = App::default();
+    app.keyflow.begin();
+    let _ = update(
+        &mut app,
+        Message::ArchiveOpened(Box::new(Err(OpenError::Core("boom".to_string())))),
+    );
+    assert!(
+        matches!(app.keyflow, crate::state::keyflow::KeyFlow::Idle),
+        "keyflow must return to Idle on a terminal no-archive error"
+    );
+    assert_eq!(app.error.as_deref(), Some("boom"), "banner error is set");
+    assert!(app.toasts.is_empty(), "no toast in the empty state");
 }
 
 #[test]
@@ -375,6 +403,13 @@ In `update`'s `match message`, add an arm (e.g. after `Message::DismissAbout`):
 
 - [ ] **Step 7: Route the swallowed open-error into a toast**
 
+This arm also resets the key-flow out of `Resolving` (the open began with
+`keyflow.begin()`). The no-archive branch uses a small new
+`KeyFlow::reset()` (`*self = Self::Idle`) added to
+`crates/paksmith-gui/src/state/keyflow.rs` alongside its sibling transitions
+(`begin`/`lock`/`unlock`), with a `reset_returns_to_idle` unit test; the
+archive-loaded branch reuses the existing `unlock()`.
+
 Replace the existing `Err(OpenError::Core(msg))` arm inside `Message::ArchiveOpened(boxed)` (currently lines ~259–268):
 
 ```rust
@@ -386,7 +421,11 @@ Replace the existing `Err(OpenError::Core(msg))` arm inside `Message::ArchiveOpe
                 } else if app.archive.is_some() {
                     // An archive is already open, so the full-area error banner in
                     // `view` would never render (the `Some(archive)` branch wins).
-                    // Surface the failure as a non-blocking toast instead.
+                    // Surface the failure as a non-blocking toast instead. The open
+                    // began with `keyflow.begin()` (→ Resolving) and has now
+                    // terminated, so leave Resolving; the archive stays displayed,
+                    // so restore the loaded-archive invariant (`Unlocked`).
+                    app.keyflow.unlock();
                     push_toast(
                         app,
                         crate::state::toast::Severity::Error,
@@ -394,6 +433,9 @@ Replace the existing `Err(OpenError::Core(msg))` arm inside `Message::ArchiveOpe
                     )
                 } else {
                     // No archive: the empty-state banner (with retry CTA) is right.
+                    // Reset out of Resolving so `view` falls through to the banner
+                    // instead of the "Opening…" spinner.
+                    app.keyflow.reset();
                     app.error = Some(msg);
                     Task::none()
                 }
@@ -465,14 +507,14 @@ pub fn overlay(toasts: &Toasts) -> Element<'_, Message> {
 }
 
 #[mutants::skip]
-fn card(id: u64, severity: Severity, message: &str) -> Element<'static, Message> {
+fn card(id: u64, severity: Severity, message: &str) -> Element<'_, Message> {
     let dismiss = button(text("\u{00d7}").size(f32::from(TEXT_SM)))
         .padding([0.0, SPACE_SM])
         .style(iced::widget::button::text)
         .on_press(Message::ToastDismissed(id));
 
     let body = row![
-        text(message.to_owned()).size(f32::from(TEXT_SM)),
+        text(message).size(f32::from(TEXT_SM)),
         dismiss,
     ]
     .spacing(SPACE_SM)
