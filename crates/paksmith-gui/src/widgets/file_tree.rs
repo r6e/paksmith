@@ -103,7 +103,12 @@ pub fn view(
     context_row: Option<usize>,
 ) -> Element<'_, Message> {
     let rows = tree.visible_rows();
-    let mut items: Vec<Element<'_, Message>> = Vec::with_capacity(rows.len());
+    // `+ 1`: when a context menu is open the loop pushes one extra element (the
+    // action strip), so reserving `rows.len() + 1` avoids a reallocation in that
+    // case. Safe to spell out the arithmetic here because `view` is
+    // `#[mutants::skip]` — an off-by-one in a capacity hint changes no behaviour
+    // and would otherwise be an unkillable mutant.
+    let mut items: Vec<Element<'_, Message>> = Vec::with_capacity(rows.len() + 1);
     for (i, row) in rows.iter().enumerate() {
         items.push(build_row(i, row, accent, selected_row, context_row));
         if show_strip_after(context_row, i, row) {
