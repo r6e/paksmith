@@ -165,6 +165,19 @@ allow = ["ISC"]
 name = "target-lexicon"
 allow = ["Apache-2.0 WITH LLVM-exception"]
 
+# BSD-2-Clause — a standard permissive OSI license (BSD-3-Clause minus the
+# non-endorsement clause; BSD-3-Clause is already in the global allow-list).
+# Pulled transitively by the `image` crate's EXIF support, which arrives via
+# iced's `image-without-codecs` feature (Phase 7b TextureViewer renders raw
+# RGBA via `Handle::from_rgba`; the codec tree is disabled). Scoped per-crate
+# per the narrow-allow-list convention.
+[[licenses.exceptions]]
+name = "kamadak-exif"
+allow = ["BSD-2-Clause"]
+[[licenses.exceptions]]
+name = "mutate_once"
+allow = ["BSD-2-Clause"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

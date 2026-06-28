@@ -47,6 +47,8 @@ pub use custom_version::{CustomVersion, CustomVersionContainer};
 pub use engine_version::EngineVersion;
 pub use export_table::{ExportTable, ObjectExport};
 pub use exports::mesh::section::MeshSection;
+// Phase 7b: public texture-decode API (GUI texture viewer).
+pub use exports::texture::{DecodedTextureRgba, TextureInfo, classify_texture, decode_texture_mip};
 pub use guid::FGuid;
 pub use import_table::{ImportTable, ObjectImport};
 pub use mappings::Usmap;

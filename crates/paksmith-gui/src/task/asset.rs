@@ -111,7 +111,7 @@ pub struct AssetLoad {
     pub truncated: bool,
     /// Parse outcome: `Ok` only when the entry both looks parseable and parses cleanly.
     /// Every failure path is stringified so the result stays `Clone` for `Message`.
-    pub parsed: Result<Box<Package>, String>,
+    pub parsed: Result<std::sync::Arc<Package>, String>,
 }
 
 /// Whether `path` looks like a parseable UAsset header (so we attempt a parse).
@@ -150,7 +150,7 @@ pub async fn load(reader: Arc<PakReader>, path: String) -> AssetLoad {
         // require a mapping return `UnversionedWithoutMappings`, surfaced here
         // as a stringified parse error → Properties view shows the reason.
         Package::read_from_reader(&reader, &path, None)
-            .map(Box::new)
+            .map(std::sync::Arc::new)
             .map_err(|e| e.to_string())
     } else {
         Err("Not a UAsset \u{2014} showing raw bytes".to_string())

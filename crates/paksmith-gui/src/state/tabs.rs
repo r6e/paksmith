@@ -1,9 +1,15 @@
-//! Pure tab-collection model for the content host. No `iced` imports.
+//! Tab-collection model for the content host. No direct `iced` imports, though
+//! a `Tab` transitively holds an iced render handle via the cached
+//! [`render`](crate::state::texture_view::TextureState::render) field on
+//! [`TextureState`](crate::state::texture_view::TextureState).
 
 use std::collections::HashSet;
 
+use std::sync::Arc;
+
 use crate::state::hex_view;
 use crate::state::property_view::NodeId;
+use crate::state::texture_view;
 use paksmith_core::asset::Package;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +17,7 @@ pub enum ViewMode {
     Properties,
     Hex,
     Info,
+    Texture,
 }
 
 #[derive(Debug, Clone)]
@@ -21,7 +28,7 @@ pub enum TabContent {
         bytes: Vec<u8>,
         /// Whether the entry is larger than the cap (entry was truncated at read time).
         truncated: bool,
-        parsed: Result<Box<Package>, String>,
+        parsed: Result<Arc<Package>, String>,
     },
 }
 
@@ -31,7 +38,30 @@ pub struct Tab {
     pub view: ViewMode,
     pub content: TabContent,
     pub hex: hex_view::HexState,
+    pub texture: texture_view::TextureState,
     pub expanded: HashSet<NodeId>,
+}
+
+/// Returns `true` iff `tab` holds a decodable texture export.
+///
+/// This reads only the per-tab decodable-mip cache (`tab.texture.mips`), so it
+/// is O(1) and safe to call on every per-frame view render (see
+/// `panels/content.rs`) — it never re-classifies the `Package`. The cache is the
+/// single source of truth, kept correct at two mutation sites so `mips` is
+/// non-empty iff the tab's current content is a decodable texture:
+///
+/// - `Tabs::set_content` resets `tab.texture` on every content swap, so the
+///   cache can never read stale-true after the content changes.
+/// - The `AssetLoaded` handler repopulates `mips` from `classify_texture`
+///   immediately after `set_content`, before any reader (`pick_view_after_load`
+///   or a view render) observes it.
+///
+/// (Archive swaps clear all tabs and `open_or_activate` re-activates an open
+/// path without reloading — neither populates `mips`, so neither can leave a
+/// stale cache behind.)
+#[must_use]
+pub fn texture_available(tab: &Tab) -> bool {
+    !tab.texture.mips.is_empty()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -53,6 +83,7 @@ impl Tabs {
             view: ViewMode::Properties,
             content: TabContent::Loading,
             hex: hex_view::HexState::default(),
+            texture: texture_view::TextureState::default(),
             expanded: HashSet::new(),
         });
         let i = self.open.len() - 1;
@@ -95,20 +126,47 @@ impl Tabs {
     pub fn set_content(&mut self, path: &str, content: TabContent) {
         if let Some(t) = self.open.iter_mut().find(|t| t.path == path) {
             t.content = content;
+            // Invalidate the per-content texture cache at the mutation site so
+            // `texture_available` (which reads `t.texture.mips` as a "decodable
+            // texture loaded" signal) can never observe state left over from the
+            // tab's previous content. The `AssetLoaded` handler
+            // repopulates it immediately after for a decodable texture, so this
+            // costs nothing in the normal flow while keeping the no-stale-true
+            // invariant self-enforcing for any future in-place reload (Phase 7c).
+            t.texture = texture_view::TextureState::default();
         }
     }
 
-    /// After a load completes, demote the default view to Info for an unparsable
-    /// asset (so the user lands on useful metadata, not the Properties error).
-    /// Only acts when the tab is still on the default `Properties` view.
+    /// After a load completes, promote or demote the default view.
+    ///
+    /// - If the asset has a decodable texture, promote to `ViewMode::Texture`.
+    /// - If the asset failed to parse, demote to `ViewMode::Info`.
+    ///
+    /// Only acts when the tab is still on the default `Properties` view
+    /// (respects a user-initiated view switch).
+    ///
+    /// # Preconditions
+    ///
+    /// The Texture promotion reads [`texture_available`], i.e. the tab's
+    /// decodable-mip cache (`tab.texture.mips`). Callers must populate that
+    /// cache from `classify_texture` (and reset it via [`set_content`] for the
+    /// new content) **before** calling this — the `AssetLoaded` handler does
+    /// exactly that. A caller that runs this before populating the cache
+    /// silently leaves a decodable texture on `Properties` instead of promoting
+    /// it (relevant to any future in-place reload — Phase 7c).
+    ///
+    /// [`set_content`]: Self::set_content
     pub fn pick_view_after_load(&mut self, path: &str) {
-        if let Some(tab) = self.open.iter_mut().find(|t| t.path == path) {
-            #[allow(clippy::collapsible_if)]
-            if matches!(&tab.content, TabContent::Ready { parsed: Err(_), .. }) {
-                if tab.view == ViewMode::Properties {
-                    tab.view = ViewMode::Info;
-                }
-            }
+        let Some(tab) = self.open.iter_mut().find(|t| t.path == path) else {
+            return;
+        };
+        if tab.view != ViewMode::Properties {
+            return; // user already switched; respect their choice
+        }
+        if texture_available(tab) {
+            tab.view = ViewMode::Texture;
+        } else if matches!(&tab.content, TabContent::Ready { parsed: Err(_), .. }) {
+            tab.view = ViewMode::Info;
         }
     }
 
@@ -287,7 +345,7 @@ mod tests {
             TabContent::Ready {
                 bytes,
                 truncated: false,
-                parsed: Ok(Box::new(pkg)),
+                parsed: Ok(Arc::new(pkg)),
             },
         );
         t
@@ -383,6 +441,104 @@ mod tests {
         assert_eq!(
             t.active, original_active,
             "activate at exactly len must be rejected (out of bounds)"
+        );
+    }
+
+    // ── ViewMode::Texture + texture_available (Phase 7b Task 3) ──────────────
+
+    /// Build a `TabContent::Ready` wrapping a non-texture `Package`
+    /// (Generic export; classify_texture → None).
+    fn ready_non_texture_content() -> TabContent {
+        use std::sync::Arc;
+        let mp = paksmith_core::testing::uasset::build_minimal_ue4_27();
+        let pkg =
+            paksmith_core::asset::Package::read_from(&mp.bytes, None, None, "Game/Foo.uasset")
+                .expect("build_minimal_ue4_27 must parse");
+        TabContent::Ready {
+            bytes: mp.bytes.clone(),
+            truncated: false,
+            parsed: Ok(Arc::new(pkg)),
+        }
+    }
+
+    #[test]
+    fn pick_view_promotes_when_mip_cache_is_populated() {
+        // Unit test of `pick_view_after_load` in isolation: it promotes off the
+        // decodable-mip cache (`texture_available`), NOT by re-classifying the
+        // `Package`. We seed `mips` directly to stand in for the handler's
+        // classify step. The classify→populate→promote pipeline (and a classify
+        // regression that would empty the cache) is covered end-to-end by
+        // `app::tests::asset_loaded_decodable_texture_populates_path_keyed_tab`.
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate("Game/T_Rock.uasset");
+        // Content kind is deliberately non-texture: a `Texture` promotion here
+        // proves the decision comes from the seeded `mips` cache, never from
+        // re-classifying the `Package`.
+        t.set_content("Game/T_Rock.uasset", ready_non_texture_content());
+        t.open[0].texture.mips = vec![(4, 4)];
+        t.pick_view_after_load("Game/T_Rock.uasset");
+        assert_eq!(
+            t.open[0].view,
+            ViewMode::Texture,
+            "a tab with a populated decodable-mip cache must promote to Texture view"
+        );
+    }
+
+    // `pick_view_after_load`'s Ok-stays-Properties and Err-demotes-to-Info paths
+    // are covered by `pick_view_after_load_ok_leaves_view_as_properties` and
+    // `pick_view_after_load_err_on_properties_demotes_to_info` above; since
+    // `pick_view` no longer classifies (it reads the mip cache), a non-texture Ok
+    // tab is indistinguishable from any other empty-cache Ok tab, so no separate
+    // non-texture variant is needed here.
+
+    #[test]
+    fn texture_available_reads_the_decodable_mip_cache() {
+        // `texture_available` is a pure reader of the per-tab decodable-mip
+        // cache (`tab.texture.mips`): empty → false, non-empty → true. It never
+        // re-classifies the `Package`, so the tab's content kind is irrelevant —
+        // only the cache the `AssetLoaded` handler populates matters.
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate("tex.uasset");
+
+        // Empty cache (the default after `open_or_activate`) → false.
+        assert!(
+            !texture_available(&t.open[0]),
+            "an empty decodable-mip cache must read false"
+        );
+
+        // A populated cache → true, even on a tab whose content would itself
+        // classify as non-texture (proving the read never re-classifies).
+        t.set_content("tex.uasset", ready_non_texture_content());
+        t.open[0].texture.mips = vec![(64, 64)];
+        assert!(
+            texture_available(&t.open[0]),
+            "a non-empty decodable-mip cache must read true"
+        );
+    }
+
+    #[test]
+    fn set_content_resets_stale_texture_cache() {
+        // `set_content` invalidates the per-content texture cache so
+        // `texture_available` cannot read stale-true after a content swap (the
+        // Phase 7c in-place-reload hazard). Populate the cache, swap to
+        // non-texture content, and assert it is cleared and the tab no longer
+        // offers a Texture view.
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate("a.uasset");
+        t.open[0].texture.mips = vec![(64, 64)];
+        t.open[0].texture.selected_mip = 3;
+        t.set_content("a.uasset", ready_non_texture_content());
+        assert!(
+            t.open[0].texture.mips.is_empty(),
+            "set_content must reset the texture cache on content swap"
+        );
+        assert_eq!(
+            t.open[0].texture.selected_mip, 0,
+            "set_content must reset the full texture state, not just mips"
+        );
+        assert!(
+            !texture_available(&t.open[0]),
+            "after a swap to non-texture content the Texture tab must not be offered"
         );
     }
 }

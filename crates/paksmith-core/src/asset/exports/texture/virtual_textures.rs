@@ -442,7 +442,20 @@ impl VirtualTextureData {
     /// (attacker-controlled, uncapped) `num_mips`: no level beyond the data
     /// arrays could resolve a grid anyway (`tile_grid_for` returns `None`), so a
     /// huge `num_mips` can't drive a multi-billion-iteration scan.
-    fn min_level(&self) -> Option<usize> {
+    ///
+    /// This is the bitmap-area gate at the heart of the classify⟂decode fidelity
+    /// line. [`flatten_geometry`](Self::flatten_geometry) calls it to pick the
+    /// cap-fitting level, and `classify_texture` gates on `flatten_geometry().ok()`
+    /// — so classify rules a VT decodable iff `min_level` succeeds *and* the
+    /// remaining geometry checks pass. What classify does NOT replicate are the
+    /// flatten's further *per-tile* sizing checks: the cap on total per-tile
+    /// decode work (a small-bitmap / huge-border grid) and the per-tile
+    /// encoded-size-overflow guard. So a pathological VT — a tile border wildly
+    /// disproportionate to its tile size — can pass classify and then fail the
+    /// decode cleanly (a bounded `UnsupportedFeature`, never an OOM). Mirroring
+    /// those rarely-hit per-tile caps into classify would couple it to the
+    /// flatten's tile math for no safety gain.
+    pub(super) fn min_level(&self) -> Option<usize> {
         let data_levels = self
             .tile_offset_data
             .len()
@@ -454,6 +467,127 @@ impl VirtualTextureData {
                 .is_some_and(|bytes| bytes <= super::pixel_format::MAX_DECODED_TEXTURE_BYTES)
         })
     }
+
+    /// The output-bitmap geometry [`flatten_virtual_texture`] will produce: the
+    /// chosen [`min_level`](Self::min_level), its tile grid, and the decoded
+    /// RGBA8 bitmap's pixel dimensions and byte layout.
+    ///
+    /// This is the single source of truth for the dimensions the flatten
+    /// returns. `flatten_virtual_texture` calls it (and then layers on the
+    /// format/`packed`/decode-work checks the geometry doesn't need); the
+    /// public [`classify_texture`](super::classify_texture) reads it via
+    /// `.ok()`, so the dims it advertises to the GUI are *exactly* what the
+    /// decode emits — by construction, not by a separately-maintained formula.
+    ///
+    /// Returns `Err(UnsupportedFeature)` for every cause the flatten rejects
+    /// *before producing pixels*, each with its own message: legacy (UE4) data,
+    /// a zero tile size, no cap-fitting `min_level`, a missing tile grid, an
+    /// over-65536-tile grid axis, a zero grid dimension, or a dimension/size
+    /// overflow. It does NOT apply the flatten's further *per-tile* sizing
+    /// checks — the decode-work cap and the per-tile encoded-size-overflow guard
+    /// (the deliberate classify⟂decode fidelity line documented on
+    /// [`min_level`](Self::min_level)) — so a VT this accepts can still fail the
+    /// decode cleanly on one of those, but always cleanly: never an OOM.
+    pub(super) fn flatten_geometry(&self) -> crate::Result<FlattenGeometry> {
+        // Legacy (UE4) VTs are not renderable; reject up front so the flatten —
+        // and the `classify_texture` gate that shares this — never offers them.
+        if self.is_legacy_data() {
+            return Err(vt_unsupported(
+                "legacy (UE4) virtual textures are not yet renderable; UE5.0+ virtual textures render",
+            ));
+        }
+        // A zero tile size is malformed (CUE4Parse divides by it in
+        // GetWidthInTiles). Reject it up front: it would otherwise zero both DoS
+        // caps below (`tile_size² == 0` → `min_level`'s bitmap-bytes and the
+        // decode-work product both vacuously fit), leaving the grid loop unbounded.
+        if self.tile_size == 0 {
+            return Err(vt_unsupported("virtual texture has a zero tile size"));
+        }
+        // DoS cap 1: the highest-res level whose decoded bitmap fits the cap;
+        // error rather than allocate past it (CUE4Parse falls back to level 0).
+        let level = self.min_level().ok_or_else(|| {
+            vt_unsupported("virtual texture is too large to decode at any mip level")
+        })?;
+        let grid = self
+            .tile_grid_for(level)
+            .ok_or_else(|| vt_unsupported("virtual texture mip level has no tile grid"))?;
+
+        // The grid is iterated by `(x, y)` and each cell's Morton address is
+        // `morton_code_2(x) | (morton_code_2(y) << 1)`; `morton_code_2` keeps only
+        // the low 16 bits, so a tile coordinate ≥ 65536 would alias a lower one
+        // (CUE4Parse's `ReverseMortonCode2` likewise never exceeds 65535). Reject a
+        // grid that large in either axis — it implies a malformed `TileOffsetData`.
+        if grid.width > MAX_VT_GRID_AXIS_TILES || grid.height > MAX_VT_GRID_AXIS_TILES {
+            return Err(vt_unsupported(
+                "virtual texture tile grid exceeds 65536 tiles on an axis",
+            ));
+        }
+        // A zero grid axis is malformed: a 0-tile-wide/high grid renders no
+        // pixels. It also slips past `min_level` — `width·height·tile_size²·4`
+        // is 0 when either axis is 0, vacuously within the cap — leaving the
+        // OTHER axis's bitmap dimension unconstrained by the cap proof. Reject it
+        // so `bitmap_h ≥ tile_size ≥ 1` holds below (see the `row_bytes` note) and
+        // so classify never advertises a zero-area Texture view.
+        if grid.width == 0 || grid.height == 0 {
+            return Err(vt_unsupported(
+                "virtual texture tile grid has a zero dimension",
+            ));
+        }
+
+        // Bitmap dims = tile grid × tile size. CUE4Parse's legacy bitmap-shrink
+        // factor fires for legacy data or a single-tile grid (maxLevel == 0); for
+        // well-formed UE5.0+ content it is always 1, so paksmith omits it. (A
+        // malformed UE5 VT with a 1×1 grid AND MaxAddress > 1 could trip CUE4Parse's
+        // shrink; paksmith would instead emit a larger zero-padded bitmap — a safe,
+        // deliberate divergence on malformed input, never an OOB.) `min_level`
+        // already proved width·height·tile_size²·4 ≤ the cap, so the products fit.
+        let (Some(bitmap_w), Some(bitmap_h)) = (
+            grid.width.checked_mul(self.tile_size),
+            grid.height.checked_mul(self.tile_size),
+        ) else {
+            return Err(vt_unsupported("virtual texture bitmap dimensions overflow"));
+        };
+        let Some(total) = (bitmap_w as usize)
+            .checked_mul(bitmap_h as usize)
+            .and_then(|p| p.checked_mul(4))
+        else {
+            return Err(vt_unsupported("virtual texture bitmap is too large"));
+        };
+        // `row_bytes ≤ total`: with `bitmap_h ≥ 1` (zero-axis grids rejected
+        // above), `bitmap_w·4 ≤ bitmap_w·bitmap_h·4 = total`, and `total` is the
+        // checked, cap-bounded allocation size — so this multiply cannot overflow
+        // `usize` even on a 32-bit target.
+        let row_bytes = bitmap_w as usize * 4;
+
+        Ok(FlattenGeometry {
+            level,
+            grid,
+            bitmap_w,
+            bitmap_h,
+            total,
+            row_bytes,
+        })
+    }
+}
+
+/// The output-bitmap geometry of a flattened virtual texture, computed once by
+/// [`VirtualTextureData::flatten_geometry`] and consumed by both the flatten
+/// and `classify_texture`. Only `bitmap_w`/`bitmap_h` are visible outside this
+/// module (the dims `classify_texture` reports); the rest are flatten-internal.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FlattenGeometry {
+    /// The chosen `min_level` (highest-res level whose bitmap fits the cap).
+    level: usize,
+    /// That level's tile grid (extents + Morton upper bound).
+    grid: TileGrid,
+    /// Decoded bitmap width in pixels (`grid.width · tile_size`).
+    pub(super) bitmap_w: u32,
+    /// Decoded bitmap height in pixels (`grid.height · tile_size`).
+    pub(super) bitmap_h: u32,
+    /// Decoded RGBA8 byte count (`bitmap_w · bitmap_h · 4`), allocation size.
+    total: usize,
+    /// Decoded bitmap stride in bytes (`bitmap_w · 4`).
+    row_bytes: usize,
 }
 
 /// The tile-grid extents of one VT mip level — the subset of CUE4Parse's
@@ -570,74 +704,48 @@ pub(crate) fn flatten_virtual_texture(
     bulk: &[BulkData],
     is_normal_map: bool,
 ) -> crate::Result<DecodedTexture> {
-    if vt.is_legacy_data() {
-        return Err(vt_unsupported(
-            "legacy (UE4) virtual textures are not yet renderable; UE5.0+ virtual textures render",
-        ));
-    }
-    // A zero tile size is malformed (CUE4Parse divides by it in
-    // GetWidthInTiles). Reject it up front: it would otherwise zero both DoS
-    // caps below (`tile_size² == 0` → `min_level`'s bitmap-bytes and the
-    // decode-work product both vacuously fit), leaving the grid loop unbounded.
-    if vt.tile_size == 0 {
-        return Err(vt_unsupported("virtual texture has a zero tile size"));
-    }
+    // Output-bitmap geometry: legacy rejection, the cap-fitting `min_level`, its
+    // tile grid, and the bitmap dimensions/size — the single source of truth
+    // `classify_texture` also reads, so classify⟂decode dimensions agree by
+    // construction. (See `flatten_geometry` for each rejection cause.)
+    let geom = vt.flatten_geometry()?;
+    let grid = geom.grid;
+
     let format = PixelFormat::from_name(
         vt.layer_types
             .get(FLATTEN_LAYER_IDX)
             .ok_or_else(|| vt_unsupported("virtual texture has no layer-0 pixel format"))?,
     );
 
-    // DoS cap 1: the highest-res level whose decoded bitmap fits the cap; error
-    // rather than allocate past it (CUE4Parse falls back to level 0).
-    let level = vt
-        .min_level()
-        .ok_or_else(|| vt_unsupported("virtual texture is too large to decode at any mip level"))?;
-    let grid = vt
-        .tile_grid_for(level)
-        .ok_or_else(|| vt_unsupported("virtual texture mip level has no tile grid"))?;
-
-    // The grid is iterated by `(x, y)` and each cell's Morton address is
-    // `morton_code_2(x) | (morton_code_2(y) << 1)`; `morton_code_2` keeps only
-    // the low 16 bits, so a tile coordinate ≥ 65536 would alias a lower one
-    // (CUE4Parse's `ReverseMortonCode2` likewise never exceeds 65535). Reject a
-    // grid that large in either axis — it implies a malformed `TileOffsetData`.
-    if grid.width > MAX_VT_GRID_AXIS_TILES || grid.height > MAX_VT_GRID_AXIS_TILES {
-        return Err(vt_unsupported(
-            "virtual texture tile grid exceeds 65536 tiles on an axis",
-        ));
-    }
-
     let tile_size = vt.tile_size;
     let tile_pixel_size = vt.physical_tile_size(); // tile_size + 2*border
     let border = vt.tile_border_size;
-
-    // Bitmap dims = tile grid × tile size. CUE4Parse's legacy bitmap-shrink
-    // factor fires for legacy data or a single-tile grid (maxLevel == 0); for
-    // well-formed UE5.0+ content it is always 1, so paksmith omits it. (A
-    // malformed UE5 VT with a 1×1 grid AND MaxAddress > 1 could trip CUE4Parse's
-    // shrink; paksmith would instead emit a larger zero-padded bitmap — a safe,
-    // deliberate divergence on malformed input, never an OOB.) `min_level`
-    // already proved width·height·tile_size²·4 ≤ the cap, so the products fit.
-    let (Some(bitmap_w), Some(bitmap_h)) = (
-        grid.width.checked_mul(tile_size),
-        grid.height.checked_mul(tile_size),
-    ) else {
-        return Err(vt_unsupported("virtual texture bitmap dimensions overflow"));
-    };
-    let Some(total) = (bitmap_w as usize)
-        .checked_mul(bitmap_h as usize)
-        .and_then(|p| p.checked_mul(4))
-    else {
-        return Err(vt_unsupported("virtual texture bitmap is too large"));
-    };
-    let row_bytes = bitmap_w as usize * 4;
+    let bitmap_w = geom.bitmap_w;
+    let bitmap_h = geom.bitmap_h;
+    let total = geom.total;
+    let row_bytes = geom.row_bytes;
 
     // packedOutputSize: the per-tile encoded byte count — trusted (the layer
     // format + the fixed physical tile size), NOT the tile `data_length`.
+    // `encoded_len` returns `None` for two distinct causes; split them so the
+    // error is accurate. (1) An undecodable format — `classify_texture`
+    // pre-screens this, but a direct flatten caller may not. (2) A per-tile
+    // encoded size that overflows `u64`/`usize`: an extreme `tile_border_size`
+    // inflates `physical_tile_size` toward `u32::MAX`, and for a 16-byte-block
+    // format that squares past the integer range. The decodable-but-overflowing
+    // case must NOT report "format is not decodable" — the format IS decodable.
+    if !super::pixel_format::is_decodable(&format) {
+        return Err(vt_unsupported(
+            "virtual-texture layer-0 pixel format is not decodable",
+        ));
+    }
     let packed = encoded_len(&format, tile_pixel_size, tile_pixel_size)
         .and_then(|n| usize::try_from(n).ok())
-        .ok_or_else(|| vt_unsupported("virtual-texture layer-0 pixel format is not decodable"))?;
+        .ok_or_else(|| {
+            vt_unsupported(
+                "virtual texture per-tile encoded size overflows — tile border disproportionate to tile size",
+            )
+        })?;
 
     // DoS cap 2: bound the TOTAL per-tile decode work, not just the output
     // bitmap. `min_level` caps the output (grid · tile_size² · 4), but a large
@@ -658,7 +766,7 @@ pub(crate) fn flatten_virtual_texture(
         vt,
         bulk,
         format,
-        level,
+        level: geom.level,
         max_address: grid.max_address,
         is_normal_map,
         tile_size,
@@ -2161,6 +2269,112 @@ mod tests {
         assert_eq!(&out.rgba[4..8], &[0, 255, 0, 255], "(1,0) green");
         assert_eq!(&out.rgba[8..12], &[0, 0, 255, 255], "(0,1) blue");
         assert_eq!(&out.rgba[12..16], &[255, 255, 255, 255], "(1,1) white");
+    }
+
+    #[test]
+    fn flatten_geometry_matches_flatten_output_dimensions() {
+        // `flatten_virtual_texture` sizes its output bitmap from
+        // `flatten_geometry`, and `classify_texture` reads the same helper — so
+        // the dims classify advertises are exactly the decode's. Pin that the
+        // flatten doesn't override the geometry's dims (a future regression where
+        // it recomputes them independently would reintroduce classify⟂decode
+        // drift). grid 2×2 × tile_size 1 → 2×2 bitmap.
+        let (vt, bulk) = morton_grid_vt();
+        let geom = vt
+            .flatten_geometry()
+            .expect("a decodable VT must yield geometry");
+        let out = flatten_virtual_texture(&vt, &bulk, false).expect("flatten");
+        assert_eq!(
+            (geom.bitmap_w, geom.bitmap_h),
+            (out.width, out.height),
+            "flatten output dims must equal flatten_geometry's bitmap dims",
+        );
+    }
+
+    #[test]
+    fn flatten_geometry_rejects_legacy_vt() {
+        // Legacy (UE4) VTs are not renderable; `flatten_geometry` must refuse
+        // them up front so `classify_texture` (which gates on it via `.ok()`)
+        // never offers an undecodable Texture view — the unit-level companion to
+        // `classify_texture_legacy_virtual_is_none`.
+        let vt = legacy_vt(1, vec![0, 64], 128);
+        assert!(vt.is_legacy_data(), "fixture must be legacy");
+        let err = vt
+            .flatten_geometry()
+            .expect_err("a legacy VT must be rejected");
+        assert!(
+            matches!(err, PaksmithError::UnsupportedFeature { ref context } if context.contains("legacy")),
+            "legacy rejection must name the cause, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn flatten_geometry_rejects_zero_grid_dimension() {
+        // A grid with a zero axis renders no pixels AND slips past `min_level`
+        // (`width·height·tile_size²·4 == 0` vacuously fits the cap), which would
+        // leave the OTHER axis's bitmap dimension unconstrained by the cap proof.
+        // `flatten_geometry` must reject either-axis-zero so `bitmap_h ≥ 1` holds
+        // for the `row_bytes` multiply and classify never advertises a zero-area
+        // Texture view. Both axes are exercised to pin the full `||` guard.
+        for (w, h, axis) in [(8u32, 0u32, "height"), (0u32, 8u32, "width")] {
+            let vt = VirtualTextureData {
+                num_layers: 1,
+                num_mips: 1,
+                tile_size: 4,
+                tile_offset_data: vec![vt_tod(w, h, 1, vec![0], vec![0])],
+                layer_types: vec!["PF_DXT1".to_string()],
+                ..Default::default()
+            };
+            // Precondition: min_level accepts it (zero-area bitmap is 0 ≤ cap), so
+            // the zero-dimension guard — not min_level — is what must reject it.
+            assert_eq!(
+                vt.min_level(),
+                Some(0),
+                "{axis}-zero grid must still pass min_level (0 bytes ≤ cap)"
+            );
+            let err = vt
+                .flatten_geometry()
+                .expect_err("a zero grid dimension must be rejected");
+            assert!(
+                matches!(err, PaksmithError::UnsupportedFeature { ref context }
+                    if context.contains("zero dimension")),
+                "the {axis} axis being zero must be rejected by name, got {err:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn flatten_rejects_overflowing_per_tile_encoded_size_with_accurate_message() {
+        // A decodable 16-byte-per-block format (BC3 / PF_DXT5) with a tile border
+        // so large that `physical_tile_size` saturates to ~u32::MAX makes the
+        // per-tile encoded size overflow u64. `flatten_geometry` still passes —
+        // the small `tile_size` keeps the OUTPUT bitmap tiny — so this is a
+        // classify→decode divergence that must fail cleanly AND name the real
+        // cause: the format IS decodable, so the message must not claim otherwise.
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 1,
+            tile_border_size: u32::MAX / 2, // physical tile saturates to ~u32::MAX
+            tile_offset_data: vec![vt_tod(1, 1, 1, vec![0], vec![0])],
+            layer_types: vec!["PF_DXT5".to_string()],
+            ..Default::default()
+        };
+        // Precondition: the output-bitmap geometry accepts it (tiny bitmap), so
+        // the only thing left to reject is the per-tile encoded-size overflow —
+        // not geometry. (PF_DXT5 is decodable, so the "not decodable" arm is not
+        // what fires; the message assertion below would fail loudly if it were.)
+        assert!(
+            vt.flatten_geometry().is_ok(),
+            "the tiny output bitmap must pass geometry — the overflow is per-tile, not output"
+        );
+        let err = flatten_virtual_texture(&vt, &[], false)
+            .expect_err("an overflowing per-tile encoded size must be rejected");
+        assert!(
+            matches!(err, PaksmithError::UnsupportedFeature { ref context }
+                if context.contains("encoded size overflows")),
+            "the message must name the encoded-size overflow, not a format problem, got {err:?}",
+        );
     }
 
     #[test]

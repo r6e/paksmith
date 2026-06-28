@@ -12,7 +12,7 @@ dark-light = "2.0.0"
 # `Task::perform` executor tokio-backed, which `paksmith-core`'s reqwest-based
 # registry fetch (inside the async `resolve_pak_key`) requires at runtime — the
 # default `thread-pool` executor would panic with no tokio reactor.
-iced = { version = "0.14", features = ["tokio"] }
+iced = { version = "0.14", features = ["tokio", "image-without-codecs"] }
 # Phase 6 Task 11: native menu bar (File/View/Help) with ⌘/Ctrl-O accelerator.
 # Apache-2.0 OR MIT.  macOS: global app menu via init_for_nsapp().
 # Windows/Linux: menu built but not attached (no iced 0.14 window-handle API).
@@ -41,6 +41,10 @@ zeroize = { workspace = true }
 [dev-dependencies]
 # Phase 6 Task 7: async runtime for the open-fixture integration test.
 tokio = { workspace = true }
+# Phase 7b Task 3: enable __test_utils so tests can build synthetic texture
+# Packages via paksmith_core::testing::uasset. Normal `cargo build` is
+# unaffected; this feature is only active during test compilation.
+paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
 
 [lints]
 workspace = true
