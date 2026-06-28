@@ -244,42 +244,46 @@ fn build_row(
             .width(Length::Fill)
             .style(move |theme: &iced::Theme, status| {
                 let palette = theme.palette();
-                if is_selected {
-                    iced::widget::button::Style {
-                        background: Some(Background::Color(accent.scale_alpha(0.18))),
-                        text_color: palette.text,
-                        border: iced::Border {
-                            color: accent,
-                            width: selection_border_width,
-                            radius: 0.0.into(),
-                        },
-                        ..Default::default()
-                    }
-                } else if is_context_owner {
-                    // The row whose inline context menu is open shares the menu
-                    // band's surface (extended_palette background.weak), so the row
-                    // and the strip directly beneath it read as one block. No accent
-                    // border — that's reserved for the keyboard cursor (is_selected).
-                    iced::widget::button::Style {
-                        background: Some(Background::Color(
-                            theme.extended_palette().background.weak.color,
-                        )),
-                        text_color: palette.text,
-                        ..Default::default()
-                    }
+                // Fill and border are chosen independently so the two cues compose:
+                //
+                //   • Fill — the context-menu owner takes the strip band's
+                //     `background.weak` surface so the row and the strip directly
+                //     beneath it read as one block, and this wins even when the row
+                //     is ALSO the keyboard cursor (select-then-right-click the same
+                //     row). A selected non-owner gets the accent wash; otherwise the
+                //     hover tint, or no fill.
+                //   • Border — the 3-px accent left edge marks the keyboard cursor
+                //     (`is_selected`) and is applied regardless of the fill, so a
+                //     selected owner keeps its selection border over the band surface.
+                let background = if is_context_owner {
+                    Some(Background::Color(
+                        theme.extended_palette().background.weak.color,
+                    ))
+                } else if is_selected {
+                    Some(Background::Color(accent.scale_alpha(0.18)))
                 } else {
                     match status {
                         iced::widget::button::Status::Hovered
-                        | iced::widget::button::Status::Pressed => iced::widget::button::Style {
-                            background: Some(Background::Color(palette.text.scale_alpha(0.07))),
-                            text_color: palette.text,
-                            ..Default::default()
-                        },
-                        _ => iced::widget::button::Style {
-                            text_color: palette.text,
-                            ..Default::default()
-                        },
+                        | iced::widget::button::Status::Pressed => {
+                            Some(Background::Color(palette.text.scale_alpha(0.07)))
+                        }
+                        _ => None,
                     }
+                };
+                let border = if is_selected {
+                    iced::Border {
+                        color: accent,
+                        width: selection_border_width,
+                        radius: 0.0.into(),
+                    }
+                } else {
+                    iced::Border::default()
+                };
+                iced::widget::button::Style {
+                    background,
+                    text_color: palette.text,
+                    border,
+                    ..Default::default()
                 }
             });
         // Wire double-click-to-open using the row index — path resolution happens
