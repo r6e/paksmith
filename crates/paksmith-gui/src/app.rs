@@ -72,6 +72,9 @@ pub struct App {
     /// generation no longer matches the current archive is ignored — prevents a
     /// stale load from the previous archive populating a new archive's tab.
     pub archive_generation: u64,
+    /// Live transient notifications (errors + action feedback), rendered as a
+    /// non-blocking overlay. See [`crate::state::toast`].
+    pub toasts: crate::state::toast::Toasts,
 }
 
 impl Default for App {
@@ -100,6 +103,7 @@ impl Default for App {
             active_game: None,
             tabs: crate::state::tabs::Tabs::default(),
             archive_generation: 0,
+            toasts: crate::state::toast::Toasts::default(),
         }
     }
 }
@@ -200,6 +204,9 @@ pub enum Message {
     TextureFitToWindow,
     /// The user selected a different mip level in the active tab.
     TextureMipSelected(usize),
+    /// Remove the toast with this id — used by both the `×` button and the
+    /// scheduled auto-expiry task.
+    ToastDismissed(u64),
 }
 
 /// Processes a `Message` and updates the application state.
@@ -261,10 +268,21 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     // We're mid-key-flow (e.g. wrong manual key) — show the error
                     // inside the panel, not as the global banner.
                     app.keyflow.set_error(msg);
+                    Task::none()
+                } else if app.archive.is_some() {
+                    // An archive is already open, so the full-area error banner in
+                    // `view` would never render (the `Some(archive)` branch wins).
+                    // Surface the failure as a non-blocking toast instead.
+                    push_toast(
+                        app,
+                        crate::state::toast::Severity::Error,
+                        format!("Couldn't open file: {msg}"),
+                    )
                 } else {
+                    // No archive: the empty-state banner (with retry CTA) is right.
                     app.error = Some(msg);
+                    Task::none()
                 }
-                Task::none()
             }
         },
         Message::KeyInputChanged(s) => {
@@ -379,6 +397,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::DismissAbout => {
             app.about_visible = false;
+            Task::none()
+        }
+        Message::ToastDismissed(id) => {
+            app.toasts.remove(id);
             Task::none()
         }
         Message::OpenAsset(path) => {
@@ -698,6 +720,21 @@ fn copy_from_active_hex(
         }
     }
     Task::none()
+}
+
+/// Push a toast and return the task that auto-dismisses it after its severity's
+/// TTL. The scheduled message reuses [`Message::ToastDismissed`], so it is a
+/// no-op if the user already dismissed the toast manually.
+fn push_toast(
+    app: &mut App,
+    severity: crate::state::toast::Severity,
+    message: String,
+) -> Task<Message> {
+    let id = app.toasts.push(severity, message);
+    let ttl = severity.ttl();
+    Task::perform(async move { tokio::time::sleep(ttl).await }, move |()| {
+        Message::ToastDismissed(id)
+    })
 }
 
 /// Move the keyboard cursor and mutate the tree based on a key press.
@@ -1245,6 +1282,68 @@ mod tests {
     fn new_app_has_no_archive() {
         let app = App::default();
         assert!(app.archive.is_none());
+    }
+
+    // ── toast consumer: open-failure-while-loaded ─────────────────────────────
+
+    use crate::state::archive::OpenError;
+    use crate::state::toast::Severity;
+
+    #[test]
+    fn open_error_while_archive_loaded_pushes_error_toast_not_banner() {
+        // An archive is already open. A failed open of another file would set
+        // `app.error`, but `view` shows the archive (the Some(archive) branch
+        // wins), so the banner never renders — the error is swallowed. It must
+        // become a toast instead.
+        let mut app = app_with_paths(&["Game/A.uasset"]);
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Core("boom".to_string())))),
+        );
+        assert_eq!(app.toasts.items().len(), 1, "one error toast pushed");
+        assert_eq!(app.toasts.items()[0].severity, Severity::Error);
+        assert!(
+            app.toasts.items()[0].message.contains("boom"),
+            "toast carries the core error message"
+        );
+        assert!(
+            app.error.is_none(),
+            "no full-area banner when an archive is open"
+        );
+    }
+
+    #[test]
+    fn open_error_with_no_archive_uses_banner_not_toast() {
+        // Empty state: the full-area banner (with the retry CTA) is the right
+        // home, so no toast and `app.error` is set.
+        let mut app = App::default();
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Core("nope".to_string())))),
+        );
+        assert!(app.toasts.is_empty(), "no toast in the empty state");
+        assert_eq!(app.error.as_deref(), Some("nope"), "banner error is set");
+    }
+
+    #[test]
+    fn open_error_mid_keyflow_sets_keyflow_error_no_toast() {
+        // Mid key-entry (wrong manual key): the error belongs inside the key panel.
+        let mut app = App::default();
+        app.keyflow.lock(PathBuf::from("locked.pak"));
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Core("bad key".to_string())))),
+        );
+        assert!(app.toasts.is_empty(), "no toast during the key flow");
+        assert!(app.error.is_none(), "no banner during the key flow");
+    }
+
+    #[test]
+    fn toast_dismissed_removes_the_targeted_toast() {
+        let mut app = App::default();
+        let id = app.toasts.push(Severity::Error, "x".to_string());
+        let _ = update(&mut app, Message::ToastDismissed(id));
+        assert!(app.toasts.is_empty(), "dismiss removes the toast");
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
