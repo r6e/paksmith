@@ -273,6 +273,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     // An archive is already open, so the full-area error banner in
                     // `view` would never render (the `Some(archive)` branch wins).
                     // Surface the failure as a non-blocking toast instead.
+                    //
+                    // The open attempt began with `keyflow.begin()` (→ Resolving);
+                    // it has now terminated, so leave Resolving — otherwise the
+                    // state machine keeps claiming an open is in flight. The
+                    // previously-loaded archive remains displayed, so restore the
+                    // loaded-archive invariant (`Unlocked`, the state the `Ok` arm
+                    // sets) rather than `Idle`, which would imply no archive.
+                    app.keyflow.unlock();
                     push_toast(
                         app,
                         crate::state::toast::Severity::Error,
@@ -1312,11 +1320,12 @@ mod tests {
 
     #[test]
     fn open_error_while_archive_loaded_pushes_error_toast_not_banner() {
-        // An archive is already open. A failed open of another file would set
-        // `app.error`, but `view` shows the archive (the Some(archive) branch
-        // wins), so the banner never renders — the error is swallowed. It must
-        // become a toast instead.
+        // An archive is already open and an open of another file is in flight
+        // (keyflow.begin() → Resolving). The failed open would set `app.error`,
+        // but `view` shows the archive (the Some(archive) branch wins), so the
+        // banner never renders — the error is swallowed. It must become a toast.
         let mut app = app_with_paths(&["Game/A.uasset"]);
+        app.keyflow.begin();
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(OpenError::Core("boom".to_string())))),
@@ -1330,6 +1339,13 @@ mod tests {
         assert!(
             app.error.is_none(),
             "no full-area banner when an archive is open"
+        );
+        // The completed open must leave Resolving; the displayed archive stays
+        // loaded, so keyflow returns to the loaded-archive state (Unlocked), not
+        // Resolving (which would falsely claim an open is still in flight).
+        assert!(
+            matches!(app.keyflow, crate::state::keyflow::KeyFlow::Unlocked),
+            "keyflow must leave Resolving when the open completes with an archive still loaded"
         );
     }
 
