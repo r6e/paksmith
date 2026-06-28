@@ -258,6 +258,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // inherit the previous selection cursor or filter query.
                 app.filter.clear();
                 app.selected_row = None;
+                app.context_row = None;
                 // Clear tabs so they never reference a stale reader.
                 app.tabs.clear();
                 app.archive_generation = app.archive_generation.wrapping_add(1);
@@ -268,6 +269,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // Enter the key-entry flow: show the inline key-prompt panel.
                 app.keyflow.lock(path);
                 app.hex_input.clear();
+                // The old archive is kept while the key prompt shows, so clear the
+                // stale context-menu index too.
+                app.context_row = None;
                 // Clear any stale tabs from a previously-open archive.
                 app.tabs.clear();
                 app.archive_generation = app.archive_generation.wrapping_add(1);
@@ -364,6 +368,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::RowToggled(i) => {
+            app.context_row = None;
             if let Some(archive) = &mut app.archive {
                 archive.tree.toggle(i);
                 // After a toggle the row count may have changed; clamp the
@@ -378,6 +383,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::RowSelected(i) => {
+            app.context_row = None;
             if let Some(archive) = &mut app.archive {
                 archive.tree.select(i);
                 // Move the keyboard cursor to the selected file.
@@ -393,6 +399,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             scroll_task.unwrap_or_else(Task::none)
         }
         Message::FilterChanged(query) => {
+            app.context_row = None;
             app.filter.clone_from(&query);
             if let Some(archive) = &mut app.archive {
                 archive.tree.set_filter(&query);
@@ -431,6 +438,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::OpenAsset(path) => {
+            // Opening any asset (button, double-click, Enter, or the context-menu
+            // strip) dismisses the inline menu.
+            app.context_row = None;
             // Re-opening an already-open asset only reactivates its tab; it keeps its
             // loaded content and must NOT re-read/re-parse (tab dedupe per the spec).
             // Branch on `was_open` directly (load in the `else`) rather than a
@@ -784,6 +794,16 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
         return None;
     };
     let named = *named;
+
+    // Any tree-key navigation (arrows, Enter, Escape, or any other key) dismisses
+    // the inline context menu. This is load-bearing, not just cosmetic: the strip
+    // inserts an extra row that shifts the Y of every row below it, which would
+    // desync the keyboard auto-scroll's `row_idx * row_height` math at the bottom
+    // of this function. Clearing here (before that scroll offset is computed) keeps
+    // row height uniform. Disjoint-field write — `archive` borrows `app.archive`,
+    // this writes `app.context_row` (same pattern as the `app.selected_row = …`
+    // writes below).
+    app.context_row = None;
 
     let prev_selected = app.selected_row;
 
@@ -1449,6 +1469,84 @@ mod tests {
             app.context_row, None,
             "second right-press on same row closes it"
         );
+    }
+
+    // ── context_row clear triggers ────────────────────────────────────────────
+    #[test]
+    fn row_toggled_clears_context_row() {
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::RowToggled(0));
+        assert_eq!(app.context_row, None, "toggling a dir clears the menu");
+    }
+
+    #[test]
+    fn row_selected_clears_context_row() {
+        let mut app = app_with_paths(&["file.txt"]);
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::RowSelected(0));
+        assert_eq!(app.context_row, None, "selecting a row clears the menu");
+    }
+
+    #[test]
+    fn filter_changed_clears_context_row() {
+        let mut app = app_with_paths(&["file.txt"]);
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::FilterChanged("f".to_string()));
+        assert_eq!(app.context_row, None, "filtering clears the menu");
+    }
+
+    #[test]
+    fn open_asset_clears_context_row() {
+        let mut app = app_with_paths(&["file.txt"]);
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::OpenAsset("file.txt".to_string()));
+        assert_eq!(app.context_row, None, "opening an asset clears the menu");
+    }
+
+    #[test]
+    fn archive_opened_ok_clears_context_row() {
+        let mut app = app_with_paths(&["old.uasset"]);
+        app.context_row = Some(0);
+        // Move a freshly-built loaded archive out of a throwaway App and swap it in.
+        let new_archive = app_with_paths(&["new.uasset"]).archive.unwrap();
+        let _ = update(&mut app, Message::ArchiveOpened(Box::new(Ok(new_archive))));
+        assert_eq!(app.context_row, None, "archive swap clears the menu");
+    }
+
+    #[test]
+    fn archive_opened_locked_clears_context_row() {
+        // Opening a locked pak keeps the old archive but enters the key flow; the
+        // stale menu index must still be cleared (the "archive swap" trigger covers
+        // both the Ok and the Locked transition).
+        let mut app = app_with_paths(&["old.uasset"]);
+        app.context_row = Some(0);
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
+                path: PathBuf::from("locked.pak"),
+            }))),
+        );
+        assert_eq!(
+            app.context_row, None,
+            "entering the key flow clears the menu"
+        );
+    }
+
+    #[test]
+    fn arrow_down_clears_context_row() {
+        let mut app = app_with_paths(&["a.txt", "b.txt"]);
+        app.context_row = Some(0);
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowDown));
+        assert_eq!(app.context_row, None, "keyboard navigation clears the menu");
+    }
+
+    #[test]
+    fn escape_clears_context_row() {
+        let mut app = app_with_paths(&["file.txt"]);
+        app.context_row = Some(0);
+        let _ = handle_tree_key(&mut app, &named_key(Named::Escape));
+        assert_eq!(app.context_row, None, "Escape clears the menu");
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
