@@ -1363,8 +1363,9 @@ mod tests {
             Message::ArchiveOpened(Box::new(Err(OpenError::Core("boom".to_string())))),
         );
         assert!(
-            !matches!(app.keyflow, crate::state::keyflow::KeyFlow::Resolving),
-            "keyflow must leave Resolving on a terminal no-archive error"
+            matches!(app.keyflow, crate::state::keyflow::KeyFlow::Idle),
+            "keyflow must return to Idle (not just leave Resolving) on a terminal \
+             no-archive error — Unlocked would falsely imply a successful unlock"
         );
         assert_eq!(app.error.as_deref(), Some("boom"), "banner error is set");
         assert!(app.toasts.is_empty(), "no toast in the empty state");
