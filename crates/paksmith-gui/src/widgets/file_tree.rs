@@ -52,6 +52,13 @@ fn row_is_selected(row_idx: usize, selected: Option<usize>) -> bool {
     selected == Some(row_idx)
 }
 
+/// Whether to render the inline context-menu strip immediately after visible
+/// row `row_idx`. The strip belongs only to the file row that currently owns
+/// the menu; directory rows and path-less rows never get one.
+fn show_strip_after(context_row: Option<usize>, row_idx: usize, row: &VisibleRow) -> bool {
+    context_row == Some(row_idx) && !row.is_dir && row.full_path.is_some()
+}
+
 /// The glyph string rendered before the label for a directory row.
 ///
 /// Directories show a chevron (▸ collapsed, ▾ expanded). File rows render no
@@ -76,17 +83,29 @@ pub fn glyph_for_row(row: &VisibleRow) -> Option<&'static str> {
 /// * `selected_row` — the currently highlighted visible-row index (the
 ///   keyboard cursor).  May point at either a dir or a file.  `None` means
 ///   no cursor.
+/// * `context_row` — the visible-row index whose inline action strip (Open /
+///   Copy Path) is shown, or `None`. The strip is rendered immediately after
+///   that row (file rows only).
 ///
 /// Each row emits:
 /// * `Message::RowToggled(i)` when a directory row is clicked.
 /// * `Message::RowSelected(i)` when a file row is clicked.
-pub fn view(tree: &Tree, accent: Color, selected_row: Option<usize>) -> Element<'_, Message> {
+/// * `Message::RowContextOpened(i)` when a file row is right-clicked.
+pub fn view(
+    tree: &Tree,
+    accent: Color,
+    selected_row: Option<usize>,
+    context_row: Option<usize>,
+) -> Element<'_, Message> {
     let rows = tree.visible_rows();
-    let items: Vec<Element<'_, Message>> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, row)| build_row(i, row, accent, selected_row))
-        .collect();
+    let mut items: Vec<Element<'_, Message>> = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        items.push(build_row(i, row, accent, selected_row));
+        if show_strip_after(context_row, i, row) {
+            let indent = file_row_indent(row_indent(row.depth));
+            items.push(crate::widgets::context_menu::action_strip(i, indent));
+        }
+    }
 
     scrollable(column(items).width(Length::Fill))
         .id(TREE_SCROLL_ID.clone())
@@ -357,5 +376,42 @@ mod tests {
     #[test]
     fn row_is_selected_none_is_false() {
         assert!(!row_is_selected(2, None));
+    }
+
+    // ── show_strip_after ──────────────────────────────────────────────────────
+
+    #[test]
+    fn show_strip_after_owning_file_row_is_true() {
+        assert!(show_strip_after(Some(0), 0, &file_row()));
+    }
+
+    #[test]
+    fn show_strip_after_other_row_is_false() {
+        // context_row points elsewhere — kills `== with !=`.
+        assert!(!show_strip_after(Some(1), 0, &file_row()));
+    }
+
+    #[test]
+    fn show_strip_after_none_is_false() {
+        assert!(!show_strip_after(None, 0, &file_row()));
+    }
+
+    #[test]
+    fn show_strip_after_dir_row_is_false() {
+        // Directories never get a menu — kills `delete !` / `&& with ||`.
+        assert!(!show_strip_after(Some(0), 0, &dir_row(false)));
+    }
+
+    #[test]
+    fn show_strip_after_file_without_path_is_false() {
+        // A file row carrying no path can't be acted on — kills `is_some -> is_none`.
+        let row = VisibleRow {
+            depth: 1,
+            label: "x".to_string(),
+            is_dir: false,
+            expanded: false,
+            full_path: None,
+        };
+        assert!(!show_strip_after(Some(0), 0, &row));
     }
 }

@@ -217,6 +217,10 @@ pub enum Message {
     /// Carries the *visible-row* index (no coordinates: `on_right_press` gives
     /// none, and the inline strip needs none).
     RowContextOpened(usize),
+    /// Copy the path of the file at the given visible-row index to the clipboard.
+    /// The path is resolved in `update` via `open_path_for_row` so the per-frame
+    /// view never clones a path String.
+    CopyPathRequested(usize),
 }
 
 /// Processes a `Message` and updates the application state.
@@ -437,6 +441,22 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             app.context_row = toggle_context_row(app.context_row, i);
             Task::none()
         }
+        Message::CopyPathRequested(i) => match open_path_for_row(app, i) {
+            Some(path) => {
+                // The action completes here, so close the inline menu.
+                app.context_row = None;
+                Task::batch([
+                    iced::clipboard::write::<Message>(path),
+                    push_toast(
+                        app,
+                        crate::state::toast::Severity::Success,
+                        "Copied path".to_string(),
+                    ),
+                ])
+            }
+            // No resolvable path (out-of-range, or a dir row) — silent no-op.
+            None => Task::none(),
+        },
         Message::OpenAsset(path) => {
             // Opening any asset (button, double-click, Enter, or the context-menu
             // strip) dismisses the inline menu.
@@ -1139,12 +1159,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
         let tree = &archive.tree;
         let accent = app.accent;
         let selected_row = app.selected_row;
+        let context_row = app.context_row;
         let tabs = &app.tabs;
         let entries = &archive.entries;
 
         pane_grid(&app.panes, move |_pane, kind, _maximized| {
             let content: Element<'_, Message> = match kind {
-                PaneKind::Sidebar => sidebar::view(tree, accent, selected_row),
+                PaneKind::Sidebar => sidebar::view(tree, accent, selected_row, context_row),
                 PaneKind::Detail => content::view(tabs, entries, accent),
             };
             pane_grid::Content::new(content)
@@ -1547,6 +1568,29 @@ mod tests {
         app.context_row = Some(0);
         let _ = handle_tree_key(&mut app, &named_key(Named::Escape));
         assert_eq!(app.context_row, None, "Escape clears the menu");
+    }
+
+    // ── Message::CopyPathRequested ────────────────────────────────────────────
+    #[test]
+    fn copy_path_requested_pushes_success_toast_and_closes_menu() {
+        let mut app = app_with_paths(&["file.txt"]);
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::CopyPathRequested(0));
+        assert_eq!(app.toasts.items().len(), 1, "one success toast pushed");
+        assert_eq!(app.toasts.items()[0].severity, Severity::Success);
+        assert!(
+            app.toasts.items()[0].message.contains("Copied"),
+            "toast confirms the copy"
+        );
+        assert_eq!(app.context_row, None, "copy closes the menu");
+    }
+
+    #[test]
+    fn copy_path_requested_oob_does_nothing() {
+        // An index with no resolvable path is a silent no-op — no toast, no panic.
+        let mut app = app_with_paths(&["file.txt"]);
+        let _ = update(&mut app, Message::CopyPathRequested(999));
+        assert!(app.toasts.is_empty(), "no toast when the row has no path");
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
