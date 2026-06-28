@@ -4,3 +4,4 @@ pub mod hex_view;
 pub mod property_tree;
 pub mod tab_bar;
 pub mod texture_viewer;
+pub mod toast;

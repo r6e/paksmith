@@ -67,6 +67,15 @@ impl KeyFlow {
         *self = Self::Unlocked;
     }
 
+    /// Transition back to `Idle`.
+    ///
+    /// Called after a terminal open error that leaves no archive: the flow is
+    /// no longer `Resolving`, so the empty-state UI (with its retry CTA) must
+    /// render instead of the "Opening…" spinner.
+    pub fn reset(&mut self) {
+        *self = Self::Idle;
+    }
+
     /// Return the locked path if in `Locked` state, `None` otherwise.
     pub fn is_locked(&self) -> Option<&Path> {
         if let Self::Locked { path, .. } = self {
@@ -118,6 +127,16 @@ mod tests {
         assert!(f.error().is_none());
         f.set_error("bad hex".to_string());
         assert_eq!(f.error(), Some("bad hex"));
+    }
+
+    #[test]
+    fn reset_returns_to_idle() {
+        let mut f = KeyFlow::Idle;
+        f.begin();
+        assert!(matches!(f, KeyFlow::Resolving));
+        f.reset();
+        assert!(matches!(f, KeyFlow::Idle), "reset must return to Idle");
+        assert!(f.is_locked().is_none());
     }
 
     #[test]
