@@ -1227,10 +1227,21 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // ── compose ───────────────────────────────────────────────────────────────
     // The menu placeholder strip is removed: on macOS the native menu bar is
     // global (above the window); on other platforms the actions are toolbar-only.
-    column![toolbar_view, body, status_view]
+    let root = column![toolbar_view, body, status_view]
         .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        .height(Length::Fill);
+
+    // Layer the non-blocking toast overlay on top when there are toasts. The
+    // overlay container is click-through except over each card's dismiss button,
+    // so the rest of the UI stays interactive while toasts are showing.
+    if app.toasts.is_empty() {
+        root.into()
+    } else {
+        iced::widget::stack([root.into(), crate::widgets::toast::overlay(&app.toasts)])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
 }
 
 #[cfg(test)]
