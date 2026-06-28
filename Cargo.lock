@@ -3952,7 +3952,7 @@ dependencies = [
 
 [[package]]
 name = "paksmith-bench"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "criterion",
  "flate2",
@@ -3964,7 +3964,7 @@ dependencies = [
 
 [[package]]
 name = "paksmith-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -3988,7 +3988,7 @@ dependencies = [
 
 [[package]]
 name = "paksmith-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes 0.9.1",
  "bcdec_rs",
@@ -4022,7 +4022,7 @@ dependencies = [
 
 [[package]]
 name = "paksmith-core-tests"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "byteorder",
  "flate2",
@@ -4044,7 +4044,7 @@ dependencies = [
 
 [[package]]
 name = "paksmith-fixture-gen"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "aes 0.8.4",
  "anyhow",
@@ -4057,7 +4057,7 @@ dependencies = [
 
 [[package]]
 name = "paksmith-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dark-light",
  "iced",
