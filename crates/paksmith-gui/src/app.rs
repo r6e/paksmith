@@ -815,7 +815,8 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
     };
     let named = *named;
 
-    // Any tree-key navigation (arrows, Enter, Escape, or any other key) dismisses
+    // Any tree-key navigation (arrows, Enter, Escape, or any other *named* key —
+    // bare character keys already returned via the `else` guard above) dismisses
     // the inline context menu. This is load-bearing, not just cosmetic: the strip
     // inserts an extra row that shifts the Y of every row below it, which would
     // desync the keyboard auto-scroll's `row_idx * row_height` math at the bottom

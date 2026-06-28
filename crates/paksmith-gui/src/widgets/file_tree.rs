@@ -91,6 +91,11 @@ pub fn glyph_for_row(row: &VisibleRow) -> Option<&'static str> {
 /// * `Message::RowToggled(i)` when a directory row is clicked.
 /// * `Message::RowSelected(i)` when a file row is clicked.
 /// * `Message::RowContextOpened(i)` when a file row is right-clicked.
+// Pure iced view composition (like the sibling `tab_bar`/`hex_view`/`property_tree`
+// view fns). The one decision — which row gets the inline strip — is extracted
+// into the unit-tested `show_strip_after`; this fn only wires the result into the
+// opaque scrollable `Element`, so there is nothing here a unit test can observe.
+#[mutants::skip]
 pub fn view(
     tree: &Tree,
     accent: Color,
@@ -102,8 +107,7 @@ pub fn view(
     for (i, row) in rows.iter().enumerate() {
         items.push(build_row(i, row, accent, selected_row));
         if show_strip_after(context_row, i, row) {
-            let indent = file_row_indent(row_indent(row.depth));
-            items.push(crate::widgets::context_menu::action_strip(i, indent));
+            items.push(crate::widgets::context_menu::action_strip(i));
         }
     }
 
