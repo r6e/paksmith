@@ -105,7 +105,7 @@ pub fn view(
     let rows = tree.visible_rows();
     let mut items: Vec<Element<'_, Message>> = Vec::with_capacity(rows.len());
     for (i, row) in rows.iter().enumerate() {
-        items.push(build_row(i, row, accent, selected_row));
+        items.push(build_row(i, row, accent, selected_row, context_row));
         if show_strip_after(context_row, i, row) {
             items.push(crate::widgets::context_menu::action_strip(i));
         }
@@ -129,8 +129,13 @@ fn build_row(
     row: &VisibleRow,
     accent: Color,
     selected_row: Option<usize>,
+    context_row: Option<usize>,
 ) -> Element<'_, Message> {
     let is_selected = row_is_selected(i, selected_row);
+    // The file row whose inline context menu is open. Reuses the same index-match
+    // predicate as keyboard selection; only ever true for a file row (the menu
+    // can only open on files).
+    let is_context_owner = row_is_selected(i, context_row);
     let indent = row_indent(row.depth);
 
     // The row content: optional accent left-border + indent spacer + optional
@@ -243,6 +248,18 @@ fn build_row(
                             width: selection_border_width,
                             radius: 0.0.into(),
                         },
+                        ..Default::default()
+                    }
+                } else if is_context_owner {
+                    // The row whose inline context menu is open shares the menu
+                    // band's surface (extended_palette background.weak), so the row
+                    // and the strip directly beneath it read as one block. No accent
+                    // border — that's reserved for the keyboard cursor (is_selected).
+                    iced::widget::button::Style {
+                        background: Some(Background::Color(
+                            theme.extended_palette().background.weak.color,
+                        )),
+                        text_color: palette.text,
                         ..Default::default()
                     }
                 } else {
