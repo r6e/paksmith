@@ -45,6 +45,7 @@ use crate::app::Message;
 pub enum MenuAction {
     Open,
     ToggleTheme,
+    ToggleConsole,
     About,
 }
 
@@ -56,6 +57,7 @@ pub fn message_for(action: MenuAction) -> Message {
     match action {
         MenuAction::Open => Message::OpenRequested,
         MenuAction::ToggleTheme => Message::ToggleTheme,
+        MenuAction::ToggleConsole => Message::ConsoleToggled,
         MenuAction::About => Message::About,
     }
 }
@@ -64,6 +66,7 @@ pub fn message_for(action: MenuAction) -> Message {
 
 const ID_OPEN: &str = "paksmith.file.open";
 const ID_TOGGLE_THEME: &str = "paksmith.view.toggle_theme";
+const ID_TOGGLE_CONSOLE: &str = "paksmith.view.toggle_console";
 const ID_ABOUT: &str = "paksmith.help.about";
 
 /// Resolves a fired `muda::MenuId` to a [`MenuAction`], if known.
@@ -71,6 +74,7 @@ pub fn action_for_id(id: &muda::MenuId) -> Option<MenuAction> {
     match id.as_ref() {
         ID_OPEN => Some(MenuAction::Open),
         ID_TOGGLE_THEME => Some(MenuAction::ToggleTheme),
+        ID_TOGGLE_CONSOLE => Some(MenuAction::ToggleConsole),
         ID_ABOUT => Some(MenuAction::About),
         _ => None,
     }
@@ -124,8 +128,9 @@ pub fn build() -> Result<Menu, muda::Error> {
 
     // ── View ──────────────────────────────────────────────────────────────────
     let toggle_theme_item = MenuItem::with_id(ID_TOGGLE_THEME, "Toggle Theme", true, None);
+    let toggle_console_item = MenuItem::with_id(ID_TOGGLE_CONSOLE, "Debug Console", true, None);
 
-    let view_menu = Submenu::with_items("View", true, &[&toggle_theme_item])?;
+    let view_menu = Submenu::with_items("View", true, &[&toggle_theme_item, &toggle_console_item])?;
 
     // ── Help ──────────────────────────────────────────────────────────────────
     let about_item = MenuItem::with_id(ID_ABOUT, "About Paksmith", true, None);
@@ -209,11 +214,20 @@ mod tests {
     }
 
     #[test]
+    fn toggle_console_maps_to_console_toggled_message() {
+        assert!(matches!(
+            message_for(MenuAction::ToggleConsole),
+            Message::ConsoleToggled
+        ));
+    }
+
+    #[test]
     fn action_for_known_ids() {
         let cases: &[(&str, MenuAction)] = &[
             (ID_OPEN, MenuAction::Open),
             (ID_TOGGLE_THEME, MenuAction::ToggleTheme),
             (ID_ABOUT, MenuAction::About),
+            (ID_TOGGLE_CONSOLE, MenuAction::ToggleConsole),
         ];
         for (raw_id, expected) in cases {
             let id = muda::MenuId::new(raw_id);

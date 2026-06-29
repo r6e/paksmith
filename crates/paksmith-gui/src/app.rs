@@ -26,6 +26,9 @@ pub enum PaneKind {
 /// Initial sidebar fraction of the pane_grid width.
 const DEFAULT_SIDEBAR_RATIO: f32 = 0.30;
 
+/// Debug-console live-refresh tick interval (ms), active only while visible.
+const CONSOLE_TICK_MS: u64 = 300;
+
 /// Root application state.
 pub struct App {
     /// Active appearance mode, detected from the OS at startup.
@@ -83,6 +86,16 @@ pub struct App {
     /// The open Export As… format picker, if any. Path-keyed; rendered beneath
     /// the current `context_row`. `None` ⇒ the action strip (or nothing) shows.
     pub export_menu: Option<crate::state::export::ExportMenu>,
+    /// Whether the debug-console panel is shown (toggled by F12 / View menu).
+    pub console_visible: bool,
+    /// Shared ring of captured `tracing` events feeding the debug console.
+    /// Injected at boot from `main`; `Default` yields an empty, unshared buffer.
+    pub log_buffer: crate::state::log_buffer::LogBuffer,
+    /// Whether the console auto-scrolls to the newest line. Set on open/clear;
+    /// cleared when the user scrolls up away from the bottom.
+    pub console_follow: bool,
+    /// Active debug-console filter predicates (min level / target / search).
+    pub console_filters: crate::state::console::ConsoleFilters,
 }
 
 impl Default for App {
@@ -114,7 +127,25 @@ impl Default for App {
             toasts: crate::state::toast::Toasts::default(),
             context_row: None,
             export_menu: None,
+            console_visible: false,
+            log_buffer: crate::state::log_buffer::LogBuffer::default(),
+            console_follow: true,
+            console_filters: crate::state::console::ConsoleFilters::default(),
         }
+    }
+}
+
+/// Build the initial [`App`], injecting the shared debug-console [`LogBuffer`].
+///
+/// `main` installs the tracing subscriber over one `LogBuffer` clone, then hands
+/// another clone here so the running app reads the same `Arc`-backed ring the
+/// subscriber writes to. Extracted from `main`'s boot closure so the
+/// buffer-sharing (load-bearing: drop it and the console is permanently empty)
+/// is unit-testable rather than buried in the untestable entry point.
+pub fn boot_app(log_buffer: crate::state::log_buffer::LogBuffer) -> App {
+    App {
+        log_buffer,
+        ..App::default()
     }
 }
 
@@ -246,6 +277,15 @@ pub enum Message {
         outcome: crate::task::export::ExportOutcome,
         generation: u64,
     },
+    /// Toggle the debug-console panel (F12 or the View menu).
+    ConsoleToggled,
+    /// Periodic tick while the console is visible, so freshly captured records
+    /// render without requiring other UI activity.
+    ConsoleTick,
+    /// The console scroll position changed; carries the relative vertical
+    /// offset (0.0 = top, 1.0 = bottom) so the follow decision is testable
+    /// without constructing a non-public `scrollable::Viewport`.
+    ConsoleScrolled(f32),
 }
 
 /// Processes a `Message` and updates the application state.
@@ -579,6 +619,34 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             } else {
                 Task::none()
             }
+        }
+        Message::ConsoleToggled => {
+            app.console_visible = !app.console_visible;
+            if app.console_visible {
+                app.console_follow = true;
+                iced::widget::operation::snap_to(
+                    crate::panels::console::SCROLL_ID,
+                    iced::widget::operation::RelativeOffset::END,
+                )
+            } else {
+                Task::none()
+            }
+        }
+        Message::ConsoleTick => {
+            // Processing any message rebuilds the view, refreshing the list from
+            // the ring. Follow the tail only when the user hasn't scrolled up.
+            if app.console_follow {
+                iced::widget::operation::snap_to(
+                    crate::panels::console::SCROLL_ID,
+                    iced::widget::operation::RelativeOffset::END,
+                )
+            } else {
+                Task::none()
+            }
+        }
+        Message::ConsoleScrolled(relative_y) => {
+            app.console_follow = crate::state::console::at_bottom(relative_y);
+            Task::none()
         }
         Message::ExportCompleted {
             outcome,
@@ -968,6 +1036,14 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
     };
     let named = *named;
 
+    // F12 is the debug-console toggle, routed via its own always-on
+    // subscription and excluded from the tree-key listener. Guard here too so a
+    // direct call (or any future routing change) can never let F12 disturb tree
+    // state or dismiss the context/export menus.
+    if named == Named::F12 {
+        return None;
+    }
+
     // Any tree-key navigation (arrows, Enter, Escape, or any other *named* key —
     // bare character keys already returned via the `else` guard above) dismisses
     // the inline context menu. This is load-bearing, not just cosmetic: the strip
@@ -1179,18 +1255,44 @@ pub fn hex_drag_listener_active(app: &App) -> bool {
 pub fn subscription(app: &App) -> Subscription<Message> {
     let menu_sub = crate::menu::subscription();
 
+    // F12 toggles the debug console. Always active — even with no archive open —
+    // so startup/open-error logs are reachable. Kept OFF the tree-key listener
+    // below so it never doubles as a TreeKey that would dismiss menus.
+    let console_toggle_sub = iced::event::listen_with(|event, _status, _window| match event {
+        Event::Keyboard(KeyboardEvent::KeyPressed {
+            key: iced::keyboard::Key::Named(Named::F12),
+            ..
+        }) => Some(Message::ConsoleToggled),
+        _ => None,
+    });
+
+    // While the console is visible, tick a few times a second so freshly
+    // captured records render without requiring other UI activity.
+    let console_tick_sub = if app.console_visible {
+        iced::time::every(std::time::Duration::from_millis(CONSOLE_TICK_MS))
+            .map(|_| Message::ConsoleTick)
+    } else {
+        Subscription::none()
+    };
+
     if app.archive.is_none() {
-        return menu_sub;
+        return Subscription::batch([menu_sub, console_toggle_sub, console_tick_sub]);
     }
 
+    // Tree navigation keys — but NOT F12 (handled above; routing it here too
+    // would fire TreeKey(F12) and clear the context/export menus).
     let tree_key_sub = iced::event::listen_with(|event, _status, _window| match event {
+        Event::Keyboard(KeyboardEvent::KeyPressed {
+            key: iced::keyboard::Key::Named(Named::F12),
+            ..
+        }) => None,
         Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) => Some(Message::TreeKey(key)),
         _ => None,
     });
 
     // Only subscribe to left-button-release when a Hex tab is active. Drag can
-    // only start inside a Hex view, so firing this app-wide would cause
-    // spurious update+view rebuilds on every click elsewhere.
+    // only start inside a Hex view, so firing this app-wide would cause spurious
+    // update+view rebuilds on every click elsewhere.
     let hex_drag_sub = if hex_drag_listener_active(app) {
         iced::event::listen_with(|event, _status, _window| match event {
             Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
@@ -1202,7 +1304,13 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         Subscription::none()
     };
 
-    Subscription::batch([menu_sub, tree_key_sub, hex_drag_sub])
+    Subscription::batch([
+        menu_sub,
+        console_toggle_sub,
+        console_tick_sub,
+        tree_key_sub,
+        hex_drag_sub,
+    ])
 }
 
 /// Returns a button style closure that uses the system accent colour so that
@@ -1479,7 +1587,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // ── compose ───────────────────────────────────────────────────────────────
     // The menu placeholder strip is removed: on macOS the native menu bar is
     // global (above the window); on other platforms the actions are toolbar-only.
-    let root = column![toolbar_view, body, status_view]
+    let mut root = column![toolbar_view, body];
+    if app.console_visible {
+        root = root.push(crate::panels::console::view(app));
+    }
+    let root = root
+        .push(status_view)
         .width(Length::Fill)
         .height(Length::Fill);
 
@@ -3776,5 +3889,58 @@ mod tests {
             app.export_menu.is_none(),
             "keyboard nav must clear the export picker"
         );
+    }
+
+    // ── console toggle / scroll / F12 ────────────────────────────────────────
+
+    #[test]
+    fn boot_app_shares_the_injected_log_buffer() {
+        // `boot_app` must hand the running app the SAME ring the caller (main,
+        // alongside the subscriber) writes to. If the `log_buffer` field were
+        // dropped, the app would get a fresh empty buffer and this snapshot
+        // would be 0 — a permanently-dead console. Kills the
+        // delete-struct-field mutant on the boot path.
+        let buffer = crate::state::log_buffer::LogBuffer::default();
+        let app = super::boot_app(buffer.clone());
+        buffer.push(tracing::Level::INFO, "t".into(), "x".into());
+        assert_eq!(app.log_buffer.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn console_toggled_flips_visibility_and_arms_follow() {
+        // Diverge from the open-branch's effect so the `console_follow = true`
+        // assignment is observable: `App::default()` already sets it true, which
+        // would mask a deleted/mutated assignment (see the PR #620 lesson on
+        // divergent test inputs).
+        let mut app = super::App {
+            console_follow: false,
+            ..super::App::default()
+        };
+        assert!(!app.console_visible);
+        let _ = super::update(&mut app, super::Message::ConsoleToggled);
+        assert!(app.console_visible);
+        assert!(app.console_follow, "opening re-arms tail-follow");
+        let _ = super::update(&mut app, super::Message::ConsoleToggled);
+        assert!(!app.console_visible);
+    }
+
+    #[test]
+    fn console_scrolled_tracks_follow_from_offset() {
+        let mut app = super::App::default();
+        let _ = super::update(&mut app, super::Message::ConsoleScrolled(0.3));
+        assert!(!app.console_follow, "scrolled up => stop following");
+        let _ = super::update(&mut app, super::Message::ConsoleScrolled(1.0));
+        assert!(app.console_follow, "back at bottom => follow again");
+    }
+
+    #[test]
+    fn f12_is_a_noop_in_handle_tree_key_and_preserves_menus() {
+        let mut app = app_with_paths(&["a.uasset", "b.uasset"]);
+        app.context_row = Some(0);
+        app.export_menu = Some(minimal_export_menu());
+        let r = super::handle_tree_key(&mut app, &Key::Named(Named::F12));
+        assert!(r.is_none(), "F12 produces no scroll task");
+        assert_eq!(app.context_row, Some(0), "F12 must not clear context row");
+        assert!(app.export_menu.is_some(), "F12 must not clear export menu");
     }
 }
