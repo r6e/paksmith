@@ -39,11 +39,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
             Message::ConsoleMinLevelChanged,
         )
         .text_size(f32::from(TEXT_SM)),
-        text_input("target…", &app.console_filters.target_filter)
+        text_input("target\u{2026}", &app.console_filters.target_filter)
             .on_input(Message::ConsoleTargetFilterChanged)
             .size(f32::from(TEXT_SM))
             .width(Length::FillPortion(2)),
-        text_input("search…", &app.console_filters.search)
+        text_input("search\u{2026}", &app.console_filters.search)
             .on_input(Message::ConsoleSearchChanged)
             .size(f32::from(TEXT_SM))
             .width(Length::FillPortion(3)),
