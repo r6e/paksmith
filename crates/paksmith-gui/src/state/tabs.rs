@@ -191,6 +191,22 @@ impl Tabs {
     pub fn active_tab_mut(&mut self) -> Option<&mut Tab> {
         self.active.and_then(|i| self.open.get_mut(i))
     }
+
+    /// The parsed `Package` for the open tab at `path`, if that tab exists and
+    /// parsed successfully. Lets Export As… enumerate formats synchronously
+    /// when the asset is already open (the common case), avoiding a re-parse.
+    #[must_use]
+    pub fn parsed_package(&self, path: &str) -> Option<&Arc<Package>> {
+        self.open
+            .iter()
+            .find(|t| t.path == path)
+            .and_then(|t| match &t.content {
+                TabContent::Ready {
+                    parsed: Ok(arc), ..
+                } => Some(arc),
+                _ => None,
+            })
+    }
 }
 
 #[cfg(test)]
@@ -513,6 +529,25 @@ mod tests {
         assert!(
             texture_available(&t.open[0]),
             "a non-empty decodable-mip cache must read true"
+        );
+    }
+
+    #[test]
+    fn parsed_package_some_for_ready_ok_none_otherwise() {
+        let mut t = ready_ok_tab("a.uasset");
+        assert!(t.parsed_package("a.uasset").is_some(), "Ready+Ok → Some");
+        assert!(
+            t.parsed_package("missing.uasset").is_none(),
+            "absent → None"
+        );
+
+        let e = ready_err_tab("b.uasset");
+        assert!(e.parsed_package("b.uasset").is_none(), "Ready+Err → None");
+
+        let _ = t.open_or_activate("loading.uasset"); // Loading content
+        assert!(
+            t.parsed_package("loading.uasset").is_none(),
+            "Loading → None"
         );
     }
 

@@ -50,6 +50,7 @@ use std::collections::HashMap;
 use std::mem::Discriminant;
 
 use crate::asset::Asset;
+use crate::asset::Package;
 pub use crate::asset::bulk_data::BulkData;
 
 // Private — handlers are re-exported below. Phase 3d-3h handler
@@ -327,9 +328,173 @@ impl HandlerRegistry {
     }
 }
 
+/// One exportable `(payload, format)` pair: the payload at `payload_idx` in a
+/// [`Package`] can be written as a file with extension `extension` by a
+/// registered [`FormatHandler`]. `Copy` so it rides a GUI `Message` freely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportFormat {
+    /// Index into [`Package::payloads`].
+    pub payload_idx: usize,
+    /// Output extension (no leading dot), e.g. `"png"`, `"csv"`, `"json"`.
+    pub extension: &'static str,
+}
+
+/// Every `(payload index, output extension)` pair that `registry` can export
+/// from `payloads`, in payload order then handler-registration order.
+///
+/// Within one payload an extension appears at most once (first registered
+/// handler wins), so a caller building a format menu never shows a duplicate
+/// entry — matching [`HandlerRegistry::find_handler_by_extension`]'s
+/// first-match dispatch. Empty when no payload has a supporting handler.
+fn formats_for_payloads(registry: &HandlerRegistry, payloads: &[Asset]) -> Vec<ExportFormat> {
+    let mut out = Vec::new();
+    for (payload_idx, asset) in payloads.iter().enumerate() {
+        let disc = std::mem::discriminant(asset);
+        let Some(bucket) = registry.by_variant.get(&disc) else {
+            continue;
+        };
+        let mut seen: Vec<&'static str> = Vec::new();
+        for handler in bucket {
+            if !handler.supports(asset) {
+                continue;
+            }
+            let ext = handler.output_extension();
+            if !seen.contains(&ext) {
+                seen.push(ext);
+                out.push(ExportFormat {
+                    payload_idx,
+                    extension: ext,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Every exportable `(payload, format)` pair for `package` under `registry`.
+///
+/// The GUI's Export As… picker is built from this; the CLI's `extract` selects
+/// one payload via its own preference logic and does not call this.
+#[must_use]
+pub fn available_formats(package: &Package, registry: &HandlerRegistry) -> Vec<ExportFormat> {
+    formats_for_payloads(registry, &package.payloads)
+}
+
+/// Resolve the bulk for `payload_idx` and run the handler that produces
+/// `extension`, returning the exported file bytes.
+///
+/// Errors (all [`crate::PaksmithError`], never panics):
+/// - `InvalidArgument { arg: "payload_idx", .. }` — index past the end of
+///   `package.payloads`.
+/// - `InvalidArgument { arg: "extension", .. }` — no registered handler both
+///   `supports` the payload and emits `extension`.
+/// - bulk-resolution / handler errors propagate unchanged.
+///
+/// The caller must build `registry` with [`HandlerRegistry::all_default_handlers`]
+/// (the same registry used to enumerate via [`available_formats`]) so a
+/// successfully-enumerated `(payload_idx, extension)` always dispatches here.
+pub fn export_payload(
+    package: &Package,
+    payload_idx: usize,
+    extension: &str,
+    registry: &HandlerRegistry,
+) -> crate::Result<Vec<u8>> {
+    let asset =
+        package
+            .payloads
+            .get(payload_idx)
+            .ok_or_else(|| crate::PaksmithError::InvalidArgument {
+                arg: "payload_idx",
+                reason: format!(
+                    "no payload at index {payload_idx} (package has {} payload(s))",
+                    package.payloads.len()
+                ),
+            })?;
+    let handler = registry
+        .find_handler_by_extension(extension, asset)
+        .ok_or_else(|| crate::PaksmithError::InvalidArgument {
+            arg: "extension",
+            reason: format!("no handler exports `{extension}` for this payload"),
+        })?;
+    let bulk = package.resolve_bulk_for_export(payload_idx)?;
+    handler.export(asset, bulk)
+}
+
 impl Default for HandlerRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(all(test, feature = "__test_utils"))]
+mod facade_tests {
+    use super::*;
+    use crate::asset::Package;
+
+    /// A real package with a single `Asset::Generic` payload (json handler).
+    fn generic_pkg() -> Package {
+        let mp = crate::testing::uasset::build_minimal_ue4_27();
+        Package::read_from(&mp.bytes, None, None, "Game/Foo.uasset")
+            .expect("build_minimal_ue4_27 must parse")
+    }
+
+    #[test]
+    fn export_payload_generic_to_json_ok() {
+        let pkg = generic_pkg();
+        let reg = HandlerRegistry::all_default_handlers();
+        let bytes = export_payload(&pkg, 0, "json", &reg).expect("generic→json");
+        assert!(!bytes.is_empty(), "json export must produce bytes");
+    }
+
+    #[test]
+    fn export_payload_out_of_range_idx_is_invalid_argument() {
+        let pkg = generic_pkg();
+        let reg = HandlerRegistry::all_default_handlers();
+        let err = export_payload(&pkg, 99, "json", &reg).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::PaksmithError::InvalidArgument {
+                    arg: "payload_idx",
+                    ..
+                }
+            ),
+            "out-of-range index must be InvalidArgument(payload_idx), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn export_payload_unhandled_extension_is_invalid_argument() {
+        let pkg = generic_pkg();
+        let reg = HandlerRegistry::all_default_handlers();
+        // A Generic payload only exports json; png has no handler for it.
+        let err = export_payload(&pkg, 0, "png", &reg).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::PaksmithError::InvalidArgument {
+                    arg: "extension",
+                    ..
+                }
+            ),
+            "unhandled extension must be InvalidArgument(extension), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn available_formats_generic_pkg_offers_json() {
+        // Package-level smoke for the Task-1 enumerator. Tolerant of extra
+        // payloads (exact ordering/dedup are pinned in formats_for_payloads
+        // unit tests); asserts the json entry for payload 0 is present.
+        let pkg = generic_pkg();
+        let reg = HandlerRegistry::all_default_handlers();
+        let formats = available_formats(&pkg, &reg);
+        assert!(
+            formats
+                .iter()
+                .any(|f| f.payload_idx == 0 && f.extension == "json"),
+            "generic package must offer json for payload 0, got {formats:?}"
+        );
     }
 }
 
@@ -521,5 +686,119 @@ mod tests {
             reg.find_handler_by_extension("csv", &asset).is_none(),
             "supports=false handler must be skipped even when extension matches"
         );
+    }
+
+    #[test]
+    fn formats_for_payloads_empty_when_no_handler() {
+        // Empty registry → no payload has a handler → empty list.
+        let reg = HandlerRegistry::new();
+        assert!(formats_for_payloads(&reg, &[generic_sentinel()]).is_empty());
+    }
+
+    #[test]
+    fn formats_for_payloads_single_handler() {
+        let mut reg = HandlerRegistry::new();
+        let disc = std::mem::discriminant(&generic_sentinel());
+        reg.register(
+            disc,
+            Box::new(MockHandler {
+                ext: "json",
+                supports_value: true,
+            }),
+        );
+        assert_eq!(
+            formats_for_payloads(&reg, &[generic_sentinel()]),
+            vec![ExportFormat {
+                payload_idx: 0,
+                extension: "json"
+            }]
+        );
+    }
+
+    #[test]
+    fn formats_for_payloads_orders_by_payload_then_registration() {
+        // Two handlers for the variant, two payloads → payload-major, then
+        // registration order within each payload.
+        let mut reg = HandlerRegistry::new();
+        let disc = std::mem::discriminant(&generic_sentinel());
+        reg.register(
+            disc,
+            Box::new(MockHandler {
+                ext: "csv",
+                supports_value: true,
+            }),
+        );
+        reg.register(
+            disc,
+            Box::new(MockHandler {
+                ext: "json",
+                supports_value: true,
+            }),
+        );
+        let payloads = [generic_sentinel(), generic_sentinel()];
+        assert_eq!(
+            formats_for_payloads(&reg, &payloads),
+            vec![
+                ExportFormat {
+                    payload_idx: 0,
+                    extension: "csv"
+                },
+                ExportFormat {
+                    payload_idx: 0,
+                    extension: "json"
+                },
+                ExportFormat {
+                    payload_idx: 1,
+                    extension: "csv"
+                },
+                ExportFormat {
+                    payload_idx: 1,
+                    extension: "json"
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn formats_for_payloads_dedups_same_extension_within_payload() {
+        // Two handlers emitting the same extension for one payload → one entry
+        // (first wins) so a format menu never shows a duplicate button.
+        let mut reg = HandlerRegistry::new();
+        let disc = std::mem::discriminant(&generic_sentinel());
+        reg.register(
+            disc,
+            Box::new(MockHandler {
+                ext: "json",
+                supports_value: true,
+            }),
+        );
+        reg.register(
+            disc,
+            Box::new(MockHandler {
+                ext: "json",
+                supports_value: true,
+            }),
+        );
+        assert_eq!(
+            formats_for_payloads(&reg, &[generic_sentinel()]),
+            vec![ExportFormat {
+                payload_idx: 0,
+                extension: "json"
+            }]
+        );
+    }
+
+    #[test]
+    fn formats_for_payloads_skips_supports_false() {
+        let mut reg = HandlerRegistry::new();
+        let disc = std::mem::discriminant(&generic_sentinel());
+        reg.register(
+            disc,
+            Box::new(MockHandler {
+                ext: "json",
+                supports_value: false,
+            }),
+        );
+        assert!(formats_for_payloads(&reg, &[generic_sentinel()]).is_empty());
     }
 }

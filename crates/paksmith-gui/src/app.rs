@@ -75,11 +75,14 @@ pub struct App {
     /// Live transient notifications (errors + action feedback), rendered as a
     /// non-blocking overlay. See [`crate::state::toast`].
     pub toasts: crate::state::toast::Toasts,
-    /// Visible-row index whose inline context-menu strip (Open / Copy Path) is
-    /// currently shown, or `None`. A *visible-row* index like
+    /// Visible-row index whose inline context-menu strip (Open / Copy Path /
+    /// Export As…) is currently shown, or `None`. A *visible-row* index like
     /// [`App::selected_row`]; cleared on every tree-mutating or selection path
     /// so a stale index can never address the wrong row.
     pub context_row: Option<usize>,
+    /// The open Export As… format picker, if any. Path-keyed; rendered beneath
+    /// the current `context_row`. `None` ⇒ the action strip (or nothing) shows.
+    pub export_menu: Option<crate::state::export::ExportMenu>,
 }
 
 impl Default for App {
@@ -110,6 +113,7 @@ impl Default for App {
             archive_generation: 0,
             toasts: crate::state::toast::Toasts::default(),
             context_row: None,
+            export_menu: None,
         }
     }
 }
@@ -221,6 +225,27 @@ pub enum Message {
     /// The path is resolved in `update` via `open_path_for_row` so the per-frame
     /// view never clones a path String.
     CopyPathRequested(usize),
+    /// Right-clicked row chose "Export As…": open the format picker for the file
+    /// at this visible-row index.
+    ExportAsRequested(usize),
+    /// Async format enumeration for a cold (unopened) entry resolved.
+    ExportFormatsReady {
+        path: String,
+        formats: Vec<paksmith_core::export::ExportFormat>,
+        generation: u64,
+    },
+    /// Cancel in the picker: return to the action strip.
+    ExportMenuCancelled,
+    /// A picker format was chosen: open the save dialog + export.
+    ExportChoiceSelected {
+        path: String,
+        choice: crate::state::export::ExportChoice,
+    },
+    /// Export run finished (or was cancelled).
+    ExportCompleted {
+        outcome: crate::task::export::ExportOutcome,
+        generation: u64,
+    },
 }
 
 /// Processes a `Message` and updates the application state.
@@ -262,7 +287,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // inherit the previous selection cursor or filter query.
                 app.filter.clear();
                 app.selected_row = None;
-                app.context_row = None;
+                dismiss_row_menus(app);
                 // Clear tabs so they never reference a stale reader.
                 app.tabs.clear();
                 app.archive_generation = app.archive_generation.wrapping_add(1);
@@ -275,7 +300,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.hex_input.clear();
                 // The old archive is kept while the key prompt shows, so clear the
                 // stale context-menu index too.
-                app.context_row = None;
+                dismiss_row_menus(app);
                 // Clear any stale tabs from a previously-open archive.
                 app.tabs.clear();
                 app.archive_generation = app.archive_generation.wrapping_add(1);
@@ -372,7 +397,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::RowToggled(i) => {
-            app.context_row = None;
+            dismiss_row_menus(app);
             if let Some(archive) = &mut app.archive {
                 archive.tree.toggle(i);
                 // After a toggle the row count may have changed; clamp the
@@ -387,7 +412,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::RowSelected(i) => {
-            app.context_row = None;
+            dismiss_row_menus(app);
             if let Some(archive) = &mut app.archive {
                 archive.tree.select(i);
                 // Move the keyboard cursor to the selected file.
@@ -403,7 +428,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             scroll_task.unwrap_or_else(Task::none)
         }
         Message::FilterChanged(query) => {
-            app.context_row = None;
+            dismiss_row_menus(app);
             app.filter.clone_from(&query);
             if let Some(archive) = &mut app.archive {
                 archive.tree.set_filter(&query);
@@ -439,12 +464,16 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::RowContextOpened(i) => {
             app.context_row = toggle_context_row(app.context_row, i);
+            // `dismiss_row_menus` would also clear `context_row`, but here we
+            // need `context_row` toggled, not cleared — so reset export_menu
+            // manually rather than delegating to the helper.
+            app.export_menu = None;
             Task::none()
         }
         Message::CopyPathRequested(i) => match open_path_for_row(app, i) {
             Some(path) => {
                 // The action completes here, so close the inline menu.
-                app.context_row = None;
+                dismiss_row_menus(app);
                 Task::batch([
                     iced::clipboard::write::<Message>(path),
                     push_toast(
@@ -457,10 +486,134 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // No resolvable path (out-of-range, or a dir row) — silent no-op.
             None => Task::none(),
         },
+        Message::ExportAsRequested(row) => {
+            let Some(path) = open_path_for_row(app, row) else {
+                return Task::none();
+            };
+            // Hybrid: enumerate synchronously from an already-open parsed tab
+            // (instant picker, no re-parse — the common case of exporting what
+            // you're viewing); else enumerate off-thread (cold path). The map
+            // closure ends the `app.tabs` borrow before we write `app.export_menu`.
+            let sync_choices = app.tabs.parsed_package(&path).map(|arc| {
+                let registry = paksmith_core::export::HandlerRegistry::all_default_handlers();
+                let formats = paksmith_core::export::available_formats(arc, &registry);
+                crate::state::export::export_choices(&formats)
+            });
+            if let Some(choices) = sync_choices {
+                app.export_menu = Some(crate::state::export::ExportMenu { path, choices });
+                Task::none()
+            } else {
+                // Cold path (no open parsed tab): show a Raw-only picker
+                // immediately — Raw needs no parse, so the menu is usable at once —
+                // then enrich it with typed formats when the async enumeration lands
+                // (ExportFormatsReady, path-guarded). Set the picker before
+                // borrowing `app.archive` so the write stays a disjoint field.
+                app.export_menu = Some(crate::state::export::ExportMenu {
+                    path: path.clone(),
+                    choices: vec![crate::state::export::ExportChoice::Raw],
+                });
+                if let Some(archive) = &app.archive {
+                    let reader = archive.reader.clone();
+                    let generation = app.archive_generation;
+                    let task_path = path.clone();
+                    Task::perform(
+                        crate::task::export::available(reader, task_path),
+                        move |formats| Message::ExportFormatsReady {
+                            path,
+                            formats,
+                            generation,
+                        },
+                    )
+                } else {
+                    Task::none()
+                }
+            }
+        }
+        Message::ExportFormatsReady {
+            path,
+            formats,
+            generation,
+        } => {
+            // Fence: drop a stale enumeration from a previous archive.
+            if generation != app.archive_generation {
+                return Task::none();
+            }
+            // Enrich the cold Raw-only picker with typed formats — but ONLY if it
+            // is still open for this exact path. If the user cancelled (which clears
+            // export_menu) or switched to another entry's picker, drop the
+            // enumeration: it must never reopen or replace a picker the user
+            // dismissed. Keying on export_menu, not context_row (which Cancel
+            // deliberately keeps so the action strip returns), is what prevents a
+            // late enumeration from popping the cancelled picker back open.
+            let still_open = app
+                .export_menu
+                .as_ref()
+                .is_some_and(|menu| menu.path == path);
+            if !still_open {
+                return Task::none();
+            }
+            let choices = crate::state::export::export_choices(&formats);
+            app.export_menu = Some(crate::state::export::ExportMenu { path, choices });
+            Task::none()
+        }
+        Message::ExportMenuCancelled => {
+            // Back to the action strip; context_row stays so the strip reappears.
+            app.export_menu = None;
+            Task::none()
+        }
+        Message::ExportChoiceSelected { path, choice } => {
+            // Commit to exporting this entry: collapse both inline menus and run
+            // the save dialog + export off-thread. Capture the reader + generation
+            // now so a mid-dialog archive swap can't redirect the export.
+            dismiss_row_menus(app);
+            if let Some(archive) = &app.archive {
+                let reader = archive.reader.clone();
+                let generation = app.archive_generation;
+                Task::perform(
+                    crate::task::export::run(reader, path, choice),
+                    move |outcome| Message::ExportCompleted {
+                        outcome,
+                        generation,
+                    },
+                )
+            } else {
+                Task::none()
+            }
+        }
+        Message::ExportCompleted {
+            outcome,
+            generation,
+        } => {
+            // Fence like other async results; a completed export of a now-closed
+            // archive drops its toast (the file was still written).
+            if generation != app.archive_generation {
+                return Task::none();
+            }
+            match outcome {
+                crate::task::export::ExportOutcome::Written(dest) => {
+                    let name = dest
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("file")
+                        .to_string();
+                    push_toast(
+                        app,
+                        crate::state::toast::Severity::Success,
+                        format!("Exported {name}"),
+                    )
+                }
+                crate::task::export::ExportOutcome::Failed(msg) => push_toast(
+                    app,
+                    crate::state::toast::Severity::Error,
+                    format!("Export failed: {msg}"),
+                ),
+                crate::task::export::ExportOutcome::Cancelled => Task::none(),
+            }
+        }
         Message::OpenAsset(path) => {
             // Opening any asset (button, double-click, Enter, or the context-menu
             // strip) dismisses the inline menu.
-            app.context_row = None;
+            dismiss_row_menus(app);
             // Re-opening an already-open asset only reactivates its tab; it keeps its
             // loaded content and must NOT re-read/re-parse (tab dedupe per the spec).
             // Branch on `was_open` directly (load in the `else`) rather than a
@@ -822,9 +975,11 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
     // desync the keyboard auto-scroll's `row_idx * row_height` math at the bottom
     // of this function. Clearing here (before that scroll offset is computed) keeps
     // row height uniform. Disjoint-field write — `archive` borrows `app.archive`,
-    // this writes `app.context_row` (same pattern as the `app.selected_row = …`
-    // writes below).
+    // these write `app.context_row` / `app.export_menu` (same pattern as the
+    // `app.selected_row = …` writes below; can't call `dismiss_row_menus` here
+    // because the live `archive` borrow from the caller is still active).
     app.context_row = None;
+    app.export_menu = None;
 
     let prev_selected = app.selected_row;
 
@@ -971,6 +1126,14 @@ fn toggle_context_row(current: Option<usize>, clicked: usize) -> Option<usize> {
     } else {
         Some(clicked)
     }
+}
+
+/// Clear both inline row menus (the action strip and the Export As… picker).
+/// Used at every site that dismisses the menu, so a dismissing gesture (nav,
+/// archive swap, a committed export) never leaves a stale picker visible.
+fn dismiss_row_menus(app: &mut App) {
+    app.context_row = None;
+    app.export_menu = None;
 }
 
 /// The asset path to open for visible tree row `i`, if it is a file row with a
@@ -1161,12 +1324,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
         let accent = app.accent;
         let selected_row = app.selected_row;
         let context_row = app.context_row;
+        let export_menu = app.export_menu.as_ref();
         let tabs = &app.tabs;
         let entries = &archive.entries;
 
         pane_grid(&app.panes, move |_pane, kind, _maximized| {
             let content: Element<'_, Message> = match kind {
-                PaneKind::Sidebar => sidebar::view(tree, accent, selected_row, context_row),
+                PaneKind::Sidebar => {
+                    sidebar::view(tree, accent, selected_row, context_row, export_menu)
+                }
                 PaneKind::Detail => content::view(tabs, entries, accent),
             };
             pane_grid::Content::new(content)
@@ -1337,6 +1503,9 @@ mod tests {
 
     use iced::keyboard::Key;
     use iced::keyboard::key::Named;
+
+    use crate::state::export::{ExportChoice, ExportMenu};
+    use crate::task::export::ExportOutcome;
 
     #[test]
     fn readable_text_picks_dark_on_light_accent_and_light_on_dark() {
@@ -3286,6 +3455,326 @@ mod tests {
         assert!(
             app.tabs.active_tab().unwrap().texture.fit_to_window,
             "TextureFitToWindow must restore fit-to-window mode"
+        );
+    }
+
+    // ── Export As… update-arm tests ───────────────────────────────────────────
+
+    fn minimal_export_menu() -> ExportMenu {
+        ExportMenu {
+            path: "a.uasset".into(),
+            choices: vec![ExportChoice::Raw],
+        }
+    }
+
+    fn app_with_parsed_tab() -> App {
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        // Parse a known-good fixture so parsed_package returns Some.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/minimal_uasset_v5.uasset");
+        let bytes = std::fs::read(&fixture).expect("read minimal_uasset_v5.uasset");
+        let pkg = paksmith_core::asset::Package::read_from(&bytes, None, None, "a.uasset")
+            .expect("parse minimal_uasset_v5.uasset");
+        app.tabs.set_content(
+            "a.uasset",
+            crate::state::tabs::TabContent::Ready {
+                bytes,
+                truncated: false,
+                parsed: Ok(std::sync::Arc::new(pkg)),
+            },
+        );
+        app
+    }
+
+    #[test]
+    fn export_as_open_parsed_tab_opens_picker_synchronously() {
+        let mut app = app_with_parsed_tab();
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::ExportAsRequested(0));
+        let menu = app
+            .export_menu
+            .expect("picker must open for a parsed open tab");
+        assert_eq!(menu.path, "a.uasset");
+        assert_eq!(
+            menu.choices.last(),
+            Some(&ExportChoice::Raw),
+            "the picker must always end with Raw"
+        );
+    }
+
+    #[test]
+    fn export_as_cold_row_shows_raw_picker_immediately() {
+        // An unopened row has no parsed tab, so Export As… takes the cold path: the
+        // picker must appear at once with Raw (which needs no parse), to be enriched
+        // with typed formats when the async enumeration lands.
+        let mut app = app_with_paths(&["a.uasset"]); // row 0, never opened → parsed_package None
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::ExportAsRequested(0));
+        let menu = app
+            .export_menu
+            .expect("cold Export As… must open a picker immediately");
+        assert_eq!(menu.path, "a.uasset");
+        assert_eq!(
+            menu.choices,
+            vec![ExportChoice::Raw],
+            "the cold picker shows Raw only until async enrichment replaces it"
+        );
+    }
+
+    #[test]
+    fn export_formats_ready_stale_generation_dropped() {
+        let mut app = App::default();
+        let _ = update(
+            &mut app,
+            Message::ExportFormatsReady {
+                path: "x.uasset".into(),
+                formats: vec![],
+                generation: 99, // != default 0
+            },
+        );
+        assert!(
+            app.export_menu.is_none(),
+            "stale-generation enumeration must be dropped"
+        );
+    }
+
+    /// A single typed format for enrichment tests, so the enriched menu
+    /// (`[Typed, Raw]`) is observably different from the pre-set Raw-only picker —
+    /// otherwise an empty `formats` yields `[Raw]` and the test can't tell
+    /// enrichment from a no-op (or a dropped message).
+    fn one_typed_format() -> paksmith_core::export::ExportFormat {
+        paksmith_core::export::ExportFormat {
+            payload_idx: 0,
+            extension: "json",
+        }
+    }
+
+    #[test]
+    fn export_formats_ready_enriches_open_cold_picker() {
+        // The cold path opens a Raw-only picker, then the async enumeration enriches
+        // it IN PLACE with the typed formats. Precondition mirrors the real flow: the
+        // Raw-only picker is already open for this path when the enumeration lands.
+        // A non-empty format list must observably change the menu — proving both the
+        // enrichment AND the generation fence ahead of it actually ran.
+        let mut app = app_with_paths(&["a.uasset"]);
+        app.context_row = Some(0);
+        let archive_gen = app.archive_generation;
+        app.export_menu = Some(minimal_export_menu()); // Raw-only, path "a.uasset"
+        let _ = update(
+            &mut app,
+            Message::ExportFormatsReady {
+                path: "a.uasset".into(),
+                formats: vec![one_typed_format()],
+                generation: archive_gen,
+            },
+        );
+        let menu = app
+            .export_menu
+            .expect("an open picker must remain open after enrichment");
+        assert_eq!(menu.path, "a.uasset");
+        assert_eq!(
+            menu.choices,
+            vec![
+                ExportChoice::Typed {
+                    payload_idx: 0,
+                    extension: "json",
+                },
+                ExportChoice::Raw,
+            ],
+            "enrichment must replace the Raw-only menu with the typed formats + Raw"
+        );
+    }
+
+    #[test]
+    fn export_formats_ready_for_other_path_does_not_clobber_open_picker() {
+        // An enumeration for a different entry must not replace the picker currently
+        // open for "a.uasset" — neither its path nor its choices.
+        let mut app = app_with_paths(&["a.uasset"]);
+        app.context_row = Some(0);
+        let archive_gen = app.archive_generation;
+        app.export_menu = Some(minimal_export_menu()); // Raw-only, path "a.uasset"
+        let _ = update(
+            &mut app,
+            Message::ExportFormatsReady {
+                path: "other.uasset".into(),
+                formats: vec![one_typed_format()],
+                generation: archive_gen,
+            },
+        );
+        let menu = app
+            .export_menu
+            .expect("the open picker must survive a mismatched enumeration");
+        assert_eq!(
+            menu.path, "a.uasset",
+            "an enumeration for a different path must not replace the open picker"
+        );
+        assert_eq!(
+            menu.choices,
+            vec![ExportChoice::Raw],
+            "a mismatched enumeration must not alter the open picker's choices"
+        );
+    }
+
+    #[test]
+    fn export_formats_ready_does_not_reopen_cancelled_picker() {
+        // Regression: if the user cancels the cold picker before the async
+        // enumeration lands, the late ExportFormatsReady must NOT reopen it.
+        // context_row stays set after Cancel (so the action strip returns), so the
+        // guard cannot rely on context_row — it must key on export_menu being open.
+        let mut app = app_with_paths(&["a.uasset"]);
+        app.context_row = Some(0); // still resolves to "a.uasset" after Cancel
+        let archive_gen = app.archive_generation;
+        app.export_menu = None; // cold picker was opened, then cancelled
+        let _ = update(
+            &mut app,
+            Message::ExportFormatsReady {
+                path: "a.uasset".into(),
+                formats: vec![],
+                generation: archive_gen,
+            },
+        );
+        assert!(
+            app.export_menu.is_none(),
+            "a cancelled picker must not be reopened by a late enumeration"
+        );
+    }
+
+    #[test]
+    fn export_menu_cancelled_clears_picker_keeps_context_row() {
+        let mut app = App {
+            context_row: Some(2),
+            export_menu: Some(minimal_export_menu()),
+            ..App::default()
+        };
+        let _ = update(&mut app, Message::ExportMenuCancelled);
+        assert!(app.export_menu.is_none(), "Cancel clears the picker");
+        assert_eq!(
+            app.context_row,
+            Some(2),
+            "Cancel keeps the action strip's row"
+        );
+    }
+
+    #[test]
+    fn export_choice_selected_dismisses_both_menus() {
+        // archive None → no task dispatched
+        let mut app = App {
+            context_row: Some(1),
+            export_menu: Some(minimal_export_menu()),
+            ..App::default()
+        };
+        let _ = update(
+            &mut app,
+            Message::ExportChoiceSelected {
+                path: "a.uasset".into(),
+                choice: ExportChoice::Raw,
+            },
+        );
+        assert!(
+            app.context_row.is_none(),
+            "choosing a format dismisses the action strip"
+        );
+        assert!(
+            app.export_menu.is_none(),
+            "choosing a format dismisses the picker"
+        );
+    }
+
+    #[test]
+    fn export_completed_written_pushes_success_toast() {
+        let mut app = App::default();
+        let archive_gen = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::ExportCompleted {
+                outcome: ExportOutcome::Written("/tmp/T_Rock.png".into()),
+                generation: archive_gen,
+            },
+        );
+        assert_eq!(app.toasts.items().len(), 1);
+        assert_eq!(app.toasts.items()[0].severity, Severity::Success);
+        assert!(app.toasts.items()[0].message.contains("T_Rock.png"));
+    }
+
+    #[test]
+    fn export_completed_failed_pushes_error_toast() {
+        let mut app = App::default();
+        let archive_gen = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::ExportCompleted {
+                outcome: ExportOutcome::Failed("disk full".into()),
+                generation: archive_gen,
+            },
+        );
+        assert_eq!(app.toasts.items().len(), 1);
+        assert_eq!(app.toasts.items()[0].severity, Severity::Error);
+        assert!(app.toasts.items()[0].message.contains("disk full"));
+    }
+
+    #[test]
+    fn export_completed_cancelled_pushes_no_toast() {
+        let mut app = App::default();
+        let archive_gen = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::ExportCompleted {
+                outcome: ExportOutcome::Cancelled,
+                generation: archive_gen,
+            },
+        );
+        assert!(app.toasts.is_empty(), "a cancelled export shows no toast");
+    }
+
+    #[test]
+    fn export_completed_stale_generation_dropped() {
+        let mut app = App::default();
+        let _ = update(
+            &mut app,
+            Message::ExportCompleted {
+                outcome: ExportOutcome::Written("/tmp/x".into()),
+                generation: 99, // != default 0
+            },
+        );
+        assert!(
+            app.toasts.is_empty(),
+            "stale-generation completion drops its toast"
+        );
+    }
+
+    // ── export_menu inline-clear coverage ────────────────────────────────────
+    // These tests pin the two `app.export_menu = None;` statements that are
+    // written inline (not via dismiss_row_menus) because a live archive borrow
+    // is held at those call sites. Without them, deleting either statement
+    // passes the suite.
+
+    #[test]
+    fn row_context_opened_clears_export_menu() {
+        let mut app = app_with_paths(&["a.uasset", "b.uasset"]);
+        app.context_row = Some(0);
+        app.export_menu = Some(minimal_export_menu());
+        // Right-click a different row — must dismiss the picker.
+        let _ = update(&mut app, Message::RowContextOpened(1));
+        assert!(
+            app.export_menu.is_none(),
+            "new right-click must clear the export picker"
+        );
+    }
+
+    #[test]
+    fn keyboard_nav_clears_export_menu() {
+        let mut app = app_with_paths(&["a.uasset", "b.uasset"]);
+        app.context_row = Some(0);
+        app.export_menu = Some(minimal_export_menu());
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowDown));
+        assert!(
+            app.export_menu.is_none(),
+            "keyboard nav must clear the export picker"
         );
     }
 }

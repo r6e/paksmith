@@ -105,7 +105,10 @@ pub use asset::{DecodedTextureRgba, TextureInfo, classify_texture, decode_textur
 // from the 3a re-export set while its shape (unit-struct stub →
 // fields-bearing) was in flux; 3b Task 4 finalized the shape and
 // this PR promotes it to the crate root.
-pub use export::{BulkData, FormatHandler, GenericHandler, HandlerRegistry};
+pub use export::{
+    BulkData, ExportFormat, FormatHandler, GenericHandler, HandlerRegistry, available_formats,
+    export_payload,
+};
 
 // Phase 5b: game-profile public API. `GameProfile`, `KeyGuid`, and
 // `ProfileStore` are the load-bearing types that consumers need to manage
