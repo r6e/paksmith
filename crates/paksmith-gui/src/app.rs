@@ -1318,14 +1318,11 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         return Subscription::batch([menu_sub, console_toggle_sub, console_tick_sub]);
     }
 
-    // Tree navigation keys — but NOT F12 (handled above; routing it here too
-    // would fire TreeKey(F12) and clear the context/export menus).
-    let tree_key_sub = iced::event::listen_with(|event, _status, _window| match event {
-        Event::Keyboard(KeyboardEvent::KeyPressed {
-            key: iced::keyboard::Key::Named(Named::F12),
-            ..
-        }) => None,
-        Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) => Some(Message::TreeKey(key)),
+    // Tree navigation keys. The decision (F12 exclusion + only-act-on-unconsumed
+    // keys) lives in the tested `tree_key_for`; this closure just destructures
+    // the event and forwards the key + capture status.
+    let tree_key_sub = iced::event::listen_with(|event, status, _window| match event {
+        Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) => tree_key_for(key, status),
         _ => None,
     });
 
@@ -1350,6 +1347,33 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         tree_key_sub,
         hex_drag_sub,
     ])
+}
+
+/// Decide whether a key press should drive tree navigation.
+///
+/// Two guards, both load-bearing:
+/// - **F12** is the debug-console toggle (its own always-on listener); routing
+///   it to [`Message::TreeKey`] would dismiss the context/export menus via
+///   `handle_tree_key`'s clear-at-top.
+/// - Only act when the event was **not** already consumed by a focused widget
+///   ([`iced::event::Status::Ignored`]). A focused `text_input` — the toolbar
+///   filter or the console target/search fields — captures the editing keys it
+///   uses (ArrowLeft/Right, printable characters, Backspace, Home/End) as
+///   `Captured`, so those no longer also navigate or mutate the file tree. Keys
+///   a single-line input doesn't consume (ArrowUp/Down, and Enter when no
+///   `on_submit` is set) stay `Ignored` and still reach the tree — acceptable,
+///   as they have no editing meaning inside the input.
+///
+/// Extracted from [`subscription`]'s opaque `listen_with` closure so the
+/// decision is unit- and mutation-tested.
+fn tree_key_for(key: iced::keyboard::Key, status: iced::event::Status) -> Option<Message> {
+    if matches!(key, iced::keyboard::Key::Named(Named::F12)) {
+        return None;
+    }
+    match status {
+        iced::event::Status::Ignored => Some(Message::TreeKey(key)),
+        iced::event::Status::Captured => None,
+    }
 }
 
 /// Returns a button style closure that uses the system accent colour so that
@@ -3981,6 +4005,26 @@ mod tests {
         assert!(r.is_none(), "F12 produces no scroll task");
         assert_eq!(app.context_row, Some(0), "F12 must not clear context row");
         assert!(app.export_menu.is_some(), "F12 must not clear export menu");
+    }
+
+    #[test]
+    fn tree_key_for_gates_on_capture_and_excludes_f12() {
+        use iced::event::Status;
+
+        // A nav key the UI did NOT consume drives the tree, carrying its key.
+        match super::tree_key_for(Key::Named(Named::ArrowDown), Status::Ignored) {
+            Some(super::Message::TreeKey(Key::Named(Named::ArrowDown))) => {}
+            other => panic!("expected TreeKey(ArrowDown), got {other:?}"),
+        }
+        // Once a focused widget (e.g. a console filter `text_input`) captured the
+        // key, it must NOT also navigate/mutate the tree.
+        assert!(
+            super::tree_key_for(Key::Named(Named::ArrowDown), Status::Captured).is_none(),
+            "a captured key must not reach the tree"
+        );
+        // F12 is the console toggle — never a tree key, regardless of status.
+        assert!(super::tree_key_for(Key::Named(Named::F12), Status::Ignored).is_none());
+        assert!(super::tree_key_for(Key::Named(Named::F12), Status::Captured).is_none());
     }
 
     // ── console filter controls ───────────────────────────────────────────────
