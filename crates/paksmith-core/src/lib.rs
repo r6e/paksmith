@@ -107,6 +107,7 @@ pub use asset::{DecodedTextureRgba, TextureInfo, classify_texture, decode_textur
 // this PR promotes it to the crate root.
 pub use export::{
     BulkData, ExportFormat, FormatHandler, GenericHandler, HandlerRegistry, available_formats,
+    export_payload,
 };
 
 // Phase 5b: game-profile public API. `GameProfile`, `KeyGuid`, and

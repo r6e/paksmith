@@ -380,9 +380,121 @@ pub fn available_formats(registry: &HandlerRegistry, package: &Package) -> Vec<E
     formats_for_payloads(registry, &package.payloads)
 }
 
+/// Resolve the bulk for `payload_idx` and run the handler that produces
+/// `extension`, returning the exported file bytes.
+///
+/// Errors (all [`crate::PaksmithError`], never panics):
+/// - `InvalidArgument { arg: "payload_idx", .. }` — index past the end of
+///   `package.payloads`.
+/// - `InvalidArgument { arg: "extension", .. }` — no registered handler both
+///   `supports` the payload and emits `extension`.
+/// - bulk-resolution / handler errors propagate unchanged.
+///
+/// The caller must build `registry` with [`HandlerRegistry::all_default_handlers`]
+/// (the same registry used to enumerate via [`available_formats`]) so a
+/// successfully-enumerated `(payload_idx, extension)` always dispatches here.
+pub fn export_payload(
+    package: &Package,
+    payload_idx: usize,
+    extension: &str,
+    registry: &HandlerRegistry,
+) -> crate::Result<Vec<u8>> {
+    let asset =
+        package
+            .payloads
+            .get(payload_idx)
+            .ok_or_else(|| crate::PaksmithError::InvalidArgument {
+                arg: "payload_idx",
+                reason: format!(
+                    "no payload at index {payload_idx} (package has {} payload(s))",
+                    package.payloads.len()
+                ),
+            })?;
+    let handler = registry
+        .find_handler_by_extension(extension, asset)
+        .ok_or_else(|| crate::PaksmithError::InvalidArgument {
+            arg: "extension",
+            reason: format!("no handler exports `{extension}` for this payload"),
+        })?;
+    let bulk = package.resolve_bulk_for_export(payload_idx)?;
+    handler.export(asset, bulk)
+}
+
 impl Default for HandlerRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(all(test, feature = "__test_utils"))]
+mod facade_tests {
+    use super::*;
+    use crate::asset::Package;
+
+    /// A real package with a single `Asset::Generic` payload (json handler).
+    fn generic_pkg() -> Package {
+        let mp = crate::testing::uasset::build_minimal_ue4_27();
+        Package::read_from(&mp.bytes, None, None, "Game/Foo.uasset")
+            .expect("build_minimal_ue4_27 must parse")
+    }
+
+    #[test]
+    fn export_payload_generic_to_json_ok() {
+        let pkg = generic_pkg();
+        let reg = HandlerRegistry::all_default_handlers();
+        let bytes = export_payload(&pkg, 0, "json", &reg).expect("generic→json");
+        assert!(!bytes.is_empty(), "json export must produce bytes");
+    }
+
+    #[test]
+    fn export_payload_out_of_range_idx_is_invalid_argument() {
+        let pkg = generic_pkg();
+        let reg = HandlerRegistry::all_default_handlers();
+        let err = export_payload(&pkg, 99, "json", &reg).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::PaksmithError::InvalidArgument {
+                    arg: "payload_idx",
+                    ..
+                }
+            ),
+            "out-of-range index must be InvalidArgument(payload_idx), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn export_payload_unhandled_extension_is_invalid_argument() {
+        let pkg = generic_pkg();
+        let reg = HandlerRegistry::all_default_handlers();
+        // A Generic payload only exports json; png has no handler for it.
+        let err = export_payload(&pkg, 0, "png", &reg).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::PaksmithError::InvalidArgument {
+                    arg: "extension",
+                    ..
+                }
+            ),
+            "unhandled extension must be InvalidArgument(extension), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn available_formats_generic_pkg_offers_json() {
+        // Package-level smoke for the Task-1 enumerator. Tolerant of extra
+        // payloads (exact ordering/dedup are pinned in formats_for_payloads
+        // unit tests); asserts the json entry for payload 0 is present.
+        let pkg = generic_pkg();
+        let reg = HandlerRegistry::all_default_handlers();
+        let formats = available_formats(&reg, &pkg);
+        assert!(
+            formats
+                .iter()
+                .any(|f| f.payload_idx == 0 && f.extension == "json"),
+            "generic package must offer json for payload 0, got {formats:?}"
+        );
     }
 }
 
