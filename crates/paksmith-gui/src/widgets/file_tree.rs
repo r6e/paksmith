@@ -52,11 +52,40 @@ fn row_is_selected(row_idx: usize, selected: Option<usize>) -> bool {
     selected == Some(row_idx)
 }
 
-/// Whether to render the inline context-menu strip immediately after visible
-/// row `row_idx`. The strip belongs only to the file row that currently owns
-/// the menu; directory rows and path-less rows never get one.
-fn show_strip_after(context_row: Option<usize>, row_idx: usize, row: &VisibleRow) -> bool {
-    context_row == Some(row_idx) && !row.is_dir && row.full_path.is_some()
+/// What to render in the inline band beneath a right-clicked file row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowMenu {
+    /// Nothing (not the context row, or a dir / pathless row).
+    None,
+    /// The Open / Copy Path / Export As… action strip.
+    Actions,
+    /// The Export As… format picker (Export As… was chosen for this row).
+    Picker,
+}
+
+/// Decide the inline band for visible row `row_idx`.
+///
+/// Both menus hang off the single right-clicked row (`context_row`). When an
+/// `ExportMenu` is open for *this row's path* (`export_menu_path`), the picker
+/// supersedes the action strip; otherwise the action strip shows. Directory
+/// rows and rows without a resolvable path never get a menu. The path match (not
+/// just `context_row == row_idx`) guards against a stale picker after a tree
+/// reshuffle moved the path off the context row.
+#[must_use]
+pub fn row_menu_after(
+    context_row: Option<usize>,
+    export_menu_path: Option<&str>,
+    row_idx: usize,
+    row: &VisibleRow,
+) -> RowMenu {
+    if context_row != Some(row_idx) || row.is_dir || row.full_path.is_none() {
+        return RowMenu::None;
+    }
+    if export_menu_path == row.full_path.as_deref() {
+        RowMenu::Picker
+    } else {
+        RowMenu::Actions
+    }
 }
 
 /// The glyph string rendered before the label for a directory row.
@@ -84,35 +113,46 @@ pub fn glyph_for_row(row: &VisibleRow) -> Option<&'static str> {
 ///   keyboard cursor).  May point at either a dir or a file.  `None` means
 ///   no cursor.
 /// * `context_row` — the visible-row index whose inline action strip (Open /
-///   Copy Path) is shown, or `None`. The strip is rendered immediately after
-///   that row (file rows only).
+///   Copy Path / Export As…) is shown, or `None`. The strip is rendered
+///   immediately after that row (file rows only).
+/// * `export_menu` — the open Export As… picker, or `None`. When `Some`, the
+///   picker replaces the action strip for the matching row.
 ///
 /// Each row emits:
 /// * `Message::RowToggled(i)` when a directory row is clicked.
 /// * `Message::RowSelected(i)` when a file row is clicked.
 /// * `Message::RowContextOpened(i)` when a file row is right-clicked.
 // Pure iced view composition (like the sibling `tab_bar`/`hex_view`/`property_tree`
-// view fns). The one decision — which row gets the inline strip — is extracted
-// into the unit-tested `show_strip_after`; this fn only wires the result into the
+// view fns). The decision of which inline band shows is extracted into the
+// unit-tested `row_menu_after`; this fn only wires the result into the
 // opaque scrollable `Element`, so there is nothing here a unit test can observe.
 #[mutants::skip]
-pub fn view(
-    tree: &Tree,
+pub fn view<'a>(
+    tree: &'a Tree,
     accent: Color,
     selected_row: Option<usize>,
     context_row: Option<usize>,
-) -> Element<'_, Message> {
+    export_menu: Option<&'a crate::state::export::ExportMenu>,
+) -> Element<'a, Message> {
     let rows = tree.visible_rows();
     // `+ 1`: when a context menu is open the loop pushes one extra element (the
-    // action strip), so reserving `rows.len() + 1` avoids a reallocation in that
-    // case. Safe to spell out the arithmetic here because `view` is
-    // `#[mutants::skip]` — an off-by-one in a capacity hint changes no behaviour
-    // and would otherwise be an unkillable mutant.
-    let mut items: Vec<Element<'_, Message>> = Vec::with_capacity(rows.len() + 1);
+    // action strip or picker), so reserving `rows.len() + 1` avoids a
+    // reallocation in that case. Safe to spell out the arithmetic here because
+    // `view` is `#[mutants::skip]` — an off-by-one in a capacity hint changes no
+    // behaviour and would otherwise be an unkillable mutant.
+    let mut items: Vec<Element<'a, Message>> = Vec::with_capacity(rows.len() + 1);
+    let export_menu_path = export_menu.map(|m| m.path.as_str());
     for (i, row) in rows.iter().enumerate() {
         items.push(build_row(i, row, accent, selected_row, context_row));
-        if show_strip_after(context_row, i, row) {
-            items.push(crate::widgets::context_menu::action_strip(i));
+        match row_menu_after(context_row, export_menu_path, i, row) {
+            RowMenu::Actions => items.push(crate::widgets::context_menu::action_strip(i)),
+            RowMenu::Picker => {
+                // Picker ⇒ export_menu is Some (row_menu_after guarantees it).
+                if let Some(menu) = export_menu {
+                    items.push(crate::widgets::export_picker::picker_strip(menu));
+                }
+            }
+            RowMenu::None => {}
         }
     }
 
@@ -408,40 +448,47 @@ mod tests {
         assert!(!row_is_selected(2, None));
     }
 
-    // ── show_strip_after ──────────────────────────────────────────────────────
+    // ── row_menu_after ────────────────────────────────────────────────────────
 
     #[test]
-    fn show_strip_after_owning_file_row_is_true() {
-        assert!(show_strip_after(Some(0), 0, &file_row()));
+    fn row_menu_none_when_not_context_row() {
+        assert_eq!(row_menu_after(Some(1), None, 0, &file_row()), RowMenu::None);
+        assert_eq!(row_menu_after(None, None, 0, &file_row()), RowMenu::None);
     }
 
     #[test]
-    fn show_strip_after_other_row_is_false() {
-        // context_row points elsewhere — kills `== with !=`.
-        assert!(!show_strip_after(Some(1), 0, &file_row()));
+    fn row_menu_none_for_dir_or_pathless_row() {
+        assert_eq!(
+            row_menu_after(Some(0), None, 0, &dir_row(false)),
+            RowMenu::None
+        );
+        let mut r = file_row();
+        r.full_path = None;
+        assert_eq!(row_menu_after(Some(0), None, 0, &r), RowMenu::None);
     }
 
     #[test]
-    fn show_strip_after_none_is_false() {
-        assert!(!show_strip_after(None, 0, &file_row()));
+    fn row_menu_actions_when_no_picker_open() {
+        // file_row()'s full_path must be Some for this to be Actions.
+        assert_eq!(
+            row_menu_after(Some(0), None, 0, &file_row()),
+            RowMenu::Actions
+        );
     }
 
     #[test]
-    fn show_strip_after_dir_row_is_false() {
-        // Directories never get a menu — kills `delete !` / `&& with ||`.
-        assert!(!show_strip_after(Some(0), 0, &dir_row(false)));
+    fn row_menu_picker_when_export_menu_path_matches() {
+        let r = file_row();
+        let p = r.full_path.as_deref();
+        assert_eq!(row_menu_after(Some(0), p, 0, &r), RowMenu::Picker);
     }
 
     #[test]
-    fn show_strip_after_file_without_path_is_false() {
-        // A file row carrying no path can't be acted on — kills `is_some -> is_none`.
-        let row = VisibleRow {
-            depth: 1,
-            label: "x".to_string(),
-            is_dir: false,
-            expanded: false,
-            full_path: None,
-        };
-        assert!(!show_strip_after(Some(0), 0, &row));
+    fn row_menu_actions_when_export_menu_path_differs() {
+        // Picker open for a different path (stale) → fall back to Actions, not Picker.
+        assert_eq!(
+            row_menu_after(Some(0), Some("Other/Different.uasset"), 0, &file_row()),
+            RowMenu::Actions
+        );
     }
 }

@@ -26,19 +26,21 @@ use crate::widgets::file_tree;
 /// * `accent` – system accent color (forwarded to `file_tree::view`).
 /// * `selected_row` – keyboard cursor position.
 /// * `context_row` – visible-row index whose inline action strip is shown.
-pub fn view(
-    tree: &Tree,
+/// * `export_menu` – the open Export As… picker, if any.
+pub fn view<'a>(
+    tree: &'a Tree,
     accent: iced::Color,
     selected_row: Option<usize>,
     context_row: Option<usize>,
-) -> Element<'_, Message> {
+    export_menu: Option<&'a crate::state::export::ExportMenu>,
+) -> Element<'a, Message> {
     let header = text("EXPLORER")
         .size(f32::from(TEXT_SM))
         .style(|theme: &iced::Theme| iced::widget::text::Style {
             color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
         });
 
-    let tree_view = file_tree::view(tree, accent, selected_row, context_row);
+    let tree_view = file_tree::view(tree, accent, selected_row, context_row, export_menu);
 
     container(
         column![header, tree_view]
