@@ -27,6 +27,7 @@ thiserror.workspace = true
 # Phase 6 Task 11: structured logging for menu build failure (non-fatal, continues
 # without native menu). Matches the workspace convention for all crates.
 tracing.workspace = true
+tracing-subscriber.workspace = true
 
 # Phase 6 Task 11: async sleep in the menu subscription bridge (tokio runtime
 # is already present via iced's tokio feature; `time` declared here because
