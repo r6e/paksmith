@@ -49,6 +49,11 @@ serde = { version = "1.0.225", features = ["derive", "rc"] }
 serde_json = "1.0.150"
 byteorder = "1.5"
 tracing = "0.1.40"
+# Used by paksmith-cli (fmt subscriber) and paksmith-gui (ring-buffer Layer for
+# the debug console). `env-filter` provides EnvFilter for RUST_LOG-driven
+# capture levels. Single workspace floor keeps Minimal-versions resolution
+# consistent across both consumers.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 flate2 = "1.1"
 sha1 = "0.11"
 tempfile = "3"
