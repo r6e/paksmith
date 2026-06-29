@@ -502,19 +502,31 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             if let Some(choices) = sync_choices {
                 app.export_menu = Some(crate::state::export::ExportMenu { path, choices });
                 Task::none()
-            } else if let Some(archive) = &app.archive {
-                let reader = archive.reader.clone();
-                let generation = app.archive_generation;
-                Task::perform(
-                    crate::task::export::available(reader, path.clone()),
-                    move |formats| Message::ExportFormatsReady {
-                        path: path.clone(),
-                        formats,
-                        generation,
-                    },
-                )
             } else {
-                Task::none()
+                // Cold path (no open parsed tab): show a Raw-only picker
+                // immediately — Raw needs no parse, so the menu is usable at once —
+                // then enrich it with typed formats when the async enumeration lands
+                // (ExportFormatsReady, path-guarded). Set the picker before
+                // borrowing `app.archive` so the write stays a disjoint field.
+                app.export_menu = Some(crate::state::export::ExportMenu {
+                    path: path.clone(),
+                    choices: vec![crate::state::export::ExportChoice::Raw],
+                });
+                if let Some(archive) = &app.archive {
+                    let reader = archive.reader.clone();
+                    let generation = app.archive_generation;
+                    let task_path = path.clone();
+                    Task::perform(
+                        crate::task::export::available(reader, task_path),
+                        move |formats| Message::ExportFormatsReady {
+                            path,
+                            formats,
+                            generation,
+                        },
+                    )
+                } else {
+                    Task::none()
+                }
             }
         }
         Message::ExportFormatsReady {
@@ -3487,6 +3499,25 @@ mod tests {
             menu.choices.last(),
             Some(&ExportChoice::Raw),
             "the picker must always end with Raw"
+        );
+    }
+
+    #[test]
+    fn export_as_cold_row_shows_raw_picker_immediately() {
+        // An unopened row has no parsed tab, so Export As… takes the cold path: the
+        // picker must appear at once with Raw (which needs no parse), to be enriched
+        // with typed formats when the async enumeration lands.
+        let mut app = app_with_paths(&["a.uasset"]); // row 0, never opened → parsed_package None
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::ExportAsRequested(0));
+        let menu = app
+            .export_menu
+            .expect("cold Export As… must open a picker immediately");
+        assert_eq!(menu.path, "a.uasset");
+        assert_eq!(
+            menu.choices,
+            vec![ExportChoice::Raw],
+            "the cold picker shows Raw only until async enrichment replaces it"
         );
     }
 
