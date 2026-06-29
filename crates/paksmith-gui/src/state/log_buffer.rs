@@ -116,6 +116,12 @@ impl<S: Subscriber> Layer<S> for RingBufferLayer {
 }
 
 /// Collects the `message` field and appends any other fields as ` key=value`.
+///
+/// SECURITY: this captures *every* field of *every* event at or above the
+/// console's capture floor, and Copy-all puts them on the clipboard. Never bind
+/// secret material — AES keys, key bytes, decryption GUIDs — as a `tracing`
+/// field or message at a captured level, or it becomes user-copyable. (Today no
+/// call site does; this note keeps it that way.)
 #[derive(Default)]
 struct MessageVisitor {
     message: String,

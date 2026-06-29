@@ -299,6 +299,18 @@ pub enum Message {
     ConsoleCopyAll,
 }
 
+/// Scroll the debug console to its newest (bottom) line. Shared by the open,
+/// tick-follow, and clear paths.
+// Thin scroll-operation glue: returns an opaque `Task` with no observable state
+// to assert, like the sibling `snap_to` call sites in the keyboard-nav arms.
+#[mutants::skip]
+fn snap_console_to_bottom() -> Task<Message> {
+    iced::widget::operation::snap_to(
+        crate::panels::console::SCROLL_ID,
+        iced::widget::operation::RelativeOffset::END,
+    )
+}
+
 /// Processes a `Message` and updates the application state.
 #[allow(clippy::needless_pass_by_value)] // iced's UpdateFn trait requires Message by value
 #[allow(clippy::too_many_lines)] // single-match-all-messages fn; splitting would obscure the shape
@@ -635,10 +647,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             app.console_visible = !app.console_visible;
             if app.console_visible {
                 app.console_follow = true;
-                iced::widget::operation::snap_to(
-                    crate::panels::console::SCROLL_ID,
-                    iced::widget::operation::RelativeOffset::END,
-                )
+                snap_console_to_bottom()
             } else {
                 Task::none()
             }
@@ -647,10 +656,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // Processing any message rebuilds the view, refreshing the list from
             // the ring. Follow the tail only when the user hasn't scrolled up.
             if app.console_follow {
-                iced::widget::operation::snap_to(
-                    crate::panels::console::SCROLL_ID,
-                    iced::widget::operation::RelativeOffset::END,
-                )
+                snap_console_to_bottom()
             } else {
                 Task::none()
             }
@@ -674,10 +680,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::ConsoleCleared => {
             app.log_buffer.clear();
             app.console_follow = true;
-            iced::widget::operation::snap_to(
-                crate::panels::console::SCROLL_ID,
-                iced::widget::operation::RelativeOffset::END,
-            )
+            snap_console_to_bottom()
         }
         Message::ConsoleCopyAll => {
             let records = app.log_buffer.snapshot();

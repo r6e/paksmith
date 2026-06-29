@@ -55,7 +55,10 @@ fn level_at_least(level: Level, min: Level) -> bool {
 /// True when `record` passes all active filters. An empty target/search string
 /// matches any record because `str::contains("")` is always true — so no
 /// redundant `is_empty()` short-circuit is needed.
-pub fn matches(record: &LogRecord, filters: &ConsoleFilters) -> bool {
+///
+/// Named `passes_filters` (not `matches`) so call sites — especially the test
+/// assertions — don't read as the stdlib `matches!` macro.
+pub fn passes_filters(record: &LogRecord, filters: &ConsoleFilters) -> bool {
     level_at_least(record.level, filters.min_level)
         && record.target.contains(filters.target_filter.as_str())
         && record.message.contains(filters.search.as_str())
@@ -63,7 +66,10 @@ pub fn matches(record: &LogRecord, filters: &ConsoleFilters) -> bool {
 
 /// The records to display, in capture order, after filtering.
 pub fn displayed<'a>(records: &'a [LogRecord], filters: &ConsoleFilters) -> Vec<&'a LogRecord> {
-    records.iter().filter(|r| matches(r, filters)).collect()
+    records
+        .iter()
+        .filter(|r| passes_filters(r, filters))
+        .collect()
 }
 
 /// Short level label for `format_line`'s `{:<5}` column: ERROR/DEBUG/TRACE are
@@ -78,7 +84,8 @@ fn level_label(level: Level) -> &'static str {
     }
 }
 
-/// One formatted line: `LEVEL target message` (level left-padded to 5 columns).
+/// One formatted line: `LEVEL target message` (level left-justified, i.e.
+/// right-padded with spaces, to a 5-column field).
 pub fn format_line(record: &LogRecord) -> String {
     format!(
         "{:<5} {} {}",
@@ -92,8 +99,8 @@ pub fn format_line(record: &LogRecord) -> String {
 /// formatted line each.
 pub fn copy_all(records: &[LogRecord], filters: &ConsoleFilters) -> String {
     displayed(records, filters)
-        .iter()
-        .map(|r| format_line(r))
+        .into_iter()
+        .map(format_line)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -126,19 +133,19 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            matches(&rec(Level::ERROR, "t", "m"), &f),
+            passes_filters(&rec(Level::ERROR, "t", "m"), &f),
             "ERROR more severe"
         );
         assert!(
-            matches(&rec(Level::WARN, "t", "m"), &f),
+            passes_filters(&rec(Level::WARN, "t", "m"), &f),
             "WARN at threshold"
         );
         assert!(
-            !matches(&rec(Level::INFO, "t", "m"), &f),
+            !passes_filters(&rec(Level::INFO, "t", "m"), &f),
             "INFO less severe"
         );
-        assert!(!matches(&rec(Level::DEBUG, "t", "m"), &f));
-        assert!(!matches(&rec(Level::TRACE, "t", "m"), &f));
+        assert!(!passes_filters(&rec(Level::DEBUG, "t", "m"), &f));
+        assert!(!passes_filters(&rec(Level::TRACE, "t", "m"), &f));
     }
 
     #[test]
@@ -146,7 +153,7 @@ mod tests {
         let f = ConsoleFilters::default();
         for lvl in LEVEL_CHOICES {
             assert!(
-                matches(&rec(lvl, "t", "m"), &f),
+                passes_filters(&rec(lvl, "t", "m"), &f),
                 "{lvl} should pass default"
             );
         }
@@ -158,15 +165,24 @@ mod tests {
             target_filter: "core".into(),
             ..Default::default()
         };
-        assert!(matches(&rec(Level::INFO, "paksmith_core::pak", "m"), &ft));
-        assert!(!matches(&rec(Level::INFO, "paksmith_gui::app", "m"), &ft));
+        assert!(passes_filters(
+            &rec(Level::INFO, "paksmith_core::pak", "m"),
+            &ft
+        ));
+        assert!(!passes_filters(
+            &rec(Level::INFO, "paksmith_gui::app", "m"),
+            &ft
+        ));
 
         let fs = ConsoleFilters {
             search: "decode".into(),
             ..Default::default()
         };
-        assert!(matches(&rec(Level::INFO, "t", "texture decode ok"), &fs));
-        assert!(!matches(&rec(Level::INFO, "t", "open ok"), &fs));
+        assert!(passes_filters(
+            &rec(Level::INFO, "t", "texture decode ok"),
+            &fs
+        ));
+        assert!(!passes_filters(&rec(Level::INFO, "t", "open ok"), &fs));
     }
 
     #[test]
