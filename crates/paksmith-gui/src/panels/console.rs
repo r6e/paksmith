@@ -3,11 +3,11 @@
 //! Thin rendering only — every decision lives in `crate::state::console` /
 //! `crate::state::log_buffer`, which are unit + mutation tested.
 
-use iced::widget::{column, container, scrollable, text};
+use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Length};
 
 use crate::app::{App, Message};
-use crate::state::console::{self, format_line};
+use crate::state::console::{self, LEVEL_CHOICES, format_line};
 use crate::theme::tokens::{SPACE_SM, TEXT_SM};
 
 /// Stable id so `update` can issue snap-to-bottom scroll tasks.
@@ -32,7 +32,32 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(Length::Fill);
 
-    container(body)
+    let controls = row![
+        pick_list(
+            LEVEL_CHOICES.to_vec(),
+            Some(app.console_filters.min_level),
+            Message::ConsoleMinLevelChanged,
+        )
+        .text_size(f32::from(TEXT_SM)),
+        text_input("target…", &app.console_filters.target_filter)
+            .on_input(Message::ConsoleTargetFilterChanged)
+            .size(f32::from(TEXT_SM))
+            .width(Length::FillPortion(2)),
+        text_input("search…", &app.console_filters.search)
+            .on_input(Message::ConsoleSearchChanged)
+            .size(f32::from(TEXT_SM))
+            .width(Length::FillPortion(3)),
+        button(text("Clear").size(f32::from(TEXT_SM)))
+            .style(iced::widget::button::secondary)
+            .on_press(Message::ConsoleCleared),
+        button(text("Copy").size(f32::from(TEXT_SM)))
+            .style(iced::widget::button::secondary)
+            .on_press(Message::ConsoleCopyAll),
+    ]
+    .spacing(SPACE_SM)
+    .align_y(iced::Alignment::Center);
+
+    container(column![controls, body].spacing(SPACE_SM))
         .padding(SPACE_SM)
         .width(Length::Fill)
         .height(Length::Fixed(CONSOLE_HEIGHT))

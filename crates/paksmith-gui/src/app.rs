@@ -135,7 +135,8 @@ impl Default for App {
     }
 }
 
-/// Build the initial [`App`], injecting the shared debug-console [`LogBuffer`].
+/// Build the initial [`App`], injecting the shared debug-console
+/// [`LogBuffer`](crate::state::log_buffer::LogBuffer).
 ///
 /// `main` installs the tracing subscriber over one `LogBuffer` clone, then hands
 /// another clone here so the running app reads the same `Arc`-backed ring the
@@ -286,6 +287,16 @@ pub enum Message {
     /// offset (0.0 = top, 1.0 = bottom) so the follow decision is testable
     /// without constructing a non-public `scrollable::Viewport`.
     ConsoleScrolled(f32),
+    /// The console min-level selector changed.
+    ConsoleMinLevelChanged(tracing::Level),
+    /// The console target-filter text changed.
+    ConsoleTargetFilterChanged(String),
+    /// The console message-search text changed.
+    ConsoleSearchChanged(String),
+    /// Clear all captured log records.
+    ConsoleCleared,
+    /// Copy all currently-displayed records to the clipboard.
+    ConsoleCopyAll,
 }
 
 /// Processes a `Message` and updates the application state.
@@ -647,6 +658,31 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::ConsoleScrolled(relative_y) => {
             app.console_follow = crate::state::console::at_bottom(relative_y);
             Task::none()
+        }
+        Message::ConsoleMinLevelChanged(level) => {
+            app.console_filters.min_level = level;
+            Task::none()
+        }
+        Message::ConsoleTargetFilterChanged(value) => {
+            app.console_filters.target_filter = value;
+            Task::none()
+        }
+        Message::ConsoleSearchChanged(value) => {
+            app.console_filters.search = value;
+            Task::none()
+        }
+        Message::ConsoleCleared => {
+            app.log_buffer.clear();
+            app.console_follow = true;
+            iced::widget::operation::snap_to(
+                crate::panels::console::SCROLL_ID,
+                iced::widget::operation::RelativeOffset::END,
+            )
+        }
+        Message::ConsoleCopyAll => {
+            let records = app.log_buffer.snapshot();
+            let payload = crate::state::console::copy_all(&records, &app.console_filters);
+            iced::clipboard::write(payload)
         }
         Message::ExportCompleted {
             outcome,
@@ -3942,5 +3978,43 @@ mod tests {
         assert!(r.is_none(), "F12 produces no scroll task");
         assert_eq!(app.context_row, Some(0), "F12 must not clear context row");
         assert!(app.export_menu.is_some(), "F12 must not clear export menu");
+    }
+
+    // ── console filter controls ───────────────────────────────────────────────
+
+    #[test]
+    fn console_min_level_changed_sets_filter() {
+        let mut app = super::App::default();
+        let _ = super::update(
+            &mut app,
+            super::Message::ConsoleMinLevelChanged(tracing::Level::WARN),
+        );
+        assert_eq!(app.console_filters.min_level, tracing::Level::WARN);
+    }
+
+    #[test]
+    fn console_target_and_search_changed_set_filters() {
+        let mut app = super::App::default();
+        let _ = super::update(
+            &mut app,
+            super::Message::ConsoleTargetFilterChanged("core".into()),
+        );
+        assert_eq!(app.console_filters.target_filter, "core");
+        let _ = super::update(
+            &mut app,
+            super::Message::ConsoleSearchChanged("decode".into()),
+        );
+        assert_eq!(app.console_filters.search, "decode");
+    }
+
+    #[test]
+    fn console_cleared_empties_buffer_and_rearms_follow() {
+        let mut app = super::App::default();
+        app.log_buffer
+            .push(tracing::Level::INFO, "t".into(), "x".into());
+        app.console_follow = false;
+        let _ = super::update(&mut app, super::Message::ConsoleCleared);
+        assert!(app.log_buffer.snapshot().is_empty());
+        assert!(app.console_follow, "clearing re-arms tail-follow");
     }
 }
