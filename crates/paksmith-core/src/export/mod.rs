@@ -376,7 +376,7 @@ fn formats_for_payloads(registry: &HandlerRegistry, payloads: &[Asset]) -> Vec<E
 /// The GUI's Export As… picker is built from this; the CLI's `extract` selects
 /// one payload via its own preference logic and does not call this.
 #[must_use]
-pub fn available_formats(registry: &HandlerRegistry, package: &Package) -> Vec<ExportFormat> {
+pub fn available_formats(package: &Package, registry: &HandlerRegistry) -> Vec<ExportFormat> {
     formats_for_payloads(registry, &package.payloads)
 }
 
@@ -488,7 +488,7 @@ mod facade_tests {
         // unit tests); asserts the json entry for payload 0 is present.
         let pkg = generic_pkg();
         let reg = HandlerRegistry::all_default_handlers();
-        let formats = available_formats(&reg, &pkg);
+        let formats = available_formats(&pkg, &reg);
         assert!(
             formats
                 .iter()

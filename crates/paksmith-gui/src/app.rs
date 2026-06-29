@@ -496,7 +496,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // closure ends the `app.tabs` borrow before we write `app.export_menu`.
             let sync_choices = app.tabs.parsed_package(&path).map(|arc| {
                 let registry = paksmith_core::export::HandlerRegistry::all_default_handlers();
-                let formats = paksmith_core::export::available_formats(&registry, arc);
+                let formats = paksmith_core::export::available_formats(arc, &registry);
                 crate::state::export::export_choices(&formats)
             });
             if let Some(choices) = sync_choices {

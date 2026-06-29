@@ -21,7 +21,7 @@ use crate::state::export::{ExportChoice, default_export_filename};
 #[allow(clippy::unused_async, reason = "async required by iced Task::perform")]
 pub async fn available(reader: Arc<PakReader>, path: String) -> Vec<ExportFormat> {
     match Package::read_from_reader(&reader, &path, None) {
-        Ok(pkg) => available_formats(&HandlerRegistry::all_default_handlers(), &pkg),
+        Ok(pkg) => available_formats(&pkg, &HandlerRegistry::all_default_handlers()),
         Err(_) => Vec::new(),
     }
 }
