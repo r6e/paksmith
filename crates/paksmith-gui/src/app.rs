@@ -538,13 +538,18 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             if generation != app.archive_generation {
                 return Task::none();
             }
-            // Apply only if the right-clicked row still resolves to this path —
-            // the tree may have reshuffled (filter/collapse) since dispatch.
-            let still_targeted = app
-                .context_row
-                .and_then(|row| open_path_for_row(app, row))
-                .is_some_and(|p| p == path);
-            if !still_targeted {
+            // Enrich the cold Raw-only picker with typed formats — but ONLY if it
+            // is still open for this exact path. If the user cancelled (which clears
+            // export_menu) or switched to another entry's picker, drop the
+            // enumeration: it must never reopen or replace a picker the user
+            // dismissed. Keying on export_menu, not context_row (which Cancel
+            // deliberately keeps so the action strip returns), is what prevents a
+            // late enumeration from popping the cancelled picker back open.
+            let still_open = app
+                .export_menu
+                .as_ref()
+                .is_some_and(|menu| menu.path == path);
+            if !still_open {
                 return Task::none();
             }
             let choices = crate::state::export::export_choices(&formats);
@@ -3538,11 +3543,93 @@ mod tests {
         );
     }
 
+    /// A single typed format for enrichment tests, so the enriched menu
+    /// (`[Typed, Raw]`) is observably different from the pre-set Raw-only picker —
+    /// otherwise an empty `formats` yields `[Raw]` and the test can't tell
+    /// enrichment from a no-op (or a dropped message).
+    fn one_typed_format() -> paksmith_core::export::ExportFormat {
+        paksmith_core::export::ExportFormat {
+            payload_idx: 0,
+            extension: "json",
+        }
+    }
+
     #[test]
-    fn export_formats_ready_applies_when_row_still_targets_path() {
+    fn export_formats_ready_enriches_open_cold_picker() {
+        // The cold path opens a Raw-only picker, then the async enumeration enriches
+        // it IN PLACE with the typed formats. Precondition mirrors the real flow: the
+        // Raw-only picker is already open for this path when the enumeration lands.
+        // A non-empty format list must observably change the menu — proving both the
+        // enrichment AND the generation fence ahead of it actually ran.
         let mut app = app_with_paths(&["a.uasset"]);
-        app.context_row = Some(0); // resolves to "a.uasset"
+        app.context_row = Some(0);
         let archive_gen = app.archive_generation;
+        app.export_menu = Some(minimal_export_menu()); // Raw-only, path "a.uasset"
+        let _ = update(
+            &mut app,
+            Message::ExportFormatsReady {
+                path: "a.uasset".into(),
+                formats: vec![one_typed_format()],
+                generation: archive_gen,
+            },
+        );
+        let menu = app
+            .export_menu
+            .expect("an open picker must remain open after enrichment");
+        assert_eq!(menu.path, "a.uasset");
+        assert_eq!(
+            menu.choices,
+            vec![
+                ExportChoice::Typed {
+                    payload_idx: 0,
+                    extension: "json",
+                },
+                ExportChoice::Raw,
+            ],
+            "enrichment must replace the Raw-only menu with the typed formats + Raw"
+        );
+    }
+
+    #[test]
+    fn export_formats_ready_for_other_path_does_not_clobber_open_picker() {
+        // An enumeration for a different entry must not replace the picker currently
+        // open for "a.uasset" — neither its path nor its choices.
+        let mut app = app_with_paths(&["a.uasset"]);
+        app.context_row = Some(0);
+        let archive_gen = app.archive_generation;
+        app.export_menu = Some(minimal_export_menu()); // Raw-only, path "a.uasset"
+        let _ = update(
+            &mut app,
+            Message::ExportFormatsReady {
+                path: "other.uasset".into(),
+                formats: vec![one_typed_format()],
+                generation: archive_gen,
+            },
+        );
+        let menu = app
+            .export_menu
+            .expect("the open picker must survive a mismatched enumeration");
+        assert_eq!(
+            menu.path, "a.uasset",
+            "an enumeration for a different path must not replace the open picker"
+        );
+        assert_eq!(
+            menu.choices,
+            vec![ExportChoice::Raw],
+            "a mismatched enumeration must not alter the open picker's choices"
+        );
+    }
+
+    #[test]
+    fn export_formats_ready_does_not_reopen_cancelled_picker() {
+        // Regression: if the user cancels the cold picker before the async
+        // enumeration lands, the late ExportFormatsReady must NOT reopen it.
+        // context_row stays set after Cancel (so the action strip returns), so the
+        // guard cannot rely on context_row — it must key on export_menu being open.
+        let mut app = app_with_paths(&["a.uasset"]);
+        app.context_row = Some(0); // still resolves to "a.uasset" after Cancel
+        let archive_gen = app.archive_generation;
+        app.export_menu = None; // cold picker was opened, then cancelled
         let _ = update(
             &mut app,
             Message::ExportFormatsReady {
@@ -3551,26 +3638,9 @@ mod tests {
                 generation: archive_gen,
             },
         );
-        let menu = app.export_menu.expect("matching path must open the picker");
-        assert_eq!(menu.choices, vec![ExportChoice::Raw]);
-    }
-
-    #[test]
-    fn export_formats_ready_dropped_when_path_no_longer_targeted() {
-        let mut app = app_with_paths(&["a.uasset"]);
-        app.context_row = Some(0); // resolves to "a.uasset", not "other"
-        let archive_gen = app.archive_generation;
-        let _ = update(
-            &mut app,
-            Message::ExportFormatsReady {
-                path: "other.uasset".into(),
-                formats: vec![],
-                generation: archive_gen,
-            },
-        );
         assert!(
             app.export_menu.is_none(),
-            "non-targeted path must be dropped"
+            "a cancelled picker must not be reopened by a late enumeration"
         );
     }
 
