@@ -51,7 +51,7 @@
 - Consumes: `HandlerRegistry` (private `by_variant` — same module), `Asset`, `Package`, `FormatHandler::{supports, output_extension}`.
 - Produces:
   - `pub struct ExportFormat { pub payload_idx: usize, pub extension: &'static str }` (`Copy`).
-  - `pub fn available_formats(registry: &HandlerRegistry, package: &Package) -> Vec<ExportFormat>`.
+  - `pub fn available_formats(package: &Package, registry: &HandlerRegistry) -> Vec<ExportFormat>`.
   - private `fn formats_for_payloads(registry: &HandlerRegistry, payloads: &[Asset]) -> Vec<ExportFormat>`.
 
 - [ ] **Step 1: Add the `Package` import**
@@ -183,7 +183,7 @@ fn formats_for_payloads(registry: &HandlerRegistry, payloads: &[Asset]) -> Vec<E
 /// The GUI's Export As… picker is built from this; the CLI's `extract` selects
 /// one payload via its own preference logic and does not call this.
 #[must_use]
-pub fn available_formats(registry: &HandlerRegistry, package: &Package) -> Vec<ExportFormat> {
+pub fn available_formats(package: &Package, registry: &HandlerRegistry) -> Vec<ExportFormat> {
     formats_for_payloads(registry, &package.payloads)
 }
 ```
@@ -291,7 +291,7 @@ mod facade_tests {
         // unit tests); asserts the json entry for payload 0 is present.
         let pkg = generic_pkg();
         let reg = HandlerRegistry::all_default_handlers();
-        let formats = available_formats(&reg, &pkg);
+        let formats = available_formats(&pkg, &reg);
         assert!(
             formats.iter().any(|f| f.payload_idx == 0 && f.extension == "json"),
             "generic package must offer json for payload 0, got {formats:?}"
@@ -680,7 +680,7 @@ use crate::state::export::{ExportChoice, default_export_filename};
 #[allow(clippy::unused_async, reason = "async required by iced Task::perform")]
 pub async fn available(reader: Arc<PakReader>, path: String) -> Vec<ExportFormat> {
     match Package::read_from_reader(&reader, &path, None) {
-        Ok(pkg) => available_formats(&HandlerRegistry::all_default_handlers(), &pkg),
+        Ok(pkg) => available_formats(&pkg, &HandlerRegistry::all_default_handlers()),
         Err(_) => Vec::new(),
     }
 }
@@ -1006,7 +1006,7 @@ fn dismiss_row_menus(app: &mut App) {
             // closure ends the `app.tabs` borrow before we write `app.export_menu`.
             let sync_choices = app.tabs.parsed_package(&path).map(|arc| {
                 let registry = paksmith_core::export::HandlerRegistry::all_default_handlers();
-                let formats = paksmith_core::export::available_formats(&registry, arc);
+                let formats = paksmith_core::export::available_formats(arc, &registry);
                 crate::state::export::export_choices(&formats)
             });
             if let Some(choices) = sync_choices {
@@ -1372,6 +1372,6 @@ git commit -m "feat(gui): add Export As… inline picker + save dialog + export 
 
 **2. Placeholder scan:** every code step has complete code; no "TBD"/"add error handling". The three `>` callouts are explicit contingencies (fixture choice, `row(items)` form, `Severity` import) with concrete fallbacks, not deferrals. ✓
 
-**3. Type consistency:** `ExportFormat { payload_idx, extension }`, `ExportChoice::Typed { payload_idx, extension }`, `ExportMenu { path, choices }`, `ExportOutcome::{Written,Cancelled,Failed}`, `RowMenu::{None,Actions,Picker}` — names used identically across tasks. `available_formats(registry, package)` / `export_payload(package, idx, ext, registry)` / `write_export(reader, src_path, choice, dest)` signatures match every call site. `Tabs::parsed_package(&self, path) -> Option<&Arc<Package>>` matches its use in `ExportAsRequested`. ✓
+**3. Type consistency:** `ExportFormat { payload_idx, extension }`, `ExportChoice::Typed { payload_idx, extension }`, `ExportMenu { path, choices }`, `ExportOutcome::{Written,Cancelled,Failed}`, `RowMenu::{None,Actions,Picker}` — names used identically across tasks. `available_formats(package, registry)` / `export_payload(package, idx, ext, registry)` / `write_export(reader, src_path, choice, dest)` signatures match every call site. `Tabs::parsed_package(&self, path) -> Option<&Arc<Package>>` matches its use in `ExportAsRequested`. ✓
 
 **4. Known traps wired in:** path-keying (no row in `ExportMenu`), `dismiss_row_menus` at all clear sites incl. `RowContextOpened` + inline at `handle_tree_key`, Raw uses uncapped `read_entry_to` (not `task::asset::load`), same `all_default_handlers()` for enumerate + export, binary-crate dead_code → GUI is one commit. ✓
