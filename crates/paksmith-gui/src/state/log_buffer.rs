@@ -80,6 +80,17 @@ impl LogBuffer {
         state.records.clear();
     }
 
+    /// Total records ever pushed (the monotonic `next_seq`). Survives eviction
+    /// and `clear`, so the UI can cheaply detect "did anything new arrive?" —
+    /// even when the ring is full and `len` is pinned at capacity, this still
+    /// advances. Used to throttle the console refresh tick when logs are idle.
+    pub fn total_pushed(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .next_seq
+    }
+
     /// Snapshot the current records (oldest first) for rendering. Clones the
     /// retained records (≤ capacity); called only while the console is visible.
     pub fn snapshot(&self) -> Vec<LogRecord> {
@@ -224,6 +235,24 @@ mod tests {
         assert_eq!(r.len(), 1);
         // Continues from before the clear (1), never reused back to 0.
         assert_eq!(r[0].seq, 1);
+    }
+
+    #[test]
+    fn total_pushed_counts_every_push_and_survives_clear() {
+        let b = LogBuffer::default();
+        assert_eq!(b.total_pushed(), 0);
+        b.push(Level::INFO, "t".into(), "a".into());
+        b.push(Level::INFO, "t".into(), "b".into());
+        assert_eq!(b.total_pushed(), 2);
+        // `clear` empties the ring but must NOT reset the counter: it is the
+        // same monotonic `next_seq` that orders records (see `clear`'s own
+        // note), and the refresh tick relies on it only ever increasing so a
+        // delta reliably means "new records arrived" rather than going
+        // backwards after a clear.
+        b.clear();
+        assert_eq!(b.total_pushed(), 2);
+        b.push(Level::INFO, "t".into(), "c".into());
+        assert_eq!(b.total_pushed(), 3);
     }
 
     #[test]

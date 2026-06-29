@@ -26,10 +26,22 @@ pub enum PaneKind {
 /// Initial sidebar fraction of the pane_grid width.
 const DEFAULT_SIDEBAR_RATIO: f32 = 0.30;
 
-/// Debug-console live-refresh tick interval (ms), active only while visible.
-const CONSOLE_TICK_MS: u64 = 300;
+/// Console refresh cadence while logs are actively arriving. Fast enough that
+/// a live tail feels responsive during an open/decode operation.
+const CONSOLE_TICK_FAST_MS: u64 = 250;
+/// Console refresh cadence once the ring has been stable for a tick. The
+/// visible-console poll still rebuilds the view each tick (iced re-views on
+/// every message), so when nothing is arriving we space those rebuilds out to
+/// cut idle CPU — at the cost of up to this much latency on the first new
+/// record after an idle spell.
+const CONSOLE_TICK_SLOW_MS: u64 = 1000;
 
 /// Root application state.
+// Three of the bools are independent UI toggles (panel visibility, tail-follow,
+// about dialog); `console_active` is a cached refresh-cadence signal paired with
+// `console_last_pushes`. None form a state machine the heuristic could model, so
+// the pedantic bool-count lint is a false positive here.
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     /// Active appearance mode, detected from the OS at startup.
     pub mode: theme::Mode,
@@ -96,6 +108,12 @@ pub struct App {
     pub console_follow: bool,
     /// Active debug-console filter predicates (min level / target / search).
     pub console_filters: crate::state::console::ConsoleFilters,
+    /// True when the last console tick saw the ring grow. Drives the adaptive
+    /// refresh interval: fast while logs flow, slow once the buffer is stable.
+    pub console_active: bool,
+    /// `LogBuffer::total_pushed` observed at the last console tick (or on open).
+    /// The tick compares against this to decide `console_active`.
+    pub console_last_pushes: u64,
 }
 
 impl Default for App {
@@ -131,6 +149,8 @@ impl Default for App {
             log_buffer: crate::state::log_buffer::LogBuffer::default(),
             console_follow: true,
             console_filters: crate::state::console::ConsoleFilters::default(),
+            console_active: false,
+            console_last_pushes: 0,
         }
     }
 }
@@ -309,6 +329,17 @@ fn snap_console_to_bottom() -> Task<Message> {
         crate::panels::console::SCROLL_ID,
         iced::widget::operation::RelativeOffset::END,
     )
+}
+
+/// Console refresh interval given whether the log ring is actively growing.
+/// Fast while records flow (responsive tail), slow once stable (cheap idle).
+fn console_refresh_interval(active: bool) -> std::time::Duration {
+    let ms = if active {
+        CONSOLE_TICK_FAST_MS
+    } else {
+        CONSOLE_TICK_SLOW_MS
+    };
+    std::time::Duration::from_millis(ms)
 }
 
 /// Processes a `Message` and updates the application state.
@@ -647,6 +678,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             app.console_visible = !app.console_visible;
             if app.console_visible {
                 app.console_follow = true;
+                // Open in fast-refresh mode and baseline the change counter to
+                // "now", so the first idle tick settles to slow rather than
+                // mistaking records that accrued while closed for fresh growth.
+                app.console_active = true;
+                app.console_last_pushes = app.log_buffer.total_pushed();
                 snap_console_to_bottom()
             } else {
                 Task::none()
@@ -654,7 +690,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::ConsoleTick => {
             // Processing any message rebuilds the view, refreshing the list from
-            // the ring. Follow the tail only when the user hasn't scrolled up.
+            // the ring. Detect whether the ring grew since the last tick to keep
+            // the refresh fast while logs flow and slow when the buffer is idle.
+            let pushes = app.log_buffer.total_pushed();
+            app.console_active = pushes != app.console_last_pushes;
+            app.console_last_pushes = pushes;
+            // Follow the tail only when the user hasn't scrolled up.
             if app.console_follow {
                 snap_console_to_bottom()
             } else {
@@ -1305,10 +1346,11 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         _ => None,
     });
 
-    // While the console is visible, tick a few times a second so freshly
-    // captured records render without requiring other UI activity.
+    // While the console is visible, tick so freshly captured records render
+    // without requiring other UI activity. The interval is adaptive: fast while
+    // logs are arriving, slow once the ring is stable, to cut idle-CPU churn.
     let console_tick_sub = if app.console_visible {
-        iced::time::every(std::time::Duration::from_millis(CONSOLE_TICK_MS))
+        iced::time::every(console_refresh_interval(app.console_active))
             .map(|_| Message::ConsoleTick)
     } else {
         Subscription::none()
@@ -3985,6 +4027,69 @@ mod tests {
         assert!(app.console_follow, "opening re-arms tail-follow");
         let _ = super::update(&mut app, super::Message::ConsoleToggled);
         assert!(!app.console_visible);
+    }
+
+    #[test]
+    fn console_refresh_interval_is_fast_when_active_and_slow_when_idle() {
+        use std::time::Duration;
+        assert_eq!(
+            super::console_refresh_interval(true),
+            Duration::from_millis(super::CONSOLE_TICK_FAST_MS),
+            "actively-flowing logs refresh fast"
+        );
+        assert_eq!(
+            super::console_refresh_interval(false),
+            Duration::from_millis(super::CONSOLE_TICK_SLOW_MS),
+            "a stable ring refreshes slowly to cut idle CPU"
+        );
+    }
+
+    #[test]
+    fn console_tick_marks_active_on_new_records_and_idle_when_stable() {
+        let mut app = super::App {
+            console_visible: true,
+            ..super::App::default()
+        };
+        // A record arrived since the baseline (0) -> the tick observes growth.
+        app.log_buffer
+            .push(tracing::Level::INFO, "t".into(), "x".into());
+        let _ = super::update(&mut app, super::Message::ConsoleTick);
+        assert!(
+            app.console_active,
+            "a fresh record makes the next tick active"
+        );
+        // No further records -> the ring is stable, so the tick goes idle.
+        let _ = super::update(&mut app, super::Message::ConsoleTick);
+        assert!(
+            !app.console_active,
+            "a stable ring makes the tick idle (slow refresh)"
+        );
+        // Another record re-activates fast refresh.
+        app.log_buffer
+            .push(tracing::Level::INFO, "t".into(), "y".into());
+        let _ = super::update(&mut app, super::Message::ConsoleTick);
+        assert!(app.console_active, "a new record re-activates the tick");
+    }
+
+    #[test]
+    fn opening_console_baselines_push_counter_and_starts_active() {
+        let mut app = super::App::default();
+        // Records accrued while the console was closed.
+        app.log_buffer
+            .push(tracing::Level::INFO, "t".into(), "x".into());
+        app.log_buffer
+            .push(tracing::Level::INFO, "t".into(), "y".into());
+        let _ = super::update(&mut app, super::Message::ConsoleToggled);
+        assert!(app.console_visible);
+        assert!(app.console_active, "opening starts in fast-refresh mode");
+        assert_eq!(
+            app.console_last_pushes, 2,
+            "opening baselines the counter to the current total, not 0"
+        );
+        // With no new records, the first tick settles to idle (proves the
+        // baseline: without it the tick would see 2 != 0 and stay active).
+        let _ = super::update(&mut app, super::Message::ConsoleTick);
+        assert!(!app.console_active);
     }
 
     #[test]
