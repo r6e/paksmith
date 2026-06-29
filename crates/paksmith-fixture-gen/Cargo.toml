@@ -86,7 +86,7 @@ byteorder.workspace = true
 # requires both sides to be compiled against the SAME version; mixing 0.8
 # and 0.9 produces a type-mismatch error since Cargo keeps them as separate
 # crates in the dependency graph.
-aes = "0.8"
+aes = "0.9"
 
 # Differential proptest harness (issue #244): sweeps random
 # `MinimalPackageSpec` combinations and asserts cross-parser
