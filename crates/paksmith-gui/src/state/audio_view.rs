@@ -41,6 +41,24 @@ pub enum Transport {
     Paused,
 }
 
+/// The action to apply to the audio-output sink that corresponds to a pure
+/// state transition. Returned by mutating [`AudioState`] methods so the caller
+/// can keep the state machine and the rodio sink in lockstep without coupling
+/// them directly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlaybackAction {
+    /// Start or resume playback from the current position.
+    Play,
+    /// Pause playback; hold the current position.
+    Pause,
+    /// Stop playback and reset the position to 0.
+    Stop,
+    /// Seek the sink to the given absolute position in seconds.
+    SeekTo(f32),
+    /// No sink action required (e.g. toggle called with no decoded audio).
+    None,
+}
+
 /// All view state for the audio inspector panel.
 ///
 /// Mirrors [`super::texture_view::TextureState`]'s shape: pure Rust, no iced
@@ -92,6 +110,82 @@ impl Default for AudioState {
             volume: 1.0,
             error: None,
         }
+    }
+}
+
+impl AudioState {
+    /// Duration of the loaded audio in seconds.
+    ///
+    /// Priority: decoded PCM data (integer frames ÷ sample-rate) → [`AudioInfo`]
+    /// metadata → `0.0`.
+    ///
+    /// The decoded path uses integer division, so the result is truncated to
+    /// whole seconds. This is intentional per the spec; callers that need
+    /// sub-second precision should store the duration separately.
+    pub fn duration_secs(&self) -> f32 {
+        if let Some(decoded) = &self.decoded {
+            let ch = usize::from(decoded.channels.max(1));
+            let rate = usize::try_from(decoded.sample_rate).unwrap_or(1).max(1);
+            #[allow(clippy::cast_precision_loss)]
+            // Audio frame counts for realistic durations fit f32 precision:
+            // 2^24 frames at 44 100 Hz ≈ 6 hours. The coarseness here is
+            // intentional (integer truncation); this is a display-only value.
+            return (decoded.samples.len() / ch / rate) as f32;
+        }
+        if let Some(d) = self.info.as_ref().and_then(|i| i.duration_secs) {
+            return d;
+        }
+        0.0
+    }
+
+    /// Toggle play/pause. Returns the [`PlaybackAction`] the caller must apply
+    /// to the audio-output seam so the pure state and the sink stay in lockstep.
+    ///
+    /// Returns [`PlaybackAction::None`] when no audio has been decoded yet.
+    pub fn toggle_play(&mut self) -> PlaybackAction {
+        if self.decoded.is_none() {
+            return PlaybackAction::None;
+        }
+        match self.transport {
+            Transport::Playing => {
+                self.transport = Transport::Paused;
+                PlaybackAction::Pause
+            }
+            Transport::Stopped | Transport::Paused => {
+                self.transport = Transport::Playing;
+                PlaybackAction::Play
+            }
+        }
+    }
+
+    /// Stop playback, reset the playhead to zero, and return
+    /// [`PlaybackAction::Stop`].
+    pub fn stop(&mut self) -> PlaybackAction {
+        self.transport = Transport::Stopped;
+        self.position_secs = 0.0;
+        PlaybackAction::Stop
+    }
+
+    /// Set the playback volume, clamped to `0.0..=1.0`.
+    pub fn set_volume(&mut self, v: f32) {
+        self.volume = v.clamp(0.0, 1.0);
+    }
+
+    /// Map a fractional scrub position (`0.0`–`1.0`) over the waveform to an
+    /// absolute seek position in seconds and return [`PlaybackAction::SeekTo`].
+    ///
+    /// `frac` is clamped to `0.0..=1.0` before multiplication so out-of-range
+    /// values (e.g. `-1.0` or `2.0`) produce valid seek positions.
+    pub fn seek_fraction(&mut self, frac: f32) -> PlaybackAction {
+        let secs = frac.clamp(0.0, 1.0) * self.duration_secs();
+        self.position_secs = secs;
+        PlaybackAction::SeekTo(secs)
+    }
+
+    /// Advance the playhead to `secs` (called by the tick that reads the sink
+    /// position).
+    pub fn set_position(&mut self, secs: f32) {
+        self.position_secs = secs;
     }
 }
 
@@ -155,6 +249,146 @@ pub fn format_time(secs: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paksmith_core::asset::AudioInfo;
+
+    // --- test helpers ---
+
+    fn playable_state() -> AudioState {
+        AudioState {
+            // 88 200 interleaved samples, 2 ch, 44 100 Hz → 1.0 s.
+            // ch=2 is load-bearing: the `/ch → *ch` mutant in `duration_secs`
+            // yields 88_200 / 44_100 = 2 instead of 1, failing the pin test.
+            decoded: Some(DecodedAudio {
+                samples: vec![0i16; 88_200],
+                sample_rate: 44_100,
+                channels: 2,
+            }),
+            ..AudioState::default()
+        }
+    }
+
+    fn playable_state_with_duration(duration_secs: f32) -> AudioState {
+        // 100 Hz, 1 channel: each sample = 1/100 s.
+        // Frame count = duration_secs * 100 (e.g. 10.0 → 1 000 frames).
+        // Integer division in `duration_secs()`: 1000 / 1 / 100 = 10 → 10.0f32.
+        let sample_rate: u32 = 100;
+        let channels: u16 = 1;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // In tests, `duration_secs` is always a small positive integer (≤ 600),
+        // so truncation and sign-loss are impossible.
+        let num_samples = (duration_secs * 100.0_f32) as usize;
+        AudioState {
+            decoded: Some(DecodedAudio {
+                samples: vec![0i16; num_samples],
+                sample_rate,
+                channels,
+            }),
+            ..AudioState::default()
+        }
+    }
+
+    // --- transport state machine ---
+
+    #[test]
+    fn toggle_play_cycles_stopped_playing_paused() {
+        let mut a = playable_state(); // decoded Some, transport Stopped
+        assert_eq!(a.toggle_play(), PlaybackAction::Play);
+        assert!(matches!(a.transport, Transport::Playing));
+        assert_eq!(a.toggle_play(), PlaybackAction::Pause);
+        assert!(matches!(a.transport, Transport::Paused));
+        assert_eq!(a.toggle_play(), PlaybackAction::Play);
+        assert!(matches!(a.transport, Transport::Playing));
+    }
+
+    #[test]
+    fn toggle_play_without_decode_is_noop() {
+        let mut a = AudioState::default(); // decoded None
+        assert_eq!(a.toggle_play(), PlaybackAction::None);
+        assert!(matches!(a.transport, Transport::Stopped));
+    }
+
+    #[test]
+    fn stop_resets_position() {
+        let mut a = playable_state();
+        a.set_position(3.0);
+        assert_eq!(a.stop(), PlaybackAction::Stop);
+        assert!(a.position_secs.abs() < 1e-6);
+        assert!(matches!(a.transport, Transport::Stopped));
+    }
+
+    // --- set_position ---
+
+    #[test]
+    fn set_position_stores_value() {
+        // Dedicated test so a no-op mutant of `set_position` fails: if the body
+        // is removed, position stays at 0.0 (default) and the assertion diverges.
+        let mut a = AudioState::default();
+        a.set_position(3.7);
+        assert!((a.position_secs - 3.7).abs() < 1e-6);
+    }
+
+    // --- seek ---
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn seek_fraction_maps_to_seconds_and_clamps() {
+        let mut a = playable_state_with_duration(10.0);
+        // 0.5 × 10 = 5.0 (exact in f32)
+        assert_eq!(a.seek_fraction(0.5), PlaybackAction::SeekTo(5.0));
+        assert!((a.position_secs - 5.0).abs() < 1e-3);
+        // clamp low: −1.0 → 0.0
+        assert_eq!(a.seek_fraction(-1.0), PlaybackAction::SeekTo(0.0));
+        // clamp high: 2.0 → 1.0 × 10 = 10.0
+        assert_eq!(a.seek_fraction(2.0), PlaybackAction::SeekTo(10.0));
+    }
+
+    // --- volume ---
+
+    #[test]
+    fn set_volume_clamps() {
+        let mut a = AudioState::default();
+        a.set_volume(1.5);
+        assert!((a.volume - 1.0).abs() < 1e-6);
+        a.set_volume(-1.0);
+        assert!(a.volume.abs() < 1e-6);
+    }
+
+    // --- duration ---
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn duration_secs_from_decoded_channels_pin() {
+        // 88 200 interleaved samples, 2 ch, 44 100 Hz:
+        // frames = 88 200 / 2 = 44 100; secs = 44 100 / 44 100 = 1.
+        // A `/ ch → * ch` mutant gives 88 200 * 2 / 44 100 = 4 (not 1); fails.
+        // A `/ rate → * rate` mutant gives 44 100 * 44 100 overflows or diverges.
+        let a = playable_state();
+        assert_eq!(a.duration_secs(), 1.0_f32);
+    }
+
+    #[test]
+    fn duration_secs_falls_back_to_info() {
+        // decoded None → must consult info.duration_secs (7.0 ≠ 0.0 or 1.0).
+        let a = AudioState {
+            info: Some(AudioInfo {
+                export_idx: 0,
+                codec_label: "PCM".to_owned(),
+                channels: None,
+                duration_secs: Some(7.0),
+                playable: true,
+            }),
+            ..AudioState::default()
+        };
+        assert!((a.duration_secs() - 7.0).abs() < 1e-6);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn duration_secs_returns_zero_when_neither() {
+        // Both decoded and info are None.
+        let a = AudioState::default();
+        assert_eq!(a.duration_secs(), 0.0_f32);
+    }
 
     #[test]
     fn compute_waveform_buckets_min_max_mono() {
