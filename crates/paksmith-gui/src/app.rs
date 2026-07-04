@@ -37,6 +37,11 @@ const CONSOLE_TICK_FAST_MS: u64 = 250;
 /// record after an idle spell.
 const CONSOLE_TICK_SLOW_MS: u64 = 1000;
 
+/// Number of `(min, max)` amplitude columns in the audio waveform overview.
+/// Matches the bucket count passed to
+/// [`crate::state::audio_view::compute_waveform`] on each decode completion.
+const WAVEFORM_COLUMNS: usize = 512;
+
 /// Root application state.
 // Three of the bools are independent UI toggles (panel visibility, tail-follow,
 // about dialog); `console_active` is a cached refresh-cadence signal paired with
@@ -269,6 +274,16 @@ pub enum Message {
         mip: usize,
         /// The decoded RGBA data or a stringified error.
         result: Result<crate::state::texture_view::DecodedMip, String>,
+        /// The archive generation at the time the decode was dispatched.
+        /// Results from a previous generation are silently dropped.
+        generation: u64,
+    },
+    /// An async audio decode task completed.
+    AudioDecoded {
+        /// Entry path identifying which tab holds this decode result.
+        path: String,
+        /// The decoded PCM data or a stringified error.
+        result: Result<crate::state::audio_view::DecodedAudio, String>,
         /// The archive generation at the time the decode was dispatched.
         /// Results from a previous generation are silently dropped.
         generation: u64,
@@ -835,6 +850,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // path-keyed tab is always correct.
             // Three-guard form: can't use let-chains on MSRV 1.88.
             let mut decode_task = Task::none();
+            let mut audio_task = Task::none();
             #[allow(clippy::collapsible_if)]
             if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path) {
                 if let TabContent::Ready {
@@ -866,14 +882,35 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                             },
                         );
                     }
+                    // Audio classification — single classify_audio call per load,
+                    // mirroring the classify_texture pattern above. A real asset is
+                    // texture XOR sound, so at most one of these blocks fires per load.
+                    // `set_content` already reset `tab.audio` to default; populate only.
+                    if let Some(info) = paksmith_core::asset::classify_audio(arc.as_ref()) {
+                        tab.audio.info = Some(info.clone());
+                        tab.audio.export_idx = info.export_idx;
+                        if info.playable {
+                            let pkg = arc.clone();
+                            let task_path = path.clone();
+                            audio_task = Task::perform(
+                                crate::task::audio::decode(pkg, info.export_idx),
+                                move |result| Message::AudioDecoded {
+                                    path: task_path,
+                                    result,
+                                    generation,
+                                },
+                            );
+                        }
+                    }
                 }
             }
-            // INVARIANT: the decodable-mip cache was populated (or left empty for
-            // a non-texture) just above, so the view picker reads `mips` rather
-            // than re-classifying. This ordering is `pick_view_after_load`'s
-            // documented precondition — do not move it before the populate block.
+            // INVARIANT: both the decodable-mip cache (texture) and audio.info
+            // (audio) were populated just above, so the view picker reads those
+            // caches rather than re-classifying. This ordering is
+            // `pick_view_after_load`'s documented precondition — do not move it
+            // before the populate block.
             app.tabs.pick_view_after_load(&path);
-            decode_task
+            Task::batch([decode_task, audio_task])
         }
         Message::TabActivated(i) => {
             app.tabs.activate(i);
@@ -989,6 +1026,42 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                             // so the render cache stays valid and is not rebuilt
                             // here — see `TextureState::error` for when it clears.
                             tab.texture.error = Some(msg);
+                        }
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::AudioDecoded {
+            path,
+            result,
+            generation,
+        } => {
+            // Generation fence: drop results from a previous archive.
+            if generation != app.archive_generation {
+                return Task::none();
+            }
+            // Find the tab by path, then write the result only if it still
+            // applies. The `tab.audio.info.is_some()` guard mirrors the texture
+            // handler's `mip < mips.len()` guard: `set_content` resets `tab.audio`
+            // to default (`info = None`) on a content swap, so a decode landing
+            // after a reset would otherwise write onto a non-audio tab.
+            // Two-guard form: can't use let-chains on MSRV 1.88.
+            #[allow(clippy::collapsible_if)]
+            if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path) {
+                if tab.audio.info.is_some() {
+                    match result {
+                        Ok(decoded) => {
+                            tab.audio.waveform = crate::state::audio_view::compute_waveform(
+                                &decoded.samples,
+                                decoded.channels,
+                                WAVEFORM_COLUMNS,
+                            );
+                            tab.audio.decoded = Some(decoded);
+                            tab.audio.error = None;
+                        }
+                        Err(msg) => {
+                            tab.audio.error = Some(msg);
                         }
                     }
                 }
@@ -4187,5 +4260,172 @@ mod tests {
         let _ = super::update(&mut app, super::Message::ConsoleCleared);
         assert!(app.log_buffer.snapshot().is_empty());
         assert!(app.console_follow, "clearing re-arms tail-follow");
+    }
+
+    // ── Task 7: AudioDecoded message wiring ──────────────────────────────────
+
+    /// Build an App whose active tab has `tab.audio.info` populated, mirroring
+    /// the postcondition of the `AssetLoaded` handler after a sound-wave load.
+    ///
+    /// The tab has no `TabContent::Ready` (left as `Loading`) because the
+    /// `AudioDecoded` arm looks up the tab by path and checks `audio.info`,
+    /// not the content variant. Setting `info` is sufficient to exercise all
+    /// four `AudioDecoded` paths (generation fence, path lookup, info guard,
+    /// Ok/Err decode result).
+    fn app_with_open_audio_tab() -> App {
+        use paksmith_core::asset::AudioInfo;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("Game/SFX_Hit.uasset");
+        let tab = app
+            .tabs
+            .active_tab_mut()
+            .expect("just-opened tab must be active");
+        tab.audio.info = Some(AudioInfo {
+            export_idx: 0,
+            codec_label: "Vorbis (Ogg)".to_owned(),
+            channels: Some(2),
+            duration_secs: Some(1.0),
+            playable: true,
+        });
+        app
+    }
+
+    /// Minimal non-trivial `DecodedAudio` for assertion tests.
+    ///
+    /// 2 mono frames so the waveform helper produces a non-empty result (min
+    /// effective columns = min(WAVEFORM_COLUMNS, frame_count) = min(512, 2) = 2).
+    /// Divergent values (MAX, MIN) pin the waveform normalization path: a
+    /// no-op body replacement would leave `waveform` empty, failing the
+    /// `!waveform.is_empty()` assertion.
+    fn two_frame_decoded_audio() -> crate::state::audio_view::DecodedAudio {
+        crate::state::audio_view::DecodedAudio {
+            samples: vec![i16::MAX, i16::MIN],
+            sample_rate: 44_100,
+            channels: 1,
+        }
+    }
+
+    #[test]
+    fn audio_decoded_stale_generation_is_dropped() {
+        let mut app = app_with_open_audio_tab();
+        app.archive_generation = 3;
+        let stale = 2u64;
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Ok(two_frame_decoded_audio()),
+                generation: stale,
+            },
+        );
+        assert!(
+            app.tabs.active_tab().unwrap().audio.decoded.is_none(),
+            "a stale-generation audio decode must be ignored"
+        );
+        assert!(
+            app.tabs.active_tab().unwrap().audio.waveform.is_empty(),
+            "a stale-generation audio decode must not populate the waveform"
+        );
+    }
+
+    #[test]
+    fn audio_decoded_current_generation_writes_decoded_and_waveform() {
+        let mut app = app_with_open_audio_tab();
+        app.archive_generation = 3;
+        // Pre-seed an error so the test verifies it is cleared on success.
+        app.tabs.active_tab_mut().unwrap().audio.error = Some("prev".to_owned());
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Ok(two_frame_decoded_audio()),
+                generation: 3,
+            },
+        );
+        let tab = app.tabs.active_tab().unwrap();
+        assert!(
+            tab.audio.decoded.is_some(),
+            "a current-generation Ok decode must populate audio.decoded"
+        );
+        assert!(
+            !tab.audio.waveform.is_empty(),
+            "a current-generation Ok decode must populate the waveform"
+        );
+        assert!(
+            tab.audio.error.is_none(),
+            "a successful decode must clear any previous error"
+        );
+    }
+
+    #[test]
+    fn audio_decoded_error_sets_error_field() {
+        let mut app = app_with_open_audio_tab();
+        app.archive_generation = 3;
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Err("boom".to_owned()),
+                generation: 3,
+            },
+        );
+        let tab = app.tabs.active_tab().unwrap();
+        assert_eq!(
+            tab.audio.error.as_deref(),
+            Some("boom"),
+            "an Err result must set audio.error to the error message"
+        );
+        assert!(
+            tab.audio.decoded.is_none(),
+            "an Err result must not populate audio.decoded"
+        );
+    }
+
+    #[test]
+    fn audio_decoded_without_info_is_dropped() {
+        // Pins the `tab.audio.info.is_some()` guard: a decode arriving after a
+        // content reset (which sets `audio.info = None` via `set_content`) must
+        // not write onto the now-non-audio tab. Mirrors
+        // `texture_decoded_after_content_reset_is_dropped` (mips-empty guard).
+        let mut app = app_with_open_audio_tab();
+        app.archive_generation = 3;
+        // Clear info to simulate a content swap / reset.
+        app.tabs.active_tab_mut().unwrap().audio.info = None;
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Ok(two_frame_decoded_audio()),
+                generation: 3,
+            },
+        );
+        assert!(
+            app.tabs.active_tab().unwrap().audio.decoded.is_none(),
+            "a decode landing after audio.info was cleared must not write decoded"
+        );
+    }
+
+    #[test]
+    fn audio_decoded_after_tab_close_same_generation_is_noop() {
+        // Race guard: a decode completes after its tab was closed. The result
+        // carries the SAME generation (no archive swap), so the fence does not
+        // drop it — the path lookup must silently no-op and must not re-open
+        // the tab. Mirrors `texture_decoded_after_tab_close_same_generation_is_noop`.
+        let mut app = app_with_open_audio_tab();
+        app.tabs.close(0);
+        assert!(app.tabs.open.is_empty(), "precondition: the tab is closed");
+        let generation = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Ok(two_frame_decoded_audio()),
+                generation,
+            },
+        );
+        assert!(
+            app.tabs.open.is_empty(),
+            "a late AudioDecoded for a closed tab must not re-open it"
+        );
     }
 }
