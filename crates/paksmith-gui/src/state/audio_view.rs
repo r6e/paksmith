@@ -95,9 +95,93 @@ impl Default for AudioState {
     }
 }
 
+/// Downsample interleaved `samples` to `columns` `(min, max)` pairs in `[-1.0, 1.0]`,
+/// averaging channels to mono for the overview. Returns empty if `columns == 0` or
+/// `samples` is empty. `channels == 0` is treated as `1` (defensive).
+pub fn compute_waveform(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32)> {
+    if columns == 0 || samples.is_empty() {
+        return Vec::new();
+    }
+    let ch = usize::from(channels.max(1));
+    let norm = f32::from(i16::MAX);
+    let ch_f32 = f32::from(channels.max(1));
+
+    // Convert interleaved samples to mono frames by averaging all channels.
+    let frames: Vec<f32> = samples
+        .chunks(ch)
+        .map(|frame| {
+            let sum: f32 = frame.iter().map(|&s| f32::from(s)).sum();
+            sum / ch_f32
+        })
+        .collect();
+
+    let frame_count = frames.len();
+    if frame_count == 0 {
+        return Vec::new();
+    }
+
+    // Clamp effective columns to available frames so no bucket is left empty.
+    let effective_cols = columns.min(frame_count);
+    let mut result = vec![(f32::MAX, f32::MIN); effective_cols];
+
+    for (frame_idx, &sample) in frames.iter().enumerate() {
+        // Integer arithmetic distributes frames evenly across columns.
+        let col = ((frame_idx * effective_cols) / frame_count).min(effective_cols - 1);
+        let (min, max) = &mut result[col];
+        if sample < *min {
+            *min = sample;
+        }
+        if sample > *max {
+            *max = sample;
+        }
+    }
+
+    result
+        .into_iter()
+        .map(|(min, max)| (min / norm, max / norm))
+        .collect()
+}
+
+/// Format seconds as `m:ss` (e.g. `75.0` → `"1:15"`). Negative values clamp to `"0:00"`.
+#[allow(clippy::cast_possible_truncation)] // intentional floor; audio durations fit u32
+#[allow(clippy::cast_sign_loss)] // sign-loss impossible: value is clamped to ≥ 0.0 above
+pub fn format_time(secs: f32) -> String {
+    let secs = secs.max(0.0);
+    let total = secs as u32;
+    let m = total / 60;
+    let s = total % 60;
+    format!("{m}:{s:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compute_waveform_buckets_min_max_mono() {
+        // 4 samples, 1 channel, 2 columns:
+        // bucket 0 = [i16::MIN, 0] -> (-1.0, 0.0)
+        // bucket 1 = [0, i16::MAX] -> (0.0, ~1.0)
+        let s = [i16::MIN, 0, 0, i16::MAX];
+        let w = compute_waveform(&s, 1, 2);
+        assert_eq!(w.len(), 2);
+        assert!((w[0].0 - -1.0).abs() < 1e-3 && w[0].1.abs() < 1e-3);
+        assert!(w[1].0.abs() < 1e-3 && (w[1].1 - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn compute_waveform_empty_or_zero_columns_is_empty() {
+        assert!(compute_waveform(&[], 1, 4).is_empty());
+        assert!(compute_waveform(&[1, 2, 3], 1, 0).is_empty());
+    }
+
+    #[test]
+    fn format_time_minutes_seconds() {
+        assert_eq!(format_time(0.0), "0:00");
+        assert_eq!(format_time(75.0), "1:15");
+        assert_eq!(format_time(-5.0), "0:00");
+        assert_eq!(format_time(605.0), "10:05");
+    }
 
     #[test]
     fn audio_state_default_transport_is_stopped() {
