@@ -243,7 +243,7 @@ fn passthrough_export(asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>
 /// (see the module-level note on the divergence from CUE4Parse's sorted
 /// `.First()` for multi-format containers). The returned codec is compared
 /// case-insensitively by [`supports_codec`].
-fn active_codec(data: &SoundWaveData) -> Option<&str> {
+pub(crate) fn active_codec(data: &SoundWaveData) -> Option<&str> {
     if let Some(streamed) = &data.streamed {
         return Some(streamed.audio_format.as_ref());
     }
@@ -261,7 +261,7 @@ fn codec_prefix(key: &str) -> &str {
 /// Non-streaming passthrough: the first format buffer is the complete codec
 /// container file. The caller's `supports` guarantees that buffer's codec, so
 /// its bytes are returned verbatim.
-fn extract_nonstreaming(bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
+pub(crate) fn extract_nonstreaming(bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
     let buffer = bulk.first().ok_or_else(|| PaksmithError::Internal {
         context: "audio passthrough: non-streaming SoundWave has no codec buffer \
                   (resolved bulk is empty)"
@@ -274,7 +274,10 @@ fn extract_nonstreaming(bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
 /// chunk's payload (the remainder is `DataSize` zero padding). Mirrors CUE4Parse
 /// `SoundDecoder`. Errors if the resolved bulk count desyncs from the chunk
 /// metadata, or a chunk's `AudioDataSize` is negative or exceeds its payload.
-fn assemble_streaming(chunks: &[StreamedAudioChunk], bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
+pub(crate) fn assemble_streaming(
+    chunks: &[StreamedAudioChunk],
+    bulk: &[BulkData],
+) -> crate::Result<Vec<u8>> {
     if chunks.len() != bulk.len() {
         return Err(PaksmithError::Internal {
             context: format!(
