@@ -63,7 +63,7 @@ impl LogBuffer {
         let seq = state.next_seq;
         state.next_seq += 1;
         if ring_is_full(state.records.len()) {
-            drop(state.records.pop_front());
+            let _ = state.records.pop_front();
         }
         state.records.push_back(LogRecord {
             seq,
@@ -152,8 +152,23 @@ impl MessageVisitor {
 }
 
 impl Visit for MessageVisitor {
-    // All typed `record_*` default to `record_debug`, so overriding this one
-    // captures every field. Trait glue — integration-tested, not mutated.
+    // `record_str` receives `&str` values directly. A string-valued `message`
+    // field (`info!(message = "x")`) would otherwise reach `record_debug` and be
+    // Debug-quoted to `"x"`; capture it raw. Every other string field delegates
+    // to `record_debug` so it keeps the usual `key="value"` quoting.
+    // Trait glue — integration-tested, not mutated.
+    #[mutants::skip]
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message = value.to_string();
+        } else {
+            self.record_debug(field, &value);
+        }
+    }
+
+    // The remaining typed `record_*` default to `record_debug`, so overriding it
+    // captures every other field — including the common `fmt::Arguments` message,
+    // whose `Debug` render carries no quotes. Trait glue — not mutated.
     #[mutants::skip]
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
@@ -268,6 +283,44 @@ mod tests {
         assert_eq!(r[0].level, Level::INFO);
         assert_eq!(r[0].target, "paksmith_test");
         assert_eq!(r[0].message, "hello world");
+    }
+
+    #[test]
+    fn ring_layer_captures_string_valued_message_without_debug_quotes() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let buffer = LogBuffer::default();
+        let subscriber = tracing_subscriber::registry().with(RingBufferLayer::new(buffer.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            // `message` bound as an explicit &str field routes through
+            // `record_str`, not `record_debug`; it must be captured raw.
+            tracing::info!(target: "paksmith_test", message = "hi there");
+        });
+        let r = buffer.snapshot();
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            r[0].message, "hi there",
+            "a string-valued message must not be Debug-quoted to \"hi there\""
+        );
+    }
+
+    #[test]
+    fn ring_layer_keeps_non_message_string_fields_quoted() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let buffer = LogBuffer::default();
+        let subscriber = tracing_subscriber::registry().with(RingBufferLayer::new(buffer.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "paksmith_test", path = "a.uasset", "opened");
+        });
+        let r = buffer.snapshot();
+        assert_eq!(r.len(), 1);
+        // The rendered message stays; the extra string field keeps `key="value"`
+        // quoting (delegated to `record_debug`), independent of field order.
+        assert!(r[0].message.contains("opened"), "got {:?}", r[0].message);
+        assert!(
+            r[0].message.contains("path=\"a.uasset\""),
+            "non-message string field must stay quoted, got {:?}",
+            r[0].message
+        );
     }
 
     // `into_message` has three branches (fields-only, message-only, combined).
