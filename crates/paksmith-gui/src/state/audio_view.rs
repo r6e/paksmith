@@ -125,12 +125,13 @@ impl AudioState {
     pub fn duration_secs(&self) -> f32 {
         if let Some(decoded) = &self.decoded {
             let ch = usize::from(decoded.channels.max(1));
-            let rate = usize::try_from(decoded.sample_rate).unwrap_or(1).max(1);
+            let frames = decoded.samples.len() / ch; // whole interleaved frames
+            let rate = decoded.sample_rate.max(1);
             #[allow(clippy::cast_precision_loss)]
-            // Audio frame counts for realistic durations fit f32 precision:
-            // 2^24 frames at 44 100 Hz ≈ 6 hours. The coarseness here is
-            // intentional (integer truncation); this is a display-only value.
-            return (decoded.samples.len() / ch / rate) as f32;
+            // Audio frame counts + rates for realistic durations fit f32 precision
+            // (2^24 frames at 44 100 Hz ≈ 6 h). Float division keeps sub-second
+            // accuracy, which `seek_fraction` and the playhead readout depend on.
+            return frames as f32 / rate as f32;
         }
         if let Some(d) = self.info.as_ref().and_then(|i| i.duration_secs) {
             return d;
@@ -269,8 +270,8 @@ mod tests {
 
     fn playable_state_with_duration(duration_secs: f32) -> AudioState {
         // 100 Hz, 1 channel: each sample = 1/100 s.
-        // Frame count = duration_secs * 100 (e.g. 10.0 → 1 000 frames).
-        // Integer division in `duration_secs()`: 1000 / 1 / 100 = 10 → 10.0f32.
+        // Frame count = duration_secs * 100 (e.g. 10.0 → 1 000 frames), so
+        // `duration_secs()` = frames / rate = `duration_secs` exactly (float).
         let sample_rate: u32 = 100;
         let channels: u16 = 1;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -364,6 +365,26 @@ mod tests {
         // A `/ rate → * rate` mutant gives 44 100 * 44 100 overflows or diverges.
         let a = playable_state();
         assert_eq!(a.duration_secs(), 1.0_f32);
+    }
+
+    #[test]
+    fn duration_secs_is_fractional_not_truncated() {
+        // 132 300 samples, 2 ch, 44 100 Hz → 66 150 frames / 44 100 = 1.5 s.
+        // Integer division (66 150 / 44 100 = 1) would report 1.0; float keeps 1.5
+        // so `seek_fraction` and the playhead stay sub-second accurate.
+        let a = AudioState {
+            decoded: Some(DecodedAudio {
+                samples: vec![0i16; 132_300],
+                sample_rate: 44_100,
+                channels: 2,
+            }),
+            ..AudioState::default()
+        };
+        assert!(
+            (a.duration_secs() - 1.5).abs() < 1e-6,
+            "got {}",
+            a.duration_secs()
+        );
     }
 
     #[test]
