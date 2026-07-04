@@ -98,7 +98,7 @@ pub use asset::{
 // Phase 7b: public texture-decode API. GUI reaches these from the crate root.
 pub use asset::{DecodedTextureRgba, TextureInfo, classify_texture, decode_texture_mip};
 // Phase 7d: public audio-decode API. GUI audio player reaches these from the crate root.
-pub use asset::{AudioPcm, decode_audio_to_pcm};
+pub use asset::{AudioInfo, AudioPcm, classify_audio, decode_audio_to_pcm};
 
 // Phase 3 export-pipeline public API. Consumers building format
 // handlers, registering custom handlers, or iterating typed Asset

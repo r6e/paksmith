@@ -25,9 +25,93 @@
 
 pub(crate) mod sound_wave;
 
-use crate::asset::Asset;
 use crate::asset::package::Package;
+use crate::asset::property::{PropertyBag, PropertyValue};
+use crate::asset::{Asset, SoundWaveData};
 use crate::export::{active_codec, assemble_streaming, extract_nonstreaming};
+
+/// Lightweight summary of a `USoundWave` export — produced by
+/// [`classify_audio`] without resolving or decoding any bulk data.
+///
+/// The GUI audio player uses this to populate tab headers and decide whether
+/// the play button is enabled (codec is decodable in-app) before issuing a
+/// full [`decode_audio_to_pcm`] call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioInfo {
+    /// Index into `Package.payloads` of the `Asset::SoundWave` export.
+    pub export_idx: usize,
+    /// Human-readable codec label. `"Vorbis (Ogg)"` for OGG; the raw
+    /// codec string (uppercased) for all other codecs.
+    pub codec_label: String,
+    /// Channel count from the `NumChannels` tagged property, or `None`
+    /// when the property is absent.
+    pub channels: Option<u16>,
+    /// Duration in seconds from the `Duration` tagged property, or `None`
+    /// when the property is absent.
+    pub duration_secs: Option<f32>,
+    /// Whether the codec is decodable in-app via [`decode_audio_to_pcm`].
+    /// `true` for PCM, ADPCM, and OGG (Vorbis); `false` for everything
+    /// else (e.g. OPUS, BINKA, XMA2).
+    pub playable: bool,
+}
+
+/// Find the first `USoundWave` export with registered bulk records and return
+/// a lightweight [`AudioInfo`] summary, or `None` if no playable audio export
+/// is present.
+///
+/// "Has bulk records" means the typed reader populated the package's bulk map
+/// for that export index — guaranteed for any `Package` built via the
+/// `read_from*` constructors. A hand-assembled `Package` without a
+/// `bulk_data` entry would classify as `None`.
+///
+/// This function is **pure and does no I/O**. The `codec_label` and `playable`
+/// flag are derived from the export's active codec; the `channels` and
+/// `duration_secs` fields are read from the segment-1 tagged-property bag.
+pub fn classify_audio(package: &Package) -> Option<AudioInfo> {
+    let (export_idx, data) = package
+        .payloads
+        .iter()
+        .enumerate()
+        .find_map(|(i, a)| match a {
+            Asset::SoundWave(d) if package.has_bulk_records(i) => Some((i, d)),
+            _ => None,
+        })?;
+    let codec = active_codec(data)?;
+    let (codec_label, playable) = match codec.to_ascii_uppercase().as_str() {
+        "PCM" => ("PCM".to_string(), true),
+        "ADPCM" => ("ADPCM".to_string(), true),
+        "OGG" => ("Vorbis (Ogg)".to_string(), true),
+        other => (other.to_string(), false),
+    };
+    let (channels, duration_secs) = read_sound_metadata(data);
+    Some(AudioInfo {
+        export_idx,
+        codec_label,
+        channels,
+        duration_secs,
+        playable,
+    })
+}
+
+/// Read `NumChannels` (Int → `u16`) and `Duration` (Float) from the
+/// segment-1 tagged-property bag. Both are `Option` — an absent property
+/// yields `None` without error.
+fn read_sound_metadata(data: &SoundWaveData) -> (Option<u16>, Option<f32>) {
+    let PropertyBag::Tree { properties } = &data.properties else {
+        return (None, None);
+    };
+    let channels =
+        sound_wave::scalar_property(properties, "NumChannels").and_then(|p| match p.value {
+            PropertyValue::Int(n) => u16::try_from(n).ok(),
+            _ => None,
+        });
+    let duration =
+        sound_wave::scalar_property(properties, "Duration").and_then(|p| match p.value {
+            PropertyValue::Float(f) => Some(f),
+            _ => None,
+        });
+    (channels, duration)
+}
 
 /// A decoded audio clip as interleaved 16-bit PCM samples.
 ///
@@ -319,5 +403,122 @@ mod tests {
         assert_eq!(pcm.sample_rate, 22050);
         let bytes: Vec<u8> = pcm.samples.iter().flat_map(|s| s.to_le_bytes()).collect();
         assert_eq!(bytes, EXPECTED);
+    }
+
+    // ===== classify_audio =====
+
+    /// Build a SoundWaveData with tagged properties in a Tree bag.
+    ///
+    /// `num_channels` and `duration_secs` are both optional — pass `None` to
+    /// omit the corresponding property from the bag, mirroring the case where the
+    /// cooker didn't write the field.
+    fn nonstreaming_with_metadata(
+        keys: &[&str],
+        num_channels: Option<i32>,
+        duration_secs: Option<f32>,
+    ) -> SoundWaveData {
+        use crate::asset::property::{Property, PropertyBag, PropertyValue};
+        let mut props: Vec<Property> = Vec::new();
+        if let Some(ch) = num_channels {
+            props.push(Property {
+                name: Arc::from("NumChannels"),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Int(ch),
+            });
+        }
+        if let Some(dur) = duration_secs {
+            props.push(Property {
+                name: Arc::from("Duration"),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Float(dur),
+            });
+        }
+        let mut data = nonstreaming(keys);
+        data.properties = PropertyBag::tree(props);
+        data
+    }
+
+    #[test]
+    fn classify_audio_reports_playable_adpcm_with_channels_and_duration() {
+        // ADPCM is playable; NumChannels=1, Duration=1.5 both present.
+        // Pins: export_idx==0, codec_label=="ADPCM", playable==true,
+        //       channels==Some(1), duration_secs==Some(1.5).
+        let sw = nonstreaming_with_metadata(&["ADPCM"], Some(1), Some(1.5));
+        let pkg = audio_pkg(sw, b"dummy");
+        let info = classify_audio(&pkg).expect("is a sound");
+        assert_eq!(info.export_idx, 0);
+        assert_eq!(info.codec_label, "ADPCM");
+        assert_eq!(info.channels, Some(1));
+        assert_eq!(info.duration_secs, Some(1.5));
+        assert!(info.playable);
+    }
+
+    #[test]
+    fn classify_audio_ogg_label_is_vorbis_ogg_and_playable() {
+        // OGG → codec_label == "Vorbis (Ogg)", playable == true.
+        let sw = nonstreaming_with_metadata(&["OGG"], Some(2), None);
+        let pkg = audio_pkg(sw, b"dummy");
+        let info = classify_audio(&pkg).expect("is a sound");
+        assert_eq!(info.codec_label, "Vorbis (Ogg)");
+        assert!(info.playable);
+    }
+
+    #[test]
+    fn classify_audio_pcm_is_playable_with_pcm_label() {
+        // PCM arm: codec_label == "PCM", playable == true.
+        let sw = nonstreaming_with_metadata(&["PCM"], Some(1), None);
+        let pkg = audio_pkg(sw, b"dummy");
+        let info = classify_audio(&pkg).expect("is a sound");
+        assert_eq!(info.codec_label, "PCM");
+        assert!(info.playable);
+    }
+
+    #[test]
+    fn classify_audio_opus_not_playable() {
+        // OPUS is proprietary — playable == false, codec_label == "OPUS".
+        let sw = nonstreaming_with_metadata(&["OPUS"], None, None);
+        let pkg = audio_pkg(sw, b"dummy");
+        let info = classify_audio(&pkg).expect("is a sound");
+        assert!(!info.playable);
+        assert_eq!(info.codec_label, "OPUS");
+    }
+
+    #[test]
+    fn classify_audio_none_for_non_soundwave_package() {
+        // A package with no SoundWave export → classify_audio returns None.
+        let fixture = build_minimal_ue4_27();
+        let pkg =
+            Package::read_from(&fixture.bytes, None, None, "Game/Test.uasset").expect("parse");
+        // build_minimal_ue4_27 produces a Generic export — not a SoundWave.
+        assert!(
+            classify_audio(&pkg).is_none(),
+            "expected None for a non-SoundWave package"
+        );
+    }
+
+    #[test]
+    fn classify_audio_none_when_no_bulk_records() {
+        // A SoundWave payload exists but no bulk records → classify_audio returns None.
+        let sw = nonstreaming(&["ADPCM"]);
+        let fixture = build_minimal_ue4_27();
+        let mut pkg =
+            Package::read_from(&fixture.bytes, None, None, "Game/Test.uasset").expect("parse");
+        pkg.payloads[0] = Asset::SoundWave(sw);
+        // Intentionally do NOT call pkg.bulk_data.insert(...) so has_bulk_records returns false.
+        assert!(
+            classify_audio(&pkg).is_none(),
+            "expected None when no bulk records registered"
+        );
+    }
+
+    #[test]
+    fn classify_audio_absent_numchannels_gives_none_channels() {
+        // NumChannels property absent → channels == None (graceful).
+        let sw = nonstreaming_with_metadata(&["OGG"], None, None);
+        let pkg = audio_pkg(sw, b"dummy");
+        let info = classify_audio(&pkg).expect("is a sound");
+        assert_eq!(info.channels, None);
     }
 }
