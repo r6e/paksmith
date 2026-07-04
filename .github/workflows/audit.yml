@@ -28,14 +28,17 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Advisories consciously accepted: all are TRANSITIVE and
-          # unmaintained/unsound-INFO with no upgrade path (none is a CVE-class
-          # vulnerability) — the same set deny.toml already accepts (its
-          # [advisories] block details RUSTSEC-2024-0429; the rest fall under its
-          # workspace-scoped `unmaintained` policy). cargo-audit lacks
-          # cargo-deny's "scope unmaintained to workspace" option, so the IDs are
-          # listed explicitly here. These are per-ID ignores: a NEW (e.g. higher-
-          # severity) advisory in any of these crates would still open an issue.
+          # Advisories consciously accepted, all TRANSITIVE — the same set
+          # deny.toml already accepts (its [advisories] block details each; the
+          # unmaintained ones fall under its workspace-scoped `unmaintained`
+          # policy). cargo-audit lacks cargo-deny's "scope unmaintained to
+          # workspace" option, so the IDs are listed explicitly here. Most are
+          # unmaintained/unsound-INFO; the quick-xml pair (2026-0194/0195) are
+          # vulnerability-class DoS advisories but provably non-applicable —
+          # quick-xml is a Linux-only BUILD dep (via wayland-scanner) that parses
+          # only bundled trusted protocol XML, never attacker input, and isn't in
+          # the runtime binary (details in deny.toml). These are per-ID ignores:
+          # a NEW advisory in any of these crates would still open an issue.
           #
           #   gtk3-rs stack via `muda 0.19.x` → gtk 0.18 (gtk4-rs is the successor;
           #   dormant on macOS/Windows, and on Linux iced 0.14 exposes no window
@@ -51,7 +54,13 @@ jobs:
           #   build-time proc-macro, all platforms; 0.1.2 is texture2ddecoder's
           #   latest, no patched paste exists (already tracked by closed issue #11):
           #     2024-0436
+          #   quick-xml < 0.41 via `wayland-scanner` (Linux-only BUILD dep; parses
+          #   only bundled trusted wayland protocol XML, never attacker input; not
+          #   in the runtime binary). Fix (0.41) unreachable: latest wayland-scanner
+          #   0.31.10 pins quick-xml ^0.39, rfd 0.17.2 pins the ^0.31 wayland stack:
+          #     2026-0194 quadratic dup-attr DoS · 2026-0195 NsReader alloc DoS
           #
           # Removal condition: when muda moves its Linux backend to gtk4, dark-light
-          # drops async-std, and texture2ddecoder drops paste.
-          ignore: RUSTSEC-2024-0370,RUSTSEC-2024-0412,RUSTSEC-2024-0413,RUSTSEC-2024-0415,RUSTSEC-2024-0416,RUSTSEC-2024-0418,RUSTSEC-2024-0419,RUSTSEC-2024-0420,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2025-0052
+          # drops async-std, texture2ddecoder drops paste, and wayland-scanner ships
+          # a release on quick-xml 0.41+.
+          ignore: RUSTSEC-2024-0370,RUSTSEC-2024-0412,RUSTSEC-2024-0413,RUSTSEC-2024-0415,RUSTSEC-2024-0416,RUSTSEC-2024-0418,RUSTSEC-2024-0419,RUSTSEC-2024-0420,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2025-0052,RUSTSEC-2026-0194,RUSTSEC-2026-0195
