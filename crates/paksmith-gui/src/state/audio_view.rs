@@ -116,12 +116,12 @@ impl Default for AudioState {
 impl AudioState {
     /// Duration of the loaded audio in seconds.
     ///
-    /// Priority: decoded PCM data (integer frames ÷ sample-rate) → [`AudioInfo`]
-    /// metadata → `0.0`.
+    /// Priority: decoded PCM data (whole frame count ÷ sample-rate, in floating
+    /// point) → [`AudioInfo`] metadata → `0.0`.
     ///
-    /// The decoded path uses integer division, so the result is truncated to
-    /// whole seconds. This is intentional per the spec; callers that need
-    /// sub-second precision should store the duration separately.
+    /// The decoded path divides in floating point, so the result keeps
+    /// sub-second precision — `seek_fraction` and the playhead readout depend on
+    /// it (a 1.5 s clip reports `1.5`, not `1.0`).
     pub fn duration_secs(&self) -> f32 {
         if let Some(decoded) = &self.decoded {
             let ch = usize::from(decoded.channels.max(1));
@@ -311,6 +311,11 @@ mod tests {
     #[test]
     fn stop_resets_position() {
         let mut a = playable_state();
+        // Drive transport OUT of Stopped first so `stop()` genuinely RESETS it
+        // (default state is already Stopped, which would make the reset a no-op
+        // and leave the transport assignment unverified).
+        assert_eq!(a.toggle_play(), PlaybackAction::Play);
+        assert!(matches!(a.transport, Transport::Playing));
         a.set_position(3.0);
         assert_eq!(a.stop(), PlaybackAction::Stop);
         assert!(a.position_secs.abs() < 1e-6);
@@ -360,7 +365,7 @@ mod tests {
     #[allow(clippy::float_cmp)]
     fn duration_secs_from_decoded_channels_pin() {
         // 88 200 interleaved samples, 2 ch, 44 100 Hz:
-        // frames = 88 200 / 2 = 44 100; secs = 44 100 / 44 100 = 1.
+        // frames = 88 200 / 2 = 44 100; secs = 44_100.0 / 44_100.0 = 1.0 (float).
         // A `/ ch → * ch` mutant gives 88 200 * 2 / 44 100 = 4 (not 1); fails.
         // A `/ rate → * rate` mutant gives 44 100 * 44 100 overflows or diverges.
         let a = playable_state();
