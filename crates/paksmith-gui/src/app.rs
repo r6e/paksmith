@@ -887,13 +887,17 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     // texture XOR sound, so at most one of these blocks fires per load.
                     // `set_content` already reset `tab.audio` to default; populate only.
                     if let Some(info) = paksmith_core::asset::classify_audio(arc.as_ref()) {
-                        tab.audio.info = Some(info.clone());
-                        tab.audio.export_idx = info.export_idx;
-                        if info.playable {
+                        // Extract the Copy scalars, then MOVE `info` (avoids
+                        // cloning its `codec_label` String).
+                        let export_idx = info.export_idx;
+                        let playable = info.playable;
+                        tab.audio.export_idx = export_idx;
+                        tab.audio.info = Some(info);
+                        if playable {
                             let pkg = arc.clone();
                             let task_path = path.clone();
                             audio_task = Task::perform(
-                                crate::task::audio::decode(pkg, info.export_idx),
+                                crate::task::audio::decode(pkg, export_idx),
                                 move |result| Message::AudioDecoded {
                                     path: task_path,
                                     result,

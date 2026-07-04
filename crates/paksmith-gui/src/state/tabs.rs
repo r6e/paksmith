@@ -71,10 +71,9 @@ pub fn texture_available(tab: &Tab) -> bool {
 ///
 /// Reads only the per-tab [`audio_view::AudioState::info`] cache — O(1), safe
 /// to call on every per-frame render. The `AssetLoaded` handler populates it
-/// via `classify_audio` immediately after `set_content`. Note: unlike the
-/// texture cache, `set_content` does not yet reset `tab.audio`; the handler
-/// that calls `set_content` is responsible for clearing it before a content
-/// swap (Phase 7d follow-up).
+/// via `classify_audio` immediately after `set_content`, which resets
+/// `tab.audio` to default on every content swap (mirroring the texture cache),
+/// so this can never observe stale state from a previous content.
 #[must_use]
 pub fn audio_available(tab: &Tab) -> bool {
     tab.audio.info.is_some()
