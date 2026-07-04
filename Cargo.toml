@@ -138,7 +138,15 @@ wiremock = "0.6"
 # is always available. None of rodio's decoder features (`flac`/`mp3`/`vorbis`/
 # `wav`/…) are enabled, so rodio pulls NO symphonia — paksmith-core's own
 # symphonia 0.6 stays the only symphonia tree in the workspace.
-rodio = { version = "0.22", default-features = false, features = ["playback"] }
+#
+# Floor pinned to 0.22.2 (not "0.22"): the OutputStream/Sink → DeviceSinkBuilder/
+# MixerDeviceSink/Player rename this seam depends on landed in 0.22.0, so "0.22"
+# would COMPILE at the Minimal-versions floor — but 0.22.0/0.22.1 ship runtime
+# playback bugs 0.22.2 fixes ("system default buffer size breaks playback", null
+# fallback device → no output, "mixer did not actually add sources sometimes").
+# For an audio-OUTPUT crate those are disqualifying, so we pin the exact patch
+# whose playback works (same patch-pin convention as thiserror/tokio above).
+rodio = { version = "0.22.2", default-features = false, features = ["playback"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
