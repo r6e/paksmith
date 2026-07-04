@@ -125,15 +125,14 @@ pub fn compute_waveform(samples: &[i16], channels: u16, columns: usize) -> Vec<(
     let mut result = vec![(f32::MAX, f32::MIN); effective_cols];
 
     for (frame_idx, &sample) in frames.iter().enumerate() {
-        // Integer arithmetic distributes frames evenly across columns.
-        let col = ((frame_idx * effective_cols) / frame_count).min(effective_cols - 1);
+        // Integer arithmetic distributes frames evenly across columns. Because
+        // `effective_cols <= frame_count` and `frame_idx <= frame_count - 1`, the
+        // quotient `(frame_idx * effective_cols) / frame_count` is always
+        // `<= effective_cols - 1`, so the index is in range without a clamp.
+        let col = (frame_idx * effective_cols) / frame_count;
         let (min, max) = &mut result[col];
-        if sample < *min {
-            *min = sample;
-        }
-        if sample > *max {
-            *max = sample;
-        }
+        *min = (*min).min(sample);
+        *max = (*max).max(sample);
     }
 
     result
@@ -173,6 +172,46 @@ mod tests {
     fn compute_waveform_empty_or_zero_columns_is_empty() {
         assert!(compute_waveform(&[], 1, 4).is_empty());
         assert!(compute_waveform(&[1, 2, 3], 1, 0).is_empty());
+    }
+
+    #[test]
+    fn compute_waveform_averages_channels_to_mono() {
+        // Stereo: one interleaved frame [L=2000, R=6000] averages to 4000, so
+        // the single bucket is 4000/32767 ≈ 0.1221 for both min and max. Divergent
+        // L/R values pin the `sum / channels` averaging (a `*` mutant would yield
+        // 16000/32767 ≈ 0.4883).
+        let w = compute_waveform(&[2000, 6000], 2, 1);
+        assert_eq!(w.len(), 1);
+        assert!((w[0].0 - 0.1221).abs() < 1e-3, "min {}", w[0].0);
+        assert!((w[0].1 - 0.1221).abs() < 1e-3, "max {}", w[0].1);
+    }
+
+    #[test]
+    fn compute_waveform_distributes_frames_into_asymmetric_buckets() {
+        // 6 mono frames into 3 columns: col0={3000,9000}, col1={-6000,12000},
+        // col2={-15000,6000}. Distinct mid-range values per bucket pin the bucket
+        // index arithmetic (`* -> +` empties col2; `/ -> %` indexes out of range),
+        // the min/max tracking (a swap flips each pair), and the normalization
+        // (`/ -> %` on a mid-range value diverges hugely from the ÷32767 result).
+        let s = [3000, 9000, -6000, 12000, -15000, 6000];
+        let w = compute_waveform(&s, 1, 3);
+        assert_eq!(w.len(), 3);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        assert!(
+            close(w[0].0, 0.0916) && close(w[0].1, 0.2747),
+            "col0 {:?}",
+            w[0]
+        );
+        assert!(
+            close(w[1].0, -0.1831) && close(w[1].1, 0.3662),
+            "col1 {:?}",
+            w[1]
+        );
+        assert!(
+            close(w[2].0, -0.4578) && close(w[2].1, 0.1831),
+            "col2 {:?}",
+            w[2]
+        );
     }
 
     #[test]
