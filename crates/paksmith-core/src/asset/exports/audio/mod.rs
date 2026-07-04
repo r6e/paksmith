@@ -246,6 +246,42 @@ mod tests {
         );
     }
 
+    // ===== PCM passthrough arm =====
+
+    #[test]
+    fn decode_audio_to_pcm_pcm_wav_passthrough_exact_roundtrip() {
+        // "PCM" codec with a valid 16-bit PCM WAV → transcode_adpcm_to_pcm
+        // returns Ok(None) (tag is WAVE_FORMAT_PCM, not ADPCM), so the `None =>
+        // cooked` passthrough arm is taken and parse_pcm_wav round-trips the
+        // buffer.  Divergent sample values / stereo / non-standard rate ensure a
+        // broken passthrough (e.g. returning silence or wrong channel count) is
+        // immediately visible as an exact-equality failure.
+        let samples: Vec<i16> = vec![100, -200, 300, -400];
+        let wav = crate::export::build_pcm_wav(&samples, 2, 22050);
+        let pkg = audio_pkg(nonstreaming(&["PCM"]), &wav);
+        let pcm = decode_audio_to_pcm(&pkg, 0).expect("PCM passthrough must succeed");
+        assert_eq!(pcm.channels, 2, "channel count must round-trip");
+        assert_eq!(pcm.sample_rate, 22050, "sample rate must round-trip");
+        assert_eq!(pcm.samples, samples, "samples must round-trip exactly");
+    }
+
+    // ===== OGG-undecodable arm =====
+
+    #[test]
+    fn decode_audio_to_pcm_ogg_undecodable_errs_internal() {
+        // A SoundWave tagged "OGG" but whose bulk is not an Ogg-Vorbis stream →
+        // transcode_vorbis_to_pcm returns Ok(None) (non-OGG passthrough in the
+        // vorbis layer) → the OGG arm's .ok_or_else converts None to
+        // Err(Internal).  Mirrors the assertion in
+        // `vorbis::tests::vorbis_handler_errs_on_undecodable_ogg_buffer`.
+        let pkg = audio_pkg(nonstreaming(&["OGG"]), b"not ogg data at all");
+        let err = decode_audio_to_pcm(&pkg, 0).unwrap_err();
+        assert!(
+            matches!(err, crate::PaksmithError::Internal { .. }),
+            "expected Internal for undecodable OGG buffer, got {err:?}"
+        );
+    }
+
     // ===== Streaming path — exercises assemble_streaming branch =====
 
     #[test]

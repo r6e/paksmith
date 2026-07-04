@@ -84,6 +84,13 @@ pub(crate) use adpcm::transcode_adpcm_to_pcm;
 pub(crate) use audio::{active_codec, assemble_streaming, extract_nonstreaming};
 pub(crate) use pcm::parse_pcm_wav;
 pub(crate) use vorbis::transcode_vorbis_to_pcm;
+// `build_pcm_wav` lives in the private `pcm` submodule; consumers outside
+// `export` (specifically the `__test_utils`-gated decode tests in
+// `asset::exports::audio`) can't reach `crate::export::pcm` directly. Gate the
+// re-export to match its sole consumer so `unused_imports` never fires in the
+// plain lib build.
+#[cfg(all(test, feature = "__test_utils"))]
+pub(crate) use pcm::build_pcm_wav;
 
 /// Converts a typed [`Asset`] plus optional bulk data into
 /// target-format bytes. Handlers are **stateless and side-effect-free**.
