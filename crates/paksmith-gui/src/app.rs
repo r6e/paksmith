@@ -1168,10 +1168,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             if let Some(tab) = app.tabs.active_tab_mut() {
                 if let Some(dur) = pos {
                     // `dur` is buffer-relative (rodio resets `get_pos` on each
-                    // re-feed), so add the offset the buffer began at to recover
-                    // the absolute track position.
-                    tab.audio
-                        .set_position(tab.audio.playback_offset_secs + dur.as_secs_f32());
+                    // re-feed); `advance_playhead` adds the offset the buffer began
+                    // at to recover the absolute track position.
+                    tab.audio.advance_playhead(dur.as_secs_f32());
                 }
                 if done {
                     let _ = tab.audio.stop();

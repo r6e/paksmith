@@ -199,6 +199,13 @@ impl AudioState {
     pub fn set_position(&mut self, secs: f32) {
         self.position_secs = secs;
     }
+
+    /// Advance the playhead from the current buffer's start offset by
+    /// `elapsed_secs` (rodio's buffer-relative `get_pos`), yielding the absolute
+    /// track position `playback_offset_secs + elapsed_secs`.
+    pub fn advance_playhead(&mut self, elapsed_secs: f32) {
+        self.position_secs = self.playback_offset_secs + elapsed_secs;
+    }
 }
 
 /// Downsample interleaved `samples` to `columns` `(min, max)` pairs in `[-1.0, 1.0]`,
@@ -342,6 +349,32 @@ mod tests {
         let mut a = AudioState::default();
         a.set_position(3.7);
         assert!((a.position_secs - 3.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn advance_playhead_adds_offset_to_elapsed() {
+        // Absolute playhead = playback_offset_secs + elapsed. Asymmetric values
+        // (offset 5.0, elapsed 2.0 → 7.0) kill a `+ -> -` (3.0) or `+ -> *` (10.0)
+        // mutant.
+        let mut a = AudioState {
+            playback_offset_secs: 5.0,
+            ..AudioState::default()
+        };
+        a.advance_playhead(2.0);
+        assert!(
+            (a.position_secs - 7.0).abs() < 1e-6,
+            "got {}",
+            a.position_secs
+        );
+        // A second case with offset 0 pins that the offset term matters (a
+        // `+ -> *` mutant gives 0.0 here, diverging from 3.5).
+        let mut b = AudioState::default();
+        b.advance_playhead(3.5);
+        assert!(
+            (b.position_secs - 3.5).abs() < 1e-6,
+            "got {}",
+            b.position_secs
+        );
     }
 
     // --- seek ---
