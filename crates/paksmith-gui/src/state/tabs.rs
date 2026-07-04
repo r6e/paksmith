@@ -151,12 +151,20 @@ impl Tabs {
             // costs nothing in the normal flow while keeping the no-stale-true
             // invariant self-enforcing for any future in-place reload (Phase 7c).
             t.texture = texture_view::TextureState::default();
+            // Same invariant for audio: `audio_available` reads `t.audio.info` as
+            // an "is a sound" signal, so reset it here at the mutation site. A
+            // failed or non-audio reload never reaches the `AssetLoaded` audio
+            // branch, so without this reset `audio_available` could observe
+            // stale-true and mis-promote a non-audio asset to `ViewMode::Audio`.
+            t.audio = audio_view::AudioState::default();
         }
     }
 
     /// After a load completes, promote or demote the default view.
     ///
+    /// Priority: Texture > Audio > Info-on-parse-error.
     /// - If the asset has a decodable texture, promote to `ViewMode::Texture`.
+    /// - Else if the asset is a `USoundWave`, promote to `ViewMode::Audio`.
     /// - If the asset failed to parse, demote to `ViewMode::Info`.
     ///
     /// Only acts when the tab is still on the default `Properties` view
@@ -622,6 +630,26 @@ mod tests {
         );
         t.open[0].audio.info = Some(sample_audio_info());
         assert!(audio_available(&t.open[0]), "AudioInfo set → must be true");
+    }
+
+    #[test]
+    fn set_content_resets_stale_audio_info() {
+        // Peer of `set_content_resets_stale_texture_cache`: `set_content` clears
+        // `tab.audio` at the mutation site so `audio_available` cannot read
+        // stale-true after a content swap (the in-place-reload hazard). Populate
+        // `audio.info`, swap to non-audio content, and assert it is cleared.
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate("a.uasset");
+        t.open[0].audio.info = Some(sample_audio_info());
+        t.set_content("a.uasset", ready_non_texture_content());
+        assert!(
+            t.open[0].audio.info.is_none(),
+            "set_content must reset tab.audio on content swap"
+        );
+        assert!(
+            !audio_available(&t.open[0]),
+            "after a swap to non-audio content the Audio tab must not be offered"
+        );
     }
 
     #[test]
