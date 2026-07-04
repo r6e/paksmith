@@ -8,6 +8,7 @@ use iced::widget::{button, column, container, pane_grid, text};
 use iced::{Element, Event, Length, Subscription, Task};
 use zeroize::Zeroizing;
 
+use crate::audio_output::AudioOutput;
 use crate::panels::{content, key_prompt, sidebar, status_bar, toolbar};
 use crate::state::archive::{LoadedArchive, OpenError};
 use crate::state::keyflow::KeyFlow;
@@ -114,6 +115,20 @@ pub struct App {
     /// `LogBuffer::total_pushed` observed at the last console tick (or on open).
     /// The tick compares against this to decide `console_active`.
     pub console_last_pushes: u64,
+    /// Audio-output backend for the Phase 7d audio player, opened lazily.
+    ///
+    /// `None` until a device is opened (or if no device is available). Holding
+    /// the `!Send` [`AudioOutput`] directly on `App` is sound because iced 0.14
+    /// keeps application state on the main thread — see `audio_output`'s module
+    /// docs for the placement rationale.
+    ///
+    /// Task 1 (the de-risking spike) only *establishes* this seam; the field is
+    /// written (`None`) but not yet read — later Phase 7d tasks wire up the
+    /// player that reads it. `dead_code` is allowed here for the same reason the
+    /// `state` module is (see `main.rs`): a Phase-7+ entry point kept ahead of
+    /// its first consumer.
+    #[allow(dead_code)]
+    pub audio: Option<AudioOutput>,
 }
 
 impl Default for App {
@@ -151,6 +166,10 @@ impl Default for App {
             console_filters: crate::state::console::ConsoleFilters::default(),
             console_active: false,
             console_last_pushes: 0,
+            // Opened lazily when the audio player first needs it (later Phase 7d
+            // task); `None` keeps `App::default()` — used throughout the tests —
+            // free of any real audio-device side effect.
+            audio: None,
         }
     }
 }

@@ -128,6 +128,17 @@ tokio = { version = "1.45", features = ["rt", "macros", "rt-multi-thread"] }
 # Phase 5c (dev): HTTP mock server for RegistryClient integration tests.
 # MIT/Apache-2.0.
 wiremock = "0.6"
+# Phase 7d: audio OUTPUT only. `default-features = false` drops rodio's decoder
+# stack (symphonia/hound/etc.) — paksmith-core decodes; rodio just plays raw
+# i16 samples via SamplesBuffer. Keep only what OutputStream/Sink/SamplesBuffer
+# need. Pin the exact minimal feature set here after Step 2 confirms it builds.
+#
+# Minimal feature set: `playback` (the ONLY non-default feature enabled) pulls
+# `cpal` and unlocks `DeviceSinkBuilder`/`MixerDeviceSink`/`Player`; `SamplesBuffer`
+# is always available. None of rodio's decoder features (`flac`/`mp3`/`vorbis`/
+# `wav`/…) are enabled, so rodio pulls NO symphonia — paksmith-core's own
+# symphonia 0.6 stays the only symphonia tree in the workspace.
+rodio = { version = "0.22", default-features = false, features = ["playback"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

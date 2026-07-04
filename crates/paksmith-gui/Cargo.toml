@@ -19,6 +19,11 @@ iced = { version = "0.14", features = ["tokio", "image-without-codecs"] }
 muda = "0.19.3"
 # Phase 6: core library for container I/O and asset parsing.
 paksmith-core = { path = "../paksmith-core", version = "0.1" }
+# Phase 7d: audio-output backend for the audio player. `default-features = false`
+# drops rodio's decoder stack — paksmith-core decodes to i16 PCM, rodio only
+# plays raw samples via SamplesBuffer. See workspace Cargo.toml for the feature
+# rationale.
+rodio.workspace = true
 # Phase 6 Task 7: native file picker (open dialog) for macOS/Windows/Linux.
 # MIT/Apache-2.0.
 rfd = "0.17"
