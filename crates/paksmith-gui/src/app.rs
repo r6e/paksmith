@@ -183,6 +183,12 @@ impl Default for App {
 pub fn boot_app(log_buffer: crate::state::log_buffer::LogBuffer) -> App {
     App {
         log_buffer,
+        // Open the real output device here (not in `App::default`): `default()`
+        // is used throughout the tests and must stay free of any audio-hardware
+        // side effect, so device acquisition lives on the live boot path only.
+        // `AudioOutput::new` returns `None` when no device is available, so a
+        // headless environment degrades to silent playback rather than failing.
+        audio: crate::audio_output::AudioOutput::new(),
         ..App::default()
     }
 }
@@ -1086,7 +1092,18 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // the `active_tab_mut` borrow ends.
             let state = if let Some(tab) = app.tabs.active_tab_mut() {
                 let action = tab.audio.toggle_play();
-                let decoded = tab.audio.decoded.clone();
+                // Pin the offset the sink buffer will begin at BEFORE the re-feed:
+                // rodio's `get_pos` is buffer-relative, so the tick adds this back
+                // to recover the absolute playhead. Only re-feed actions
+                // (`Play`/`SeekTo`) restart the buffer; `Pause`/`None` don't.
+                if matches!(
+                    action,
+                    crate::state::audio_view::PlaybackAction::Play
+                        | crate::state::audio_view::PlaybackAction::SeekTo(_)
+                ) {
+                    tab.audio.playback_offset_secs = tab.audio.position_secs;
+                }
+                let decoded = decoded_for_action(&tab.audio, action);
                 let transport = tab.audio.transport;
                 let position_secs = tab.audio.position_secs;
                 Some((action, decoded, transport, position_secs))
@@ -1107,7 +1124,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::AudioStop => {
             let state = if let Some(tab) = app.tabs.active_tab_mut() {
                 let action = tab.audio.stop();
-                let decoded = tab.audio.decoded.clone();
+                // `Stop` never re-feeds, so `decoded_for_action` returns `None`
+                // (no MB-scale PCM clone).
+                let decoded = decoded_for_action(&tab.audio, action);
                 let transport = tab.audio.transport;
                 let position_secs = tab.audio.position_secs;
                 Some((action, decoded, transport, position_secs))
@@ -1148,7 +1167,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let done = app.audio.as_ref().is_some_and(AudioOutput::finished);
             if let Some(tab) = app.tabs.active_tab_mut() {
                 if let Some(dur) = pos {
-                    tab.audio.set_position(dur.as_secs_f32());
+                    // `dur` is buffer-relative (rodio resets `get_pos` on each
+                    // re-feed), so add the offset the buffer began at to recover
+                    // the absolute track position.
+                    tab.audio
+                        .set_position(tab.audio.playback_offset_secs + dur.as_secs_f32());
                 }
                 if done {
                     let _ = tab.audio.stop();
@@ -1511,7 +1534,30 @@ pub fn audio_tick_active(app: &App) -> bool {
         .is_some_and(|t| t.audio.transport == crate::state::audio_view::Transport::Playing)
 }
 
-/// Apply a [`PlaybackAction`] from the pure state machine to the audio-output seam.
+/// Clone the decoded PCM only for re-feed actions (`Play`/`SeekTo`).
+///
+/// `Pause`, `Stop`, and `None` never read `decoded` in [`apply_playback`], so
+/// cloning the (MB-scale) `Vec<i16>` for them is pure waste — those actions get
+/// `None` instead.
+///
+/// `#[mutants::skip]`: which branch is taken is only observable through the real
+/// rodio device (with `app.audio == None` the seam returns early and never reads
+/// `decoded`), so this decision cannot be unit-mutation-tested. It is seam-perf
+/// glue, verified by the manual smoke checklist.
+#[mutants::skip]
+fn decoded_for_action(
+    audio: &crate::state::audio_view::AudioState,
+    action: crate::state::audio_view::PlaybackAction,
+) -> Option<crate::state::audio_view::DecodedAudio> {
+    use crate::state::audio_view::PlaybackAction;
+    match action {
+        PlaybackAction::Play | PlaybackAction::SeekTo(_) => audio.decoded.clone(),
+        PlaybackAction::Pause | PlaybackAction::Stop | PlaybackAction::None => None,
+    }
+}
+
+/// Apply a [`PlaybackAction`](crate::state::audio_view::PlaybackAction) from the
+/// pure state machine to the audio-output seam.
 ///
 /// The decision of *which* action to take was already made by the pure
 /// `AudioState` methods (`toggle_play`, `stop`, …) and is mutation-tested there.
@@ -4696,13 +4742,29 @@ mod tests {
     // --- AudioVolume arm ---
 
     #[test]
-    fn audio_volume_clamps_above_one() {
+    fn audio_volume_arm_sets_and_clamps() {
         let mut app = app_with_decoded_audio();
         // `app.audio` is None so the seam call is skipped; only pure state is tested.
+        // Divergent in-range value: 0.5 ≠ the 1.0 default, so a mutant that drops
+        // the arm's `tab.audio.set_volume(v)` call (leaving volume at 1.0) fails.
+        let _ = update(&mut app, Message::AudioVolume(0.5));
+        assert!(
+            (app.tabs.active_tab().unwrap().audio.volume - 0.5).abs() < 1e-6,
+            "in-range volume 0.5 must be stored by the arm (got {})",
+            app.tabs.active_tab().unwrap().audio.volume
+        );
+        // Clamp high: 1.5 → 1.0.
         let _ = update(&mut app, Message::AudioVolume(1.5));
         assert!(
             (app.tabs.active_tab().unwrap().audio.volume - 1.0).abs() < 1e-6,
             "volume 1.5 must clamp to 1.0 (got {})",
+            app.tabs.active_tab().unwrap().audio.volume
+        );
+        // Clamp low: −0.5 → 0.0.
+        let _ = update(&mut app, Message::AudioVolume(-0.5));
+        assert!(
+            app.tabs.active_tab().unwrap().audio.volume.abs() < 1e-6,
+            "volume −0.5 must clamp to 0.0 (got {})",
             app.tabs.active_tab().unwrap().audio.volume
         );
     }
@@ -4757,6 +4819,61 @@ mod tests {
             app.tabs.active_tab().unwrap().audio.transport,
             crate::state::audio_view::Transport::Playing,
             "third toggle: Paused → Playing"
+        );
+    }
+
+    // --- playback_offset_secs (feed-offset) ---
+
+    #[test]
+    fn audio_play_pins_offset_to_position() {
+        // Resume (Paused → Playing) produces a re-feed `Play`, so the arm must
+        // pin `playback_offset_secs` to the current `position_secs`. Divergent:
+        // position 2.5 ≠ the 0.0 offset default, so a mutant that drops the pin
+        // (offset stays 0.0) fails.
+        let mut app = app_with_decoded_audio();
+        {
+            let tab = app.tabs.active_tab_mut().unwrap();
+            tab.audio.transport = crate::state::audio_view::Transport::Paused;
+            tab.audio.position_secs = 2.5;
+        }
+        let _ = update(&mut app, Message::AudioPlayPause);
+        let tab = app.tabs.active_tab().unwrap();
+        assert_eq!(
+            tab.audio.transport,
+            crate::state::audio_view::Transport::Playing,
+            "precondition: resume moved transport to Playing"
+        );
+        assert!(
+            (tab.audio.playback_offset_secs - 2.5).abs() < 1e-6,
+            "Play must pin the feed-offset to position_secs (got {})",
+            tab.audio.playback_offset_secs
+        );
+    }
+
+    #[test]
+    fn audio_pause_leaves_offset_unchanged() {
+        // Pause (Playing → Paused) does NOT re-feed, so the arm must leave
+        // `playback_offset_secs` alone. A pre-set 1.0 offset diverges from the
+        // 2.5 position, so a mutant that pins the offset on every action (setting
+        // it to 2.5) fails.
+        let mut app = app_with_decoded_audio();
+        {
+            let tab = app.tabs.active_tab_mut().unwrap();
+            tab.audio.transport = crate::state::audio_view::Transport::Playing;
+            tab.audio.position_secs = 2.5;
+            tab.audio.playback_offset_secs = 1.0;
+        }
+        let _ = update(&mut app, Message::AudioPlayPause);
+        let tab = app.tabs.active_tab().unwrap();
+        assert_eq!(
+            tab.audio.transport,
+            crate::state::audio_view::Transport::Paused,
+            "precondition: toggle moved transport to Paused"
+        );
+        assert!(
+            (tab.audio.playback_offset_secs - 1.0).abs() < 1e-6,
+            "Pause must not touch the feed-offset (got {})",
+            tab.audio.playback_offset_secs
         );
     }
 }

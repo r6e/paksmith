@@ -111,6 +111,12 @@ impl AudioOutput {
     }
 
     /// Resumes playback after a [`AudioOutput::pause`].
+    ///
+    /// Currently unused: the Phase 7d transport re-feeds a fresh `SamplesBuffer`
+    /// from the paused position on resume (via [`AudioOutput::play_samples`])
+    /// rather than un-pausing in place, so this method is retained only for a
+    /// possible future non-re-feed resume path. `#[mutants::skip]` (module-wide)
+    /// already covers it.
     pub fn resume(&mut self) {
         self.player.play();
     }

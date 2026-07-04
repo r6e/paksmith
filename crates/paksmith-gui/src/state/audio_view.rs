@@ -92,6 +92,16 @@ pub struct AudioState {
     pub transport: Transport,
     /// Playhead position in seconds.
     pub position_secs: f32,
+    /// Absolute track position (seconds) at which the current sink buffer began
+    /// playing — i.e. the offset the samples were re-fed from on the last
+    /// `Play`/`SeekTo`.
+    ///
+    /// Needed because rodio's `Player::get_pos` is *buffer-relative*: it resets
+    /// to zero every time the audio seam re-feeds a fresh `SamplesBuffer`
+    /// (stop + append) and reports only elapsed time within the current source.
+    /// The tick reconstructs the absolute playhead as
+    /// `playback_offset_secs + get_pos()`. Defaults to `0.0`.
+    pub playback_offset_secs: f32,
     /// Playback volume in `0.0..=1.0`.
     pub volume: f32,
     /// Error message from the most recent decode or playback attempt, if any.
@@ -107,6 +117,7 @@ impl Default for AudioState {
             waveform: Vec::new(),
             transport: Transport::Stopped,
             position_secs: 0.0,
+            playback_offset_secs: 0.0,
             volume: 1.0,
             error: None,
         }
@@ -351,12 +362,24 @@ mod tests {
     // --- volume ---
 
     #[test]
-    fn set_volume_clamps() {
+    fn set_volume_stores_and_clamps() {
         let mut a = AudioState::default();
+        // Divergent in-range value: differs from the 1.0 default, so a mutant
+        // that drops the assignment (leaving volume at 1.0) fails here.
+        a.set_volume(0.5);
+        assert!(
+            (a.volume - 0.5).abs() < 1e-6,
+            "in-range volume must be stored"
+        );
+        // Clamp high: 1.5 → 1.0.
         a.set_volume(1.5);
-        assert!((a.volume - 1.0).abs() < 1e-6);
-        a.set_volume(-1.0);
-        assert!(a.volume.abs() < 1e-6);
+        assert!(
+            (a.volume - 1.0).abs() < 1e-6,
+            "volume 1.5 must clamp to 1.0"
+        );
+        // Clamp low: −0.5 → 0.0.
+        a.set_volume(-0.5);
+        assert!(a.volume.abs() < 1e-6, "volume −0.5 must clamp to 0.0");
     }
 
     // --- duration ---
