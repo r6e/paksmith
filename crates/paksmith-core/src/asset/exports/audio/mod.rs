@@ -56,8 +56,9 @@ pub struct AudioInfo {
 }
 
 /// Find the first `USoundWave` export with registered bulk records and return
-/// a lightweight [`AudioInfo`] summary, or `None` if no playable audio export
-/// is present.
+/// a lightweight [`AudioInfo`] summary, or `None` if no such export is present.
+/// (A non-playable codec still returns `Some` with `playable: false`; `None`
+/// means no `USoundWave` export had bulk records at all.)
 ///
 /// "Has bulk records" means the typed reader populated the package's bulk map
 /// for that export index — guaranteed for any `Package` built via the
