@@ -258,7 +258,7 @@ mod tests {
         AudioState {
             // 88 200 interleaved samples, 2 ch, 44 100 Hz → 1.0 s.
             // ch=2 is load-bearing: the `/ch → *ch` mutant in `duration_secs`
-            // yields 88_200 / 44_100 = 2 instead of 1, failing the pin test.
+            // yields 88_200 * 2 / 44_100 = 4 instead of 1, failing the pin test.
             decoded: Some(DecodedAudio {
                 samples: vec![0i16; 88_200],
                 sample_rate: 44_100,
