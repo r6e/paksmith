@@ -26,6 +26,24 @@ ignore = [
     # Fixed in glib 0.20+; muda 0.19.x pins glib 0.18.x.  Remove this ignore
     # when muda bumps its gtk/glib dependency.
     { id = "RUSTSEC-2024-0429", reason = "paksmith never calls glib::VariantStrIter; Linux gtk path is dormant (iced 0.14 exposes no window handle); menu strings are compile-time constants with no attacker input; fixed in glib 0.20+ pending muda dep bump" },
+    # RUSTSEC-2026-0194 / RUSTSEC-2026-0195: DoS advisories in quick-xml < 0.41
+    # (quadratic runtime on duplicate start-tag attribute names; unbounded
+    # namespace-declaration allocation in `NsReader`). Both require
+    # attacker-controlled XML input to trigger.
+    # Provable non-applicability: (1) quick-xml is pulled by exactly ONE crate in
+    # the tree — wayland-scanner (sole dependent in Cargo.lock) — a Linux-only
+    # BUILD dependency that generates code at compile time and is not present in
+    # the shipped runtime binary. (2) wayland-scanner parses only the wayland
+    # protocol XML bundled with the wayland stack (developer-controlled, trusted
+    # input); no attacker-controlled XML ever reaches quick-xml. (3) macOS and
+    # Windows builds don't pull the wayland tree at all.
+    # Fully upstream-BLOCKED: the fix landed in quick-xml 0.41, but NO
+    # wayland-scanner release uses it — the latest (0.31.10) still pins
+    # quick-xml ^0.39 — and rfd 0.17.2 (latest) pins wayland-client ^0.31, so no
+    # dependency-resolution path reaches the patched quick-xml. Remove both
+    # ignores once wayland-scanner ships a release on quick-xml 0.41+.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml is a Linux-only build-time dep (only wayland-scanner uses it) parsing bundled trusted wayland protocol XML; no attacker input reaches it and it is not in the runtime binary; fix (0.41+) blocked — no wayland-scanner release uses quick-xml 0.41 and rfd 0.17.2 pins the ^0.31 wayland stack" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml is a Linux-only build-time dep (only wayland-scanner uses it) parsing bundled trusted wayland protocol XML; no attacker input reaches it and it is not in the runtime binary; fix (0.41+) blocked — no wayland-scanner release uses quick-xml 0.41 and rfd 0.17.2 pins the ^0.31 wayland stack" },
 ]
 
 [licenses]

@@ -26,7 +26,22 @@ pub enum PaneKind {
 /// Initial sidebar fraction of the pane_grid width.
 const DEFAULT_SIDEBAR_RATIO: f32 = 0.30;
 
+/// Console refresh cadence while logs are actively arriving. Fast enough that
+/// a live tail feels responsive during an open/decode operation.
+const CONSOLE_TICK_FAST_MS: u64 = 250;
+/// Console refresh cadence once the ring has been stable for a tick. The
+/// visible-console poll still rebuilds the view each tick (iced re-views on
+/// every message), so when nothing is arriving we space those rebuilds out to
+/// cut idle CPU — at the cost of up to this much latency on the first new
+/// record after an idle spell.
+const CONSOLE_TICK_SLOW_MS: u64 = 1000;
+
 /// Root application state.
+// Three of the bools are independent UI toggles (panel visibility, tail-follow,
+// about dialog); `console_active` is a cached refresh-cadence signal paired with
+// `console_last_pushes`. None form a state machine the heuristic could model, so
+// the pedantic bool-count lint is a false positive here.
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     /// Active appearance mode, detected from the OS at startup.
     pub mode: theme::Mode,
@@ -83,6 +98,22 @@ pub struct App {
     /// The open Export As… format picker, if any. Path-keyed; rendered beneath
     /// the current `context_row`. `None` ⇒ the action strip (or nothing) shows.
     pub export_menu: Option<crate::state::export::ExportMenu>,
+    /// Whether the debug-console panel is shown (toggled by F12 / View menu).
+    pub console_visible: bool,
+    /// Shared ring of captured `tracing` events feeding the debug console.
+    /// Injected at boot from `main`; `Default` yields an empty, unshared buffer.
+    pub log_buffer: crate::state::log_buffer::LogBuffer,
+    /// Whether the console auto-scrolls to the newest line. Set on open/clear;
+    /// cleared when the user scrolls up away from the bottom.
+    pub console_follow: bool,
+    /// Active debug-console filter predicates (min level / target / search).
+    pub console_filters: crate::state::console::ConsoleFilters,
+    /// True when the last console tick saw the ring grow. Drives the adaptive
+    /// refresh interval: fast while logs flow, slow once the buffer is stable.
+    pub console_active: bool,
+    /// `LogBuffer::total_pushed` observed at the last console tick (or on open).
+    /// The tick compares against this to decide `console_active`.
+    pub console_last_pushes: u64,
 }
 
 impl Default for App {
@@ -114,7 +145,28 @@ impl Default for App {
             toasts: crate::state::toast::Toasts::default(),
             context_row: None,
             export_menu: None,
+            console_visible: false,
+            log_buffer: crate::state::log_buffer::LogBuffer::default(),
+            console_follow: true,
+            console_filters: crate::state::console::ConsoleFilters::default(),
+            console_active: false,
+            console_last_pushes: 0,
         }
+    }
+}
+
+/// Build the initial [`App`], injecting the shared debug-console
+/// [`LogBuffer`](crate::state::log_buffer::LogBuffer).
+///
+/// `main` installs the tracing subscriber over one `LogBuffer` clone, then hands
+/// another clone here so the running app reads the same `Arc`-backed ring the
+/// subscriber writes to. Extracted from `main`'s boot closure so the
+/// buffer-sharing (load-bearing: drop it and the console is permanently empty)
+/// is unit-testable rather than buried in the untestable entry point.
+pub fn boot_app(log_buffer: crate::state::log_buffer::LogBuffer) -> App {
+    App {
+        log_buffer,
+        ..App::default()
     }
 }
 
@@ -246,6 +298,48 @@ pub enum Message {
         outcome: crate::task::export::ExportOutcome,
         generation: u64,
     },
+    /// Toggle the debug-console panel (F12 or the View menu).
+    ConsoleToggled,
+    /// Periodic tick while the console is visible, so freshly captured records
+    /// render without requiring other UI activity.
+    ConsoleTick,
+    /// The console scroll position changed; carries the relative vertical
+    /// offset (0.0 = top, 1.0 = bottom) so the follow decision is testable
+    /// without constructing a non-public `scrollable::Viewport`.
+    ConsoleScrolled(f32),
+    /// The console min-level selector changed.
+    ConsoleMinLevelChanged(tracing::Level),
+    /// The console target-filter text changed.
+    ConsoleTargetFilterChanged(String),
+    /// The console message-search text changed.
+    ConsoleSearchChanged(String),
+    /// Clear all captured log records.
+    ConsoleCleared,
+    /// Copy all currently-displayed records to the clipboard.
+    ConsoleCopyAll,
+}
+
+/// Scroll the debug console to its newest (bottom) line. Shared by the open,
+/// tick-follow, and clear paths.
+// Thin scroll-operation glue: returns an opaque `Task` with no observable state
+// to assert, like the sibling `snap_to` call sites in the keyboard-nav arms.
+#[mutants::skip]
+fn snap_console_to_bottom() -> Task<Message> {
+    iced::widget::operation::snap_to(
+        crate::panels::console::SCROLL_ID,
+        iced::widget::operation::RelativeOffset::END,
+    )
+}
+
+/// Console refresh interval given whether the log ring is actively growing.
+/// Fast while records flow (responsive tail), slow once stable (cheap idle).
+fn console_refresh_interval(active: bool) -> std::time::Duration {
+    let ms = if active {
+        CONSOLE_TICK_FAST_MS
+    } else {
+        CONSOLE_TICK_SLOW_MS
+    };
+    std::time::Duration::from_millis(ms)
 }
 
 /// Processes a `Message` and updates the application state.
@@ -579,6 +673,60 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             } else {
                 Task::none()
             }
+        }
+        Message::ConsoleToggled => {
+            app.console_visible = !app.console_visible;
+            if app.console_visible {
+                app.console_follow = true;
+                // Open in fast-refresh mode and baseline the change counter to
+                // "now", so the first idle tick settles to slow rather than
+                // mistaking records that accrued while closed for fresh growth.
+                app.console_active = true;
+                app.console_last_pushes = app.log_buffer.total_pushed();
+                snap_console_to_bottom()
+            } else {
+                Task::none()
+            }
+        }
+        Message::ConsoleTick => {
+            // Processing any message rebuilds the view, refreshing the list from
+            // the ring. Detect whether the ring grew since the last tick to keep
+            // the refresh fast while logs flow and slow when the buffer is idle.
+            let pushes = app.log_buffer.total_pushed();
+            app.console_active = pushes != app.console_last_pushes;
+            app.console_last_pushes = pushes;
+            // Follow the tail only when the user hasn't scrolled up.
+            if app.console_follow {
+                snap_console_to_bottom()
+            } else {
+                Task::none()
+            }
+        }
+        Message::ConsoleScrolled(relative_y) => {
+            app.console_follow = crate::state::console::at_bottom(relative_y);
+            Task::none()
+        }
+        Message::ConsoleMinLevelChanged(level) => {
+            app.console_filters.min_level = level;
+            Task::none()
+        }
+        Message::ConsoleTargetFilterChanged(value) => {
+            app.console_filters.target_filter = value;
+            Task::none()
+        }
+        Message::ConsoleSearchChanged(value) => {
+            app.console_filters.search = value;
+            Task::none()
+        }
+        Message::ConsoleCleared => {
+            app.log_buffer.clear();
+            app.console_follow = true;
+            snap_console_to_bottom()
+        }
+        Message::ConsoleCopyAll => {
+            let records = app.log_buffer.snapshot();
+            let payload = crate::state::console::copy_all(&records, &app.console_filters);
+            iced::clipboard::write(payload)
         }
         Message::ExportCompleted {
             outcome,
@@ -968,6 +1116,14 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
     };
     let named = *named;
 
+    // F12 is the debug-console toggle, routed via its own always-on
+    // subscription and excluded from the tree-key listener. Guard here too so a
+    // direct call (or any future routing change) can never let F12 disturb tree
+    // state or dismiss the context/export menus.
+    if named == Named::F12 {
+        return None;
+    }
+
     // Any tree-key navigation (arrows, Enter, Escape, or any other *named* key —
     // bare character keys already returned via the `else` guard above) dismisses
     // the inline context menu. This is load-bearing, not just cosmetic: the strip
@@ -1179,18 +1335,42 @@ pub fn hex_drag_listener_active(app: &App) -> bool {
 pub fn subscription(app: &App) -> Subscription<Message> {
     let menu_sub = crate::menu::subscription();
 
+    // F12 toggles the debug console. Always active — even with no archive open —
+    // so startup/open-error logs are reachable. Kept OFF the tree-key listener
+    // below so it never doubles as a TreeKey that would dismiss menus.
+    let console_toggle_sub = iced::event::listen_with(|event, _status, _window| match event {
+        Event::Keyboard(KeyboardEvent::KeyPressed {
+            key: iced::keyboard::Key::Named(Named::F12),
+            ..
+        }) => Some(Message::ConsoleToggled),
+        _ => None,
+    });
+
+    // While the console is visible, tick so freshly captured records render
+    // without requiring other UI activity. The interval is adaptive: fast while
+    // logs are arriving, slow once the ring is stable, to cut idle-CPU churn.
+    let console_tick_sub = if app.console_visible {
+        iced::time::every(console_refresh_interval(app.console_active))
+            .map(|_| Message::ConsoleTick)
+    } else {
+        Subscription::none()
+    };
+
     if app.archive.is_none() {
-        return menu_sub;
+        return Subscription::batch([menu_sub, console_toggle_sub, console_tick_sub]);
     }
 
-    let tree_key_sub = iced::event::listen_with(|event, _status, _window| match event {
-        Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) => Some(Message::TreeKey(key)),
+    // Tree navigation keys. The decision (F12 exclusion + only-act-on-unconsumed
+    // keys) lives in the tested `tree_key_for`; this closure just destructures
+    // the event and forwards the key + capture status.
+    let tree_key_sub = iced::event::listen_with(|event, status, _window| match event {
+        Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) => tree_key_for(key, status),
         _ => None,
     });
 
     // Only subscribe to left-button-release when a Hex tab is active. Drag can
-    // only start inside a Hex view, so firing this app-wide would cause
-    // spurious update+view rebuilds on every click elsewhere.
+    // only start inside a Hex view, so firing this app-wide would cause spurious
+    // update+view rebuilds on every click elsewhere.
     let hex_drag_sub = if hex_drag_listener_active(app) {
         iced::event::listen_with(|event, _status, _window| match event {
             Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
@@ -1202,7 +1382,40 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         Subscription::none()
     };
 
-    Subscription::batch([menu_sub, tree_key_sub, hex_drag_sub])
+    Subscription::batch([
+        menu_sub,
+        console_toggle_sub,
+        console_tick_sub,
+        tree_key_sub,
+        hex_drag_sub,
+    ])
+}
+
+/// Decide whether a key press should drive tree navigation.
+///
+/// Two guards, both load-bearing:
+/// - **F12** is the debug-console toggle (its own always-on listener); routing
+///   it to [`Message::TreeKey`] would dismiss the context/export menus via
+///   `handle_tree_key`'s clear-at-top.
+/// - Only act when the event was **not** already consumed by a focused widget
+///   ([`iced::event::Status::Ignored`]). A focused `text_input` — the toolbar
+///   filter or the console target/search fields — captures the editing keys it
+///   uses (ArrowLeft/Right, printable characters, Backspace, Home/End) as
+///   `Captured`, so those no longer also navigate or mutate the file tree. Keys
+///   a single-line input doesn't consume (ArrowUp/Down, and Enter when no
+///   `on_submit` is set) stay `Ignored` and still reach the tree — acceptable,
+///   as they have no editing meaning inside the input.
+///
+/// Extracted from [`subscription`]'s opaque `listen_with` closure so the
+/// decision is unit- and mutation-tested.
+fn tree_key_for(key: iced::keyboard::Key, status: iced::event::Status) -> Option<Message> {
+    if matches!(key, iced::keyboard::Key::Named(Named::F12)) {
+        return None;
+    }
+    match status {
+        iced::event::Status::Ignored => Some(Message::TreeKey(key)),
+        iced::event::Status::Captured => None,
+    }
 }
 
 /// Returns a button style closure that uses the system accent colour so that
@@ -1479,7 +1692,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // ── compose ───────────────────────────────────────────────────────────────
     // The menu placeholder strip is removed: on macOS the native menu bar is
     // global (above the window); on other platforms the actions are toolbar-only.
-    let root = column![toolbar_view, body, status_view]
+    let mut root = column![toolbar_view, body];
+    if app.console_visible {
+        root = root.push(crate::panels::console::view(app));
+    }
+    let root = root
+        .push(status_view)
         .width(Length::Fill)
         .height(Length::Fill);
 
@@ -3776,5 +3994,179 @@ mod tests {
             app.export_menu.is_none(),
             "keyboard nav must clear the export picker"
         );
+    }
+
+    // ── console toggle / scroll / F12 ────────────────────────────────────────
+
+    #[test]
+    fn boot_app_shares_the_injected_log_buffer() {
+        // `boot_app` must hand the running app the SAME ring the caller (main,
+        // alongside the subscriber) writes to. If the `log_buffer` field were
+        // dropped, the app would get a fresh empty buffer and this snapshot
+        // would be 0 — a permanently-dead console. Kills the
+        // delete-struct-field mutant on the boot path.
+        let buffer = crate::state::log_buffer::LogBuffer::default();
+        let app = super::boot_app(buffer.clone());
+        buffer.push(tracing::Level::INFO, "t".into(), "x".into());
+        assert_eq!(app.log_buffer.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn console_toggled_flips_visibility_and_arms_follow() {
+        // Diverge from the open-branch's effect so the `console_follow = true`
+        // assignment is observable: `App::default()` already sets it true, which
+        // would mask a deleted/mutated assignment (see the PR #620 lesson on
+        // divergent test inputs).
+        let mut app = super::App {
+            console_follow: false,
+            ..super::App::default()
+        };
+        assert!(!app.console_visible);
+        let _ = super::update(&mut app, super::Message::ConsoleToggled);
+        assert!(app.console_visible);
+        assert!(app.console_follow, "opening re-arms tail-follow");
+        let _ = super::update(&mut app, super::Message::ConsoleToggled);
+        assert!(!app.console_visible);
+    }
+
+    #[test]
+    fn console_refresh_interval_is_fast_when_active_and_slow_when_idle() {
+        use std::time::Duration;
+        assert_eq!(
+            super::console_refresh_interval(true),
+            Duration::from_millis(super::CONSOLE_TICK_FAST_MS),
+            "actively-flowing logs refresh fast"
+        );
+        assert_eq!(
+            super::console_refresh_interval(false),
+            Duration::from_millis(super::CONSOLE_TICK_SLOW_MS),
+            "a stable ring refreshes slowly to cut idle CPU"
+        );
+    }
+
+    #[test]
+    fn console_tick_marks_active_on_new_records_and_idle_when_stable() {
+        let mut app = super::App {
+            console_visible: true,
+            ..super::App::default()
+        };
+        // A record arrived since the baseline (0) -> the tick observes growth.
+        app.log_buffer
+            .push(tracing::Level::INFO, "t".into(), "x".into());
+        let _ = super::update(&mut app, super::Message::ConsoleTick);
+        assert!(
+            app.console_active,
+            "a fresh record makes the next tick active"
+        );
+        // No further records -> the ring is stable, so the tick goes idle.
+        let _ = super::update(&mut app, super::Message::ConsoleTick);
+        assert!(
+            !app.console_active,
+            "a stable ring makes the tick idle (slow refresh)"
+        );
+        // Another record re-activates fast refresh.
+        app.log_buffer
+            .push(tracing::Level::INFO, "t".into(), "y".into());
+        let _ = super::update(&mut app, super::Message::ConsoleTick);
+        assert!(app.console_active, "a new record re-activates the tick");
+    }
+
+    #[test]
+    fn opening_console_baselines_push_counter_and_starts_active() {
+        let mut app = super::App::default();
+        // Records accrued while the console was closed.
+        app.log_buffer
+            .push(tracing::Level::INFO, "t".into(), "x".into());
+        app.log_buffer
+            .push(tracing::Level::INFO, "t".into(), "y".into());
+        let _ = super::update(&mut app, super::Message::ConsoleToggled);
+        assert!(app.console_visible);
+        assert!(app.console_active, "opening starts in fast-refresh mode");
+        assert_eq!(
+            app.console_last_pushes, 2,
+            "opening baselines the counter to the current total, not 0"
+        );
+        // With no new records, the first tick settles to idle (proves the
+        // baseline: without it the tick would see 2 != 0 and stay active).
+        let _ = super::update(&mut app, super::Message::ConsoleTick);
+        assert!(!app.console_active);
+    }
+
+    #[test]
+    fn console_scrolled_tracks_follow_from_offset() {
+        let mut app = super::App::default();
+        let _ = super::update(&mut app, super::Message::ConsoleScrolled(0.3));
+        assert!(!app.console_follow, "scrolled up => stop following");
+        let _ = super::update(&mut app, super::Message::ConsoleScrolled(1.0));
+        assert!(app.console_follow, "back at bottom => follow again");
+    }
+
+    #[test]
+    fn f12_is_a_noop_in_handle_tree_key_and_preserves_menus() {
+        let mut app = app_with_paths(&["a.uasset", "b.uasset"]);
+        app.context_row = Some(0);
+        app.export_menu = Some(minimal_export_menu());
+        let r = super::handle_tree_key(&mut app, &Key::Named(Named::F12));
+        assert!(r.is_none(), "F12 produces no scroll task");
+        assert_eq!(app.context_row, Some(0), "F12 must not clear context row");
+        assert!(app.export_menu.is_some(), "F12 must not clear export menu");
+    }
+
+    #[test]
+    fn tree_key_for_gates_on_capture_and_excludes_f12() {
+        use iced::event::Status;
+
+        // A nav key the UI did NOT consume drives the tree, carrying its key.
+        match super::tree_key_for(Key::Named(Named::ArrowDown), Status::Ignored) {
+            Some(super::Message::TreeKey(Key::Named(Named::ArrowDown))) => {}
+            other => panic!("expected TreeKey(ArrowDown), got {other:?}"),
+        }
+        // Once a focused widget (e.g. a console filter `text_input`) captured the
+        // key, it must NOT also navigate/mutate the tree.
+        assert!(
+            super::tree_key_for(Key::Named(Named::ArrowDown), Status::Captured).is_none(),
+            "a captured key must not reach the tree"
+        );
+        // F12 is the console toggle — never a tree key, regardless of status.
+        assert!(super::tree_key_for(Key::Named(Named::F12), Status::Ignored).is_none());
+        assert!(super::tree_key_for(Key::Named(Named::F12), Status::Captured).is_none());
+    }
+
+    // ── console filter controls ───────────────────────────────────────────────
+
+    #[test]
+    fn console_min_level_changed_sets_filter() {
+        let mut app = super::App::default();
+        let _ = super::update(
+            &mut app,
+            super::Message::ConsoleMinLevelChanged(tracing::Level::WARN),
+        );
+        assert_eq!(app.console_filters.min_level, tracing::Level::WARN);
+    }
+
+    #[test]
+    fn console_target_and_search_changed_set_filters() {
+        let mut app = super::App::default();
+        let _ = super::update(
+            &mut app,
+            super::Message::ConsoleTargetFilterChanged("core".into()),
+        );
+        assert_eq!(app.console_filters.target_filter, "core");
+        let _ = super::update(
+            &mut app,
+            super::Message::ConsoleSearchChanged("decode".into()),
+        );
+        assert_eq!(app.console_filters.search, "decode");
+    }
+
+    #[test]
+    fn console_cleared_empties_buffer_and_rearms_follow() {
+        let mut app = super::App::default();
+        app.log_buffer
+            .push(tracing::Level::INFO, "t".into(), "x".into());
+        app.console_follow = false;
+        let _ = super::update(&mut app, super::Message::ConsoleCleared);
+        assert!(app.log_buffer.snapshot().is_empty());
+        assert!(app.console_follow, "clearing re-arms tail-follow");
     }
 }

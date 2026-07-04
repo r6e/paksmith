@@ -16,7 +16,19 @@ mod widgets;
 
 use app::App;
 
+// Binary entry point: installs the tracing subscriber, builds the native menu,
+// and runs the iced event loop — none of which is unit-testable (no test can
+// drive `iced::application().run()`). The one bit of real logic, sharing the
+// log buffer into the app, is extracted to the tested `app::boot_app`.
+#[mutants::skip]
 fn main() -> iced::Result {
+    // Capture tracing events into a bounded ring for the in-app debug console.
+    // Install before building the menu so the menu-build path's own warnings
+    // are captured. `try_init` (inside) is a no-op if a subscriber already
+    // exists.
+    let log_buffer = state::log_buffer::LogBuffer::default();
+    state::log_buffer::init_console_tracing(log_buffer.clone());
+
     // Build and install the native menu bar.
     //
     // macOS: `init_for_nsapp()` attaches the menu as the global app menu bar
@@ -45,9 +57,13 @@ fn main() -> iced::Result {
         }
     };
 
-    iced::application(App::default, app::update, app::view)
-        .title("Paksmith")
-        .theme(|app: &App| theme::iced_theme(app.mode))
-        .subscription(app::subscription)
-        .run()
+    iced::application(
+        move || app::boot_app(log_buffer.clone()),
+        app::update,
+        app::view,
+    )
+    .title("Paksmith")
+    .theme(|app: &App| theme::iced_theme(app.mode))
+    .subscription(app::subscription)
+    .run()
 }
