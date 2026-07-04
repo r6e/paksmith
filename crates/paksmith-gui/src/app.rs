@@ -126,13 +126,6 @@ pub struct App {
     /// the `!Send` [`AudioOutput`] directly on `App` is sound because iced 0.14
     /// keeps application state on the main thread — see `audio_output`'s module
     /// docs for the placement rationale.
-    ///
-    /// Task 1 (the de-risking spike) only *establishes* this seam; the field is
-    /// written (`None`) but not yet read — later Phase 7d tasks wire up the
-    /// player that reads it. `dead_code` is allowed here for the same reason the
-    /// `state` module is (see `main.rs`): a Phase-7+ entry point kept ahead of
-    /// its first consumer.
-    #[allow(dead_code)]
     pub audio: Option<AudioOutput>,
 }
 
@@ -288,6 +281,21 @@ pub enum Message {
         /// Results from a previous generation are silently dropped.
         generation: u64,
     },
+    /// Toggle play/pause for the active tab's audio.
+    // Constructed by the audio-player widget (later Phase 7d task).
+    #[allow(dead_code)]
+    AudioPlayPause,
+    /// Stop the active tab's audio and reset the playhead to zero.
+    // Constructed by the audio-player widget (later Phase 7d task).
+    #[allow(dead_code)]
+    AudioStop,
+    /// Set the active tab's audio volume (`0.0`–`1.0`; clamped by `AudioState`).
+    // Constructed by the audio-player widget (later Phase 7d task).
+    #[allow(dead_code)]
+    AudioVolume(f32),
+    /// Periodic tick while audio is playing: advance the displayed playhead
+    /// and detect playback completion.
+    AudioTick,
     /// A texture channel was toggled on/off in the active tab.
     TextureChannelToggled {
         channel: crate::state::texture_view::Channel,
@@ -1072,6 +1080,86 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::AudioPlayPause => {
+            // Two-phase borrow: compute the pure state transition + copy out
+            // the data needed by the seam, then call `apply_playback` after
+            // the `active_tab_mut` borrow ends.
+            let state = if let Some(tab) = app.tabs.active_tab_mut() {
+                let action = tab.audio.toggle_play();
+                let decoded = tab.audio.decoded.clone();
+                let transport = tab.audio.transport;
+                let position_secs = tab.audio.position_secs;
+                Some((action, decoded, transport, position_secs))
+            } else {
+                None
+            };
+            if let Some((action, decoded, transport, position_secs)) = state {
+                apply_playback(
+                    &mut app.audio,
+                    decoded.as_ref(),
+                    transport,
+                    position_secs,
+                    action,
+                );
+            }
+            Task::none()
+        }
+        Message::AudioStop => {
+            let state = if let Some(tab) = app.tabs.active_tab_mut() {
+                let action = tab.audio.stop();
+                let decoded = tab.audio.decoded.clone();
+                let transport = tab.audio.transport;
+                let position_secs = tab.audio.position_secs;
+                Some((action, decoded, transport, position_secs))
+            } else {
+                None
+            };
+            if let Some((action, decoded, transport, position_secs)) = state {
+                apply_playback(
+                    &mut app.audio,
+                    decoded.as_ref(),
+                    transport,
+                    position_secs,
+                    action,
+                );
+            }
+            Task::none()
+        }
+        Message::AudioVolume(v) => {
+            // Two-phase borrow: set volume in pure state, then forward the
+            // clamped value to the seam. Tuple-match sidesteps `collapsible_if`
+            // (the fix would be a let-chain, unavailable at MSRV 1.88).
+            let volume = if let Some(tab) = app.tabs.active_tab_mut() {
+                tab.audio.set_volume(v);
+                Some(tab.audio.volume)
+            } else {
+                None
+            };
+            if let (Some(vol), Some(out)) = (volume, app.audio.as_mut()) {
+                out.set_volume(vol);
+            }
+            Task::none()
+        }
+        Message::AudioTick => {
+            // Read seam state before borrowing tabs (immutable borrows of
+            // `app.audio` are released before `active_tab_mut` takes a
+            // mutable borrow of `app.tabs`).
+            let pos = app.audio.as_ref().and_then(AudioOutput::position);
+            let done = app.audio.as_ref().is_some_and(AudioOutput::finished);
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                if let Some(dur) = pos {
+                    tab.audio.set_position(dur.as_secs_f32());
+                }
+                if done {
+                    let _ = tab.audio.stop();
+                }
+            }
+            // Tuple-match sidesteps `collapsible_if` (let-chain not in MSRV 1.88).
+            if let (true, Some(out)) = (done, app.audio.as_mut()) {
+                out.stop();
+            }
+            Task::none()
+        }
         Message::TextureChannelToggled { channel } => {
             if let Some(tab) = app.tabs.active_tab_mut() {
                 tab.texture.channels.toggle(channel);
@@ -1411,6 +1499,88 @@ pub fn hex_drag_listener_active(app: &App) -> bool {
         .is_some_and(|t| t.view == crate::state::tabs::ViewMode::Hex)
 }
 
+/// Returns `true` when the active tab is currently playing audio (so the
+/// play-gated [`Message::AudioTick`] subscription should be active).
+///
+/// Extracted from [`subscription`] so the predicate is unit- and
+/// mutation-tested without a headless iced runtime. Kills the
+/// `Transport::Playing == Transport::Paused` mutant.
+pub fn audio_tick_active(app: &App) -> bool {
+    app.tabs
+        .active_tab()
+        .is_some_and(|t| t.audio.transport == crate::state::audio_view::Transport::Playing)
+}
+
+/// Apply a [`PlaybackAction`] from the pure state machine to the audio-output seam.
+///
+/// The decision of *which* action to take was already made by the pure
+/// `AudioState` methods (`toggle_play`, `stop`, …) and is mutation-tested there.
+/// This function is glue — it dispatches that decision to the `!Send` rodio
+/// backend — and cannot be unit-tested without a real audio device, so the
+/// whole impl is `#[mutants::skip]`.
+///
+/// On `Play` (and `SeekTo` when currently `Playing`), the decoded samples are
+/// re-fed from the current `position_secs` so that both a stopped→play transition
+/// (position 0) and a paused→resume transition (position > 0) route through the
+/// same uniform path.
+#[mutants::skip]
+fn apply_playback(
+    audio: &mut Option<AudioOutput>,
+    decoded: Option<&crate::state::audio_view::DecodedAudio>,
+    transport: crate::state::audio_view::Transport,
+    position_secs: f32,
+    action: crate::state::audio_view::PlaybackAction,
+) {
+    use crate::state::audio_view::PlaybackAction;
+    let Some(out) = audio else { return };
+    match action {
+        PlaybackAction::Play => {
+            if let Some(dec) = decoded {
+                // Slice samples from the current playhead position so that
+                // Stopped→play starts from 0 and Paused→resume starts mid-clip.
+                // `position_secs` is non-negative (reset to 0 by `stop`;
+                // `set_position` only receives seam-reported values).  The product
+                // fits `usize`: realistic audio lengths stay well within usize::MAX.
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    clippy::cast_precision_loss
+                )]
+                let mut start =
+                    (position_secs * dec.sample_rate as f32 * f32::from(dec.channels)) as usize;
+                start = start.min(dec.samples.len());
+                start -= start % usize::from(dec.channels).max(1);
+                out.play_samples(dec.samples[start..].to_vec(), dec.channels, dec.sample_rate);
+            }
+        }
+        PlaybackAction::Pause => out.pause(),
+        PlaybackAction::Stop => out.stop(),
+        PlaybackAction::SeekTo(_) => {
+            // Re-feed only when already playing; a seek while paused/stopped just
+            // updates `position_secs` in the pure state and play will read it later.
+            // `collapsible_if`: the suggested collapse would use a let-chain
+            // (`transport == … && let Some(dec) = decoded`) which is not
+            // available on MSRV 1.88.
+            #[allow(clippy::collapsible_if)]
+            if transport == crate::state::audio_view::Transport::Playing {
+                if let Some(dec) = decoded {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        clippy::cast_precision_loss
+                    )]
+                    let mut start =
+                        (position_secs * dec.sample_rate as f32 * f32::from(dec.channels)) as usize;
+                    start = start.min(dec.samples.len());
+                    start -= start % usize::from(dec.channels).max(1);
+                    out.play_samples(dec.samples[start..].to_vec(), dec.channels, dec.sample_rate);
+                }
+            }
+        }
+        PlaybackAction::None => {}
+    }
+}
+
 /// Returns a [`Subscription`] that converts keyboard key-press events into
 /// [`Message::TreeKey`] while an archive is open, merged with the menu event
 /// bridge that polls the `muda` global channel.
@@ -1452,8 +1622,22 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         Subscription::none()
     };
 
+    // Tick at 100 ms while audio is playing so the displayed playhead advances
+    // and the finish condition is polled. Gated on `audio_tick_active` so the
+    // subscription costs nothing when no audio is playing.
+    let audio_tick_sub = if audio_tick_active(app) {
+        iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::AudioTick)
+    } else {
+        Subscription::none()
+    };
+
     if app.archive.is_none() {
-        return Subscription::batch([menu_sub, console_toggle_sub, console_tick_sub]);
+        return Subscription::batch([
+            menu_sub,
+            console_toggle_sub,
+            console_tick_sub,
+            audio_tick_sub,
+        ]);
     }
 
     // Tree navigation keys. The decision (F12 exclusion + only-act-on-unconsumed
@@ -1482,6 +1666,7 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         menu_sub,
         console_toggle_sub,
         console_tick_sub,
+        audio_tick_sub,
         tree_key_sub,
         hex_drag_sub,
     ])
@@ -4430,6 +4615,148 @@ mod tests {
         assert!(
             app.tabs.open.is_empty(),
             "a late AudioDecoded for a closed tab must not re-open it"
+        );
+    }
+
+    // ── Task 8: audio playback wiring ─────────────────────────────────────────
+
+    /// Build an `App` with an active tab that has decoded audio, so transport
+    /// arms have a real `decoded` payload to act on.
+    fn app_with_decoded_audio() -> App {
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("Game/SFX.uasset");
+        let tab = app
+            .tabs
+            .active_tab_mut()
+            .expect("just-opened tab must be active");
+        tab.audio.decoded = Some(crate::state::audio_view::DecodedAudio {
+            // 4 samples, stereo (2 ch): 2 frames at 44 100 Hz → tiny but non-empty.
+            samples: vec![1_i16, -1_i16, 2_i16, -2_i16],
+            sample_rate: 44_100,
+            channels: 2,
+        });
+        tab.audio.info = Some(paksmith_core::asset::AudioInfo {
+            export_idx: 0,
+            codec_label: "Vorbis (Ogg)".to_owned(),
+            channels: Some(2),
+            duration_secs: Some(1.0),
+            playable: true,
+        });
+        app
+    }
+
+    // --- audio_tick_active ---
+
+    #[test]
+    fn audio_tick_active_true_when_playing() {
+        let mut app = app_with_decoded_audio();
+        app.tabs.active_tab_mut().unwrap().audio.transport =
+            crate::state::audio_view::Transport::Playing;
+        assert!(
+            audio_tick_active(&app),
+            "audio_tick_active must return true when transport is Playing"
+        );
+    }
+
+    #[test]
+    fn audio_tick_active_false_when_paused() {
+        let mut app = app_with_decoded_audio();
+        app.tabs.active_tab_mut().unwrap().audio.transport =
+            crate::state::audio_view::Transport::Paused;
+        assert!(
+            !audio_tick_active(&app),
+            "audio_tick_active must return false when transport is Paused"
+        );
+    }
+
+    #[test]
+    fn audio_tick_active_false_when_stopped() {
+        let app = app_with_decoded_audio();
+        // Transport starts Stopped (default).
+        assert_eq!(
+            app.tabs.active_tab().unwrap().audio.transport,
+            crate::state::audio_view::Transport::Stopped,
+            "precondition: transport is Stopped"
+        );
+        assert!(
+            !audio_tick_active(&app),
+            "audio_tick_active must return false when transport is Stopped"
+        );
+    }
+
+    #[test]
+    fn audio_tick_active_false_when_no_tab() {
+        let app = App::default(); // no tabs open
+        assert!(
+            !audio_tick_active(&app),
+            "audio_tick_active must return false when no tab is open"
+        );
+    }
+
+    // --- AudioVolume arm ---
+
+    #[test]
+    fn audio_volume_clamps_above_one() {
+        let mut app = app_with_decoded_audio();
+        // `app.audio` is None so the seam call is skipped; only pure state is tested.
+        let _ = update(&mut app, Message::AudioVolume(1.5));
+        assert!(
+            (app.tabs.active_tab().unwrap().audio.volume - 1.0).abs() < 1e-6,
+            "volume 1.5 must clamp to 1.0 (got {})",
+            app.tabs.active_tab().unwrap().audio.volume
+        );
+    }
+
+    // --- AudioStop arm ---
+
+    #[test]
+    fn audio_stop_resets_transport_and_position() {
+        let mut app = app_with_decoded_audio();
+        // Prime the tab into Playing state with a non-zero position.
+        {
+            let tab = app.tabs.active_tab_mut().unwrap();
+            tab.audio.transport = crate::state::audio_view::Transport::Playing;
+            tab.audio.position_secs = 3.0;
+        }
+        let _ = update(&mut app, Message::AudioStop);
+        let tab = app.tabs.active_tab().unwrap();
+        assert_eq!(
+            tab.audio.transport,
+            crate::state::audio_view::Transport::Stopped,
+            "transport must be Stopped after AudioStop"
+        );
+        assert!(
+            tab.audio.position_secs.abs() < 1e-6,
+            "position must reset to 0.0 after AudioStop (got {})",
+            tab.audio.position_secs
+        );
+    }
+
+    // --- AudioPlayPause arm ---
+
+    #[test]
+    fn audio_play_pause_toggles_transport() {
+        let mut app = app_with_decoded_audio();
+        // Stopped → Playing
+        let _ = update(&mut app, Message::AudioPlayPause);
+        assert_eq!(
+            app.tabs.active_tab().unwrap().audio.transport,
+            crate::state::audio_view::Transport::Playing,
+            "first toggle: Stopped → Playing"
+        );
+        // Playing → Paused
+        let _ = update(&mut app, Message::AudioPlayPause);
+        assert_eq!(
+            app.tabs.active_tab().unwrap().audio.transport,
+            crate::state::audio_view::Transport::Paused,
+            "second toggle: Playing → Paused"
+        );
+        // Paused → Playing
+        let _ = update(&mut app, Message::AudioPlayPause);
+        assert_eq!(
+            app.tabs.active_tab().unwrap().audio.transport,
+            crate::state::audio_view::Transport::Playing,
+            "third toggle: Paused → Playing"
         );
     }
 }
