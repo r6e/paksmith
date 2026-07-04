@@ -60,6 +60,7 @@ pub fn view<'a>(
                         ViewMode::Properties => properties_view(parsed, &tab.expanded),
                         ViewMode::Hex => hex_view::view(bytes, *truncated, &tab.hex, accent),
                         ViewMode::Texture => texture_viewer::view(&tab.texture, accent),
+                        ViewMode::Audio => muted_text("Audio player \u{2014} coming soon"),
                     }
                 }
             };
