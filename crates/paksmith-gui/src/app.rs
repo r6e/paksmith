@@ -417,69 +417,74 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 Message::ArchiveOpened(Box::new(r))
             })
         }
-        Message::ArchiveOpened(boxed) => match *boxed {
-            Ok(loaded) => {
-                app.error = None;
-                app.keyflow.unlock();
-                app.hex_input.clear();
-                // Reset stale per-archive UI state so a new archive doesn't
-                // inherit the previous selection cursor or filter query.
-                app.filter.clear();
-                app.selected_row = None;
-                dismiss_row_menus(app);
-                // Clear tabs so they never reference a stale reader.
-                app.tabs.clear();
-                app.archive_generation = app.archive_generation.wrapping_add(1);
-                app.archive = Some(loaded);
-                Task::none()
-            }
-            Err(OpenError::Locked { path }) => {
-                // Enter the key-entry flow: show the inline key-prompt panel.
-                app.keyflow.lock(path);
-                app.hex_input.clear();
-                // The old archive is kept while the key prompt shows, so clear the
-                // stale context-menu index too.
-                dismiss_row_menus(app);
-                // Clear any stale tabs from a previously-open archive.
-                app.tabs.clear();
-                app.archive_generation = app.archive_generation.wrapping_add(1);
-                Task::none()
-            }
-            Err(OpenError::Core(msg)) => {
-                if app.keyflow.is_locked().is_some() {
-                    // We're mid-key-flow (e.g. wrong manual key) — show the error
-                    // inside the panel, not as the global banner.
-                    app.keyflow.set_error(msg);
-                    Task::none()
-                } else if app.archive.is_some() {
-                    // An archive is already open, so the full-area error banner in
-                    // `view` would never render (the `Some(archive)` branch wins).
-                    // Surface the failure as a non-blocking toast instead.
-                    //
-                    // The open attempt began with `keyflow.begin()` (→ Resolving);
-                    // it has now terminated, so leave Resolving — otherwise the
-                    // state machine keeps claiming an open is in flight. The
-                    // previously-loaded archive remains displayed, so restore the
-                    // loaded-archive invariant (`Unlocked`, the state the `Ok` arm
-                    // sets) rather than `Idle`, which would imply no archive.
+        Message::ArchiveOpened(boxed) => {
+            // Swapping archives clears all tabs; stop the surviving global sink first
+            // (spec §3 "one active playback" — no tab can own it after the swap).
+            stop_active_playback(app);
+            match *boxed {
+                Ok(loaded) => {
+                    app.error = None;
                     app.keyflow.unlock();
-                    push_toast(
-                        app,
-                        crate::state::toast::Severity::Error,
-                        format!("Couldn't open file: {msg}"),
-                    )
-                } else {
-                    // No archive: the empty-state banner (with retry CTA) is the
-                    // right home. The open began with `keyflow.begin()` (→
-                    // `Resolving`); reset to `Idle` so `view` falls through to the
-                    // banner instead of showing the "Opening…" spinner forever
-                    // (the `Resolving` branch precedes the `app.error` branch).
-                    app.keyflow.reset();
-                    app.error = Some(msg);
+                    app.hex_input.clear();
+                    // Reset stale per-archive UI state so a new archive doesn't
+                    // inherit the previous selection cursor or filter query.
+                    app.filter.clear();
+                    app.selected_row = None;
+                    dismiss_row_menus(app);
+                    // Clear tabs so they never reference a stale reader.
+                    app.tabs.clear();
+                    app.archive_generation = app.archive_generation.wrapping_add(1);
+                    app.archive = Some(loaded);
                     Task::none()
                 }
+                Err(OpenError::Locked { path }) => {
+                    // Enter the key-entry flow: show the inline key-prompt panel.
+                    app.keyflow.lock(path);
+                    app.hex_input.clear();
+                    // The old archive is kept while the key prompt shows, so clear the
+                    // stale context-menu index too.
+                    dismiss_row_menus(app);
+                    // Clear any stale tabs from a previously-open archive.
+                    app.tabs.clear();
+                    app.archive_generation = app.archive_generation.wrapping_add(1);
+                    Task::none()
+                }
+                Err(OpenError::Core(msg)) => {
+                    if app.keyflow.is_locked().is_some() {
+                        // We're mid-key-flow (e.g. wrong manual key) — show the error
+                        // inside the panel, not as the global banner.
+                        app.keyflow.set_error(msg);
+                        Task::none()
+                    } else if app.archive.is_some() {
+                        // An archive is already open, so the full-area error banner in
+                        // `view` would never render (the `Some(archive)` branch wins).
+                        // Surface the failure as a non-blocking toast instead.
+                        //
+                        // The open attempt began with `keyflow.begin()` (→ Resolving);
+                        // it has now terminated, so leave Resolving — otherwise the
+                        // state machine keeps claiming an open is in flight. The
+                        // previously-loaded archive remains displayed, so restore the
+                        // loaded-archive invariant (`Unlocked`, the state the `Ok` arm
+                        // sets) rather than `Idle`, which would imply no archive.
+                        app.keyflow.unlock();
+                        push_toast(
+                            app,
+                            crate::state::toast::Severity::Error,
+                            format!("Couldn't open file: {msg}"),
+                        )
+                    } else {
+                        // No archive: the empty-state banner (with retry CTA) is the
+                        // right home. The open began with `keyflow.begin()` (→
+                        // `Resolving`); reset to `Idle` so `view` falls through to the
+                        // banner instead of showing the "Opening…" spinner forever
+                        // (the `Resolving` branch precedes the `app.error` branch).
+                        app.keyflow.reset();
+                        app.error = Some(msg);
+                        Task::none()
+                    }
+                }
             }
-        },
+        }
         Message::KeyInputChanged(s) => {
             app.hex_input = Zeroizing::new(s);
             // Clear any previous key-attempt error when the user starts typing.
@@ -807,6 +812,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // Opening any asset (button, double-click, Enter, or the context-menu
             // strip) dismisses the inline menu.
             dismiss_row_menus(app);
+            // Opening another asset stops the current playback (spec §3).
+            stop_active_playback(app);
             // Re-opening an already-open asset only reactivates its tab; it keeps its
             // loaded content and must NOT re-read/re-parse (tab dedupe per the spec).
             // Branch on `was_open` directly (load in the `else`) rather than a
@@ -928,10 +935,19 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::batch([decode_task, audio_task])
         }
         Message::TabActivated(i) => {
+            // Switching to a different tab stops the current playback (spec §3);
+            // re-activating the already-active tab is a playback no-op.
+            if app.tabs.active != Some(i) {
+                stop_active_playback(app);
+            }
             app.tabs.activate(i);
             Task::none()
         }
         Message::TabClosed(i) => {
+            // Closing the tab that owns the current playback stops the sink (spec §3).
+            if app.tabs.active == Some(i) {
+                stop_active_playback(app);
+            }
             app.tabs.close(i);
             Task::none()
         }
@@ -1576,6 +1592,29 @@ fn decoded_for_action(
     match action {
         PlaybackAction::Play | PlaybackAction::SeekTo(_) => audio.decoded.clone(),
         PlaybackAction::Pause | PlaybackAction::Stop | PlaybackAction::None => None,
+    }
+}
+
+/// Enforce the "one active playback, globally" lifecycle rule (spec §3): reset
+/// the active tab's transport to `Stopped` and stop the shared rodio sink.
+///
+/// Called *before* any transition that changes which tab is active, removes the
+/// playing tab, or clears all tabs (tab switch, tab close, opening another
+/// asset, archive swap) — so the single global device never keeps playing a tab
+/// the user has navigated away from. There is no autoplay, so the correct
+/// post-transition state is always "device stopped, active tab ready".
+///
+/// `#[mutants::skip]`: the device call (`AudioOutput::stop`) is the rodio seam,
+/// unobservable when `app.audio == None` (headless tests); the pure transport
+/// reset it delegates to (`AudioState::stop`, already mutation-tested) and the
+/// call-site guards (which ARE tested) carry the logic. This body is glue.
+#[mutants::skip]
+fn stop_active_playback(app: &mut App) {
+    if let Some(tab) = app.tabs.active_tab_mut() {
+        let _ = tab.audio.stop();
+    }
+    if let Some(out) = app.audio.as_mut() {
+        out.stop();
     }
 }
 
@@ -4983,5 +5022,107 @@ mod tests {
             tab.audio.playback_offset_secs,
             tab.audio.position_secs
         );
+    }
+
+    // ── Task 11: navigation stops playback ───────────────────────────────────────
+
+    #[test]
+    fn switching_to_a_different_tab_stops_outgoing_playback() {
+        use crate::state::audio_view::Transport;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset"); // idx 0
+        let _ = app.tabs.open_or_activate("B.uasset"); // idx 1 (now active)
+        app.tabs.activate(0); // make tab 0 the active/playing tab
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        let _ = update(&mut app, Message::TabActivated(1));
+
+        assert_eq!(
+            app.tabs.open[0].audio.transport,
+            Transport::Stopped,
+            "switching to a different tab must stop the outgoing tab's playback"
+        );
+        assert_eq!(
+            app.tabs.active,
+            Some(1),
+            "the target tab must become active"
+        );
+    }
+
+    #[test]
+    fn reactivating_the_active_tab_keeps_playback() {
+        use crate::state::audio_view::Transport;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset"); // idx 0, active
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        let _ = update(&mut app, Message::TabActivated(0)); // re-activate the SAME tab
+
+        assert_eq!(
+            app.tabs.open[0].audio.transport,
+            Transport::Playing,
+            "re-activating the already-active tab must NOT stop playback"
+        );
+    }
+
+    #[test]
+    fn closing_a_non_active_tab_keeps_active_playback() {
+        use crate::state::audio_view::Transport;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset"); // idx 0
+        let _ = app.tabs.open_or_activate("B.uasset"); // idx 1
+        app.tabs.activate(0); // tab 0 active + playing
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        let _ = update(&mut app, Message::TabClosed(1)); // close the NON-active tab
+
+        assert_eq!(
+            app.tabs.active,
+            Some(0),
+            "closing a later tab leaves active index unchanged"
+        );
+        assert_eq!(
+            app.tabs.open[0].audio.transport,
+            Transport::Playing,
+            "closing a non-active tab must NOT stop the active tab's playback"
+        );
+    }
+
+    #[test]
+    fn opening_another_asset_stops_playback() {
+        use crate::state::audio_view::Transport;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset"); // idx 0, active + playing
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        let _ = update(&mut app, Message::OpenAsset("B.uasset".into()));
+
+        assert_eq!(
+            app.tabs.open[0].audio.transport,
+            Transport::Stopped,
+            "opening another asset must stop the previously-playing tab"
+        );
+    }
+
+    #[test]
+    fn opening_a_new_archive_stops_playback_without_panicking() {
+        use crate::state::audio_view::Transport;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset");
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        // Any tab-clearing ArchiveOpened result; the stop runs first. This exercises
+        // the archive-swap stop path with a live active tab (its transport reset is
+        // then discarded by clear() — see the accepted mutation survivor note).
+        // Locked always calls app.tabs.clear(), making the is_empty() assertion valid.
+        // (Core-no-archive does not clear tabs, so it can't be used here.)
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
+                path: PathBuf::from("locked.pak"),
+            }))),
+        );
+
+        assert!(app.tabs.open.is_empty(), "archive swap clears all tabs");
     }
 }
