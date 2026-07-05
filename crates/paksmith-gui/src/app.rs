@@ -1167,9 +1167,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::AudioVolume(v) => {
-            // Two-phase borrow: set volume in pure state, then forward the
-            // clamped value to the seam. Tuple-match sidesteps `collapsible_if`
-            // (the fix would be a let-chain, unavailable at MSRV 1.88).
+            // Kept on the two-phase pattern (unlike the disjoint-borrow
+            // Play/Stop/Seek arms) ON PURPOSE: the value forwarded to the seam is
+            // a `Copy` `f32`, so there's no PCM clone to hoist out of the borrow,
+            // and the tuple-match sidesteps `collapsible_if` (the collapse would
+            // need a let-chain, unavailable at MSRV 1.88).
             let volume = if let Some(tab) = app.tabs.active_tab_mut() {
                 tab.audio.set_volume(v);
                 Some(tab.audio.volume)
