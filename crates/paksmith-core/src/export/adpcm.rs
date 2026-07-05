@@ -120,7 +120,10 @@ pub(crate) fn parse_wav(buf: &[u8]) -> Option<(WavFmt, &[u8])> {
                     channels: read_u16le(body, 2)?,
                     sample_rate: read_u32le(body, 4)?,
                     block_align: read_u16le(body, 12)?,
-                    bits_per_sample: read_u16le(body, 14).unwrap_or(0),
+                    // Required in any valid ≥16-byte `fmt ` chunk; a truncated fmt
+                    // missing it is a malformed container (→ `None`), not a bits=0
+                    // "unsupported format".
+                    bits_per_sample: read_u16le(body, 14)?,
                     // `cbSize` (off 16) ≥ 2 ⇒ `samplesPerBlock` at off 18.
                     samples_per_block: read_u16le(body, 18).unwrap_or(0),
                 });

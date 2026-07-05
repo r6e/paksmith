@@ -81,9 +81,9 @@ fn pcm_data_within_cap(byte_len: usize) -> crate::Result<()> {
 /// Parse a 16-bit PCM WAV into `(channels, sample_rate, interleaved i16 samples)`.
 ///
 /// Rejects non-PCM (`wFormatTag != 1`) or non-16-bit (`wBitsPerSample != 16`)
-/// with [`crate::PaksmithError::UnsupportedFeature`], a `data` chunk exceeding
-/// [`MAX_AUDIO_DECODED_BYTES`] with [`crate::PaksmithError::Internal`]
-/// (decompression-bomb guard, checked before allocating), and a malformed
+/// with [`crate::PaksmithError::UnsupportedFeature`]; a `data` chunk exceeding
+/// [`MAX_AUDIO_DECODED_BYTES`] or with an odd byte length (not a whole number of
+/// 16-bit samples) with [`crate::PaksmithError::Internal`]; and a malformed
 /// RIFF/WAVE container with [`crate::PaksmithError::Internal`].
 pub(crate) fn parse_pcm_wav(wav: &[u8]) -> crate::Result<(u16, u32, Vec<i16>)> {
     let (fmt, data) = parse_wav(wav).ok_or_else(|| crate::PaksmithError::Internal {
@@ -98,6 +98,13 @@ pub(crate) fn parse_pcm_wav(wav: &[u8]) -> crate::Result<(u16, u32, Vec<i16>)> {
         });
     }
     pcm_data_within_cap(data.len())?;
+    // A 16-bit PCM `data` chunk is a whole number of samples; an odd byte length
+    // is a malformed container (`chunks_exact(2)` would silently drop the tail).
+    if data.len() % 2 != 0 {
+        return Err(crate::PaksmithError::Internal {
+            context: format!("PCM WAV data chunk has an odd byte length ({})", data.len()),
+        });
+    }
     let samples = data
         .chunks_exact(2)
         .map(|b| i16::from_le_bytes([b[0], b[1]]))
@@ -241,6 +248,19 @@ mod tests {
         assert!(
             matches!(err, crate::PaksmithError::Internal { .. }),
             "invalid RIFF must yield Internal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_pcm_wav_rejects_odd_data_length() {
+        // A 16-bit PCM data chunk with an odd byte count is malformed: without the
+        // guard, `chunks_exact(2)` would silently drop the trailing byte and return
+        // Ok. Three data bytes → one whole sample + a dangling byte.
+        let wav = make_wav(1, 1, 22050, 16, &[1, 0, 2]);
+        let err = parse_pcm_wav(&wav).unwrap_err();
+        assert!(
+            matches!(err, crate::PaksmithError::Internal { .. }),
+            "odd-length PCM data must yield Internal, got {err:?}"
         );
     }
 }

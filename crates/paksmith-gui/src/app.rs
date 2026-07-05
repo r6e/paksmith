@@ -1103,10 +1103,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::AudioPlayPause => {
-            // Two-phase borrow: compute the pure state transition + copy out
-            // the data needed by the seam, then call `apply_playback` after
-            // the `active_tab_mut` borrow ends.
-            let state = if let Some(tab) = app.tabs.active_tab_mut() {
+            // `app.tabs` and `app.audio` are disjoint fields, so the seam call can
+            // borrow the device WHILE the active-tab borrow is live — the decoded
+            // PCM is passed by reference (`apply_playback` reads it only for the
+            // re-feed actions), never cloned.
+            if let Some(tab) = app.tabs.active_tab_mut() {
                 let action = tab.audio.toggle_play();
                 // Pin the offset the sink buffer will begin at BEFORE the re-feed:
                 // rodio's `get_pos` is buffer-relative, so the tick adds this back
@@ -1119,48 +1120,29 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 ) {
                     tab.audio.playback_offset_secs = tab.audio.position_secs;
                 }
-                let decoded = decoded_for_action(&tab.audio, action);
-                let transport = tab.audio.transport;
-                let position_secs = tab.audio.position_secs;
-                let volume = tab.audio.volume;
-                Some((action, decoded, transport, position_secs, volume))
-            } else {
-                None
-            };
-            if let Some((action, decoded, transport, position_secs, volume)) = state {
                 apply_playback(
                     &mut app.audio,
-                    decoded.as_ref(),
-                    transport,
-                    position_secs,
-                    volume,
+                    tab.audio.decoded.as_ref(),
+                    tab.audio.transport,
+                    tab.audio.position_secs,
+                    tab.audio.volume,
                     action,
                 );
             }
             Task::none()
         }
         Message::AudioStop => {
-            let state = if let Some(tab) = app.tabs.active_tab_mut() {
+            // Disjoint-field borrow (see `AudioPlayPause`): `Stop` doesn't re-feed,
+            // so `apply_playback` ignores the decoded ref — passing it by reference
+            // costs nothing.
+            if let Some(tab) = app.tabs.active_tab_mut() {
                 let action = tab.audio.stop();
-                // `Stop` never re-feeds, so `decoded_for_action` returns `None`
-                // (no MB-scale PCM clone).
-                let decoded = decoded_for_action(&tab.audio, action);
-                let transport = tab.audio.transport;
-                let position_secs = tab.audio.position_secs;
-                // `Stop` doesn't re-feed, so volume is unused by `apply_playback`
-                // here; pass it for a uniform call signature.
-                let volume = tab.audio.volume;
-                Some((action, decoded, transport, position_secs, volume))
-            } else {
-                None
-            };
-            if let Some((action, decoded, transport, position_secs, volume)) = state {
                 apply_playback(
                     &mut app.audio,
-                    decoded.as_ref(),
-                    transport,
-                    position_secs,
-                    volume,
+                    tab.audio.decoded.as_ref(),
+                    tab.audio.transport,
+                    tab.audio.position_secs,
+                    tab.audio.volume,
                     action,
                 );
             }
@@ -1182,29 +1164,20 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::AudioSeek(frac) => {
-            // Two-phase borrow: compute the seek transition in pure state, then
-            // call `apply_playback` after the `active_tab_mut` borrow ends.
-            // `seek_fraction` always returns `SeekTo`, so we unconditionally pin
-            // `playback_offset_secs`; rodio's `get_pos` is buffer-relative, and
-            // the tick must add this offset to recover the absolute position.
-            let state = if let Some(tab) = app.tabs.active_tab_mut() {
+            // `seek_fraction` always returns `SeekTo`, so unconditionally pin
+            // `playback_offset_secs` (rodio's `get_pos` is buffer-relative; the
+            // tick adds this offset back). Disjoint-field borrow (see
+            // `AudioPlayPause`) lets the seam read the decoded PCM by reference,
+            // no clone.
+            if let Some(tab) = app.tabs.active_tab_mut() {
                 let act = tab.audio.seek_fraction(frac);
                 tab.audio.playback_offset_secs = tab.audio.position_secs;
-                let decoded = decoded_for_action(&tab.audio, act);
-                let transport = tab.audio.transport;
-                let position_secs = tab.audio.position_secs;
-                let volume = tab.audio.volume;
-                Some((act, decoded, transport, position_secs, volume))
-            } else {
-                None
-            };
-            if let Some((act, decoded, transport, position_secs, volume)) = state {
                 apply_playback(
                     &mut app.audio,
-                    decoded.as_ref(),
-                    transport,
-                    position_secs,
-                    volume,
+                    tab.audio.decoded.as_ref(),
+                    tab.audio.transport,
+                    tab.audio.position_secs,
+                    tab.audio.volume,
                     act,
                 );
             }
@@ -1582,27 +1555,6 @@ pub fn audio_tick_active(app: &App) -> bool {
     app.tabs
         .active_tab()
         .is_some_and(|t| t.audio.transport == crate::state::audio_view::Transport::Playing)
-}
-
-/// Clone the decoded PCM only for re-feed actions (`Play`/`SeekTo`).
-///
-/// `Pause`, `Stop`, and `None` never read `decoded` in [`apply_playback`], so
-/// cloning the (MB-scale) `Vec<i16>` for them is pure waste — those actions get
-/// `None` instead.
-///
-/// The return value is device-independent: `Some` for the two re-feed actions,
-/// `None` for the other three. It is asserted directly in the unit tests, so a
-/// `Play => None` mutant (which would make playback silently never start) is
-/// caught without a real rodio device.
-fn decoded_for_action(
-    audio: &crate::state::audio_view::AudioState,
-    action: crate::state::audio_view::PlaybackAction,
-) -> Option<crate::state::audio_view::DecodedAudio> {
-    use crate::state::audio_view::PlaybackAction;
-    match action {
-        PlaybackAction::Play | PlaybackAction::SeekTo(_) => audio.decoded.clone(),
-        PlaybackAction::Pause | PlaybackAction::Stop | PlaybackAction::None => None,
-    }
 }
 
 /// Enforce the "one active playback, globally" lifecycle rule (spec §3): reset
@@ -4847,28 +4799,6 @@ mod tests {
             "volume −0.5 must clamp to 0.0 (got {})",
             app.tabs.active_tab().unwrap().audio.volume
         );
-    }
-
-    // --- decoded_for_action ---
-
-    #[test]
-    fn decoded_for_action_clones_only_for_refeed_actions() {
-        use crate::state::audio_view::{AudioState, DecodedAudio, PlaybackAction};
-        let s = AudioState {
-            decoded: Some(DecodedAudio {
-                samples: vec![1, 2],
-                sample_rate: 8000,
-                channels: 1,
-            }),
-            ..AudioState::default()
-        };
-        // Re-feed actions clone the PCM; the others return None. Device-independent,
-        // so a `Play => None` mutant (playback would silently never start) fails here.
-        assert!(decoded_for_action(&s, PlaybackAction::Play).is_some());
-        assert!(decoded_for_action(&s, PlaybackAction::SeekTo(0.0)).is_some());
-        assert!(decoded_for_action(&s, PlaybackAction::Pause).is_none());
-        assert!(decoded_for_action(&s, PlaybackAction::Stop).is_none());
-        assert!(decoded_for_action(&s, PlaybackAction::None).is_none());
     }
 
     // --- AudioStop arm ---

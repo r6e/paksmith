@@ -200,41 +200,39 @@ impl AudioState {
 /// Downsample interleaved `samples` to `columns` `(min, max)` pairs in `[-1.0, 1.0]`,
 /// averaging channels to mono for the overview. Returns empty if `columns == 0` or
 /// `samples` is empty. `channels == 0` is treated as `1` (defensive).
+///
+/// Runs a single streaming pass: peak memory is `O(columns)` regardless of clip
+/// length, so a near-cap (1 GiB) decode doesn't allocate a second full-length
+/// buffer just to build a 512-column overview.
 pub fn compute_waveform(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32)> {
     if columns == 0 || samples.is_empty() {
         return Vec::new();
     }
     let ch = usize::from(channels.max(1));
-    let norm = f32::from(i16::MAX);
     let ch_f32 = f32::from(channels.max(1));
+    // Normalize by 32768, not `i16::MAX` (32767): `i16::MIN` maps to exactly `-1.0`
+    // (so the stated `[-1.0, 1.0]` invariant holds without a clamp), and it matches
+    // `AudioOutput`'s i16→f32 playback scaling.
+    let norm = 32_768.0_f32;
 
-    // Convert interleaved samples to mono frames by averaging all channels.
-    let frames: Vec<f32> = samples
-        .chunks(ch)
-        .map(|frame| {
-            let sum: f32 = frame.iter().map(|&s| f32::from(s)).sum();
-            sum / ch_f32
-        })
-        .collect();
-
-    let frame_count = frames.len();
-    if frame_count == 0 {
-        return Vec::new();
-    }
-
+    // `samples.chunks(ch)` yields `div_ceil(len, ch)` frames (a partial trailing
+    // frame is kept — averaged by the full channel count, a pre-existing quirk).
+    // `samples` is non-empty and `ch >= 1`, so `frame_count >= 1`.
+    let frame_count = samples.len().div_ceil(ch);
     // Clamp effective columns to available frames so no bucket is left empty.
     let effective_cols = columns.min(frame_count);
     let mut result = vec![(f32::MAX, f32::MIN); effective_cols];
 
-    for (frame_idx, &sample) in frames.iter().enumerate() {
+    for (frame_idx, frame) in samples.chunks(ch).enumerate() {
+        let mono = frame.iter().map(|&s| f32::from(s)).sum::<f32>() / ch_f32;
         // Integer arithmetic distributes frames evenly across columns. Because
         // `effective_cols <= frame_count` and `frame_idx <= frame_count - 1`, the
         // quotient `(frame_idx * effective_cols) / frame_count` is always
         // `<= effective_cols - 1`, so the index is in range without a clamp.
         let col = (frame_idx * effective_cols) / frame_count;
         let (min, max) = &mut result[col];
-        *min = (*min).min(sample);
-        *max = (*max).max(sample);
+        *min = (*min).min(mono);
+        *max = (*max).max(mono);
     }
 
     result
@@ -498,11 +496,35 @@ mod tests {
     }
 
     #[test]
+    fn compute_waveform_full_scale_stays_within_unit_range() {
+        // The `[-1.0, 1.0]` invariant must hold for the extreme samples. With the
+        // ÷32768 normalization `i16::MIN` maps to exactly `-1.0` (÷32767 would give
+        // -1.00003, breaking the invariant) and `i16::MAX` stays `< 1.0`.
+        let w = compute_waveform(&[i16::MIN, i16::MAX], 1, 2);
+        assert_eq!(w.len(), 2);
+        assert!(
+            (w[0].0 - -1.0).abs() < 1e-6,
+            "i16::MIN must normalize to exactly -1.0, got {}",
+            w[0].0
+        );
+        assert!(
+            w[0].0 >= -1.0,
+            "amplitude must not dip below -1.0, got {}",
+            w[0].0
+        );
+        assert!(
+            w[1].1 <= 1.0,
+            "amplitude must not exceed 1.0, got {}",
+            w[1].1
+        );
+    }
+
+    #[test]
     fn compute_waveform_averages_channels_to_mono() {
         // Stereo: one interleaved frame [L=2000, R=6000] averages to 4000, so
-        // the single bucket is 4000/32767 ≈ 0.1221 for both min and max. Divergent
+        // the single bucket is 4000/32768 ≈ 0.1221 for both min and max. Divergent
         // L/R values pin the `sum / channels` averaging (a `*` mutant would yield
-        // 16000/32767 ≈ 0.4883).
+        // 16000/32768 ≈ 0.4883).
         let w = compute_waveform(&[2000, 6000], 2, 1);
         assert_eq!(w.len(), 1);
         assert!((w[0].0 - 0.1221).abs() < 1e-3, "min {}", w[0].0);
@@ -515,7 +537,7 @@ mod tests {
         // col2={-15000,6000}. Distinct mid-range values per bucket pin the bucket
         // index arithmetic (`* -> +` empties col2; `/ -> %` indexes out of range),
         // the min/max tracking (a swap flips each pair), and the normalization
-        // (`/ -> %` on a mid-range value diverges hugely from the ÷32767 result).
+        // (`/ -> %` on a mid-range value diverges hugely from the ÷32768 result).
         let s = [3000, 9000, -6000, 12000, -15000, 6000];
         let w = compute_waveform(&s, 1, 3);
         assert_eq!(w.len(), 3);

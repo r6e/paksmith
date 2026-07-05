@@ -1,8 +1,8 @@
 //! Waveform canvas widget for the audio player.
 //!
 //! Draws a column-per-peak waveform with a playhead line and emits
-//! [`crate::app::Message::AudioSeek`] on left-press inside the canvas.  The full
-//! widget is rendering/hit-test glue; all pure logic lives in
+//! [`crate::app::Message::AudioSeek`] on click or drag (scrub) inside the canvas.
+//! The full widget is rendering/hit-test glue; all pure logic lives in
 //! [`crate::state::audio_view`].
 
 use iced::widget::{button, canvas, column, container, row, slider, text};
@@ -22,10 +22,10 @@ const WAVEFORM_HEIGHT: f32 = 80.0;
 // ── Waveform struct ───────────────────────────────────────────────────────────
 
 /// A `canvas::Program` that renders a waveform + playhead and emits
-/// [`Message::AudioSeek`] on click.
+/// [`Message::AudioSeek`] on click or drag (scrub).
 ///
 /// The `draw`/`update` methods are `#[mutants::skip]` rendering/hit-test glue;
-/// the only pure logic (the click → seek fraction) is extracted to the tested
+/// the only pure logic (the x → seek fraction) is extracted to the tested
 /// [`seek_fraction_from_x`].
 struct Waveform<'a> {
     /// Pre-computed per-column (min, max) amplitude pairs in `[-1.0, 1.0]`.
@@ -37,28 +37,50 @@ struct Waveform<'a> {
 }
 
 impl canvas::Program<Message> for Waveform<'_> {
-    type State = ();
+    /// `true` while the left button is held after a press inside the canvas, so
+    /// subsequent cursor motion scrubs the playhead (drag-to-seek).
+    type State = bool;
 
     // Event plumbing glue (iced `Cursor`/`Event` aren't unit-constructible); the
     // seek-fraction math it delegates to is pinned by `seek_fraction_from_x`.
     #[mutants::skip]
     fn update(
         &self,
-        _state: &mut Self::State,
+        dragging: &mut Self::State,
         event: &canvas::Event,
         bounds: Rectangle,
         cursor: iced::mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
-        // Emit a seek message on left-button press inside the canvas.
-        let iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) =
-            event
-        else {
+        use iced::mouse::{Button, Event as MouseEvent};
+        let iced::Event::Mouse(mouse_event) = event else {
             return None;
         };
-        // `pos.x` is already relative to `bounds.x` (origin = top-left of canvas).
-        let pos = cursor.position_in(bounds)?;
-        let frac = seek_fraction_from_x(pos.x, bounds.width);
-        Some(canvas::Action::publish(Message::AudioSeek(frac)).and_capture())
+        match mouse_event {
+            // A left-press inside the canvas begins a scrub and emits the initial
+            // seek. `and_capture()` routes the following motion/release events here
+            // even once the cursor leaves the canvas bounds.
+            MouseEvent::ButtonPressed(Button::Left) => {
+                // `pos.x` is relative to `bounds.x` (origin = top-left of canvas).
+                let pos = cursor.position_in(bounds)?;
+                *dragging = true;
+                let frac = seek_fraction_from_x(pos.x, bounds.width);
+                Some(canvas::Action::publish(Message::AudioSeek(frac)).and_capture())
+            }
+            // Motion while the button is held keeps seeking (drag). The absolute
+            // cursor position is delivered even outside the canvas during the
+            // captured drag; `seek_fraction_from_x` clamps the relative x to [0, 1].
+            MouseEvent::CursorMoved { .. } if *dragging => {
+                let pos = cursor.position()?;
+                let frac = seek_fraction_from_x(pos.x - bounds.x, bounds.width);
+                Some(canvas::Action::publish(Message::AudioSeek(frac)).and_capture())
+            }
+            // Release ends the scrub.
+            MouseEvent::ButtonReleased(Button::Left) => {
+                *dragging = false;
+                None
+            }
+            _ => None,
+        }
     }
 
     // Pure rendering glue (coordinate math → iced geometry); visual correctness
