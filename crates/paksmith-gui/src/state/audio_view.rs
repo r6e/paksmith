@@ -54,6 +54,73 @@ pub enum PlaybackAction {
     None,
 }
 
+/// Upper bound on the interleaved-sample count the GUI will *play* (independent
+/// of the core 1 GiB decode cap). Playback hands the samples to rodio, which
+/// holds a second full-length `f32` buffer (≈2× the `i16` bytes), so an
+/// otherwise-decodable but very large clip could double peak memory at play
+/// time. 128 Mi samples ≈ 256 MiB of `i16` ≈ 25 min of 44.1 kHz stereo — beyond
+/// any real game asset — so the cap rejects nothing legitimate while bounding
+/// the playback-time `f32` allocation. Over-cap clips still show metadata +
+/// waveform; only the transport is disabled (use Export As… to save the stream).
+pub const MAX_PLAYABLE_SAMPLES: usize = 128 * 1024 * 1024;
+
+/// Whether the audio transport controls can be used, and if not, why.
+///
+/// Drives the view: [`Available`](Self::Available) renders active controls;
+/// the other two disable them (and show the reason) so the user can't drive a
+/// no-op sink or trigger the large-clip playback allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackAvailability {
+    /// A device is present and the clip is within [`MAX_PLAYABLE_SAMPLES`].
+    Available,
+    /// No audio output device (or device init failed).
+    NoDevice,
+    /// The decoded clip exceeds [`MAX_PLAYABLE_SAMPLES`] and is too large to play.
+    ClipTooLarge,
+}
+
+/// Decide whether playback is available for a clip of `sample_count` interleaved
+/// samples (`None` = not yet decoded) given whether an output `device` exists.
+///
+/// No device wins over clip size (there's nothing to play into either way).
+#[must_use]
+pub fn playback_availability(
+    sample_count: Option<usize>,
+    device_available: bool,
+) -> PlaybackAvailability {
+    if !device_available {
+        return PlaybackAvailability::NoDevice;
+    }
+    match sample_count {
+        Some(n) if n > MAX_PLAYABLE_SAMPLES => PlaybackAvailability::ClipTooLarge,
+        _ => PlaybackAvailability::Available,
+    }
+}
+
+/// Whether to warn the user that a just-decoded clip can't be played because no
+/// output device opened: true iff the decode succeeded (`decoded_ok`) AND no
+/// device is available. A decode failure warns via the error field, not this
+/// toast; a device-present success needs no warning.
+#[must_use]
+pub fn should_warn_no_device(decoded_ok: bool, device_available: bool) -> bool {
+    decoded_ok && !device_available
+}
+
+/// The reason the transport controls are disabled, or `None` when playback is
+/// [`Available`](PlaybackAvailability::Available). Exhaustive over the enum so a
+/// future variant forces an explicit reason rather than silently falling into a
+/// wildcard.
+#[must_use]
+pub fn disabled_reason(availability: PlaybackAvailability) -> Option<&'static str> {
+    match availability {
+        PlaybackAvailability::Available => None,
+        PlaybackAvailability::NoDevice => Some("No audio output device available."),
+        PlaybackAvailability::ClipTooLarge => {
+            Some("Clip too large to play in-app \u{2014} use Export As\u{2026} to save the stream.")
+        }
+    }
+}
+
 /// All view state for the audio inspector panel.
 ///
 /// Mirrors [`super::texture_view::TextureState`]'s shape: pure Rust, no iced
@@ -604,6 +671,85 @@ mod tests {
         // 0-channel clip: raw index = 1.0 × 100 × 0 = 0; the `.max(1)` guards the
         // `% 0` divide-by-zero. Returns 0 without panicking.
         assert_eq!(resume_sample_offset(1.0, 100, 0, 10), 0);
+    }
+
+    #[test]
+    fn max_playable_samples_is_128_mi() {
+        // Pin the exact value against the expanded literal (not `128*1024*1024`,
+        // which cargo-mutants would mutate identically): 128 Mi = 134_217_728.
+        // The availability tests reference the const symbolically, so only this
+        // absolute-value assertion kills a `*`→`+`/`/` mutant in its definition.
+        assert_eq!(MAX_PLAYABLE_SAMPLES, 134_217_728);
+    }
+
+    #[test]
+    fn playback_availability_no_device_wins() {
+        // No device → NoDevice regardless of clip presence/size.
+        assert_eq!(
+            playback_availability(None, false),
+            PlaybackAvailability::NoDevice
+        );
+        assert_eq!(
+            playback_availability(Some(10), false),
+            PlaybackAvailability::NoDevice
+        );
+        assert_eq!(
+            playback_availability(Some(MAX_PLAYABLE_SAMPLES + 1), false),
+            PlaybackAvailability::NoDevice
+        );
+    }
+
+    #[test]
+    fn playback_availability_device_present_gates_on_clip_size() {
+        // With a device: not-yet-decoded and at/below the cap are Available; only
+        // strictly-over-cap is ClipTooLarge (pins the `>` boundary).
+        assert_eq!(
+            playback_availability(None, true),
+            PlaybackAvailability::Available
+        );
+        assert_eq!(
+            playback_availability(Some(10), true),
+            PlaybackAvailability::Available
+        );
+        assert_eq!(
+            playback_availability(Some(MAX_PLAYABLE_SAMPLES), true),
+            PlaybackAvailability::Available
+        );
+        assert_eq!(
+            playback_availability(Some(MAX_PLAYABLE_SAMPLES + 1), true),
+            PlaybackAvailability::ClipTooLarge
+        );
+    }
+
+    #[test]
+    fn should_warn_no_device_only_on_ok_without_device() {
+        assert!(
+            should_warn_no_device(true, false),
+            "decoded ok + no device → warn"
+        );
+        assert!(
+            !should_warn_no_device(true, true),
+            "decoded ok + device present → no warn"
+        );
+        assert!(
+            !should_warn_no_device(false, false),
+            "decode failed → no warn (no device)"
+        );
+        assert!(
+            !should_warn_no_device(false, true),
+            "decode failed → no warn (device present)"
+        );
+    }
+
+    #[test]
+    fn disabled_reason_some_only_when_unavailable_and_distinct() {
+        assert!(disabled_reason(PlaybackAvailability::Available).is_none());
+        let no_device = disabled_reason(PlaybackAvailability::NoDevice).expect("reason");
+        let too_large = disabled_reason(PlaybackAvailability::ClipTooLarge).expect("reason");
+        assert!(no_device.contains("device"), "{no_device}");
+        assert!(too_large.contains("too large"), "{too_large}");
+        // Distinct strings: kills a mutant that returns the same reason for both.
+        assert_ne!(no_device, too_large);
     }
 
     #[test]

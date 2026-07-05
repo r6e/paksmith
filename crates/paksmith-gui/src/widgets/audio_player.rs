@@ -9,7 +9,10 @@ use iced::widget::{button, canvas, column, container, row, slider, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme};
 
 use crate::app::Message;
-use crate::state::audio_view::{AudioState, Transport, format_time};
+use crate::state::audio_view::{
+    AudioState, PlaybackAvailability, Transport, disabled_reason, format_time,
+    playback_availability,
+};
 use crate::theme::tokens::{
     SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM,
 };
@@ -203,13 +206,22 @@ pub fn waveform_canvas(state: &AudioState, accent: Color) -> Element<'_, Message
 /// - for a **non-playable** codec, a hint pointing the user at Export As… to save
 ///   the raw stream, with no transport controls.
 ///
+/// When `device_available` is false (no output device) or the decoded clip
+/// exceeds [`MAX_PLAYABLE_SAMPLES`](crate::state::audio_view::MAX_PLAYABLE_SAMPLES),
+/// the transport controls are rendered **disabled** with a reason line — the
+/// metadata + waveform still show.
+///
 /// `accent` is the theme accent colour, used for the waveform playhead.
 ///
-/// This function is `#[mutants::skip]` rendering glue; the two pieces of pure
-/// logic it delegates to ([`play_pause_label`] and [`metadata_summary`]) are
-/// unit-tested below.
+/// This function is `#[mutants::skip]` rendering glue; its pure logic
+/// ([`play_pause_label`], [`metadata_summary`], and the availability decision
+/// [`playback_availability`]) is unit-tested.
 #[mutants::skip]
-pub fn view<'a>(state: &'a AudioState, accent: Color) -> Element<'a, Message> {
+pub fn view<'a>(
+    state: &'a AudioState,
+    accent: Color,
+    device_available: bool,
+) -> Element<'a, Message> {
     let Some(info) = state.info.as_ref() else {
         // Defensive: the content host only routes audio tabs here (their `info`
         // is `Some`), so this placeholder should never actually surface.
@@ -242,7 +254,11 @@ pub fn view<'a>(state: &'a AudioState, accent: Color) -> Element<'a, Message> {
         } else if state.error.is_none() {
             children.push(muted_line("Decoding\u{2026}".to_owned()));
         }
-        children.push(transport_row(state));
+        let availability = playback_availability(
+            state.decoded.as_ref().map(|d| d.samples.len()),
+            device_available,
+        );
+        children.push(transport_row(state, availability));
     } else {
         children.push(muted_line(format!(
             "Codec {} can't be decoded in-app \u{2014} use Export As\u{2026} to save the raw stream.",
@@ -260,23 +276,30 @@ pub fn view<'a>(state: &'a AudioState, accent: Color) -> Element<'a, Message> {
 /// Transport controls row: play/pause, stop, a volume slider, and the
 /// `position / duration` readout. Nothing here borrows `state` (all values are
 /// copied or owned), so the element is `'static`.
+///
+/// When `availability` is not [`Available`](PlaybackAvailability::Available) the
+/// play/pause + stop buttons are disabled (no `on_press`), the volume slider is
+/// dropped, and a reason line explains why — so the user can't drive a no-op
+/// sink or trigger the large-clip playback allocation.
 #[mutants::skip]
-fn transport_row(state: &AudioState) -> Element<'static, Message> {
+fn transport_row(
+    state: &AudioState,
+    availability: PlaybackAvailability,
+) -> Element<'static, Message> {
+    // `disabled_reason` is the single source of truth: `None` ⇒ controls active,
+    // `Some(reason)` ⇒ disabled with that reason (exhaustive over the enum).
+    let reason = disabled_reason(availability);
+    let enabled = reason.is_none();
+
     let play_pause = button(text(play_pause_label(state.transport)).size(f32::from(TEXT_SM)))
-        .on_press(Message::AudioPlayPause)
+        .on_press_maybe(enabled.then_some(Message::AudioPlayPause))
         .padding([SPACE_XS, SPACE_SM])
         .style(iced::widget::button::secondary);
 
     let stop = button(text("Stop").size(f32::from(TEXT_SM)))
-        .on_press(Message::AudioStop)
+        .on_press_maybe(enabled.then_some(Message::AudioStop))
         .padding([SPACE_XS, SPACE_SM])
         .style(iced::widget::button::secondary);
-
-    // Explicit 0.01 step: a slider's default step is `1`, which on a `0.0..=1.0`
-    // range would snap the volume to only 0 % or 100 %.
-    let volume = slider(0.0..=1.0, state.volume, Message::AudioVolume)
-        .step(0.01_f32)
-        .width(Length::Fixed(140.0));
 
     let readout = text(format!(
         "{} / {}",
@@ -285,10 +308,27 @@ fn transport_row(state: &AudioState) -> Element<'static, Message> {
     ))
     .size(f32::from(TEXT_SM));
 
-    row![play_pause, stop, volume, readout]
+    match reason {
+        None => {
+            // Explicit 0.01 step: a slider's default step is `1`, which on a
+            // `0.0..=1.0` range would snap the volume to only 0 % or 100 %.
+            let volume = slider(0.0..=1.0, state.volume, Message::AudioVolume)
+                .step(0.01_f32)
+                .width(Length::Fixed(140.0));
+            row![play_pause, stop, volume, readout]
+                .spacing(SPACE_SM)
+                .align_y(iced::Alignment::Center)
+                .into()
+        }
+        Some(reason) => column![
+            row![play_pause, stop, readout]
+                .spacing(SPACE_SM)
+                .align_y(iced::Alignment::Center),
+            muted_line(reason.to_owned()),
+        ]
         .spacing(SPACE_SM)
-        .align_y(iced::Alignment::Center)
-        .into()
+        .into(),
+    }
 }
 
 /// Label for the play/pause button: `"Pause"` while playing, `"Play"` in either

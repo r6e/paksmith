@@ -1104,6 +1104,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // to default (`info = None`) on a content swap, so a decode landing
             // after a reset would otherwise write onto a non-audio tab.
             // Two-guard form: can't use let-chains on MSRV 1.88.
+            let mut decoded_ok = false;
             #[allow(clippy::collapsible_if)]
             if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path) {
                 if tab.audio.info.is_some() {
@@ -1116,12 +1117,25 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                             );
                             tab.audio.decoded = Some(decoded);
                             tab.audio.error = None;
+                            decoded_ok = true;
                         }
                         Err(msg) => {
                             tab.audio.error = Some(msg);
                         }
                     }
                 }
+            }
+            // Spec §"No audio device": a clip decoded fine but there's no output
+            // device, so it can't be played (the transport is also rendered
+            // disabled). Surface it once, after the tab borrow ends so `push_toast`
+            // can take `&mut app`. The device-independent decision lives in the
+            // tested `should_warn_no_device`.
+            if crate::state::audio_view::should_warn_no_device(decoded_ok, app.audio.is_some()) {
+                return push_toast(
+                    app,
+                    crate::state::toast::Severity::Error,
+                    "No audio output device \u{2014} playback unavailable.".to_owned(),
+                );
             }
             Task::none()
         }
@@ -1620,6 +1634,18 @@ fn refeed_from_position(
     position_secs: f32,
     volume: f32,
 ) {
+    // Defense in depth: the view disables play for an over-cap clip so this is
+    // normally unreachable, but guard the actual allocation site too — a fresh
+    // `play_samples` doubles the samples into an `f32` buffer, so refuse before
+    // that alloc if a future caller ever reaches here with an over-cap clip.
+    if dec.samples.len() > crate::state::audio_view::MAX_PLAYABLE_SAMPLES {
+        tracing::warn!(
+            samples = dec.samples.len(),
+            cap = crate::state::audio_view::MAX_PLAYABLE_SAMPLES,
+            "refusing to play a clip over the GUI playback cap"
+        );
+        return;
+    }
     let start = crate::state::audio_view::resume_sample_offset(
         position_secs,
         dec.sample_rate,
@@ -1924,13 +1950,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
         let export_menu = app.export_menu.as_ref();
         let tabs = &app.tabs;
         let entries = &archive.entries;
+        let audio_device_available = app.audio.is_some();
 
         pane_grid(&app.panes, move |_pane, kind, _maximized| {
             let content: Element<'_, Message> = match kind {
                 PaneKind::Sidebar => {
                     sidebar::view(tree, accent, selected_row, context_row, export_menu)
                 }
-                PaneKind::Detail => content::view(tabs, entries, accent),
+                PaneKind::Detail => content::view(tabs, entries, accent, audio_device_available),
             };
             pane_grid::Content::new(content)
         })
@@ -4670,6 +4697,53 @@ mod tests {
         assert!(
             tab.audio.decoded.is_none(),
             "an Err result must not populate audio.decoded"
+        );
+    }
+
+    #[test]
+    fn audio_decoded_ok_with_no_device_pushes_toast() {
+        // `App::default` opens no output device (`audio == None`), so a successful
+        // decode can't be played — the handler surfaces one toast (spec §"No audio
+        // device"; the transport is also rendered disabled in the view).
+        let mut app = app_with_open_audio_tab();
+        app.archive_generation = 3;
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Ok(two_frame_decoded_audio()),
+                generation: 3,
+            },
+        );
+        assert_eq!(
+            app.toasts.items().len(),
+            1,
+            "a successful decode with no output device must push one toast"
+        );
+        assert_eq!(
+            app.toasts.items()[0].severity,
+            crate::state::toast::Severity::Error
+        );
+    }
+
+    #[test]
+    fn audio_decoded_err_pushes_no_toast() {
+        // A decode FAILURE must NOT push the no-device toast (that's only for a
+        // successful-but-unplayable decode) — pins the `decoded_ok &&` half of the
+        // toast condition against the Ok case above.
+        let mut app = app_with_open_audio_tab();
+        app.archive_generation = 3;
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Err("boom".to_owned()),
+                generation: 3,
+            },
+        );
+        assert!(
+            app.toasts.is_empty(),
+            "a decode error must not push the no-device toast"
         );
     }
 

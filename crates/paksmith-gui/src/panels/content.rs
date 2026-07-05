@@ -27,12 +27,15 @@ use crate::widgets::{audio_player, hex_view, property_tree, tab_bar, texture_vie
 /// * `tabs`    — the current tab collection.
 /// * `entries` — the archive's per-entry metadata map (keyed by full path).
 /// * `accent`  — the system accent colour for the active view-mode button.
+/// * `audio_device_available` — whether an audio output device opened; gates the
+///   audio player's transport controls (disabled + reason when absent).
 #[mutants::skip]
 #[allow(clippy::too_many_lines)] // single-fn content host; splitting would obscure layout
 pub fn view<'a>(
     tabs: &'a Tabs,
     entries: &'a BTreeMap<String, EntryMeta>,
     accent: iced::Color,
+    audio_device_available: bool,
 ) -> Element<'a, Message> {
     if tabs.open.is_empty() {
         return empty_state();
@@ -61,7 +64,9 @@ pub fn view<'a>(
                         ViewMode::Properties => properties_view(parsed, &tab.expanded),
                         ViewMode::Hex => hex_view::view(bytes, *truncated, &tab.hex, accent),
                         ViewMode::Texture => texture_viewer::view(&tab.texture, accent),
-                        ViewMode::Audio => audio_player::view(&tab.audio, accent),
+                        ViewMode::Audio => {
+                            audio_player::view(&tab.audio, accent, audio_device_available)
+                        }
                     }
                 }
             };
