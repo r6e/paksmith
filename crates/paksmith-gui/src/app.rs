@@ -5111,11 +5111,11 @@ mod tests {
         let _ = app.tabs.open_or_activate("A.uasset");
         app.tabs.open[0].audio.transport = Transport::Playing;
 
-        // Any tab-clearing ArchiveOpened result; the stop runs first. This exercises
-        // the archive-swap stop path with a live active tab (its transport reset is
-        // then discarded by clear() — see the accepted mutation survivor note).
-        // Locked always calls app.tabs.clear(), making the is_empty() assertion valid.
-        // (Core-no-archive does not clear tabs, so it can't be used here.)
+        // `Locked` always calls `app.tabs.clear()`, so this pins the clearing
+        // branch: the stop runs first (on the live active tab), then clear()
+        // drops every tab. The observable *stop* itself is pinned separately by
+        // `archive_open_event_stops_active_playback` via the non-clearing `Core`
+        // path.
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
@@ -5124,5 +5124,34 @@ mod tests {
         );
 
         assert!(app.tabs.open.is_empty(), "archive swap clears all tabs");
+    }
+
+    #[test]
+    fn archive_open_event_stops_active_playback() {
+        use crate::state::audio_view::Transport;
+        // A `Core` open error with no archive loaded is the one `ArchiveOpened`
+        // path that does NOT clear tabs — the active tab survives, so the
+        // top-of-arm `stop_active_playback` is directly observable here. This
+        // pins the ArchiveOpened stop (which `is_empty()` on a clearing branch
+        // cannot): delete the stop and this tab stays `Playing`.
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset"); // idx 0, active + playing
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Core("boom".to_string())))),
+        );
+
+        assert_eq!(
+            app.tabs.open.len(),
+            1,
+            "a Core open error keeps the existing tab (no clear)"
+        );
+        assert_eq!(
+            app.tabs.open[0].audio.transport,
+            Transport::Stopped,
+            "any archive-open event must stop the active tab's playback"
+        );
     }
 }
