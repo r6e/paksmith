@@ -1628,6 +1628,31 @@ fn stop_active_playback(app: &mut App) {
     }
 }
 
+/// Re-feed the decoded clip to the sink from `position_secs` at `volume`.
+///
+/// Shared by the `Play` and `SeekTo`-while-playing arms of [`apply_playback`]:
+/// compute the frame-aligned resume offset, re-apply the active tab's volume (a
+/// fresh `play_samples` source does NOT carry the previous level over), and hand
+/// the tail to the sink. `#[mutants::skip]`: pure device glue — the only logic it
+/// carries (the resume-offset math) is unit + mutation tested in
+/// [`resume_sample_offset`](crate::state::audio_view::resume_sample_offset).
+#[mutants::skip]
+fn refeed_from_position(
+    out: &mut AudioOutput,
+    dec: &crate::state::audio_view::DecodedAudio,
+    position_secs: f32,
+    volume: f32,
+) {
+    let start = crate::state::audio_view::resume_sample_offset(
+        position_secs,
+        dec.sample_rate,
+        dec.channels,
+        dec.samples.len(),
+    );
+    out.set_volume(volume);
+    out.play_samples(dec.samples[start..].to_vec(), dec.channels, dec.sample_rate);
+}
+
 /// Apply a [`PlaybackAction`](crate::state::audio_view::PlaybackAction) from the
 /// pure state machine to the audio-output seam.
 ///
@@ -1650,24 +1675,13 @@ fn apply_playback(
     volume: f32,
     action: crate::state::audio_view::PlaybackAction,
 ) {
-    use crate::state::audio_view::{PlaybackAction, resume_sample_offset};
+    use crate::state::audio_view::PlaybackAction;
     let Some(out) = audio else { return };
     match action {
         PlaybackAction::Play => {
+            // Stopped→play starts from 0; Paused→resume starts mid-clip.
             if let Some(dec) = decoded {
-                // Slice samples from the current playhead position so that
-                // Stopped→play starts from 0 and Paused→resume starts mid-clip.
-                let start = resume_sample_offset(
-                    position_secs,
-                    dec.sample_rate,
-                    dec.channels,
-                    dec.samples.len(),
-                );
-                // Re-apply the active tab's volume on every re-feed: `play_samples`
-                // stop+append+plays a fresh source and does not carry volume over,
-                // so without this the device would keep the previous tab's level.
-                out.set_volume(volume);
-                out.play_samples(dec.samples[start..].to_vec(), dec.channels, dec.sample_rate);
+                refeed_from_position(out, dec, position_secs, volume);
             }
         }
         PlaybackAction::Pause => out.pause(),
@@ -1681,14 +1695,7 @@ fn apply_playback(
             #[allow(clippy::collapsible_if)]
             if transport == crate::state::audio_view::Transport::Playing {
                 if let Some(dec) = decoded {
-                    let start = resume_sample_offset(
-                        position_secs,
-                        dec.sample_rate,
-                        dec.channels,
-                        dec.samples.len(),
-                    );
-                    out.set_volume(volume);
-                    out.play_samples(dec.samples[start..].to_vec(), dec.channels, dec.sample_rate);
+                    refeed_from_position(out, dec, position_secs, volume);
                 }
             }
         }
