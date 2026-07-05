@@ -180,15 +180,33 @@ impl Default for App {
 /// subscriber writes to. Extracted from `main`'s boot closure so the
 /// buffer-sharing (load-bearing: drop it and the console is permanently empty)
 /// is unit-testable rather than buried in the untestable entry point.
+///
+/// `#[mutants::skip]`: this function opens the real audio device, which is
+/// environment-gated — `AudioOutput::new()` returns `None` in a headless
+/// (CI/test) environment, so a mutant deleting the `audio` field init is
+/// indistinguishable from the real path there and would survive. The
+/// device-free, load-bearing part (log-buffer sharing) is extracted to
+/// [`base_app`] so it stays mutation-tested.
+#[mutants::skip]
 pub fn boot_app(log_buffer: crate::state::log_buffer::LogBuffer) -> App {
+    let mut app = base_app(log_buffer);
+    // Open the real output device here (not in `App::default`/`base_app`):
+    // `default()` is used throughout the tests and must stay free of any
+    // audio-hardware side effect, so device acquisition lives on the live boot
+    // path only. `AudioOutput::new` returns `None` when no device is available,
+    // so a headless environment degrades to silent playback rather than failing.
+    app.audio = crate::audio_output::AudioOutput::new();
+    app
+}
+
+/// The device-free core of [`boot_app`]: wire the caller's shared `LogBuffer`
+/// into a fresh `App`. Extracted (not `#[mutants::skip]`) so the load-bearing
+/// buffer sharing — drop it and the console is permanently empty — stays
+/// mutation-tested via `boot_app_shares_the_injected_log_buffer`, even though
+/// `boot_app` itself is device glue.
+fn base_app(log_buffer: crate::state::log_buffer::LogBuffer) -> App {
     App {
         log_buffer,
-        // Open the real output device here (not in `App::default`): `default()`
-        // is used throughout the tests and must stay free of any audio-hardware
-        // side effect, so device acquisition lives on the live boot path only.
-        // `AudioOutput::new` returns `None` when no device is available, so a
-        // headless environment degrades to silent playback rather than failing.
-        audio: crate::audio_output::AudioOutput::new(),
         ..App::default()
     }
 }
