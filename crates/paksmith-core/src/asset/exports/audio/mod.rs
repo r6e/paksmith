@@ -79,8 +79,9 @@ pub fn classify_audio(package: &Package) -> Option<AudioInfo> {
         })?;
     let codec = active_codec(data)?;
     let (codec_label, playable) = match codec.to_ascii_uppercase().as_str() {
-        "PCM" => ("PCM".to_string(), true),
-        "ADPCM" => ("ADPCM".to_string(), true),
+        // Both passthrough/transcode paths label the export with the matched
+        // codec string, so bind it once rather than repeating the literal.
+        known @ ("PCM" | "ADPCM") => (known.to_string(), true),
         "OGG" => ("Vorbis (Ogg)".to_string(), true),
         other => (other.to_string(), false),
     };

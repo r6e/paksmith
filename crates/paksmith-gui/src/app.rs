@@ -1122,16 +1122,18 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 let decoded = decoded_for_action(&tab.audio, action);
                 let transport = tab.audio.transport;
                 let position_secs = tab.audio.position_secs;
-                Some((action, decoded, transport, position_secs))
+                let volume = tab.audio.volume;
+                Some((action, decoded, transport, position_secs, volume))
             } else {
                 None
             };
-            if let Some((action, decoded, transport, position_secs)) = state {
+            if let Some((action, decoded, transport, position_secs, volume)) = state {
                 apply_playback(
                     &mut app.audio,
                     decoded.as_ref(),
                     transport,
                     position_secs,
+                    volume,
                     action,
                 );
             }
@@ -1145,16 +1147,20 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 let decoded = decoded_for_action(&tab.audio, action);
                 let transport = tab.audio.transport;
                 let position_secs = tab.audio.position_secs;
-                Some((action, decoded, transport, position_secs))
+                // `Stop` doesn't re-feed, so volume is unused by `apply_playback`
+                // here; pass it for a uniform call signature.
+                let volume = tab.audio.volume;
+                Some((action, decoded, transport, position_secs, volume))
             } else {
                 None
             };
-            if let Some((action, decoded, transport, position_secs)) = state {
+            if let Some((action, decoded, transport, position_secs, volume)) = state {
                 apply_playback(
                     &mut app.audio,
                     decoded.as_ref(),
                     transport,
                     position_secs,
+                    volume,
                     action,
                 );
             }
@@ -1187,16 +1193,18 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 let decoded = decoded_for_action(&tab.audio, act);
                 let transport = tab.audio.transport;
                 let position_secs = tab.audio.position_secs;
-                Some((act, decoded, transport, position_secs))
+                let volume = tab.audio.volume;
+                Some((act, decoded, transport, position_secs, volume))
             } else {
                 None
             };
-            if let Some((act, decoded, transport, position_secs)) = state {
+            if let Some((act, decoded, transport, position_secs, volume)) = state {
                 apply_playback(
                     &mut app.audio,
                     decoded.as_ref(),
                     transport,
                     position_secs,
+                    volume,
                     act,
                 );
             }
@@ -1582,11 +1590,10 @@ pub fn audio_tick_active(app: &App) -> bool {
 /// cloning the (MB-scale) `Vec<i16>` for them is pure waste — those actions get
 /// `None` instead.
 ///
-/// `#[mutants::skip]`: which branch is taken is only observable through the real
-/// rodio device (with `app.audio == None` the seam returns early and never reads
-/// `decoded`), so this decision cannot be unit-mutation-tested. It is seam-perf
-/// glue, verified by the manual smoke checklist.
-#[mutants::skip]
+/// The return value is device-independent: `Some` for the two re-feed actions,
+/// `None` for the other three. It is asserted directly in the unit tests, so a
+/// `Play => None` mutant (which would make playback silently never start) is
+/// caught without a real rodio device.
 fn decoded_for_action(
     audio: &crate::state::audio_view::AudioState,
     action: crate::state::audio_view::PlaybackAction,
@@ -1640,27 +1647,26 @@ fn apply_playback(
     decoded: Option<&crate::state::audio_view::DecodedAudio>,
     transport: crate::state::audio_view::Transport,
     position_secs: f32,
+    volume: f32,
     action: crate::state::audio_view::PlaybackAction,
 ) {
-    use crate::state::audio_view::PlaybackAction;
+    use crate::state::audio_view::{PlaybackAction, resume_sample_offset};
     let Some(out) = audio else { return };
     match action {
         PlaybackAction::Play => {
             if let Some(dec) = decoded {
                 // Slice samples from the current playhead position so that
                 // Stopped→play starts from 0 and Paused→resume starts mid-clip.
-                // `position_secs` is non-negative (reset to 0 by `stop`;
-                // `set_position` only receives seam-reported values).  The product
-                // fits `usize`: realistic audio lengths stay well within usize::MAX.
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    clippy::cast_precision_loss
-                )]
-                let mut start =
-                    (position_secs * dec.sample_rate as f32 * f32::from(dec.channels)) as usize;
-                start = start.min(dec.samples.len());
-                start -= start % usize::from(dec.channels).max(1);
+                let start = resume_sample_offset(
+                    position_secs,
+                    dec.sample_rate,
+                    dec.channels,
+                    dec.samples.len(),
+                );
+                // Re-apply the active tab's volume on every re-feed: `play_samples`
+                // stop+append+plays a fresh source and does not carry volume over,
+                // so without this the device would keep the previous tab's level.
+                out.set_volume(volume);
                 out.play_samples(dec.samples[start..].to_vec(), dec.channels, dec.sample_rate);
             }
         }
@@ -1675,15 +1681,13 @@ fn apply_playback(
             #[allow(clippy::collapsible_if)]
             if transport == crate::state::audio_view::Transport::Playing {
                 if let Some(dec) = decoded {
-                    #[allow(
-                        clippy::cast_possible_truncation,
-                        clippy::cast_sign_loss,
-                        clippy::cast_precision_loss
-                    )]
-                    let mut start =
-                        (position_secs * dec.sample_rate as f32 * f32::from(dec.channels)) as usize;
-                    start = start.min(dec.samples.len());
-                    start -= start % usize::from(dec.channels).max(1);
+                    let start = resume_sample_offset(
+                        position_secs,
+                        dec.sample_rate,
+                        dec.channels,
+                        dec.samples.len(),
+                    );
+                    out.set_volume(volume);
                     out.play_samples(dec.samples[start..].to_vec(), dec.channels, dec.sample_rate);
                 }
             }
@@ -1735,8 +1739,12 @@ pub fn subscription(app: &App) -> Subscription<Message> {
 
     // Tick at 100 ms while audio is playing so the displayed playhead advances
     // and the finish condition is polled. Gated on `audio_tick_active` so the
-    // subscription costs nothing when no audio is playing.
-    let audio_tick_sub = if audio_tick_active(app) {
+    // subscription costs nothing when no audio is playing, AND on device
+    // presence: with no output device (`app.audio == None`) the tick can never
+    // observe a position or finish, so it would spin forever. The device gate
+    // stays OUT of `audio_tick_active` so that predicate remains device-agnostic
+    // and unit-testable (`App::default()` has `audio == None`).
+    let audio_tick_sub = if audio_tick_active(app) && app.audio.is_some() {
         iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::AudioTick)
     } else {
         Subscription::none()
@@ -4832,6 +4840,28 @@ mod tests {
             "volume −0.5 must clamp to 0.0 (got {})",
             app.tabs.active_tab().unwrap().audio.volume
         );
+    }
+
+    // --- decoded_for_action ---
+
+    #[test]
+    fn decoded_for_action_clones_only_for_refeed_actions() {
+        use crate::state::audio_view::{AudioState, DecodedAudio, PlaybackAction};
+        let s = AudioState {
+            decoded: Some(DecodedAudio {
+                samples: vec![1, 2],
+                sample_rate: 8000,
+                channels: 1,
+            }),
+            ..AudioState::default()
+        };
+        // Re-feed actions clone the PCM; the others return None. Device-independent,
+        // so a `Play => None` mutant (playback would silently never start) fails here.
+        assert!(decoded_for_action(&s, PlaybackAction::Play).is_some());
+        assert!(decoded_for_action(&s, PlaybackAction::SeekTo(0.0)).is_some());
+        assert!(decoded_for_action(&s, PlaybackAction::Pause).is_none());
+        assert!(decoded_for_action(&s, PlaybackAction::Stop).is_none());
+        assert!(decoded_for_action(&s, PlaybackAction::None).is_none());
     }
 
     // --- AudioStop arm ---

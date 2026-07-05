@@ -189,12 +189,6 @@ impl AudioState {
         PlaybackAction::SeekTo(secs)
     }
 
-    /// Advance the playhead to `secs` (called by the tick that reads the sink
-    /// position).
-    pub fn set_position(&mut self, secs: f32) {
-        self.position_secs = secs;
-    }
-
     /// Advance the playhead from the current buffer's start offset by
     /// `elapsed_secs` (rodio's buffer-relative `get_pos`), yielding the absolute
     /// track position `playback_offset_secs + elapsed_secs`.
@@ -258,6 +252,35 @@ pub fn format_time(secs: f32) -> String {
     let m = total / 60;
     let s = total % 60;
     format!("{m}:{s:02}")
+}
+
+/// The interleaved-sample index at which to resume playback for a clip of
+/// `len` interleaved samples (`channels`-interleaved, `sample_rate` Hz), given
+/// an absolute playhead `position_secs`.
+///
+/// Converts seconds → interleaved index, clamps to `len` (a position past the
+/// end resumes at the end = silence), then frame-aligns DOWN to a channel
+/// boundary so stereo L/R never swap. `position_secs` is non-negative in
+/// production (reset to 0 by [`AudioState::stop`]; only
+/// [`AudioState::advance_playhead`]/[`AudioState::seek_fraction`] write it).
+/// `channels` is guarded with `.max(1)` so a 0-channel clip can't
+/// divide-by-zero.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "interleaved index for realistic audio lengths fits usize; negative/NaN position saturates to 0"
+)]
+pub fn resume_sample_offset(
+    position_secs: f32,
+    sample_rate: u32,
+    channels: u16,
+    len: usize,
+) -> usize {
+    let mut start = (position_secs * sample_rate as f32 * f32::from(channels)) as usize;
+    start = start.min(len);
+    start -= start % usize::from(channels).max(1);
+    start
 }
 
 #[cfg(test)]
@@ -329,21 +352,10 @@ mod tests {
         // and leave the transport assignment unverified).
         assert_eq!(a.toggle_play(), PlaybackAction::Play);
         assert!(matches!(a.transport, Transport::Playing));
-        a.set_position(3.0);
+        a.position_secs = 3.0;
         assert_eq!(a.stop(), PlaybackAction::Stop);
         assert!(a.position_secs.abs() < 1e-6);
         assert!(matches!(a.transport, Transport::Stopped));
-    }
-
-    // --- set_position ---
-
-    #[test]
-    fn set_position_stores_value() {
-        // Dedicated test so a no-op mutant of `set_position` fails: if the body
-        // is removed, position stays at 0.0 (default) and the assertion diverges.
-        let mut a = AudioState::default();
-        a.set_position(3.7);
-        assert!((a.position_secs - 3.7).abs() < 1e-6);
     }
 
     #[test]
@@ -531,6 +543,45 @@ mod tests {
         assert_eq!(format_time(75.0), "1:15");
         assert_eq!(format_time(-5.0), "0:00");
         assert_eq!(format_time(605.0), "10:05");
+    }
+
+    // --- resume_sample_offset (divergent, mutation-killing) ---
+
+    #[test]
+    fn resume_sample_offset_converts_seconds_to_interleaved_index() {
+        // Mono: 2.0 s × 100 Hz × 1 ch = 200. Non-unit position AND rate so a mutant
+        // dropping either factor changes the result.
+        assert_eq!(resume_sample_offset(2.0, 100, 1, 1000), 200);
+    }
+
+    #[test]
+    fn resume_sample_offset_scales_by_channel_count() {
+        // Same position/rate as the mono case, stereo → 2.0 × 100 × 2 = 400.
+        // Dropping `f32::from(channels)` would yield 200 (the mono result).
+        assert_eq!(resume_sample_offset(2.0, 100, 2, 1000), 400);
+    }
+
+    #[test]
+    fn resume_sample_offset_frame_aligns_down_for_stereo() {
+        // 1.5 s × 5 Hz × 3 ch = 22.5 → 22 (exact in f32); 22 % 3 = 1, so the
+        // frame-align subtracts 1 → 21. Deleting `- start % channels` leaves 22;
+        // deleting `.max(1)` doesn't matter here but the odd-boundary landing pins
+        // the modulo. `len` is large so the clamp is a no-op.
+        assert_eq!(resume_sample_offset(1.5, 5, 3, 100_000), 21);
+    }
+
+    #[test]
+    fn resume_sample_offset_clamps_position_past_end() {
+        // Position far beyond the clip: 9999 × 100 × 2 ≫ len. Clamps to 1000 (already
+        // even, so frame-align leaves it). Deleting `.min(len)` would slice OOB.
+        assert_eq!(resume_sample_offset(9999.0, 100, 2, 1000), 1000);
+    }
+
+    #[test]
+    fn resume_sample_offset_zero_channels_does_not_panic() {
+        // 0-channel clip: raw index = 1.0 × 100 × 0 = 0; the `.max(1)` guards the
+        // `% 0` divide-by-zero. Returns 0 without panicking.
+        assert_eq!(resume_sample_offset(1.0, 100, 0, 10), 0);
     }
 
     #[test]

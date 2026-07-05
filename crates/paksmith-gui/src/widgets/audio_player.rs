@@ -288,15 +288,21 @@ fn metadata_summary(
     )
 }
 
+/// Muted text style (foreground scaled by [`TEXT_MUTED_ALPHA`]). Shared by
+/// [`muted_line`] and [`centered_muted`] so the alpha lives in one place.
+fn muted_text_style(theme: &iced::Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
+    }
+}
+
 /// A muted single-line text element (in-flight "Decoding…" and the non-playable
 /// export hint).
 #[mutants::skip]
 fn muted_line(msg: String) -> Element<'static, Message> {
     text(msg)
         .size(f32::from(TEXT_SM))
-        .style(|theme: &iced::Theme| iced::widget::text::Style {
-            color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
-        })
+        .style(muted_text_style)
         .into()
 }
 
@@ -315,18 +321,12 @@ fn error_line(msg: String) -> Element<'static, Message> {
 /// A muted placeholder centred in the full viewport (the `info.is_none()` guard).
 #[mutants::skip]
 fn centered_muted(msg: &'static str) -> Element<'static, Message> {
-    container(
-        text(msg)
-            .size(f32::from(TEXT_MD))
-            .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
-            }),
-    )
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    container(text(msg).size(f32::from(TEXT_MD)).style(muted_text_style))
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 /// Map a click x-coordinate (relative to the canvas left edge) and the canvas

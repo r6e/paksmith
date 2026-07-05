@@ -58,11 +58,33 @@ pub(crate) fn build_pcm_wav(samples: &[i16], channels: u16, sample_rate: u32) ->
     wav
 }
 
+/// The decoded `Vec<i16>` from [`parse_pcm_wav`] is `byte_len` bytes (one i16 per
+/// 2 bytes). Reject a PCM `data` chunk that would exceed the shared decode cap
+/// BEFORE allocating — the ADPCM/Vorbis paths cap the same way, so the whole
+/// audio subsystem is uniformly bounded. `byte_len` is the raw `data`-chunk
+/// length (which equals the resulting sample bytes).
+///
+/// Uses [`crate::PaksmithError::Internal`] to match the `vorbis`/`adpcm` cap
+/// guards (a resource bound, not an unsupported-format condition), keeping the
+/// three audio paths' rejection variant uniform.
+fn pcm_data_within_cap(byte_len: usize) -> crate::Result<()> {
+    if byte_len > MAX_AUDIO_DECODED_BYTES {
+        return Err(crate::PaksmithError::Internal {
+            context: format!(
+                "PCM decode: audio data ({byte_len} bytes) exceeds the {MAX_AUDIO_DECODED_BYTES}-byte cap"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Parse a 16-bit PCM WAV into `(channels, sample_rate, interleaved i16 samples)`.
 ///
 /// Rejects non-PCM (`wFormatTag != 1`) or non-16-bit (`wBitsPerSample != 16`)
-/// with [`crate::PaksmithError::UnsupportedFeature`], and a malformed RIFF/WAVE
-/// container with [`crate::PaksmithError::Internal`].
+/// with [`crate::PaksmithError::UnsupportedFeature`], a `data` chunk exceeding
+/// [`MAX_AUDIO_DECODED_BYTES`] with [`crate::PaksmithError::Internal`]
+/// (decompression-bomb guard, checked before allocating), and a malformed
+/// RIFF/WAVE container with [`crate::PaksmithError::Internal`].
 pub(crate) fn parse_pcm_wav(wav: &[u8]) -> crate::Result<(u16, u32, Vec<i16>)> {
     let (fmt, data) = parse_wav(wav).ok_or_else(|| crate::PaksmithError::Internal {
         context: "decoded audio is not a valid WAV".to_string(),
@@ -75,6 +97,7 @@ pub(crate) fn parse_pcm_wav(wav: &[u8]) -> crate::Result<(u16, u32, Vec<i16>)> {
             ),
         });
     }
+    pcm_data_within_cap(data.len())?;
     let samples = data
         .chunks_exact(2)
         .map(|b| i16::from_le_bytes([b[0], b[1]]))
@@ -134,6 +157,25 @@ mod tests {
         // overflow-panicking (the helper is self-safe regardless of caller).
         let wav = build_pcm_wav(&[], u16::MAX, 8000);
         assert_eq!(u16_at(&wav, 32), u16::MAX); // block align saturated
+    }
+
+    // ===== pcm_data_within_cap (pure, no gigabyte allocation) =====
+
+    #[test]
+    fn pcm_data_within_cap_accepts_at_and_below_cap() {
+        assert!(pcm_data_within_cap(MAX_AUDIO_DECODED_BYTES).is_ok());
+        assert!(pcm_data_within_cap(MAX_AUDIO_DECODED_BYTES - 1).is_ok());
+    }
+
+    #[test]
+    fn pcm_data_within_cap_rejects_above_cap() {
+        // The divergent boundary pair: one byte past the cap must reject. Kills the
+        // `>`→`>=`/`<` and const mutants without a multi-GiB allocation. Uses the
+        // `Internal` variant to match the vorbis/adpcm cap guards.
+        assert!(matches!(
+            pcm_data_within_cap(MAX_AUDIO_DECODED_BYTES + 1),
+            Err(crate::PaksmithError::Internal { .. })
+        ));
     }
 
     // ===== parse_pcm_wav =====
