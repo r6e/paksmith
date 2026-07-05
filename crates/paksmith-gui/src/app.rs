@@ -418,8 +418,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             })
         }
         Message::ArchiveOpened(boxed) => {
-            // Swapping archives clears all tabs; stop the surviving global sink first
-            // (spec §3 "one active playback" — no tab can own it after the swap).
+            // Any archive-open result stops the current playback first (spec §3
+            // "one active playback"). The clearing branches (Ok/Locked) leave no
+            // tab to own the sink; a Core failure keeps the tabs but the
+            // navigation attempt still stops playback (tab + device reset
+            // together, so no desync).
             stop_active_playback(app);
             match *boxed {
                 Ok(loaded) => {
@@ -5105,7 +5108,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_new_archive_stops_playback_without_panicking() {
+    fn archive_swap_clears_tabs_without_panicking() {
         use crate::state::audio_view::Transport;
         let mut app = App::default();
         let _ = app.tabs.open_or_activate("A.uasset");
