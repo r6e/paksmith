@@ -833,8 +833,13 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // Opening any asset (button, double-click, Enter, or the context-menu
             // strip) dismisses the inline menu.
             dismiss_row_menus(app);
-            // Opening another asset stops the current playback (spec §3).
-            stop_active_playback(app);
+            // Opening *another* sound stops the current playback (spec §3);
+            // re-opening the already-active asset is not "another" and must not
+            // stop it — mirrors the `TabActivated` same-tab guard.
+            let reopening_active = app.tabs.active_tab().is_some_and(|t| t.path == path);
+            if !reopening_active {
+                stop_active_playback(app);
+            }
             // Re-opening an already-open asset only reactivates its tab; it keeps its
             // loaded content and must NOT re-read/re-parse (tab dedupe per the spec).
             // Branch on `was_open` directly (load in the `else`) rather than a
@@ -5091,6 +5096,24 @@ mod tests {
             app.tabs.open[0].audio.transport,
             Transport::Stopped,
             "opening another asset must stop the previously-playing tab"
+        );
+    }
+
+    #[test]
+    fn reopening_the_active_asset_keeps_playback() {
+        use crate::state::audio_view::Transport;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset"); // idx 0, active + playing
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        // Re-opening the already-active asset is not "opening another sound"
+        // (spec §3), so playback must continue — the path-equality guard.
+        let _ = update(&mut app, Message::OpenAsset("A.uasset".into()));
+
+        assert_eq!(
+            app.tabs.open[0].audio.transport,
+            Transport::Playing,
+            "re-opening the active asset must NOT stop its playback"
         );
     }
 

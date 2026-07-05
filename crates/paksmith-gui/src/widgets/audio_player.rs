@@ -1,9 +1,9 @@
 //! Waveform canvas widget for the audio player.
 //!
 //! Draws a column-per-peak waveform with a playhead line and emits
-//! [`crate::app::Message::AudioSeek`] on click or drag (scrub) inside the canvas.
-//! The full widget is rendering/hit-test glue; all pure logic lives in
-//! [`crate::state::audio_view`].
+//! [`crate::app::Message::AudioSeek`] on a click or when a drag is released
+//! inside the canvas. The full widget is rendering/hit-test glue; all pure logic
+//! lives in [`crate::state::audio_view`].
 
 use iced::widget::{button, canvas, column, container, row, slider, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme};
@@ -22,7 +22,7 @@ const WAVEFORM_HEIGHT: f32 = 80.0;
 // ── Waveform struct ───────────────────────────────────────────────────────────
 
 /// A `canvas::Program` that renders a waveform + playhead and emits
-/// [`Message::AudioSeek`] on click or drag (scrub).
+/// [`Message::AudioSeek`] on a click or on drag release.
 ///
 /// The `draw`/`update` methods are `#[mutants::skip]` rendering/hit-test glue;
 /// the only pure logic (the x → seek fraction) is extracted to the tested
@@ -38,7 +38,7 @@ struct Waveform<'a> {
 
 impl canvas::Program<Message> for Waveform<'_> {
     /// `true` while the left button is held after a press inside the canvas, so
-    /// subsequent cursor motion scrubs the playhead (drag-to-seek).
+    /// the release is routed here and commits the seek.
     type State = bool;
 
     // Event plumbing glue (iced `Cursor`/`Event` aren't unit-constructible); the
@@ -52,32 +52,49 @@ impl canvas::Program<Message> for Waveform<'_> {
         cursor: iced::mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
         use iced::mouse::{Button, Event as MouseEvent};
+        // A window focus loss (e.g. alt-tab with the button held) can swallow the
+        // release that ends a drag, stranding `dragging = true`. Clear it here so a
+        // later click can't fire a stale seek — iced's `CursorMoved` carries no
+        // button-held state, so this is the only clean lost-release signal.
+        if let iced::Event::Window(iced::window::Event::Unfocused) = event {
+            *dragging = false;
+            return None;
+        }
         let iced::Event::Mouse(mouse_event) = event else {
             return None;
         };
         match mouse_event {
-            // A left-press inside the canvas begins a scrub and emits the initial
-            // seek. `and_capture()` routes the following motion/release events here
-            // even once the cursor leaves the canvas bounds.
+            // A left-press INSIDE the canvas begins the interaction and captures the
+            // mouse so the following motion + release route here. The seek is
+            // committed on RELEASE (below), NOT per-move: re-feeding the sink on
+            // every `CursorMoved` re-copies and re-normalizes the sample tail, so a
+            // fast drag over a long clip would storm the device. A press OUTSIDE
+            // ends any (possibly stranded) drag and doesn't capture, so a click on
+            // another widget after a lost release can't be stolen.
             MouseEvent::ButtonPressed(Button::Left) => {
-                // `pos.x` is relative to `bounds.x` (origin = top-left of canvas).
-                let pos = cursor.position_in(bounds)?;
-                *dragging = true;
-                let frac = seek_fraction_from_x(pos.x, bounds.width);
-                Some(canvas::Action::publish(Message::AudioSeek(frac)).and_capture())
+                if cursor.position_in(bounds).is_some() {
+                    *dragging = true;
+                    Some(canvas::Action::capture())
+                } else {
+                    *dragging = false;
+                    None
+                }
             }
-            // Motion while the button is held keeps seeking (drag). The absolute
-            // cursor position is delivered even outside the canvas during the
-            // captured drag; `seek_fraction_from_x` clamps the relative x to [0, 1].
-            MouseEvent::CursorMoved { .. } if *dragging => {
-                let pos = cursor.position()?;
-                let frac = seek_fraction_from_x(pos.x - bounds.x, bounds.width);
-                Some(canvas::Action::publish(Message::AudioSeek(frac)).and_capture())
-            }
-            // Release ends the scrub.
-            MouseEvent::ButtonReleased(Button::Left) => {
+            // Motion while held: hold the capture (keep the release routed here),
+            // but do not seek — the visible playhead simply keeps following real
+            // playback until the drag commits on release.
+            MouseEvent::CursorMoved { .. } if *dragging => Some(canvas::Action::capture()),
+            // Release commits the seek to the final cursor position (delivered even
+            // if the drag left the canvas bounds; `seek_fraction_from_x` clamps the
+            // relative x to [0, 1]). If the position is unavailable (released
+            // off-window), just end the drag without seeking, rather than jumping
+            // to 0:00.
+            MouseEvent::ButtonReleased(Button::Left) if *dragging => {
                 *dragging = false;
-                None
+                cursor.position().map(|p| {
+                    let frac = seek_fraction_from_x(p.x - bounds.x, bounds.width);
+                    canvas::Action::publish(Message::AudioSeek(frac)).and_capture()
+                })
             }
             _ => None,
         }
