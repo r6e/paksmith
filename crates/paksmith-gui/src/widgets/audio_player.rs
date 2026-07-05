@@ -1,7 +1,7 @@
 //! Waveform canvas widget for the audio player.
 //!
 //! Draws a column-per-peak waveform with a playhead line and emits
-//! [`Message::AudioSeek`] on left-press inside the canvas.  The full
+//! [`crate::app::Message::AudioSeek`] on left-press inside the canvas.  The full
 //! widget is rendering/hit-test glue; all pure logic lives in
 //! [`crate::state::audio_view`].
 
