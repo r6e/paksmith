@@ -14,11 +14,11 @@ use iced::{Element, Length};
 use crate::app::{Message, accent_button};
 use crate::panels::detail::{compression_ratio, human_size, kv_row};
 use crate::state::archive::EntryMeta;
-use crate::state::tabs::{TabContent, Tabs, ViewMode, texture_available};
+use crate::state::tabs::{TabContent, Tabs, ViewMode, audio_available, texture_available};
 use crate::theme::tokens::{
     SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM,
 };
-use crate::widgets::{hex_view, property_tree, tab_bar, texture_viewer};
+use crate::widgets::{audio_player, hex_view, property_tree, tab_bar, texture_viewer};
 
 // ── public entry-point ────────────────────────────────────────────────────────
 
@@ -46,7 +46,8 @@ pub fn view<'a>(
         None => muted_text("No active tab"),
         Some(tab) => {
             let show_texture = texture_available(tab);
-            let switcher = view_mode_switcher(tab.view, accent, show_texture);
+            let show_audio = audio_available(tab);
+            let switcher = view_mode_switcher(tab.view, accent, show_texture, show_audio);
             let content = match &tab.content {
                 TabContent::Loading => muted_text("Loading\u{2026}"),
                 TabContent::Ready {
@@ -60,7 +61,7 @@ pub fn view<'a>(
                         ViewMode::Properties => properties_view(parsed, &tab.expanded),
                         ViewMode::Hex => hex_view::view(bytes, *truncated, &tab.hex, accent),
                         ViewMode::Texture => texture_viewer::view(&tab.texture, accent),
-                        ViewMode::Audio => muted_text("Audio player \u{2014} coming soon"),
+                        ViewMode::Audio => audio_player::view(&tab.audio, accent),
                     }
                 }
             };
@@ -87,6 +88,7 @@ fn view_mode_switcher(
     active: ViewMode,
     accent: iced::Color,
     show_texture: bool,
+    show_audio: bool,
 ) -> Element<'static, Message> {
     let mut modes: Vec<(ViewMode, &'static str)> = vec![
         (ViewMode::Properties, "Properties"),
@@ -95,6 +97,9 @@ fn view_mode_switcher(
     ];
     if show_texture {
         modes.push((ViewMode::Texture, "Texture"));
+    }
+    if show_audio {
+        modes.push((ViewMode::Audio, "Audio"));
     }
 
     let buttons: Vec<Element<'_, Message>> = modes

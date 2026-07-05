@@ -5,11 +5,6 @@
 //! panels follow the same single-responsibility pattern: state lives here,
 //! widget rendering lives in `widgets/audio_player` (a later Phase 7d task).
 
-// Most fields and two Transport variants are defined now but consumed by the
-// audio-player widget and decode task landed in later Phase 7d tasks. Suppress
-// dead_code for the whole module until those tasks fill in the constructors.
-#![allow(dead_code)]
-
 use paksmith_core::asset::AudioInfo;
 
 /// A decoded audio clip as interleaved 16-bit PCM samples.

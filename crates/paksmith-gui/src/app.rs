@@ -288,16 +288,10 @@ pub enum Message {
         generation: u64,
     },
     /// Toggle play/pause for the active tab's audio.
-    // Constructed by the audio-player widget (later Phase 7d task).
-    #[allow(dead_code)]
     AudioPlayPause,
     /// Stop the active tab's audio and reset the playhead to zero.
-    // Constructed by the audio-player widget (later Phase 7d task).
-    #[allow(dead_code)]
     AudioStop,
     /// Set the active tab's audio volume (`0.0`–`1.0`; clamped by `AudioState`).
-    // Constructed by the audio-player widget (later Phase 7d task).
-    #[allow(dead_code)]
     AudioVolume(f32),
     /// Seek the active tab's audio to the given fractional position (`0.0`–`1.0`).
     /// Emitted by the waveform canvas on click/drag.
