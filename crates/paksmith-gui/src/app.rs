@@ -4969,7 +4969,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_seek_quarter_moves_position_to_distinct_value() {
+    fn audio_seek_quarter_moves_position_to_2_5_secs() {
         // AudioSeek(0.25) on a 10.0 s clip must set position_secs to 2.5 (not
         // 5.0 and not 0.0).  A mutant that hard-codes a different fraction or
         // calls seek_fraction with the wrong argument will produce a different

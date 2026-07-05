@@ -21,10 +21,9 @@ const WAVEFORM_HEIGHT: f32 = 80.0;
 /// A `canvas::Program` that renders a waveform + playhead and emits
 /// [`Message::AudioSeek`] on click.
 ///
-/// Marked `#[mutants::skip]` because the draw and update methods are
-/// rendering / hit-test glue with no observable pure-logic state to assert
-/// against in unit tests.
-#[mutants::skip]
+/// The `draw`/`update` methods are `#[mutants::skip]` rendering/hit-test glue;
+/// the only pure logic (the click → seek fraction) is extracted to the tested
+/// [`seek_fraction_from_x`].
 struct Waveform<'a> {
     /// Pre-computed per-column (min, max) amplitude pairs in `[-1.0, 1.0]`.
     peaks: &'a [(f32, f32)],
@@ -37,6 +36,9 @@ struct Waveform<'a> {
 impl canvas::Program<Message> for Waveform<'_> {
     type State = ();
 
+    // Event plumbing glue (iced `Cursor`/`Event` aren't unit-constructible); the
+    // seek-fraction math it delegates to is pinned by `seek_fraction_from_x`.
+    #[mutants::skip]
     fn update(
         &self,
         _state: &mut Self::State,
@@ -50,13 +52,15 @@ impl canvas::Program<Message> for Waveform<'_> {
         else {
             return None;
         };
-        let pos = cursor.position_in(bounds)?;
         // `pos.x` is already relative to `bounds.x` (origin = top-left of canvas).
-        // `bounds.width` is always > 0 while the canvas is laid out.
-        let frac = (pos.x / bounds.width).clamp(0.0, 1.0);
+        let pos = cursor.position_in(bounds)?;
+        let frac = seek_fraction_from_x(pos.x, bounds.width);
         Some(canvas::Action::publish(Message::AudioSeek(frac)).and_capture())
     }
 
+    // Pure rendering glue (coordinate math → iced geometry); visual correctness
+    // is verified by manual smoke, not unit tests.
+    #[mutants::skip]
     fn draw(
         &self,
         _state: &Self::State,
@@ -141,4 +145,31 @@ pub fn waveform_canvas(state: &AudioState, accent: Color) -> Element<'_, Message
     .width(Length::Fill)
     .height(Length::Fixed(WAVEFORM_HEIGHT))
     .into()
+}
+
+/// Map a click x-coordinate (relative to the canvas left edge) and the canvas
+/// width to a seek fraction in `[0.0, 1.0]`. A zero/negative width returns
+/// `0.0`, guarding the caller against a NaN/inf fraction from division by zero.
+fn seek_fraction_from_x(x: f32, width: f32) -> f32 {
+    if width <= 0.0 {
+        return 0.0;
+    }
+    (x / width).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seek_fraction_from_x;
+
+    #[test]
+    #[allow(clippy::float_cmp)] // clamp returns the exact bounds 0.0 / 1.0
+    fn seek_fraction_from_x_maps_and_clamps() {
+        // x=40 of an 80-wide canvas → 0.5. Divergent values kill `/ -> *`
+        // (3200 → clamps to 1.0) and `/ -> %` (40.0).
+        assert!((seek_fraction_from_x(40.0, 80.0) - 0.5).abs() < 1e-6);
+        assert!((seek_fraction_from_x(20.0, 80.0) - 0.25).abs() < 1e-6);
+        assert_eq!(seek_fraction_from_x(-10.0, 80.0), 0.0, "clamp low");
+        assert_eq!(seek_fraction_from_x(200.0, 80.0), 1.0, "clamp high");
+        assert_eq!(seek_fraction_from_x(40.0, 0.0), 0.0, "zero-width guard");
+    }
 }
