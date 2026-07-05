@@ -299,6 +299,9 @@ pub enum Message {
     // Constructed by the audio-player widget (later Phase 7d task).
     #[allow(dead_code)]
     AudioVolume(f32),
+    /// Seek the active tab's audio to the given fractional position (`0.0`–`1.0`).
+    /// Emitted by the waveform canvas on click/drag.
+    AudioSeek(f32),
     /// Periodic tick while audio is playing: advance the displayed playhead
     /// and detect playback completion.
     AudioTick,
@@ -1156,6 +1159,33 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
             if let (Some(vol), Some(out)) = (volume, app.audio.as_mut()) {
                 out.set_volume(vol);
+            }
+            Task::none()
+        }
+        Message::AudioSeek(frac) => {
+            // Two-phase borrow: compute the seek transition in pure state, then
+            // call `apply_playback` after the `active_tab_mut` borrow ends.
+            // `seek_fraction` always returns `SeekTo`, so we unconditionally pin
+            // `playback_offset_secs`; rodio's `get_pos` is buffer-relative, and
+            // the tick must add this offset to recover the absolute position.
+            let state = if let Some(tab) = app.tabs.active_tab_mut() {
+                let act = tab.audio.seek_fraction(frac);
+                tab.audio.playback_offset_secs = tab.audio.position_secs;
+                let decoded = decoded_for_action(&tab.audio, act);
+                let transport = tab.audio.transport;
+                let position_secs = tab.audio.position_secs;
+                Some((act, decoded, transport, position_secs))
+            } else {
+                None
+            };
+            if let Some((act, decoded, transport, position_secs)) = state {
+                apply_playback(
+                    &mut app.audio,
+                    decoded.as_ref(),
+                    transport,
+                    position_secs,
+                    act,
+                );
             }
             Task::none()
         }
@@ -4873,6 +4903,91 @@ mod tests {
             (tab.audio.playback_offset_secs - 1.0).abs() < 1e-6,
             "Pause must not touch the feed-offset (got {})",
             tab.audio.playback_offset_secs
+        );
+    }
+
+    // ── Task 9: AudioSeek arm ─────────────────────────────────────────────────
+
+    /// Build an `App` with an active tab whose decoded audio has a known
+    /// duration (`duration_secs`), so seek-fraction tests can assert the exact
+    /// resulting `position_secs`.  Uses a 100 Hz mono PCM clip so the sample
+    /// count is easy to reason about.
+    fn app_with_audio_of_duration(duration_secs: f32) -> App {
+        use paksmith_core::asset::AudioInfo;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("Game/SFX_Seek.uasset");
+        let tab = app
+            .tabs
+            .active_tab_mut()
+            .expect("just-opened tab must be active");
+        let sample_rate: u32 = 100;
+        let channels: u16 = 1;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        // duration_secs is a small positive constant in tests (≤10 s);
+        // sample_rate (100) * duration_secs fits exactly in f32 (2^24 mantissa
+        // > 1000); the product is ≤ 1000 samples — no truncation or sign-loss.
+        let num_samples = (sample_rate as f32 * duration_secs) as usize;
+        tab.audio.decoded = Some(crate::state::audio_view::DecodedAudio {
+            samples: vec![0_i16; num_samples],
+            sample_rate,
+            channels,
+        });
+        tab.audio.info = Some(AudioInfo {
+            export_idx: 0,
+            codec_label: "PCM".to_owned(),
+            channels: Some(1),
+            duration_secs: Some(duration_secs),
+            playable: true,
+        });
+        app
+    }
+
+    #[test]
+    fn audio_seek_half_moves_position_and_pins_offset() {
+        // AudioSeek(0.5) on a 10.0 s clip must set position_secs to 5.0 and
+        // pin playback_offset_secs to that same value.  A mutant that drops the
+        // pin leaves offset at 0.0 (the default), which diverges from 5.0.
+        let mut app = app_with_audio_of_duration(10.0);
+        app.audio = None; // no live seam: pure-state effects only
+        let _ = update(&mut app, Message::AudioSeek(0.5));
+        let tab = app.tabs.active_tab().unwrap();
+        assert!(
+            (tab.audio.position_secs - 5.0).abs() < 1e-4,
+            "AudioSeek(0.5) on a 10.0 s clip must set position_secs to 5.0 (got {})",
+            tab.audio.position_secs
+        );
+        assert!(
+            (tab.audio.playback_offset_secs - tab.audio.position_secs).abs() < 1e-6,
+            "AudioSeek must pin playback_offset_secs == position_secs (offset={}, pos={})",
+            tab.audio.playback_offset_secs,
+            tab.audio.position_secs
+        );
+    }
+
+    #[test]
+    fn audio_seek_quarter_moves_position_to_distinct_value() {
+        // AudioSeek(0.25) on a 10.0 s clip must set position_secs to 2.5 (not
+        // 5.0 and not 0.0).  A mutant that hard-codes a different fraction or
+        // calls seek_fraction with the wrong argument will produce a different
+        // position.
+        let mut app = app_with_audio_of_duration(10.0);
+        app.audio = None;
+        let _ = update(&mut app, Message::AudioSeek(0.25));
+        let tab = app.tabs.active_tab().unwrap();
+        assert!(
+            (tab.audio.position_secs - 2.5).abs() < 1e-4,
+            "AudioSeek(0.25) on a 10.0 s clip must set position_secs to 2.5 (got {})",
+            tab.audio.position_secs
+        );
+        assert!(
+            (tab.audio.playback_offset_secs - tab.audio.position_secs).abs() < 1e-6,
+            "AudioSeek must pin playback_offset_secs == position_secs (offset={}, pos={})",
+            tab.audio.playback_offset_secs,
+            tab.audio.position_secs
         );
     }
 }
