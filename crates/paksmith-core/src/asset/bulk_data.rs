@@ -3452,6 +3452,45 @@ mod tests {
 
     #[cfg(feature = "__test_utils")]
     #[test]
+    fn chunked_zlib_zero_valued_chunk_entries_pass_the_negative_check() {
+        // The entry check is strictly `< 0`: zero-valued fields are
+        // NOT "negative" (the reference decoder has no such check at
+        // all, so zero must not be rejected there). Kills both
+        // `< 0` → `<= 0` mutants on the entry check.
+        //
+        // (a) A (0, 10) entry passes the check and fails only later,
+        // in the decode loop (its empty stream inflates to 0 bytes,
+        // not 10) — the mutant would misreport it as "negative".
+        let zero_comp = assemble_framing((TEST_V1_TAG, 4096), None, (0, 10), &[(0, 10)], &[]);
+        expect_decode_failed(
+            decompress_zlib(&zero_comp, 10, "test.uasset"),
+            "decompressed to 0 bytes",
+        );
+        // (b) A (len, 0) entry alongside a real chunk is ACCEPTED:
+        // its stream inflates to exactly the claimed 0 bytes and the
+        // remaining chunk carries the payload. chunk size 8 over a
+        // 10-byte total → count 2, sums consistent.
+        let payload = b"0123456789";
+        let empty_stream = zlib_stream(&[]);
+        let full_stream = zlib_stream(payload);
+        let empty_len = i64::try_from(empty_stream.len()).unwrap();
+        let full_len = i64::try_from(full_stream.len()).unwrap();
+        let mut streams = empty_stream.clone();
+        streams.extend_from_slice(&full_stream);
+        let zero_unc = assemble_framing(
+            (TEST_V1_TAG, 8),
+            None,
+            (empty_len + full_len, 10),
+            &[(empty_len, 0), (full_len, 10)],
+            &streams,
+        );
+        let out = decompress_zlib(&zero_unc, 10, "test.uasset")
+            .expect("zero-uncompressed chunk entry is not negative");
+        assert_eq!(out, payload);
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
     fn chunked_zlib_rejects_trailing_bytes() {
         // SizeOnDisk delimits the framing exactly; trailing bytes are
         // a corruption / crafted-input signal.
