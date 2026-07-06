@@ -7,10 +7,10 @@ name: Mutation Testing
 # pending forever — see ci.yml `changes` job and PR #152 for that trap.)
 # `--in-diff` keeps each matching run scoped to the changed lines, and
 # the mutant list is split across a `--shard` matrix so wall-clock is
-# roughly (single-job time / SHARD_COUNT) + one baseline build per
-# shard (~1 min). The `mutants` aggregator is the single stable
-# status; point any future required-check entry at it, never at the
-# per-shard jobs.
+# roughly (single-job time / shard count) plus one baseline
+# build + test per shard. The `mutants` aggregator is the single
+# stable status; point any future required-check entry at it, never
+# at the per-shard jobs.
 on:
   pull_request:
 
@@ -49,13 +49,17 @@ jobs:
               - 'Cargo.lock'
               - '.github/workflows/mutants.yml'
 
-  # Each shard tests every 4th mutant of the deterministic
-  # (`--no-shuffle`) mutant list — collectively exhaustive, no
-  # overlap. Changing the shard count means updating BOTH the matrix
-  # list and the `/4` denominators below (name + --shard argument);
-  # they cannot reference a shared constant in Actions syntax.
+  # Each shard tests a consecutive slice of the deterministic
+  # (`--no-shuffle`) mutant list (cargo-mutants' default `slice`
+  # sharding) — collectively exhaustive, no overlap, PROVIDED every
+  # shard sees the identical diff (pinned below) and the identical
+  # arguments. The matrix list is the single source of truth for the
+  # shard count: the `/N` denominators derive from
+  # `strategy.job-total`, which equals the shard count only while
+  # `shard` stays this job's ONLY matrix axis — adding a second axis
+  # would multiply it and break the partition.
   shard:
-    name: cargo-mutants shard (${{ matrix.shard }}/4)
+    name: cargo-mutants shard (${{ matrix.shard }}/${{ strategy.job-total }})
     needs: changes
     if: needs.changes.outputs.parser == 'true'
     runs-on: ubuntu-latest
@@ -79,14 +83,21 @@ jobs:
       - uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2.82.8
         with:
           tool: cargo-mutants
-      # Bind base ref via env so the value cannot be interpolated into
-      # shell — even though base_ref is a GitHub-provided branch name,
-      # the env-var pattern is what the security guide recommends for
-      # any github.event.* field reaching `run:`.
+      # Diff against the EVENT-PINNED base commit, not the mutable
+      # `origin/<base>` branch ref: the k/n shard partition is only
+      # collectively exhaustive when every shard computes a
+      # byte-identical diff (upstream: "as long as all shards see the
+      # same diff"), and the base branch can advance between the
+      # shards' independent checkouts. `base.sha` and the checked-out
+      # merge commit are both fixed in the event payload, so all
+      # shards derive the same mutant list. Bound via env so the
+      # value cannot be interpolated into shell — the env-var pattern
+      # is what the security guide recommends for any github.event.*
+      # field reaching `run:`.
       - name: Compute PR diff
         env:
-          BASE_REF: ${{ github.base_ref }}
-        run: git diff "origin/${BASE_REF}" -- > /tmp/pr.diff
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git diff "${BASE_SHA}" -- > /tmp/pr.diff
       # `--in-diff` scopes mutation testing to the lines changed in the
       # PR (massive speedup vs whole-workspace mutation). `--no-shuffle`
       # gives stable order across runs — load-bearing for sharding:
@@ -105,7 +116,7 @@ jobs:
             --no-shuffle \
             -j 2 \
             --all-features \
-            --shard ${{ matrix.shard }}/4
+            --shard ${{ matrix.shard }}/${{ strategy.job-total }}
       # cargo-mutants writes per-outcome lists to mutants.out/{caught,
       # missed,timeout,unviable}.txt. The `missed.txt` set is the only
       # actionable signal — those are mutations that survived the test
@@ -117,7 +128,7 @@ jobs:
         shell: bash
         run: |
           {
-            echo "### Mutation testing (shard ${{ matrix.shard }}/4)"
+            echo "### Mutation testing (shard ${{ matrix.shard }}/${{ strategy.job-total }})"
             echo ""
             if [ -d mutants.out ]; then
               echo "| Outcome | Count |"
