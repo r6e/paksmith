@@ -1,14 +1,18 @@
-// Coverage-guided fuzzing of the bulk-data zlib decompression path.
+// Coverage-guided fuzzing of the bulk-data zlib decompression path
+// (chunked `FCompressedChunkInfo` framing, #644).
 //
 // What this catches:
-//   - Panics / aborts from the F1 pre-size (eager `Vec::with_capacity`):
-//     the fuzzer drives an arbitrary wire-claimed decompressed size against
-//     an arbitrary compressed stream, exercising the pre-size, the
-//     `take(MAX_BULK_DATA_SIZE)` zlib-bomb cap, and the post-read
-//     length-mismatch check.
+//   - Panics / aborts from the framing parser: arbitrary bytes exercise the
+//     tag/summary/chunk-table validation (truncation, negative sizes, sum
+//     mismatches, overflow-checked chunk-count math) and the F1 pre-size
+//     discipline (chunk table bounded by real input and consumed in place,
+//     never materialized; output pre-sized from `compressed.len()`).
 //   - Decompression bombs: a tiny compressed input claiming a huge size must
-//     surface an `Err` (length mismatch / cap), never inflate unbounded.
-//   - Malformed deflate streams: the decoder must return an error, not panic.
+//     surface an `Err` (the `MAX_BULK_DATA_SIZE` claim cap, framing-sum
+//     checks, per-chunk `take(chunk_unc + 1)` bounds), never inflate
+//     unbounded.
+//   - Malformed deflate streams in chunk payloads: the decoder must return
+//     an error, not panic.
 //
 // This reaches `decompress_zlib` directly via the `__test_utils`
 // `testing::bench::zlib_decompress` seam — far more iterations/coverage than

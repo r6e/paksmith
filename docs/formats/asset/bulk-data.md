@@ -69,14 +69,11 @@ shape including flag validation, `Size64Bit` field widening,
 `DuplicateNonOptionalPayload` block skip, with caps enforced inline.
 The `BulkDataResolver` (same module) materializes payload bytes across
 all four tiers (inline / uexp-resident / `.ubulk` / `.uptnl`) —
-applying the offset fix-up, the per-package byte budget, and
-zlib decompression — and the Phase 3 format handlers consume the
-resolved bytes. **Known divergence:** for `BULKDATA_SerializeCompressedZLIB`
-records the resolver decodes a single zlib stream rather than the
-chunked `FCompressedChunkInfo` framing described under *Payload
-decompression* below; this is a deliberately unverified limitation
-(rare in cooked content — bulk-level compression is uncommon) tracked
-for a follow-up.
+applying the offset fix-up, the per-package byte budget, and the
+chunked `FCompressedChunkInfo` zlib decompression described under
+*Payload decompression* below
+([#644](https://github.com/r6e/paksmith/issues/644)) — and the
+Phase 3 format handlers consume the resolved bytes.
 
 ## Versions
 
@@ -182,28 +179,72 @@ dispatch table.
 When `BULKDATA_SerializeCompressedZLIB` is set, the on-disk payload is
 zlib-compressed. In the engine this routes through
 `FArchive::SerializeCompressed`, which writes the **chunked
-`FCompressedChunkInfo` framing**: a magic-tag header
-(`FCompressedChunkInfo { CompressedSize = PACKAGE_FILE_TAG (0x9E2A83C1),
-UncompressedSize = block size }`), a summary `FCompressedChunkInfo`
-(total compressed / uncompressed sizes), a per-block size table of
-`FCompressedChunkInfo` entries, then the independently-zlib-compressed
-blocks, decompressed and concatenated. (The layout shown is the v1
-header; the v2 variant, tagged `ARCHIVE_V2_HEADER_TAG`, inserts an inline
-compression-format byte before the summary. `FByteBulkData` uses the v1
-"Zlib" path.) This is a **distinct framing** from both the pak per-block
+`FCompressedChunkInfo` framing**. Each `FCompressedChunkInfo` is two
+little-endian `i64`s (`CompressedSize`, `UncompressedSize`; the
+pre-UE4 `u32` layout is below paksmith's version floor). The layout:
+
+1. **Tag record** — `CompressedSize` carries the magic:
+   `PACKAGE_FILE_TAG` (`0x9E2A83C1`, v1) or `ARCHIVE_V2_HEADER_TAG`
+   (`0x22222222_9E2A83C1` — `PACKAGE_FILE_TAG` in the low 32 bits,
+   v2). `UncompressedSize` carries the compression chunk size, with a
+   legacy quirk: the value `PACKAGE_FILE_TAG` here is a sentinel
+   meaning `LOADING_COMPRESSION_CHUNK_SIZE` (131072 = 128 KiB).
+   Byte-swapped tag forms mark big-endian producers.
+2. **v2 only: compression-format byte** — `0` = inline FString-named
+   format, `1` = None, `2` = Oodle, `3` = Zlib, `4` = Gzip, `5` = LZ4.
+   The v1 header has no format field; readers decode v1 payloads with
+   the caller's legacy format (Zlib for `FByteBulkData`).
+3. **Summary record** — total compressed / total uncompressed sizes.
+4. **Chunk table** — `ceil(total_uncompressed / chunk_size)` records;
+   the per-field sums MUST equal the summary totals.
+5. **Chunk streams** — one independent zlib stream per table entry,
+   back to back; each decompresses to exactly its entry's
+   `UncompressedSize`, concatenated in order.
+
+This is a **distinct framing** from both the pak per-block
 `FPakCompressedBlock` path (see
 [`../compression/zlib.md`](../compression/zlib.md)) and a single raw
 zlib stream. The total decompressed size is `ElementCount` bytes (for
-byte bulk data); a reader MUST clamp this against
-`MAX_UNCOMPRESSED_ENTRY_BYTES` before allocating the output buffer
-(decompression-bomb guard).
+byte bulk data); a reader MUST bound its work by the real input
+length before trusting any wire-claimed size (decompression-bomb /
+allocation-amplification guard). Layout verified against the
+CUE4Parse reference (`FByteBulkData.cs` →
+`FArchive.SerializeCompressedNew`, `Compression.cs`) and
+cross-anchored against independent community decoders
+(Remnant-2-Save-Parser, revision-go).[^2]
 
-> **Paksmith divergence:** the current resolver decodes the payload as a
-> single zlib stream, not the chunked framing above — a deliberately
-> unverified limitation (bulk-level compression is rare in cooked
-> content), tracked for a follow-up. Verified against the CUE4Parse
-> reference (`FByteBulkData.cs` → `FArchive.SerializeCompressedNew`),
-> not against a real chunk-framed fixture.
+**Paksmith implementation** (`decompress_zlib` in
+`asset/bulk_data.rs`, [#644](https://github.com/r6e/paksmith/issues/644));
+deviations are all fail-closed:
+
+- **Pre-parse claim cap**: `ElementCount` (the decompressed-size
+  claim) is capped at `MAX_BULK_DATA_SIZE` (8 GiB) before any
+  framing parse — the per-record transient-output ceiling,
+  independent of the resolver's 16 GiB per-package budget.
+- **Little-endian only**: the byte-swapped tag forms
+  (`PACKAGE_FILE_TAG_SWAPPED`, 64-bit-swapped v1/v2 tags) are
+  recognized and rejected, not swap-decoded — consistent with the
+  parser-wide LE policy.
+- **Zlib only**: v2 named formats (None/Oodle/Gzip/LZ4) surface
+  `UnsupportedBulkCompression`; a v2 inline-FString format name is
+  rejected without parsing the string (no known bulk-data producer).
+- **Exact totals**: the summary's uncompressed total must equal
+  `ElementCount` exactly (the reference decoder tolerates `<=`; the
+  engine writer always emits `==`, so a mismatch is treated as
+  corruption), chunk-table sums must equal the summary, each chunk
+  must inflate to exactly its claimed size, and the framing must
+  consume the record's `SizeOnDisk` region exactly (no trailing
+  bytes).
+- **Bounded allocation**: the chunk table's byte size is validated
+  against the real remaining input before it is walked, the table
+  is validated and consumed in place (never copied into an owned
+  buffer), and the output buffer is pre-sized from the compressed
+  input length (never from wire claims), growing only as real bytes
+  are produced — each chunk's read is capped at its claimed size + 1
+  so an over-long stream is detected rather than inflated.
+- A **zero-size record** carries no framing at all (the engine
+  early-outs before writing the header); empty input with
+  `ElementCount = 0` decodes to an empty payload.
 
 ### Alternate read paths (UE 5.0+ pre-baked metadata)
 
@@ -372,9 +413,10 @@ A `FByteBulkDataHeader` reader MUST:
   carries encrypted blocks (per the parent format's encryption
   conventions; see [`../crypto/aes-pak.md`](../crypto/aes-pak.md)).
 - **For `BULKDATA_SerializeCompressedZLIB` payloads**: bound the
-  decompressed output at `MAX_UNCOMPRESSED_ENTRY_BYTES`; the
-  `ElementCount` field publishes the expected decompressed size
-  (verify post-decompress matches).
+  decompressed output at `MAX_BULK_DATA_SIZE` (paksmith enforces
+  this on the `ElementCount` claim before parsing the chunk
+  framing); the `ElementCount` field publishes the expected
+  decompressed size (verify the framing totals match).
 - **For `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile`**:
   surface `MissingCompanionFile { kind: Uptnl }` when `.uptnl` is
   absent. Paksmith's `CompanionFileKind` enum defines all three
@@ -439,12 +481,15 @@ ships in Phase 3b Task 3:
   construction routes through `read_from` only.
 
 **Status:** `complete`. The record reader, the `BulkDataResolver`
-(tier dispatch + offset fix-up + zlib decompression + per-package byte
-budget), and the `Package::read_from_pak` integration all ship, and the
-Phase 3 typed export readers (texture mips: 3e; static mesh: 3g;
-skeletal mesh: 3h; audio: 3f) consume the resolved bytes. The one known
-gap is the chunked-`FCompressedChunkInfo` zlib framing noted under
-*Payload decompression* (the resolver decodes a single zlib stream).
+(tier dispatch + offset fix-up + chunked-`FCompressedChunkInfo` zlib
+decompression + per-package byte budget), and the
+`Package::read_from_pak` integration all ship, and the Phase 3 typed
+export readers (texture mips: 3e; static mesh: 3g; skeletal mesh: 3h;
+audio: 3f) consume the resolved bytes. The chunked zlib framing under
+*Payload decompression* shipped with
+[#644](https://github.com/r6e/paksmith/issues/644); the remaining
+compression follow-ups are LZO/BitWindow
+([#559](https://github.com/r6e/paksmith/issues/559)).
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 + the per-task
 plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
@@ -452,3 +497,5 @@ plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FByteBulkDataHeader.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` (primary oracle for the header constructor) and `EBulkDataFlags.cs` in the same directory (full flag catalog). `FByteBulkData.cs` in the same directory covers the wrapping payload-read logic (zlib decompression, bulk-archive resolution); the per-record header layout above is sourced from `FByteBulkDataHeader.cs`.
+
+[^2]: Chunked-framing layout (primary oracle): `FabianFG/CUE4Parse/CUE4Parse/UE4/Readers/FArchive.cs` (`SerializeCompressedNew`) and `CUE4Parse/Compression/Compression.cs` (`LOADING_COMPRESSION_CHUNK_SIZE`). Independent cross-anchors: `Brabb3l/Remnant-2-Save-Parser` `src/sav.rs` (`ARCHIVE_V2_HEADER_TAG`, Rust) and `t1nky/revision-go` `remnant/save_file.go` (tag constants + chunk size, Go).

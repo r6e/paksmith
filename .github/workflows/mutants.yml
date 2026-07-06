@@ -1,12 +1,24 @@
 name: Mutation Testing
 
-# Runs on every PR. The `changes` job decides whether the diff touches
-# parsing-relevant code; non-matching PRs skip-as-success so this can
-# safely become a required check without deadlocking docs-only PRs.
-# (Bare `paths:` filters produce no run at all, leaving required checks
-# pending forever — see ci.yml `changes` job and PR #152 for that trap.)
-# `--in-diff` keeps each matching run scoped to the changed lines, so
-# wall-clock stays in the single-minute range.
+# Runs on every PR, as a four-stage graph:
+# `changes` -> `enumerate` -> `shard` (x N matrix) -> `mutants`.
+#
+# `changes` decides whether the diff touches parsing-relevant code;
+# non-matching PRs skip-as-success so this can safely become a
+# required check without deadlocking docs-only PRs. (Bare `paths:`
+# filters produce no run at all, leaving required checks pending
+# forever — see ci.yml `changes` job and PR #152 for that trap.)
+# `enumerate` then counts the mutants in the PR diff without
+# building; a clean zero count (Cargo.lock bumps, comment-only
+# edits) also skips-as-success without spawning shard runners. The
+# accepted cost: mutant-bearing PRs pay the enumerate hop (~1-2 min
+# of checkout + toolchain) serially before the shards start.
+# `--in-diff` keeps each matching run scoped to the changed lines,
+# and the mutant list is split across the `--shard` matrix so
+# wall-clock is roughly (single-job time / shard count) plus one
+# baseline build + test per shard. The `mutants` aggregator is the
+# single stable status; point any future required-check entry at
+# it, never at the per-shard jobs.
 on:
   pull_request:
 
@@ -45,12 +57,88 @@ jobs:
               - 'Cargo.lock'
               - '.github/workflows/mutants.yml'
 
-  mutants:
-    name: cargo-mutants (PR diff)
+  # Each shard tests a consecutive slice of the deterministic
+  # (`--no-shuffle`) mutant list (cargo-mutants' default `slice`
+  # sharding) — collectively exhaustive, no overlap, PROVIDED every
+  # shard sees the identical diff (pinned below) and the identical
+  # arguments. The matrix list is the single source of truth for the
+  # shard count: the `/N` denominators derive from
+  # `strategy.job-total`, which equals the shard count only while
+  # `shard` stays this job's ONLY matrix axis — adding a second axis
+  # would multiply it and break the partition. Matrix values are the
+  # HUMAN-FACING 1-based indices (jobs read "1/4".."4/4"); the single
+  # `--shard` call site converts to the 0-based `k/n` (k in 0..n-1)
+  # that cargo-mutants requires.
+  #
+  # Pre-flight: `cargo mutants --list` enumerates without building or
+  # testing (sub-second), so a parser-filter hit whose diff yields
+  # ZERO mutants (Cargo.lock bumps, comment-only edits, edits to this
+  # workflow) resolves in this one light job instead of spawning four
+  # shard runners. CAUTION: the enumeration arguments must stay in
+  # lockstep with the shard invocation (same pinned diff, same
+  # `--all-features`) — argument drift here could silently skip real
+  # mutation testing. The step fails loud on any cargo-mutants error:
+  # the count is captured via a simple-command assignment, which
+  # bash's default `-e` covers (NOTE: no pipefail here — the
+  # implicit `run:` shell is `bash -e {0}` — so keep the capture
+  # pipe-free). Only a clean zero count skips the shards, and the
+  # aggregator fails if this job fails.
+  enumerate:
+    name: Enumerate mutants
     needs: changes
     if: needs.changes.outputs.parser == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      has_mutants: ${{ steps.count.outputs.has_mutants }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Full history needed for `git diff` against the PR base.
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+      - uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2.82.8
+        with:
+          tool: cargo-mutants
+      # Same event-pinned diff derivation as the shard jobs below —
+      # see the rationale comment there.
+      - name: Compute PR diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git diff "${BASE_SHA}" -- > /tmp/pr.diff
+      # `--list --json` prints NOTHING (not `[]`) when the diff yields
+      # zero mutants, hence the empty-guard before jq.
+      - name: Count mutants in diff
+        id: count
+        run: |
+          listing=$(cargo mutants --list --json --in-diff /tmp/pr.diff --all-features)
+          if [ -z "${listing}" ]; then
+            count=0
+          else
+            count=$(jq 'length' <<<"${listing}")
+          fi
+          echo "count: ${count}"
+          if [ "${count}" -gt 0 ]; then
+            echo "has_mutants=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_mutants=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "### Mutation-testing pre-flight: ${count} mutant(s) in the PR diff" >> "$GITHUB_STEP_SUMMARY"
+
+  shard:
+    name: cargo-mutants shard (${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: [changes, enumerate]
+    # `parser == 'true'` is implied: `enumerate` only runs (and only
+    # emits outputs) when the parser filter matched.
+    if: needs.enumerate.outputs.has_mutants == 'true'
+    runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      # One shard's miss must not cancel the others — every shard's
+      # outcome is diagnostic signal.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       # Mutated builds routinely produce warnings (the mutation IS the
       # divergence). `-D warnings` would mask the mutation signal.
@@ -64,42 +152,52 @@ jobs:
       - uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2.82.8
         with:
           tool: cargo-mutants
-      # Bind base ref via env so the value cannot be interpolated into
-      # shell — even though base_ref is a GitHub-provided branch name,
-      # the env-var pattern is what the security guide recommends for
-      # any github.event.* field reaching `run:`.
+      # Diff against the EVENT-PINNED base commit, not the mutable
+      # `origin/<base>` branch ref: the k/n shard partition is only
+      # collectively exhaustive when every shard computes a
+      # byte-identical diff (upstream: "as long as all shards see the
+      # same diff"), and the base branch can advance between the
+      # shards' independent checkouts. `base.sha` and the checked-out
+      # merge commit are both fixed in the event payload, so all
+      # shards derive the same mutant list. Bound via env so the
+      # value cannot be interpolated into shell — the env-var pattern
+      # is what the security guide recommends for any github.event.*
+      # field reaching `run:`.
       - name: Compute PR diff
         env:
-          BASE_REF: ${{ github.base_ref }}
-        run: git diff "origin/${BASE_REF}" -- > /tmp/pr.diff
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git diff "${BASE_SHA}" -- > /tmp/pr.diff
       # `--in-diff` scopes mutation testing to the lines changed in the
       # PR (massive speedup vs whole-workspace mutation). `--no-shuffle`
-      # gives stable order across runs (easier to compare). `-j 2`
+      # gives stable order across runs — load-bearing for sharding:
+      # shards partition the ORDERED list into consecutive slices, so
+      # a shuffled order would break the partition's determinism. `-j 2`
       # parallelism is conservative — bump if jobs are I/O-bound on a
       # given runner. `--all-features` matches CI's full test invocation
       # so mutations on `__test_utils`-gated code and the
       # `paksmith-core-tests` integration suite are validated against
       # the same surface CI runs (per CLAUDE.md: default `cargo test`
       # misses these).
-      - name: Run cargo-mutants on PR diff
+      - name: Run cargo-mutants shard on PR diff
         run: |
           cargo mutants \
             --in-diff /tmp/pr.diff \
             --no-shuffle \
             -j 2 \
-            --all-features
+            --all-features \
+            --shard $(( ${{ matrix.shard }} - 1 ))/${{ strategy.job-total }}
       # cargo-mutants writes per-outcome lists to mutants.out/{caught,
       # missed,timeout,unviable}.txt. The `missed.txt` set is the only
       # actionable signal — those are mutations that survived the test
       # suite, indicating tests that compile but don't actually assert
       # the invariant. Counts give a quick gut-check; full lists live in
-      # the uploaded artifact.
+      # the per-shard uploaded artifact.
       - name: Summarize results
         if: always()
         shell: bash
         run: |
           {
-            echo "### Mutation testing"
+            echo "### Mutation testing (shard ${{ matrix.shard }}/${{ strategy.job-total }})"
             echo ""
             if [ -d mutants.out ]; then
               echo "| Outcome | Count |"
@@ -124,6 +222,42 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: mutants-results
+          name: mutants-results-shard-${{ matrix.shard }}
           path: mutants.out/
           retention-days: 30
+
+  # Single stable status joining the shard matrix. Carries the exact
+  # name the pre-shard workflow's one job had, so dashboards, branch
+  # rules, and any future ruleset entry keep one durable identity.
+  # Preserves skip-as-success: a parser-untouched PR (everything
+  # downstream skipped) and a parser-touching PR whose diff yields
+  # zero mutants (shards skipped after a CLEAN enumeration) both
+  # pass; a failed `changes` gate, a failed enumeration, or any
+  # shard failure fails. The enumerate check is load-bearing: shards
+  # skip when enumeration fails, so without it a broken pre-flight
+  # would silently pass the whole gate.
+  mutants:
+    name: cargo-mutants (PR diff)
+    needs: [changes, enumerate, shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate shard results
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          ENUMERATE_RESULT: ${{ needs.enumerate.result }}
+          SHARD_RESULT: ${{ needs.shard.result }}
+        run: |
+          echo "changes: ${CHANGES_RESULT}, enumerate: ${ENUMERATE_RESULT}, shards: ${SHARD_RESULT}"
+          if [ "${CHANGES_RESULT}" != "success" ]; then
+            echo "changes gate did not succeed"; exit 1
+          fi
+          case "${ENUMERATE_RESULT}" in
+            success|skipped) ;;
+            *) echo "mutant enumeration failed"; exit 1 ;;
+          esac
+          case "${SHARD_RESULT}" in
+            success|skipped) exit 0 ;;
+            *) echo "one or more shards failed"; exit 1 ;;
+          esac
