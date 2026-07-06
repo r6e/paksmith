@@ -5,8 +5,12 @@ name: Mutation Testing
 # safely become a required check without deadlocking docs-only PRs.
 # (Bare `paths:` filters produce no run at all, leaving required checks
 # pending forever — see ci.yml `changes` job and PR #152 for that trap.)
-# `--in-diff` keeps each matching run scoped to the changed lines, so
-# wall-clock stays in the single-minute range.
+# `--in-diff` keeps each matching run scoped to the changed lines, and
+# the mutant list is split across a `--shard` matrix so wall-clock is
+# roughly (single-job time / SHARD_COUNT) + one baseline build per
+# shard (~1 min). The `mutants` aggregator is the single stable
+# status; point any future required-check entry at it, never at the
+# per-shard jobs.
 on:
   pull_request:
 
@@ -45,12 +49,23 @@ jobs:
               - 'Cargo.lock'
               - '.github/workflows/mutants.yml'
 
-  mutants:
-    name: cargo-mutants (PR diff)
+  # Each shard tests every 4th mutant of the deterministic
+  # (`--no-shuffle`) mutant list — collectively exhaustive, no
+  # overlap. Changing the shard count means updating BOTH the matrix
+  # list and the `/4` denominators below (name + --shard argument);
+  # they cannot reference a shared constant in Actions syntax.
+  shard:
+    name: cargo-mutants shard (${{ matrix.shard }}/4)
     needs: changes
     if: needs.changes.outputs.parser == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      # One shard's miss must not cancel the others — every shard's
+      # outcome is diagnostic signal.
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     env:
       # Mutated builds routinely produce warnings (the mutation IS the
       # divergence). `-D warnings` would mask the mutation signal.
@@ -74,32 +89,35 @@ jobs:
         run: git diff "origin/${BASE_REF}" -- > /tmp/pr.diff
       # `--in-diff` scopes mutation testing to the lines changed in the
       # PR (massive speedup vs whole-workspace mutation). `--no-shuffle`
-      # gives stable order across runs (easier to compare). `-j 2`
+      # gives stable order across runs — load-bearing for sharding:
+      # shards partition the ORDERED list, so a shuffled order would
+      # break the every-4th-mutant partition's determinism. `-j 2`
       # parallelism is conservative — bump if jobs are I/O-bound on a
       # given runner. `--all-features` matches CI's full test invocation
       # so mutations on `__test_utils`-gated code and the
       # `paksmith-core-tests` integration suite are validated against
       # the same surface CI runs (per CLAUDE.md: default `cargo test`
       # misses these).
-      - name: Run cargo-mutants on PR diff
+      - name: Run cargo-mutants shard on PR diff
         run: |
           cargo mutants \
             --in-diff /tmp/pr.diff \
             --no-shuffle \
             -j 2 \
-            --all-features
+            --all-features \
+            --shard ${{ matrix.shard }}/4
       # cargo-mutants writes per-outcome lists to mutants.out/{caught,
       # missed,timeout,unviable}.txt. The `missed.txt` set is the only
       # actionable signal — those are mutations that survived the test
       # suite, indicating tests that compile but don't actually assert
       # the invariant. Counts give a quick gut-check; full lists live in
-      # the uploaded artifact.
+      # the per-shard uploaded artifact.
       - name: Summarize results
         if: always()
         shell: bash
         run: |
           {
-            echo "### Mutation testing"
+            echo "### Mutation testing (shard ${{ matrix.shard }}/4)"
             echo ""
             if [ -d mutants.out ]; then
               echo "| Outcome | Count |"
@@ -124,6 +142,32 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: mutants-results
+          name: mutants-results-shard-${{ matrix.shard }}
           path: mutants.out/
           retention-days: 30
+
+  # Single stable status joining the shard matrix. Carries the exact
+  # name the pre-shard workflow's one job had, so dashboards, branch
+  # rules, and any future ruleset entry keep one durable identity.
+  # Preserves skip-as-success: a parser-untouched PR (shards skipped)
+  # passes; a failed `changes` gate or any shard failure fails.
+  mutants:
+    name: cargo-mutants (PR diff)
+    needs: [changes, shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate shard results
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          SHARD_RESULT: ${{ needs.shard.result }}
+        run: |
+          echo "changes: ${CHANGES_RESULT}, shards: ${SHARD_RESULT}"
+          if [ "${CHANGES_RESULT}" != "success" ]; then
+            echo "changes gate did not succeed"; exit 1
+          fi
+          case "${SHARD_RESULT}" in
+            success|skipped) exit 0 ;;
+            *) echo "one or more shards failed"; exit 1 ;;
+          esac
