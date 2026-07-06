@@ -79,15 +79,18 @@ pub(crate) const MAX_BULK_DATA_RECORDS_PER_EXPORT: usize = 256;
 pub(crate) const MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE: u64 = 16 * 1024 * 1024 * 1024;
 
 /// v2 chunked-framing header tag: `PACKAGE_FILE_TAG` in the low 32
-/// bits, `0x22222222` in the high 32 (pair-anchored against
-/// [`crate::asset::version::PACKAGE_FILE_TAG`]; value
-/// `0x2222_2222_9E2A_83C1`). A tag record carrying this value means
-/// the framing header inserts an inline compression-format byte
-/// before the summary record. Verified against the CUE4Parse
-/// reference (`FArchive.SerializeCompressedNew`) and independent
-/// community decoders (Remnant-2-Save-Parser, revision-go).
-pub(crate) const ARCHIVE_V2_HEADER_TAG: u64 =
-    (0x2222_2222_u64 << 32) | (crate::asset::version::PACKAGE_FILE_TAG as u64);
+/// bits, `0x22222222` in the high 32. Written as a literal because
+/// any derivation from [`crate::asset::version::PACKAGE_FILE_TAG`]
+/// (`|`, `^`, `+` over disjoint bit halves) is operator-mutation-
+/// equivalent and unkillable; the pair-anchor relation to
+/// `PACKAGE_FILE_TAG` is pinned by
+/// `framing_constants_pin_expected_values` instead. A tag record
+/// carrying this value means the framing header inserts an inline
+/// compression-format byte before the summary record. Verified
+/// against the CUE4Parse reference
+/// (`FArchive.SerializeCompressedNew`) and independent community
+/// decoders (Remnant-2-Save-Parser, revision-go).
+pub(crate) const ARCHIVE_V2_HEADER_TAG: u64 = 0x2222_2222_9E2A_83C1;
 
 /// Fallback compression-chunk size (128 KiB) when the tag record's
 /// chunk-size field carries the legacy `PACKAGE_FILE_TAG` sentinel
@@ -3338,6 +3341,17 @@ mod tests {
         );
         expect_decode_failed(
             decompress_zlib(&framed, 1_000_000, "test.uasset"),
+            "truncated",
+        );
+        // Near-boundary variant: the input ends 8 bytes INTO the
+        // single table entry (40 bytes total; the entry needs 16
+        // past the 32-byte headers). Exercises the `table_bytes <=
+        // remaining` bound in its off-by-small window — kills the
+        // `remaining = len - pos` → `len + pos` mutant, which would
+        // pass the bound and panic on the table slice.
+        let valid = frame_zlib(b"0123456789", 4096, (TEST_V1_TAG, 4096), None);
+        expect_decode_failed(
+            decompress_zlib(&valid[..40], 10, "test.uasset"),
             "truncated",
         );
     }
