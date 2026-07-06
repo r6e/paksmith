@@ -236,11 +236,12 @@ deviations are all fail-closed:
   consume the record's `SizeOnDisk` region exactly (no trailing
   bytes).
 - **Bounded allocation**: the chunk table's byte size is validated
-  against the real remaining input before the table is allocated,
-  and the output buffer is pre-sized from the compressed input
-  length (never from wire claims), growing only as real bytes are
-  produced — each chunk's read is capped at its claimed size + 1 so
-  an over-long stream is detected rather than inflated.
+  against the real remaining input before it is walked, the table
+  is validated and consumed in place (never copied into an owned
+  buffer), and the output buffer is pre-sized from the compressed
+  input length (never from wire claims), growing only as real bytes
+  are produced — each chunk's read is capped at its claimed size + 1
+  so an over-long stream is detected rather than inflated.
 - A **zero-size record** carries no framing at all (the engine
   early-outs before writing the header); empty input with
   `ElementCount = 0` decodes to an empty payload.

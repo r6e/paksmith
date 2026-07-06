@@ -1371,8 +1371,10 @@ fn read_chunk_info(buf: &[u8], pos: &mut usize) -> Option<(i64, i64)> {
 ///   `MAX_BULK_DATA_SIZE` before any parsing — the per-record
 ///   ceiling, independent of the resolver's package budget.
 /// - The chunk table's byte size is bounded by the REAL remaining
-///   input length before any table allocation — a lying summary
-///   cannot force a large allocation.
+///   input length before it is walked, and the table is validated
+///   and consumed in place (never materialized into an owned
+///   buffer) — a lying summary cannot force any table-proportional
+///   allocation.
 /// - The output buffer is pre-sized from `compressed.len()`, never
 ///   from wire-claimed sizes; growth is driven by actually-produced
 ///   bytes, bounded per chunk by `take(chunk_uncompressed + 1)` and
@@ -1559,9 +1561,10 @@ pub(crate) fn decompress_zlib(
     })?;
 
     // 7. SECURITY: the chunk table must physically fit in the
-    // remaining input BEFORE any table allocation — a lying summary
-    // cannot force an allocation larger than the bytes actually
-    // present.
+    // remaining input BEFORE it is walked — a lying summary cannot
+    // push the table slice past the bytes actually present (and the
+    // table is never materialized, so no allocation scales with it
+    // either).
     let remaining = compressed.len() - pos;
     let table_bytes = chunk_count
         .checked_mul(CHUNK_INFO_WIRE_SIZE)
@@ -1573,11 +1576,15 @@ pub(crate) fn decompress_zlib(
             ))
         })?;
 
-    // 8. Chunk table. Entries are non-negative; per-field sums must
-    // equal the summary totals (reference-decoder parity).
+    // 8. Chunk table, first pass: entries are non-negative;
+    // per-field sums must equal the summary totals
+    // (reference-decoder parity). The table is validated IN PLACE —
+    // never materialized into an owned Vec — so a 512 MiB input
+    // cannot force a second table-sized allocation (Copilot R6:
+    // the entries are consumed exactly once, in order, by the
+    // decode pass below).
     let table_region = &compressed[pos..pos + table_bytes];
     pos += table_bytes;
-    let mut chunks: Vec<(i64, i64)> = Vec::with_capacity(chunk_count);
     let mut sum_comp: i64 = 0;
     let mut sum_unc: i64 = 0;
     for entry in table_region.chunks_exact(CHUNK_INFO_WIRE_SIZE) {
@@ -1595,7 +1602,6 @@ pub(crate) fn decompress_zlib(
         sum_unc = sum_unc
             .checked_add(chunk_unc)
             .ok_or_else(|| fail("chunk table uncompressed-size sum overflow".to_string()))?;
-        chunks.push((chunk_comp, chunk_unc));
     }
     if sum_comp != total_comp {
         return Err(fail(format!(
@@ -1626,22 +1632,26 @@ pub(crate) fn decompress_zlib(
         )));
     }
 
-    // 10. Decompress chunk by chunk, appending into one output
-    // buffer. SECURITY (Phase 3 audit F1): pre-size from the
-    // COMPRESSED input length, NOT the wire-claimed `expected` —
-    // the eager reservation stays proportional to bytes actually
-    // present (bounded by MAX_BULK_DATA_COMPRESSED_SIZE = 512 MiB
-    // upstream), never amplified by a lying count. Each chunk's
-    // read is bounded by `take(chunk_unc + 1)`: the `+ 1` makes an
-    // over-long stream detectable while capping a decompression
-    // bomb at one byte past the table's claim, and the table sums
-    // were pinned to `expected` above.
+    // 10. Chunk table, second pass: decompress chunk by chunk,
+    // appending into one output buffer. Entry values were validated
+    // non-negative in the first pass. SECURITY (Phase 3 audit F1):
+    // pre-size from the COMPRESSED input length, NOT the wire-claimed
+    // `expected` — the eager reservation stays proportional to bytes
+    // actually present (bounded by MAX_BULK_DATA_COMPRESSED_SIZE =
+    // 512 MiB upstream), never amplified by a lying count. Each
+    // chunk's read is bounded by `take(chunk_unc + 1)`: the `+ 1`
+    // makes an over-long stream detectable while capping a
+    // decompression bomb at one byte past the table's claim, and the
+    // table sums were pinned to `expected` above.
     let mut out: Vec<u8> = Vec::with_capacity(compressed.len());
-    for (index, &(chunk_comp, chunk_unc)) in chunks.iter().enumerate() {
+    for (index, entry) in table_region.chunks_exact(CHUNK_INFO_WIRE_SIZE).enumerate() {
+        let mut entry_pos = 0usize;
+        let (chunk_comp, chunk_unc) = read_chunk_info(entry, &mut entry_pos)
+            .ok_or_else(|| fail("truncated chunk table entry".to_string()))?;
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "non-negative; bounded by streams_len (a usize) via the sum check above"
+            reason = "validated non-negative in the first pass; bounded by streams_len (a usize) via the sum check above"
         )]
         let chunk_len = chunk_comp as usize;
         // In-bounds: sum(chunk_comp) == streams_len exactly (step 9),
