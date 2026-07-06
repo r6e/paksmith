@@ -3368,7 +3368,10 @@ impl fmt::Display for AssetParseFault {
                  + size {size} > u64::MAX"
             ),
             Self::BulkDataSizeExceeded { size, cap } => {
-                write!(f, "bulk-data SizeOnDisk {size} exceeds cap {cap}")
+                // Site-neutral label: `size` is SizeOnDisk at the
+                // read-side cap but ElementCount's decompressed claim
+                // at the decompression boundary (see the variant doc).
+                write!(f, "bulk-data size claim {size} exceeds cap {cap}")
             }
             Self::BulkDataCompressedSizeExceeded { size, cap } => write!(
                 f,
@@ -8102,7 +8105,7 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "asset deserialization failed for `Game/Texture.uasset`: \
-             bulk-data SizeOnDisk 9663676416 exceeds cap 8589934592"
+             bulk-data size claim 9663676416 exceeds cap 8589934592"
         );
     }
 

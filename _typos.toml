@@ -46,3 +46,9 @@ Nam = "Nam"
 # engine's symbol; allowlist the substring so the typos check
 # doesn't fight verbatim citations.
 Seperate = "Seperate"
+
+# Unreal `.sav` save-file extension, appearing in verbatim citations
+# of community reference decoders (e.g. Remnant-2-Save-Parser's
+# `src/sav.rs` in `docs/formats/asset/bulk-data.md`). typos flags it
+# as a misspelling of "save".
+sav = "sav"

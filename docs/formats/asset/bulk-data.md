@@ -211,12 +211,16 @@ allocation-amplification guard). Layout verified against the
 CUE4Parse reference (`FByteBulkData.cs` →
 `FArchive.SerializeCompressedNew`, `Compression.cs`) and
 cross-anchored against independent community decoders
-(Remnant-2-Save-Parser, revision-go).
+(Remnant-2-Save-Parser, revision-go).[^2]
 
 **Paksmith implementation** (`decompress_zlib` in
 `asset/bulk_data.rs`, [#644](https://github.com/r6e/paksmith/issues/644));
 deviations are all fail-closed:
 
+- **Pre-parse claim cap**: `ElementCount` (the decompressed-size
+  claim) is capped at `MAX_BULK_DATA_SIZE` (8 GiB) before any
+  framing parse — the per-record transient-output ceiling,
+  independent of the resolver's 16 GiB per-package budget.
 - **Little-endian only**: the byte-swapped tag forms
   (`PACKAGE_FILE_TAG_SWAPPED`, 64-bit-swapped v1/v2 tags) are
   recognized and rejected, not swap-decoded — consistent with the
@@ -408,9 +412,10 @@ A `FByteBulkDataHeader` reader MUST:
   carries encrypted blocks (per the parent format's encryption
   conventions; see [`../crypto/aes-pak.md`](../crypto/aes-pak.md)).
 - **For `BULKDATA_SerializeCompressedZLIB` payloads**: bound the
-  decompressed output at `MAX_UNCOMPRESSED_ENTRY_BYTES`; the
-  `ElementCount` field publishes the expected decompressed size
-  (verify post-decompress matches).
+  decompressed output at `MAX_BULK_DATA_SIZE` (paksmith enforces
+  this on the `ElementCount` claim before parsing the chunk
+  framing); the `ElementCount` field publishes the expected
+  decompressed size (verify the framing totals match).
 - **For `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile`**:
   surface `MissingCompanionFile { kind: Uptnl }` when `.uptnl` is
   absent. Paksmith's `CompanionFileKind` enum defines all three
@@ -491,3 +496,5 @@ plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FByteBulkDataHeader.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` (primary oracle for the header constructor) and `EBulkDataFlags.cs` in the same directory (full flag catalog). `FByteBulkData.cs` in the same directory covers the wrapping payload-read logic (zlib decompression, bulk-archive resolution); the per-record header layout above is sourced from `FByteBulkDataHeader.cs`.
+
+[^2]: Chunked-framing layout (primary oracle): `FabianFG/CUE4Parse/CUE4Parse/UE4/Readers/FArchive.cs` (`SerializeCompressedNew`) and `CUE4Parse/Compression/Compression.cs` (`LOADING_COMPRESSION_CHUNK_SIZE`). Independent cross-anchors: `Brabb3l/Remnant-2-Save-Parser` `src/sav.rs` (`ARCHIVE_V2_HEADER_TAG`, Rust) and `t1nky/revision-go` `remnant/save_file.go` (tag constants + chunk size, Go).

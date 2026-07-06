@@ -90,13 +90,13 @@ pub(crate) const MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE: u64 = 16 * 1024 * 1024 *
 /// against the CUE4Parse reference
 /// (`FArchive.SerializeCompressedNew`) and independent community
 /// decoders (Remnant-2-Save-Parser, revision-go).
-pub(crate) const ARCHIVE_V2_HEADER_TAG: u64 = 0x2222_2222_9E2A_83C1;
+const ARCHIVE_V2_HEADER_TAG: u64 = 0x2222_2222_9E2A_83C1;
 
 /// Fallback compression-chunk size (128 KiB) when the tag record's
 /// chunk-size field carries the legacy `PACKAGE_FILE_TAG` sentinel
 /// instead of a real size. Mirrors the reference decoder's
 /// `LOADING_COMPRESSION_CHUNK_SIZE`.
-pub(crate) const LOADING_COMPRESSION_CHUNK_SIZE: i64 = 131_072;
+const LOADING_COMPRESSION_CHUNK_SIZE: i64 = 131_072;
 
 /// Wire size of one `FCompressedChunkInfo`: two little-endian i64s
 /// (UE4+; the pre-UE4 u32 layout is below paksmith's version floor).
@@ -1502,11 +1502,7 @@ pub(crate) fn decompress_zlib(
     // 3. Compression chunk size, honoring the legacy sentinel quirk:
     // a chunk-size field carrying PACKAGE_FILE_TAG itself means
     // "128 KiB" (files written before the size was stored).
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "PACKAGE_FILE_TAG fits in i64 positively"
-    )]
-    let sentinel = v1_tag as i64;
+    let sentinel = i64::from(crate::asset::version::PACKAGE_FILE_TAG);
     let chunk_size = if tag_chunk_size == sentinel {
         LOADING_COMPRESSION_CHUNK_SIZE
     } else {
@@ -3359,8 +3355,10 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn chunked_zlib_survives_huge_uncompressed_claim() {
-        // i64::MAX-scale claims must fail cleanly (no overflow, no
-        // panic, no allocation proportional to the claim).
+        // Huge claims must fail cleanly (no overflow, no panic, no
+        // allocation proportional to the claim), at both tiers of
+        // defense. An i64::MAX claim dies at the pre-parse
+        // MAX_BULK_DATA_SIZE cap before any framing math runs...
         let stream = zlib_stream(&[0u8; 16]);
         let stream_len = i64::try_from(stream.len()).unwrap();
         let framed = assemble_framing(
@@ -3371,7 +3369,31 @@ mod tests {
             &stream,
         );
         let result = decompress_zlib(&framed, i64::MAX, "test.uasset");
-        assert!(result.is_err(), "huge claim must fail closed");
+        assert!(
+            matches!(
+                result,
+                Err(crate::PaksmithError::AssetParse {
+                    fault: crate::error::AssetParseFault::BulkDataSizeExceeded { .. },
+                    ..
+                })
+            ),
+            "over-cap claim dies at the claim cap, got {result:?}"
+        );
+        // ...while the largest in-cap claim (exactly 8 GiB at chunk
+        // size 2 → a ~4-billion-entry chunk table) exercises the
+        // framing math itself: the ceil computation must not
+        // overflow, and the table bound must reject before any
+        // allocation proportional to the count.
+        #[allow(clippy::cast_possible_wrap, reason = "8 GiB fits i64 positively")]
+        let at_cap = MAX_BULK_DATA_SIZE as i64;
+        let framed = assemble_framing(
+            (TEST_V1_TAG, 2),
+            None,
+            (stream_len, at_cap),
+            &[(stream_len, 16)],
+            &stream,
+        );
+        expect_decode_failed(decompress_zlib(&framed, at_cap, "test.uasset"), "truncated");
     }
 
     #[cfg(feature = "__test_utils")]
