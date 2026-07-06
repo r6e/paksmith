@@ -34,9 +34,10 @@ per-chunk fallible allocation).
 
 **Paksmith parser status: `complete`.** Phase 1 deliverable; the
 decompression path ships as part of
-`paksmith-core/src/container/pak/mod.rs` (`stream_zlib_to`); Zlib is
-the only `CompressionMethod` paksmith fully decompresses, other
-methods detect-only and route to `DecompressionFault::UnsupportedMethod`.
+`paksmith-core/src/container/pak/mod.rs` (`stream_zlib_to`); Zlib and
+[LZ4](lz4.md) are the two `CompressionMethod`s paksmith fully
+decompresses, other methods detect-only and route to
+`DecompressionFault::UnsupportedMethod`.
 
 ## Versions
 

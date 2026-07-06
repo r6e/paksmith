@@ -95,3 +95,10 @@ path = "fuzz_targets/fuzz_export_pipeline.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_lz4_decompress"
+path = "fuzz_targets/fuzz_lz4_decompress.rs"
+test = false
+doc = false
+bench = false

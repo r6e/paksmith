@@ -542,14 +542,17 @@ pub enum DecompressionFault {
     /// Per-block decompressed-output buffer reservation failed in
     /// `stream_lz4_to`, BEFORE decoding. LZ4 raw blocks decode into
     /// a buffer pre-sized to the block's expected output
-    /// (`compression_block_size`, or the final-block remainder), so
-    /// unlike zlib there is no mid-decode growth site — this is the
-    /// LZ4 path's only output-side reservation. Issue #636.
+    /// (`compression_block_size`, or the final-block remainder),
+    /// capped input-proportionally by `lz4_block_output_cap` at
+    /// `compressed_len × 255` so a crafted claim cannot force a huge
+    /// eager allocation. Unlike zlib there is no mid-decode growth
+    /// site — this is the LZ4 path's only output-side reservation.
+    /// Issue #636.
     Lz4OutputReserveFailed {
         /// 0-based block index for context.
         block_index: usize,
-        /// Bytes the reservation requested (the block's expected
-        /// decompressed size).
+        /// Bytes the reservation requested (the block's capped
+        /// expected output; see `lz4_block_output_cap`).
         requested: usize,
         /// Underlying `try_reserve_exact` failure reason.
         source: TryReserveError,

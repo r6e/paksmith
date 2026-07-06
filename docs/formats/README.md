@@ -99,4 +99,7 @@ Status enums (the `paksmith-doc-lint status-enum` check enforces these):
   re-verify the wire claims against the oracle. Use `n/a` if the
   doc has never been cross-checked. **Do NOT bump for purely
   formatting / whitespace edits** — the column tracks verification
-  activity, not commit-touch.
+  activity, not commit-touch. Because PRs squash-merge, these SHAs
+  reference pre-squash branch commits and may not resolve on `main`;
+  they date/order the verification event rather than serve as a
+  browsable ref.

@@ -269,7 +269,11 @@ See `docs/security/allocation-caps.md` for the broader policy.
   `encoded_entry_in_data_record_size` for the cursor base offset.
 - `crates/paksmith-core/src/container/pak/mod.rs` — `stream_zlib_to`
   block loop (the canonical reference implementation); `stream_lz4_to`
-  shares the same outer loop shape for raw LZ4 blocks.
+  shares the same outer loop shape for raw LZ4 blocks but NOT the
+  bomb-budget mechanism — it decodes into a buffer pre-sized to the
+  block's capped expected output, so over-expansion surfaces as
+  `Lz4DecodeError` rather than `take(budget)`/`DecompressionBomb`
+  (see [`lz4.md`](lz4.md)).
 
 **Status:** `complete` for v5-v11. V3-V4 compressed entries are
 rejected at `stream_zlib_to` with `UnsupportedVersion`.

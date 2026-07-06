@@ -446,8 +446,9 @@ jobs:
       # sanitizer out of the box. Same override applied in fuzz.yml.
       # No target arg → builds every harness registered in
       # `fuzz/Cargo.toml`: `fuzz_pak_open`, `fuzz_usmap_parse`,
-      # `fuzz_asset_parse`, plus the Phase 3 decode harnesses
-      # `fuzz_bulk_decompress`, `fuzz_texture_decode`,
-      # `fuzz_audio_decode`, `fuzz_export_pipeline`.
+      # `fuzz_asset_parse`, plus the decode harnesses
+      # `fuzz_bulk_decompress`, `fuzz_lz4_decompress` (#636),
+      # `fuzz_texture_decode`, `fuzz_audio_decode`,
+      # `fuzz_export_pipeline`.
       - name: Build fuzz harness
         run: cargo fuzz build --target x86_64-unknown-linux-gnu
