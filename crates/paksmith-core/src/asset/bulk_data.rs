@@ -864,10 +864,14 @@ pub(crate) fn make_zero_record() -> FByteBulkData {
 ///    incremented BEFORE allocation; fires
 ///    `BulkDataPackageBudgetExceeded` if over cap (rollback on
 ///    over-budget OR decode-failure paths).
-/// 6. Compression decode: zlib via flate2; output length verified
-///    against `ElementCount`; mismatch fires
-///    `BulkDataDecompressLengthMismatch`, decode errors fire
-///    `BulkDataCompressionDecodeFailed`.
+/// 6. Compression decode: chunked `FCompressedChunkInfo` framing +
+///    zlib via flate2 (see `decompress_zlib`); the framing summary's
+///    uncompressed total is verified against `ElementCount`
+///    (mismatch fires `BulkDataDecompressLengthMismatch`); framing
+///    violations and codec stream errors fire
+///    `BulkDataCompressionDecodeFailed`; unsupported v2 formats fire
+///    `UnsupportedBulkCompression`; a decompressed claim over
+///    `MAX_BULK_DATA_SIZE` fires `BulkDataSizeExceeded`.
 ///
 /// # Threading
 ///
@@ -1360,6 +1364,9 @@ fn read_chunk_info(buf: &[u8], pos: &mut usize) -> Option<(i64, i64)> {
 /// `UnsupportedBulkCompression`.
 ///
 /// SECURITY invariants (Phase 3 audit F1 discipline):
+/// - `expected_size` (the decompressed claim) is capped at
+///   `MAX_BULK_DATA_SIZE` before any parsing — the per-record
+///   ceiling, independent of the resolver's package budget.
 /// - The chunk table's byte size is bounded by the REAL remaining
 ///   input length before any table allocation — a lying summary
 ///   cannot force a large allocation.
@@ -1397,6 +1404,23 @@ pub(crate) fn decompress_zlib(
     }
     #[allow(clippy::cast_sign_loss, reason = "validated >= 0 above")]
     let expected = expected_size as u64;
+
+    // Per-record ceiling on the decompressed claim (R1 panel):
+    // parity with the read-side SizeOnDisk cap for uncompressed
+    // blobs, and the absolute transient-output bound the
+    // single-stream decoder carried via `take(MAX_BULK_DATA_SIZE)`.
+    // Without it, the resolver's 16 GiB package budget alone would
+    // let a single crafted record decompress to 16 GiB (previously
+    // possible only across two 8 GiB records).
+    if expected > MAX_BULK_DATA_SIZE {
+        return Err(crate::PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: crate::error::AssetParseFault::BulkDataSizeExceeded {
+                size: expected,
+                cap: MAX_BULK_DATA_SIZE,
+            },
+        });
+    }
 
     // A zero-size record serializes NO payload bytes at all (the
     // engine early-outs before writing any framing).
@@ -2926,6 +2950,40 @@ mod tests {
         assert_eq!(out, original);
     }
 
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn decompress_zlib_rejects_decompressed_claim_over_cap() {
+        // Per-record ceiling on the decompressed claim (R1 panel):
+        // parity with the read-side SizeOnDisk cap for uncompressed
+        // blobs, restoring the absolute transient-output bound the
+        // single-stream decoder had via `take(MAX_BULK_DATA_SIZE)`.
+        // Fires before any framing parse.
+        #[allow(clippy::cast_possible_wrap, reason = "8 GiB fits i64 positively")]
+        let over = MAX_BULK_DATA_SIZE as i64 + 1;
+        match decompress_zlib(&[], over, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BulkDataSizeExceeded { size, cap },
+                ..
+            }) => {
+                assert_eq!(size, MAX_BULK_DATA_SIZE + 1);
+                assert_eq!(cap, MAX_BULK_DATA_SIZE);
+            }
+            other => panic!("expected BulkDataSizeExceeded, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn decompress_zlib_accepts_decompressed_claim_at_cap() {
+        // Boundary: exactly MAX_BULK_DATA_SIZE passes the cap check
+        // (strict >) and proceeds to framing validation — with empty
+        // input that surfaces the truncated-header fault, NOT
+        // BulkDataSizeExceeded. Kills the `>` → `>=` mutant.
+        #[allow(clippy::cast_possible_wrap, reason = "8 GiB fits i64 positively")]
+        let at_cap = MAX_BULK_DATA_SIZE as i64;
+        expect_decode_failed(decompress_zlib(&[], at_cap, "test.uasset"), "truncated");
+    }
+
     // ---- chunked FCompressedChunkInfo framing (#644) ----
     //
     // Wire literals per the CUE4Parse reference
@@ -3142,8 +3200,8 @@ mod tests {
     #[allow(clippy::cast_possible_wrap, reason = "bit-pattern tags")]
     fn chunked_zlib_rejects_byte_swapped_tags() {
         // Byte-swapped (big-endian producer) framings are recognized
-        // and rejected: paksmith is little-endian-only. All four
-        // swapped forms from the reference decoder.
+        // and rejected: paksmith is little-endian-only. All three
+        // swapped forms the reference decoder compares against.
         let payload = b"0123456789";
         for tag in [
             0x0000_0000_C183_2A9Ei64,        // PACKAGE_FILE_TAG_SWAPPED

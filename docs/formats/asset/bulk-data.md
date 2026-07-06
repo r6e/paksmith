@@ -69,14 +69,11 @@ shape including flag validation, `Size64Bit` field widening,
 `DuplicateNonOptionalPayload` block skip, with caps enforced inline.
 The `BulkDataResolver` (same module) materializes payload bytes across
 all four tiers (inline / uexp-resident / `.ubulk` / `.uptnl`) —
-applying the offset fix-up, the per-package byte budget, and
-zlib decompression — and the Phase 3 format handlers consume the
-resolved bytes. **Known divergence:** for `BULKDATA_SerializeCompressedZLIB`
-records the resolver decodes a single zlib stream rather than the
-chunked `FCompressedChunkInfo` framing described under *Payload
-decompression* below; this is a deliberately unverified limitation
-(rare in cooked content — bulk-level compression is uncommon) tracked
-for a follow-up.
+applying the offset fix-up, the per-package byte budget, and the
+chunked `FCompressedChunkInfo` zlib decompression described under
+*Payload decompression* below
+([#644](https://github.com/r6e/paksmith/issues/644)) — and the
+Phase 3 format handlers consume the resolved bytes.
 
 ## Versions
 
@@ -478,12 +475,15 @@ ships in Phase 3b Task 3:
   construction routes through `read_from` only.
 
 **Status:** `complete`. The record reader, the `BulkDataResolver`
-(tier dispatch + offset fix-up + zlib decompression + per-package byte
-budget), and the `Package::read_from_pak` integration all ship, and the
-Phase 3 typed export readers (texture mips: 3e; static mesh: 3g;
-skeletal mesh: 3h; audio: 3f) consume the resolved bytes. The one known
-gap is the chunked-`FCompressedChunkInfo` zlib framing noted under
-*Payload decompression* (the resolver decodes a single zlib stream).
+(tier dispatch + offset fix-up + chunked-`FCompressedChunkInfo` zlib
+decompression + per-package byte budget), and the
+`Package::read_from_pak` integration all ship, and the Phase 3 typed
+export readers (texture mips: 3e; static mesh: 3g; skeletal mesh: 3h;
+audio: 3f) consume the resolved bytes. The chunked zlib framing under
+*Payload decompression* shipped with
+[#644](https://github.com/r6e/paksmith/issues/644); the remaining
+compression follow-ups are LZO/BitWindow
+([#559](https://github.com/r6e/paksmith/issues/559)).
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 + the per-task
 plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
