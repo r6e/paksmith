@@ -2840,41 +2840,33 @@ mod tests {
         let record = FByteBulkData::read_from(&mut cur, "test.uasset").expect("parse");
 
         let resolver = BulkDataResolver::new_for_test(uasset, uasset_len as u64, 0);
-        // Pre-seed at 0 — record's claim_size is 100 (decompressed).
-        // After failed resolve, counter should be back to 0.
+        // Pre-seed so the corrupt record's 100-byte reservation FITS
+        // (cap - 105 + 100 = cap - 5), but a leaked reservation plus
+        // the 8-byte follow-up would NOT (cap - 5 + 8 > cap). The
+        // follow-up on the SAME resolver therefore succeeds only if
+        // the failed resolve rolled its reservation back — deleting
+        // the `inspect_err` fetch_sub flips the final expect into
+        // BulkDataPackageBudgetExceeded.
+        resolver.set_bytes_resolved_for_test(MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE - 105);
         let result = resolver.resolve(&record, "test.uasset");
-        assert!(
-            result.is_err(),
-            "expected zlib decode error; got Ok({:?})",
-            result.ok()
-        );
-        // Read the counter directly. The test-only setter is the
-        // intended hook; using it to verify reads the live value.
-        // Resolve a record that ABSOLUTELY MUST succeed — if the
-        // counter were inflated, a subsequent valid record might
-        // hit budget exceeded. Verify by resolving a small fresh
-        // record after the failed one.
-        let fresh_record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 8, 0);
-        let fresh_resolver = BulkDataResolver::new_for_test(vec![0u8; 100], 100, 0);
-        let _data = fresh_resolver
-            .resolve(&fresh_record, "test.uasset")
-            .expect("fresh resolver works after isolated decode failure");
-        // Now ALSO verify rollback on the SAME resolver: another
-        // fresh record (uncompressed, small) must succeed even
-        // after the failed compressed resolve.
-        let fresh_record_same = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 8, 0);
-        let small_uasset = vec![0xAA; 100];
-        let same_resolver = BulkDataResolver::new_for_test(small_uasset, 100, 0);
-        // Pre-seed near cap; the failed-resolve rollback was a
-        // separate resolver, so this is a fresh budget. The
-        // genuine test of rollback-on-failure is implicit in
-        // `inspect_err` running — exercised by the failed resolve
-        // above which executed the rollback closure.
-        same_resolver.set_bytes_resolved_for_test(MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE - 100);
-        // 8 bytes + (cap - 100) = cap - 92 → still under cap.
-        let _data = same_resolver
-            .resolve(&fresh_record_same, "test.uasset")
-            .expect("under-cap resolve after rollback path");
+        match result {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BulkDataCompressionDecodeFailed { .. },
+                ..
+            }) => {}
+            // A budget fault here would mean the reservation never
+            // succeeded and the rollback path never ran — the test
+            // setup, not the rollback, would be broken.
+            other => {
+                panic!("expected decode failure after a successful reservation, got {other:?}")
+            }
+        }
+        // Follow-up on the SAME resolver: 8 uncompressed bytes fit
+        // post-rollback (cap - 105 + 8 = cap - 97), not post-leak.
+        let follow_up = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 8, 0);
+        let _data = resolver
+            .resolve(&follow_up, "test.uasset")
+            .expect("rollback restored the headroom the follow-up needs");
     }
 
     #[cfg(feature = "__test_utils")]
