@@ -2084,28 +2084,6 @@ fn stream_zlib_to<R: Read + Seek>(
     Ok(bytes_written)
 }
 
-/// Stream the LZ4-decompressed payload of `entry` from `file` to
-/// `writer`. Returns the number of decompressed bytes written.
-///
-/// UE pak LZ4 payloads are independent RAW LZ4 blocks (no LZ4-frame
-/// header, no size prefix) — the block form repak writes via
-/// `lz4_flex::block::compress` and the CUE4Parse reference decodes
-/// (`K4os LZ4Codec.Decode` into a caller-sized buffer). The reader
-/// derives each block's decompressed size: every block except the
-/// last inflates to exactly `compression_block_size`; the last takes
-/// the remainder of `uncompressed_size`. See
-/// `docs/formats/compression/lz4.md`. Issue #636.
-///
-/// Buffer discipline mirrors [`stream_zlib_to`] (#373): one
-/// compressed-input buffer and one decompressed-output buffer,
-/// hoisted and capacity-reused across blocks; the full
-/// `uncompressed_size` never lives in memory at once. Unlike zlib
-/// there is no mid-decode growth loop — the output buffer is
-/// pre-sized to the block's expected output, which doubles as the
-/// decompression-bomb cap: `lz4_flex::block::decompress_into` errors
-/// on a block that would expand past it (surfaced as
-/// [`DecompressionFault::Lz4DecodeError`]), so over-expansion can
-/// never allocate beyond the per-block expected size.
 /// Maximum factor by which one raw LZ4 block can inflate: a block of
 /// N compressed bytes decodes to at most `N × 255` output bytes.
 /// Literals copy 1:1; the only amplifying construct is a match-length
@@ -2133,6 +2111,28 @@ fn lz4_block_output_cap(expected_out: u64, compressed_len: u64) -> u64 {
     expected_out.min(compressed_len.saturating_mul(MAX_LZ4_BLOCK_EXPANSION_RATIO))
 }
 
+/// Stream the LZ4-decompressed payload of `entry` from `file` to
+/// `writer`. Returns the number of decompressed bytes written.
+///
+/// UE pak LZ4 payloads are independent RAW LZ4 blocks (no LZ4-frame
+/// header, no size prefix) — the block form repak writes via
+/// `lz4_flex::block::compress` and the CUE4Parse reference decodes
+/// (`K4os LZ4Codec.Decode` into a caller-sized buffer). The reader
+/// derives each block's decompressed size: every block except the
+/// last inflates to exactly `compression_block_size`; the last takes
+/// the remainder of `uncompressed_size`. See
+/// `docs/formats/compression/lz4.md`. Issue #636.
+///
+/// Buffer discipline mirrors [`stream_zlib_to`] (#373): one
+/// compressed-input buffer and one decompressed-output buffer,
+/// hoisted and capacity-reused across blocks; the full
+/// `uncompressed_size` never lives in memory at once. Unlike zlib
+/// there is no mid-decode growth loop — the output buffer is
+/// pre-sized to the block's expected output, which doubles as the
+/// decompression-bomb cap: `lz4_flex::block::decompress_into` errors
+/// on a block that would expand past it (surfaced as
+/// [`DecompressionFault::Lz4DecodeError`]), so over-expansion can
+/// never allocate beyond the per-block expected size.
 #[allow(clippy::too_many_lines)] // bounded by per-block error-reporting, mirroring stream_zlib_to
 fn stream_lz4_to<R: Read + Seek>(
     file: &mut R,
@@ -2149,7 +2149,10 @@ fn stream_lz4_to<R: Read + Seek>(
     // as v8 or newer, where compression-block offsets are already
     // relative — the guard `stream_zlib_to` needs (zlib IS reachable
     // pre-v5 via numeric method 1) would be structurally unreachable
-    // dead code here.
+    // dead code here. Defense in depth: even a hypothetical
+    // absolute-offset entry reaching this loop fails closed at
+    // `validate_block_bounds` (abs_end > file_size), never decoding
+    // out-of-bounds bytes.
     let path = entry.filename();
 
     let uncompressed_size = entry.header().uncompressed_size();
@@ -2181,9 +2184,15 @@ fn stream_lz4_to<R: Read + Seek>(
         // compression_block_size for every block except the last,
         // which takes the remainder. `min` covers both (the remainder
         // is < block_size only on the final block of a well-formed
-        // entry; a crafted entry with excess blocks yields expected 0
-        // for the extras, and a raw LZ4 block cannot inflate into a
-        // 0-byte buffer without erroring — fail closed).
+        // entry). A crafted entry with excess blocks yields expected 0
+        // for the extras: non-final extras die at the block-size check
+        // below (a 0-byte decode != block_size), and while a single
+        // TRAILING zero-output block (e.g. the 1-byte `0x00` "empty
+        // last sequence" block) does decode Ok into an empty buffer,
+        // it produces no bytes — output stays exactly the declared
+        // `uncompressed_size` via `check_cumulative_size`. The repak
+        // oracle is more lenient still (it silently ignores ALL excess
+        // blocks), so this is matching-or-stricter behavior.
         let remaining = uncompressed_size.saturating_sub(bytes_written);
         let expected_out = remaining.min(block_size);
 

@@ -171,7 +171,7 @@ writer never produces.
   `take(+1)`-style trick is needed.
 - Faults: corrupt blocks → `Lz4DecodeError`; short non-final blocks
   → `NonFinalBlockSizeMismatch`; cumulative shortfall →
-  `SizeUnderrun`; fallible reservations → 
+  `SizeUnderrun`; fallible reservations →
   `CompressedBlockReserveFailed` (input, shared seam with zlib) and
   `Lz4OutputReserveFailed` (output, seam `PakSeam::Lz4OutputReserve`).
 - `verify_entry` routes LZ4 through the same block-walk hash arm as
