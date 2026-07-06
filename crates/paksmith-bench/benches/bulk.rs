@@ -2,18 +2,16 @@
 //!
 //! Zlib decompression is the highest-*volume* byte path in the bulk resolver
 //! (every compressed mip/buffer flows through it). Decompresses an 8 MiB
-//! semi-compressible payload via the `__test_utils` `zlib_decompress` accessor,
+//! semi-compressible payload (engine chunked `FCompressedChunkInfo` framing,
+//! 64 × 128 KiB chunks) via the `__test_utils` `zlib_decompress` accessor,
 //! reporting throughput over the decompressed bytes.
 
 #![allow(unused_results, missing_docs)]
 
 use std::hint::black_box;
-use std::io::Write;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use flate2::Compression;
-use flate2::write::ZlibEncoder;
-use paksmith_core::testing::bench::zlib_decompress;
+use paksmith_core::testing::bench::{zlib_compress_framed, zlib_decompress};
 
 const UNCOMPRESSED: usize = 8 * 1024 * 1024;
 
@@ -32,9 +30,7 @@ fn make_payload() -> (Vec<u8>, i64) {
             *b = (s & 0x3F) as u8;
         }
     }
-    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-    enc.write_all(&data).expect("zlib write");
-    let compressed = enc.finish().expect("zlib finish");
+    let compressed = zlib_compress_framed(&data);
     (compressed, i64::try_from(UNCOMPRESSED).expect("fits i64"))
 }
 
