@@ -68,13 +68,63 @@ pub fn decode_texture_mip(
     Ok(decode_mip(&format, encoded, width, height, false, "bench")?.rgba)
 }
 
-/// Decompress a zlib-compressed bulk payload to `expected_size` bytes. Isolates
-/// the decompression hot path (the highest-volume byte path in the resolver).
+/// Decompress a chunked-framed zlib bulk payload (engine
+/// `FCompressedChunkInfo` framing, see #644) to `expected_size`
+/// bytes. Isolates the decompression hot path (the highest-volume
+/// byte path in the resolver). Build valid inputs with
+/// [`zlib_compress_framed`].
 ///
 /// # Errors
-/// Propagates `decompress_zlib` errors (size mismatch, corrupt stream).
+/// Propagates `decompress_zlib` errors (framing violations, size
+/// mismatch, corrupt stream).
 pub fn zlib_decompress(compressed: &[u8], expected_size: i64) -> crate::Result<Vec<u8>> {
     decompress_zlib(compressed, expected_size, "bench")
+}
+
+/// Compress `payload` into the engine's chunked `FCompressedChunkInfo`
+/// framing (v1 header, 128 KiB chunks) — the writer-side counterpart
+/// of [`zlib_decompress`], so benches and tests can synthesize valid
+/// compressed bulk payloads.
+///
+/// # Panics
+/// Panics if `payload` exceeds `i64::MAX` bytes (impossible for a
+/// bench/test input).
+#[must_use]
+pub fn zlib_compress_framed(payload: &[u8]) -> Vec<u8> {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+
+    const CHUNK: usize = 131_072; // LOADING_COMPRESSION_CHUNK_SIZE
+
+    let pieces: Vec<(Vec<u8>, usize)> = payload
+        .chunks(CHUNK)
+        .map(|c| {
+            let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+            enc.write_all(c).expect("in-memory zlib write");
+            (enc.finish().expect("in-memory zlib finish"), c.len())
+        })
+        .collect();
+    let as_i64 = |n: usize| i64::try_from(n).expect("bench payload fits i64");
+    let info = |c: i64, u: i64, out: &mut Vec<u8>| {
+        out.extend_from_slice(&c.to_le_bytes());
+        out.extend_from_slice(&u.to_le_bytes());
+    };
+    let total_comp: usize = pieces.iter().map(|(s, _)| s.len()).sum();
+    let mut out = Vec::new();
+    info(
+        i64::from(crate::asset::version::PACKAGE_FILE_TAG),
+        as_i64(CHUNK),
+        &mut out,
+    );
+    info(as_i64(total_comp), as_i64(payload.len()), &mut out);
+    for (stream, unc) in &pieces {
+        info(as_i64(stream.len()), as_i64(*unc), &mut out);
+    }
+    for (stream, _) in &pieces {
+        out.extend_from_slice(stream);
+    }
+    out
 }
 
 /// The exact encoded byte length `decode_mip` requires for `format_name` at
@@ -304,7 +354,6 @@ pub fn large_data_table(rows: usize, cols: usize) -> Asset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn decode_texture_mip_returns_rgba_for_a_bc1_block() {
@@ -316,13 +365,37 @@ mod tests {
 
     #[test]
     fn zlib_decompress_round_trips() {
-        let original: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
-        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-        enc.write_all(&original).expect("zlib write");
-        let compressed = enc.finish().expect("zlib finish");
+        // 300 KiB → three 128 KiB-boundary chunks through the framed
+        // writer; the parser recovering the exact bytes pins the
+        // writer's field layout (tag, summary, table, streams) and
+        // the multi-chunk decode path together.
+        let original: Vec<u8> = (0..300 * 1024u32).map(|i| (i % 251) as u8).collect();
+        let framed = zlib_compress_framed(&original);
         let expected = i64::try_from(original.len()).expect("len fits i64");
-        let out = zlib_decompress(&compressed, expected).expect("decompress");
+        let out = zlib_decompress(&framed, expected).expect("decompress");
         assert_eq!(out, original, "decompress recovers the original bytes");
+    }
+
+    #[test]
+    fn zlib_compress_framed_layout_anchor() {
+        // Field pin for the framed writer's hardcoded header: tag
+        // record = PACKAGE_FILE_TAG + 128 KiB chunk size, summary =
+        // (total compressed, payload length), little-endian i64s.
+        let framed = zlib_compress_framed(&[0x42; 4]);
+        assert_eq!(
+            &framed[..16],
+            &[
+                0xC1, 0x83, 0x2A, 0x9E, 0x00, 0x00, 0x00, 0x00, // PACKAGE_FILE_TAG
+                0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, // 131072
+            ],
+            "tag record hex anchor"
+        );
+        let stream_len = framed.len() - 48; // tag + summary + 1 table entry
+        let mut expected_info = Vec::new();
+        expected_info.extend_from_slice(&i64::try_from(stream_len).unwrap().to_le_bytes());
+        expected_info.extend_from_slice(&4i64.to_le_bytes());
+        assert_eq!(&framed[16..32], &expected_info[..], "summary record");
+        assert_eq!(&framed[32..48], &expected_info[..], "chunk table entry");
     }
 
     #[test]
