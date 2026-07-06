@@ -101,8 +101,8 @@ jobs:
       # `--in-diff` scopes mutation testing to the lines changed in the
       # PR (massive speedup vs whole-workspace mutation). `--no-shuffle`
       # gives stable order across runs — load-bearing for sharding:
-      # shards partition the ORDERED list, so a shuffled order would
-      # break the every-4th-mutant partition's determinism. `-j 2`
+      # shards partition the ORDERED list into consecutive slices, so
+      # a shuffled order would break the partition's determinism. `-j 2`
       # parallelism is conservative — bump if jobs are I/O-bound on a
       # given runner. `--all-features` matches CI's full test invocation
       # so mutations on `__test_utils`-gated code and the
