@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 use std::sync::Arc;
 
+use crate::state::audio_view;
 use crate::state::hex_view;
 use crate::state::property_view::NodeId;
 use crate::state::texture_view;
@@ -18,6 +19,7 @@ pub enum ViewMode {
     Hex,
     Info,
     Texture,
+    Audio,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +41,7 @@ pub struct Tab {
     pub content: TabContent,
     pub hex: hex_view::HexState,
     pub texture: texture_view::TextureState,
+    pub audio: audio_view::AudioState,
     pub expanded: HashSet<NodeId>,
 }
 
@@ -64,6 +67,18 @@ pub fn texture_available(tab: &Tab) -> bool {
     !tab.texture.mips.is_empty()
 }
 
+/// Returns `true` iff `tab` holds a classified sound-wave export.
+///
+/// Reads only the per-tab [`audio_view::AudioState::info`] cache — O(1), safe
+/// to call on every per-frame render. The `AssetLoaded` handler populates it
+/// via `classify_audio` immediately after `set_content`, which resets
+/// `tab.audio` to default on every content swap (mirroring the texture cache),
+/// so this can never observe stale state from a previous content.
+#[must_use]
+pub fn audio_available(tab: &Tab) -> bool {
+    tab.audio.info.is_some()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Tabs {
     pub open: Vec<Tab>,
@@ -84,6 +99,7 @@ impl Tabs {
             content: TabContent::Loading,
             hex: hex_view::HexState::default(),
             texture: texture_view::TextureState::default(),
+            audio: audio_view::AudioState::default(),
             expanded: HashSet::new(),
         });
         let i = self.open.len() - 1;
@@ -134,12 +150,20 @@ impl Tabs {
             // costs nothing in the normal flow while keeping the no-stale-true
             // invariant self-enforcing for any future in-place reload (Phase 7c).
             t.texture = texture_view::TextureState::default();
+            // Same invariant for audio: `audio_available` reads `t.audio.info` as
+            // an "is a sound" signal, so reset it here at the mutation site. A
+            // failed or non-audio reload never reaches the `AssetLoaded` audio
+            // branch, so without this reset `audio_available` could observe
+            // stale-true and mis-promote a non-audio asset to `ViewMode::Audio`.
+            t.audio = audio_view::AudioState::default();
         }
     }
 
     /// After a load completes, promote or demote the default view.
     ///
+    /// Priority: Texture > Audio > Info-on-parse-error.
     /// - If the asset has a decodable texture, promote to `ViewMode::Texture`.
+    /// - Else if the asset is a `USoundWave`, promote to `ViewMode::Audio`.
     /// - If the asset failed to parse, demote to `ViewMode::Info`.
     ///
     /// Only acts when the tab is still on the default `Properties` view
@@ -165,6 +189,8 @@ impl Tabs {
         }
         if texture_available(tab) {
             tab.view = ViewMode::Texture;
+        } else if audio_available(tab) {
+            tab.view = ViewMode::Audio;
         } else if matches!(&tab.content, TabContent::Ready { parsed: Err(_), .. }) {
             tab.view = ViewMode::Info;
         }
@@ -574,6 +600,91 @@ mod tests {
         assert!(
             !texture_available(&t.open[0]),
             "after a swap to non-texture content the Texture tab must not be offered"
+        );
+    }
+
+    // ── ViewMode::Audio + audio_available (Phase 7d Task 4) ──────────────────
+
+    /// Build an `AudioInfo` for use in tests (Vorbis/stereo/12.5 s/playable).
+    fn sample_audio_info() -> paksmith_core::asset::AudioInfo {
+        paksmith_core::asset::AudioInfo {
+            export_idx: 0,
+            codec_label: "Vorbis (Ogg)".to_string(),
+            channels: Some(2),
+            duration_secs: Some(12.5),
+            playable: true,
+        }
+    }
+
+    #[test]
+    fn audio_available_is_true_only_once_classified() {
+        // `audio_available` is the audio peer of `texture_available`: it reads
+        // the per-tab AudioInfo cache (tab.audio.info) rather than re-classifying
+        // the Package. None → false; Some → true.
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate("audio.uasset");
+        assert!(
+            !audio_available(&t.open[0]),
+            "no AudioInfo yet → must be false"
+        );
+        t.open[0].audio.info = Some(sample_audio_info());
+        assert!(audio_available(&t.open[0]), "AudioInfo set → must be true");
+    }
+
+    #[test]
+    fn set_content_resets_stale_audio_info() {
+        // Peer of `set_content_resets_stale_texture_cache`: `set_content` clears
+        // `tab.audio` at the mutation site so `audio_available` cannot read
+        // stale-true after a content swap (the in-place-reload hazard). Populate
+        // `audio.info`, swap to non-audio content, and assert it is cleared.
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate("a.uasset");
+        t.open[0].audio.info = Some(sample_audio_info());
+        t.set_content("a.uasset", ready_non_texture_content());
+        assert!(
+            t.open[0].audio.info.is_none(),
+            "set_content must reset tab.audio on content swap"
+        );
+        assert!(
+            !audio_available(&t.open[0]),
+            "after a swap to non-audio content the Audio tab must not be offered"
+        );
+    }
+
+    #[test]
+    fn pick_view_promotes_to_audio_when_audio_available_and_no_texture() {
+        // A tab whose texture-mip cache is empty (texture_available = false) but
+        // whose audio.info is Some (audio_available = true) must be promoted from
+        // Properties to Audio. Uses ready_non_texture_content so the tab's
+        // Package is a realistic non-texture parse result, making the test an
+        // honest simulation of a sound-wave asset load.
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate("audio.uasset");
+        t.set_content("audio.uasset", ready_non_texture_content());
+        // texture_available is false (set_content resets mips to empty).
+        assert!(t.open[0].texture.mips.is_empty());
+        // Populate audio.info to make audio_available true.
+        t.open[0].audio.info = Some(sample_audio_info());
+        t.pick_view_after_load("audio.uasset");
+        assert_eq!(
+            t.open[0].view,
+            ViewMode::Audio,
+            "a tab with audio but no texture, on Properties, must promote to Audio"
+        );
+    }
+
+    #[test]
+    fn pick_view_audio_respects_user_set_hex() {
+        // pick_view_after_load must not override a user-initiated view switch.
+        // Even with audio_available = true, a tab already on Hex must stay on Hex.
+        let mut t = loading_tabs(&["audio.uasset"]);
+        t.open[0].audio.info = Some(sample_audio_info());
+        t.set_view(0, ViewMode::Hex);
+        t.pick_view_after_load("audio.uasset");
+        assert_eq!(
+            t.open[0].view,
+            ViewMode::Hex,
+            "user-set Hex must be respected even when audio_available is true"
         );
     }
 }

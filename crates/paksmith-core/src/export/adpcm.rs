@@ -74,13 +74,15 @@ const _: () = assert!(MS_COEFF1.len() == MS_COEFF2.len());
 const MS_HEADER_BYTES: usize = 7;
 
 /// The parsed `fmt ` fields this decoder needs.
-struct WavFmt {
-    format_tag: u16,
-    channels: u16,
-    sample_rate: u32,
-    block_align: u16,
+pub(crate) struct WavFmt {
+    pub(crate) format_tag: u16,
+    pub(crate) channels: u16,
+    pub(crate) sample_rate: u32,
+    pub(crate) block_align: u16,
+    /// `wBitsPerSample` at fmt body offset 14.
+    pub(crate) bits_per_sample: u16,
     /// `samplesPerBlock` from the ADPCM `fmt ` extension (`0` if absent).
-    samples_per_block: u16,
+    pub(crate) samples_per_block: u16,
 }
 
 fn read_u16le(buf: &[u8], off: usize) -> Option<u16> {
@@ -99,7 +101,7 @@ fn read_u32le(buf: &[u8], off: usize) -> Option<u32> {
 /// `None` when the buffer is not a well-formed RIFF/WAVE with both a `fmt ` and
 /// a `data` chunk — the caller treats that as "not decodable here, pass
 /// through".
-fn parse_wav(buf: &[u8]) -> Option<(WavFmt, &[u8])> {
+pub(crate) fn parse_wav(buf: &[u8]) -> Option<(WavFmt, &[u8])> {
     if buf.get(0..4)? != b"RIFF" || buf.get(8..12)? != b"WAVE" {
         return None;
     }
@@ -118,6 +120,10 @@ fn parse_wav(buf: &[u8]) -> Option<(WavFmt, &[u8])> {
                     channels: read_u16le(body, 2)?,
                     sample_rate: read_u32le(body, 4)?,
                     block_align: read_u16le(body, 12)?,
+                    // Required in any valid ≥16-byte `fmt ` chunk; a truncated fmt
+                    // missing it is a malformed container (→ `None`), not a bits=0
+                    // "unsupported format".
+                    bits_per_sample: read_u16le(body, 14)?,
                     // `cbSize` (off 16) ≥ 2 ⇒ `samplesPerBlock` at off 18.
                     samples_per_block: read_u16le(body, 18).unwrap_or(0),
                 });

@@ -8,6 +8,7 @@ use iced::widget::{button, column, container, pane_grid, text};
 use iced::{Element, Event, Length, Subscription, Task};
 use zeroize::Zeroizing;
 
+use crate::audio_output::AudioOutput;
 use crate::panels::{content, key_prompt, sidebar, status_bar, toolbar};
 use crate::state::archive::{LoadedArchive, OpenError};
 use crate::state::keyflow::KeyFlow;
@@ -35,6 +36,11 @@ const CONSOLE_TICK_FAST_MS: u64 = 250;
 /// cut idle CPU — at the cost of up to this much latency on the first new
 /// record after an idle spell.
 const CONSOLE_TICK_SLOW_MS: u64 = 1000;
+
+/// Number of `(min, max)` amplitude columns in the audio waveform overview.
+/// Matches the bucket count passed to
+/// [`crate::state::audio_view::compute_waveform`] on each decode completion.
+const WAVEFORM_COLUMNS: usize = 512;
 
 /// Root application state.
 // Three of the bools are independent UI toggles (panel visibility, tail-follow,
@@ -114,6 +120,13 @@ pub struct App {
     /// `LogBuffer::total_pushed` observed at the last console tick (or on open).
     /// The tick compares against this to decide `console_active`.
     pub console_last_pushes: u64,
+    /// Audio-output backend for the Phase 7d audio player, opened lazily.
+    ///
+    /// `None` until a device is opened (or if no device is available). Holding
+    /// the `!Send` [`AudioOutput`] directly on `App` is sound because iced 0.14
+    /// keeps application state on the main thread — see `audio_output`'s module
+    /// docs for the placement rationale.
+    pub audio: Option<AudioOutput>,
 }
 
 impl Default for App {
@@ -151,6 +164,10 @@ impl Default for App {
             console_filters: crate::state::console::ConsoleFilters::default(),
             console_active: false,
             console_last_pushes: 0,
+            // `App::default()` — used throughout the tests — leaves the device
+            // unset so it stays free of any real audio-hardware side effect. The
+            // live path opens the real output device eagerly in `boot_app`.
+            audio: None,
         }
     }
 }
@@ -163,7 +180,31 @@ impl Default for App {
 /// subscriber writes to. Extracted from `main`'s boot closure so the
 /// buffer-sharing (load-bearing: drop it and the console is permanently empty)
 /// is unit-testable rather than buried in the untestable entry point.
+///
+/// `#[mutants::skip]`: this function opens the real audio device, which is
+/// environment-gated — `AudioOutput::new()` returns `None` in a headless
+/// (CI/test) environment, so a mutant deleting the `audio` field init is
+/// indistinguishable from the real path there and would survive. The
+/// device-free, load-bearing part (log-buffer sharing) is extracted to
+/// [`base_app`] so it stays mutation-tested.
+#[mutants::skip]
 pub fn boot_app(log_buffer: crate::state::log_buffer::LogBuffer) -> App {
+    let mut app = base_app(log_buffer);
+    // Open the real output device here (not in `App::default`/`base_app`):
+    // `default()` is used throughout the tests and must stay free of any
+    // audio-hardware side effect, so device acquisition lives on the live boot
+    // path only. `AudioOutput::new` returns `None` when no device is available,
+    // so a headless environment degrades to silent playback rather than failing.
+    app.audio = crate::audio_output::AudioOutput::new();
+    app
+}
+
+/// The device-free core of [`boot_app`]: wire the caller's shared `LogBuffer`
+/// into a fresh `App`. Extracted (not `#[mutants::skip]`) so the load-bearing
+/// buffer sharing — drop it and the console is permanently empty — stays
+/// mutation-tested via `boot_app_shares_the_injected_log_buffer`, even though
+/// `boot_app` itself is device glue.
+fn base_app(log_buffer: crate::state::log_buffer::LogBuffer) -> App {
     App {
         log_buffer,
         ..App::default()
@@ -254,6 +295,28 @@ pub enum Message {
         /// Results from a previous generation are silently dropped.
         generation: u64,
     },
+    /// An async audio decode task completed.
+    AudioDecoded {
+        /// Entry path identifying which tab holds this decode result.
+        path: String,
+        /// The decoded PCM data or a stringified error.
+        result: Result<crate::state::audio_view::DecodedAudio, String>,
+        /// The archive generation at the time the decode was dispatched.
+        /// Results from a previous generation are silently dropped.
+        generation: u64,
+    },
+    /// Toggle play/pause for the active tab's audio.
+    AudioPlayPause,
+    /// Stop the active tab's audio and reset the playhead to zero.
+    AudioStop,
+    /// Set the active tab's audio volume (`0.0`–`1.0`; clamped by `AudioState`).
+    AudioVolume(f32),
+    /// Seek the active tab's audio to the given fractional position (`0.0`–`1.0`).
+    /// Emitted by the waveform canvas on click/drag.
+    AudioSeek(f32),
+    /// Periodic tick while audio is playing: advance the displayed playhead
+    /// and detect playback completion.
+    AudioTick,
     /// A texture channel was toggled on/off in the active tab.
     TextureChannelToggled {
         channel: crate::state::texture_view::Channel,
@@ -372,69 +435,77 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 Message::ArchiveOpened(Box::new(r))
             })
         }
-        Message::ArchiveOpened(boxed) => match *boxed {
-            Ok(loaded) => {
-                app.error = None;
-                app.keyflow.unlock();
-                app.hex_input.clear();
-                // Reset stale per-archive UI state so a new archive doesn't
-                // inherit the previous selection cursor or filter query.
-                app.filter.clear();
-                app.selected_row = None;
-                dismiss_row_menus(app);
-                // Clear tabs so they never reference a stale reader.
-                app.tabs.clear();
-                app.archive_generation = app.archive_generation.wrapping_add(1);
-                app.archive = Some(loaded);
-                Task::none()
-            }
-            Err(OpenError::Locked { path }) => {
-                // Enter the key-entry flow: show the inline key-prompt panel.
-                app.keyflow.lock(path);
-                app.hex_input.clear();
-                // The old archive is kept while the key prompt shows, so clear the
-                // stale context-menu index too.
-                dismiss_row_menus(app);
-                // Clear any stale tabs from a previously-open archive.
-                app.tabs.clear();
-                app.archive_generation = app.archive_generation.wrapping_add(1);
-                Task::none()
-            }
-            Err(OpenError::Core(msg)) => {
-                if app.keyflow.is_locked().is_some() {
-                    // We're mid-key-flow (e.g. wrong manual key) — show the error
-                    // inside the panel, not as the global banner.
-                    app.keyflow.set_error(msg);
-                    Task::none()
-                } else if app.archive.is_some() {
-                    // An archive is already open, so the full-area error banner in
-                    // `view` would never render (the `Some(archive)` branch wins).
-                    // Surface the failure as a non-blocking toast instead.
-                    //
-                    // The open attempt began with `keyflow.begin()` (→ Resolving);
-                    // it has now terminated, so leave Resolving — otherwise the
-                    // state machine keeps claiming an open is in flight. The
-                    // previously-loaded archive remains displayed, so restore the
-                    // loaded-archive invariant (`Unlocked`, the state the `Ok` arm
-                    // sets) rather than `Idle`, which would imply no archive.
+        Message::ArchiveOpened(boxed) => {
+            // Any archive-open result stops the current playback first (spec §3
+            // "one active playback"). The clearing branches (Ok/Locked) leave no
+            // tab to own the sink; a Core failure keeps the tabs but the
+            // navigation attempt still stops playback (tab + device reset
+            // together, so no desync).
+            stop_active_playback(app);
+            match *boxed {
+                Ok(loaded) => {
+                    app.error = None;
                     app.keyflow.unlock();
-                    push_toast(
-                        app,
-                        crate::state::toast::Severity::Error,
-                        format!("Couldn't open file: {msg}"),
-                    )
-                } else {
-                    // No archive: the empty-state banner (with retry CTA) is the
-                    // right home. The open began with `keyflow.begin()` (→
-                    // `Resolving`); reset to `Idle` so `view` falls through to the
-                    // banner instead of showing the "Opening…" spinner forever
-                    // (the `Resolving` branch precedes the `app.error` branch).
-                    app.keyflow.reset();
-                    app.error = Some(msg);
+                    app.hex_input.clear();
+                    // Reset stale per-archive UI state so a new archive doesn't
+                    // inherit the previous selection cursor or filter query.
+                    app.filter.clear();
+                    app.selected_row = None;
+                    dismiss_row_menus(app);
+                    // Clear tabs so they never reference a stale reader.
+                    app.tabs.clear();
+                    app.archive_generation = app.archive_generation.wrapping_add(1);
+                    app.archive = Some(loaded);
                     Task::none()
                 }
+                Err(OpenError::Locked { path }) => {
+                    // Enter the key-entry flow: show the inline key-prompt panel.
+                    app.keyflow.lock(path);
+                    app.hex_input.clear();
+                    // The old archive is kept while the key prompt shows, so clear the
+                    // stale context-menu index too.
+                    dismiss_row_menus(app);
+                    // Clear any stale tabs from a previously-open archive.
+                    app.tabs.clear();
+                    app.archive_generation = app.archive_generation.wrapping_add(1);
+                    Task::none()
+                }
+                Err(OpenError::Core(msg)) => {
+                    if app.keyflow.is_locked().is_some() {
+                        // We're mid-key-flow (e.g. wrong manual key) — show the error
+                        // inside the panel, not as the global banner.
+                        app.keyflow.set_error(msg);
+                        Task::none()
+                    } else if app.archive.is_some() {
+                        // An archive is already open, so the full-area error banner in
+                        // `view` would never render (the `Some(archive)` branch wins).
+                        // Surface the failure as a non-blocking toast instead.
+                        //
+                        // The open attempt began with `keyflow.begin()` (→ Resolving);
+                        // it has now terminated, so leave Resolving — otherwise the
+                        // state machine keeps claiming an open is in flight. The
+                        // previously-loaded archive remains displayed, so restore the
+                        // loaded-archive invariant (`Unlocked`, the state the `Ok` arm
+                        // sets) rather than `Idle`, which would imply no archive.
+                        app.keyflow.unlock();
+                        push_toast(
+                            app,
+                            crate::state::toast::Severity::Error,
+                            format!("Couldn't open file: {msg}"),
+                        )
+                    } else {
+                        // No archive: the empty-state banner (with retry CTA) is the
+                        // right home. The open began with `keyflow.begin()` (→
+                        // `Resolving`); reset to `Idle` so `view` falls through to the
+                        // banner instead of showing the "Opening…" spinner forever
+                        // (the `Resolving` branch precedes the `app.error` branch).
+                        app.keyflow.reset();
+                        app.error = Some(msg);
+                        Task::none()
+                    }
+                }
             }
-        },
+        }
         Message::KeyInputChanged(s) => {
             app.hex_input = Zeroizing::new(s);
             // Clear any previous key-attempt error when the user starts typing.
@@ -762,6 +833,13 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // Opening any asset (button, double-click, Enter, or the context-menu
             // strip) dismisses the inline menu.
             dismiss_row_menus(app);
+            // Opening *another* sound stops the current playback (spec §3);
+            // re-opening the already-active asset is not "another" and must not
+            // stop it — mirrors the `TabActivated` same-tab guard.
+            let reopening_active = app.tabs.active_tab().is_some_and(|t| t.path == path);
+            if !reopening_active {
+                stop_active_playback(app);
+            }
             // Re-opening an already-open asset only reactivates its tab; it keeps its
             // loaded content and must NOT re-read/re-parse (tab dedupe per the spec).
             // Branch on `was_open` directly (load in the `else`) rather than a
@@ -816,6 +894,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // path-keyed tab is always correct.
             // Three-guard form: can't use let-chains on MSRV 1.88.
             let mut decode_task = Task::none();
+            let mut audio_task = Task::none();
             #[allow(clippy::collapsible_if)]
             if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path) {
                 if let TabContent::Ready {
@@ -847,20 +926,54 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                             },
                         );
                     }
+                    // Audio classification — single classify_audio call per load,
+                    // mirroring the classify_texture pattern above. A real asset is
+                    // texture XOR sound, so at most one of these blocks fires per load.
+                    // `set_content` already reset `tab.audio` to default; populate only.
+                    if let Some(info) = paksmith_core::asset::classify_audio(arc.as_ref()) {
+                        // Extract the Copy scalars, then MOVE `info` (avoids
+                        // cloning its `codec_label` String).
+                        let export_idx = info.export_idx;
+                        let playable = info.playable;
+                        tab.audio.export_idx = export_idx;
+                        tab.audio.info = Some(info);
+                        if playable {
+                            let pkg = arc.clone();
+                            let task_path = path.clone();
+                            audio_task = Task::perform(
+                                crate::task::audio::decode(pkg, export_idx),
+                                move |result| Message::AudioDecoded {
+                                    path: task_path,
+                                    result,
+                                    generation,
+                                },
+                            );
+                        }
+                    }
                 }
             }
-            // INVARIANT: the decodable-mip cache was populated (or left empty for
-            // a non-texture) just above, so the view picker reads `mips` rather
-            // than re-classifying. This ordering is `pick_view_after_load`'s
-            // documented precondition — do not move it before the populate block.
+            // INVARIANT: both the decodable-mip cache (texture) and audio.info
+            // (audio) were populated just above, so the view picker reads those
+            // caches rather than re-classifying. This ordering is
+            // `pick_view_after_load`'s documented precondition — do not move it
+            // before the populate block.
             app.tabs.pick_view_after_load(&path);
-            decode_task
+            Task::batch([decode_task, audio_task])
         }
         Message::TabActivated(i) => {
+            // Switching to a different tab stops the current playback (spec §3);
+            // re-activating the already-active tab is a playback no-op.
+            if app.tabs.active != Some(i) {
+                stop_active_playback(app);
+            }
             app.tabs.activate(i);
             Task::none()
         }
         Message::TabClosed(i) => {
+            // Closing the tab that owns the current playback stops the sink (spec §3).
+            if app.tabs.active == Some(i) {
+                stop_active_playback(app);
+            }
             app.tabs.close(i);
             Task::none()
         }
@@ -973,6 +1086,162 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                         }
                     }
                 }
+            }
+            Task::none()
+        }
+        Message::AudioDecoded {
+            path,
+            result,
+            generation,
+        } => {
+            // Generation fence: drop results from a previous archive.
+            if generation != app.archive_generation {
+                return Task::none();
+            }
+            // Find the tab by path, then write the result only if it still
+            // applies. The `tab.audio.info.is_some()` guard mirrors the texture
+            // handler's `mip < mips.len()` guard: `set_content` resets `tab.audio`
+            // to default (`info = None`) on a content swap, so a decode landing
+            // after a reset would otherwise write onto a non-audio tab.
+            // Two-guard form: can't use let-chains on MSRV 1.88.
+            let mut decoded_ok = false;
+            #[allow(clippy::collapsible_if)]
+            if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path) {
+                if tab.audio.info.is_some() {
+                    match result {
+                        Ok(decoded) => {
+                            tab.audio.waveform = crate::state::audio_view::compute_waveform(
+                                &decoded.samples,
+                                decoded.channels,
+                                WAVEFORM_COLUMNS,
+                            );
+                            tab.audio.decoded = Some(decoded);
+                            tab.audio.error = None;
+                            decoded_ok = true;
+                        }
+                        Err(msg) => {
+                            tab.audio.error = Some(msg);
+                        }
+                    }
+                }
+            }
+            // Spec §"No audio device": a clip decoded fine but there's no output
+            // device, so it can't be played (the transport is also rendered
+            // disabled). Surface it once, after the tab borrow ends so `push_toast`
+            // can take `&mut app`. The device-independent decision lives in the
+            // tested `should_warn_no_device`.
+            if crate::state::audio_view::should_warn_no_device(decoded_ok, app.audio.is_some()) {
+                return push_toast(
+                    app,
+                    crate::state::toast::Severity::Error,
+                    "No audio output device \u{2014} playback unavailable.".to_owned(),
+                );
+            }
+            Task::none()
+        }
+        Message::AudioPlayPause => {
+            // `app.tabs` and `app.audio` are disjoint fields, so the seam call can
+            // borrow the device WHILE the active-tab borrow is live — the decoded
+            // PCM is passed by reference (`apply_playback` reads it only for the
+            // re-feed actions), never cloned.
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                let action = tab.audio.toggle_play();
+                // Pin the offset the sink buffer will begin at BEFORE the re-feed:
+                // rodio's `get_pos` is buffer-relative, so the tick adds this back
+                // to recover the absolute playhead. Only re-feed actions
+                // (`Play`/`SeekTo`) restart the buffer; `Pause`/`None` don't.
+                if matches!(
+                    action,
+                    crate::state::audio_view::PlaybackAction::Play
+                        | crate::state::audio_view::PlaybackAction::SeekTo(_)
+                ) {
+                    tab.audio.playback_offset_secs = tab.audio.position_secs;
+                }
+                apply_playback(
+                    &mut app.audio,
+                    tab.audio.decoded.as_ref(),
+                    tab.audio.transport,
+                    tab.audio.position_secs,
+                    tab.audio.volume,
+                    action,
+                );
+            }
+            Task::none()
+        }
+        Message::AudioStop => {
+            // Disjoint-field borrow (see `AudioPlayPause`): `Stop` doesn't re-feed,
+            // so `apply_playback` ignores the decoded ref — passing it by reference
+            // costs nothing.
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                let action = tab.audio.stop();
+                apply_playback(
+                    &mut app.audio,
+                    tab.audio.decoded.as_ref(),
+                    tab.audio.transport,
+                    tab.audio.position_secs,
+                    tab.audio.volume,
+                    action,
+                );
+            }
+            Task::none()
+        }
+        Message::AudioVolume(v) => {
+            // Kept on the two-phase pattern (unlike the disjoint-borrow
+            // Play/Stop/Seek arms) ON PURPOSE: the value forwarded to the seam is
+            // a `Copy` `f32`, so there's no PCM clone to hoist out of the borrow,
+            // and the tuple-match sidesteps `collapsible_if` (the collapse would
+            // need a let-chain, unavailable at MSRV 1.88).
+            let volume = if let Some(tab) = app.tabs.active_tab_mut() {
+                tab.audio.set_volume(v);
+                Some(tab.audio.volume)
+            } else {
+                None
+            };
+            if let (Some(vol), Some(out)) = (volume, app.audio.as_mut()) {
+                out.set_volume(vol);
+            }
+            Task::none()
+        }
+        Message::AudioSeek(frac) => {
+            // `seek_fraction` always returns `SeekTo`, so unconditionally pin
+            // `playback_offset_secs` (rodio's `get_pos` is buffer-relative; the
+            // tick adds this offset back). Disjoint-field borrow (see
+            // `AudioPlayPause`) lets the seam read the decoded PCM by reference,
+            // no clone.
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                let act = tab.audio.seek_fraction(frac);
+                tab.audio.playback_offset_secs = tab.audio.position_secs;
+                apply_playback(
+                    &mut app.audio,
+                    tab.audio.decoded.as_ref(),
+                    tab.audio.transport,
+                    tab.audio.position_secs,
+                    tab.audio.volume,
+                    act,
+                );
+            }
+            Task::none()
+        }
+        Message::AudioTick => {
+            // Read seam state before borrowing tabs (immutable borrows of
+            // `app.audio` are released before `active_tab_mut` takes a
+            // mutable borrow of `app.tabs`).
+            let pos = app.audio.as_ref().and_then(AudioOutput::position);
+            let done = app.audio.as_ref().is_some_and(AudioOutput::finished);
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                if let Some(dur) = pos {
+                    // `dur` is buffer-relative (rodio resets `get_pos` on each
+                    // re-feed); `advance_playhead` adds the offset the buffer began
+                    // at to recover the absolute track position.
+                    tab.audio.advance_playhead(dur.as_secs_f32());
+                }
+                if done {
+                    let _ = tab.audio.stop();
+                }
+            }
+            // Tuple-match sidesteps `collapsible_if` (let-chain not in MSRV 1.88).
+            if let (true, Some(out)) = (done, app.audio.as_mut()) {
+                out.stop();
             }
             Task::none()
         }
@@ -1315,6 +1584,128 @@ pub fn hex_drag_listener_active(app: &App) -> bool {
         .is_some_and(|t| t.view == crate::state::tabs::ViewMode::Hex)
 }
 
+/// Returns `true` when the active tab is currently playing audio (so the
+/// play-gated [`Message::AudioTick`] subscription should be active).
+///
+/// Extracted from [`subscription`] so the predicate is unit- and
+/// mutation-tested without a headless iced runtime. Kills the
+/// `Transport::Playing == Transport::Paused` mutant.
+pub fn audio_tick_active(app: &App) -> bool {
+    app.tabs
+        .active_tab()
+        .is_some_and(|t| t.audio.transport == crate::state::audio_view::Transport::Playing)
+}
+
+/// Enforce the "one active playback, globally" lifecycle rule (spec §3): reset
+/// the active tab's transport to `Stopped` and stop the shared rodio sink.
+///
+/// Called *before* any transition that changes which tab is active, removes the
+/// playing tab, or clears all tabs (tab switch, tab close, opening another
+/// asset, archive swap) — so the single global device never keeps playing a tab
+/// the user has navigated away from. There is no autoplay, so the correct
+/// post-transition state is always "device stopped, active tab ready".
+///
+/// `#[mutants::skip]`: the device call (`AudioOutput::stop`) is the rodio seam,
+/// unobservable when `app.audio == None` (headless tests); the pure transport
+/// reset it delegates to (`AudioState::stop`, already mutation-tested) and the
+/// call-site guards (which ARE tested) carry the logic. This body is glue.
+#[mutants::skip]
+fn stop_active_playback(app: &mut App) {
+    if let Some(tab) = app.tabs.active_tab_mut() {
+        let _ = tab.audio.stop();
+    }
+    if let Some(out) = app.audio.as_mut() {
+        out.stop();
+    }
+}
+
+/// Re-feed the decoded clip to the sink from `position_secs` at `volume`.
+///
+/// Shared by the `Play` and `SeekTo`-while-playing arms of [`apply_playback`]:
+/// compute the frame-aligned resume offset, re-apply the active tab's volume (a
+/// fresh `play_samples` source does NOT carry the previous level over), and hand
+/// the tail to the sink. `#[mutants::skip]`: pure device glue — the only logic it
+/// carries (the resume-offset math) is unit + mutation tested in
+/// [`resume_sample_offset`](crate::state::audio_view::resume_sample_offset).
+#[mutants::skip]
+fn refeed_from_position(
+    out: &mut AudioOutput,
+    dec: &crate::state::audio_view::DecodedAudio,
+    position_secs: f32,
+    volume: f32,
+) {
+    // Defense in depth: the view disables play for an over-cap clip so this is
+    // normally unreachable, but guard the actual allocation site too — a fresh
+    // `play_samples` doubles the samples into an `f32` buffer, so refuse before
+    // that alloc if a future caller ever reaches here with an over-cap clip.
+    if dec.samples.len() > crate::state::audio_view::MAX_PLAYABLE_SAMPLES {
+        tracing::warn!(
+            samples = dec.samples.len(),
+            cap = crate::state::audio_view::MAX_PLAYABLE_SAMPLES,
+            "refusing to play a clip over the GUI playback cap"
+        );
+        return;
+    }
+    let start = crate::state::audio_view::resume_sample_offset(
+        position_secs,
+        dec.sample_rate,
+        dec.channels,
+        dec.samples.len(),
+    );
+    out.set_volume(volume);
+    out.play_samples(dec.samples[start..].to_vec(), dec.channels, dec.sample_rate);
+}
+
+/// Apply a [`PlaybackAction`](crate::state::audio_view::PlaybackAction) from the
+/// pure state machine to the audio-output seam.
+///
+/// The decision of *which* action to take was already made by the pure
+/// `AudioState` methods (`toggle_play`, `stop`, …) and is mutation-tested there.
+/// This function is glue — it dispatches that decision to the `!Send` rodio
+/// backend — and cannot be unit-tested without a real audio device, so the
+/// whole impl is `#[mutants::skip]`.
+///
+/// On `Play` (and `SeekTo` when currently `Playing`), the decoded samples are
+/// re-fed from the current `position_secs` so that both a stopped→play transition
+/// (position 0) and a paused→resume transition (position > 0) route through the
+/// same uniform path.
+#[mutants::skip]
+fn apply_playback(
+    audio: &mut Option<AudioOutput>,
+    decoded: Option<&crate::state::audio_view::DecodedAudio>,
+    transport: crate::state::audio_view::Transport,
+    position_secs: f32,
+    volume: f32,
+    action: crate::state::audio_view::PlaybackAction,
+) {
+    use crate::state::audio_view::PlaybackAction;
+    let Some(out) = audio else { return };
+    match action {
+        PlaybackAction::Play => {
+            // Stopped→play starts from 0; Paused→resume starts mid-clip.
+            if let Some(dec) = decoded {
+                refeed_from_position(out, dec, position_secs, volume);
+            }
+        }
+        PlaybackAction::Pause => out.pause(),
+        PlaybackAction::Stop => out.stop(),
+        PlaybackAction::SeekTo(_) => {
+            // Re-feed only when already playing; a seek while paused/stopped just
+            // updates `position_secs` in the pure state and play will read it later.
+            // `collapsible_if`: the suggested collapse would use a let-chain
+            // (`transport == … && let Some(dec) = decoded`) which is not
+            // available on MSRV 1.88.
+            #[allow(clippy::collapsible_if)]
+            if transport == crate::state::audio_view::Transport::Playing {
+                if let Some(dec) = decoded {
+                    refeed_from_position(out, dec, position_secs, volume);
+                }
+            }
+        }
+        PlaybackAction::None => {}
+    }
+}
+
 /// Returns a [`Subscription`] that converts keyboard key-press events into
 /// [`Message::TreeKey`] while an archive is open, merged with the menu event
 /// bridge that polls the `muda` global channel.
@@ -1356,8 +1747,26 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         Subscription::none()
     };
 
+    // Tick at 100 ms while audio is playing so the displayed playhead advances
+    // and the finish condition is polled. Gated on `audio_tick_active` so the
+    // subscription costs nothing when no audio is playing, AND on device
+    // presence: with no output device (`app.audio == None`) the tick can never
+    // observe a position or finish, so it would spin forever. The device gate
+    // stays OUT of `audio_tick_active` so that predicate remains device-agnostic
+    // and unit-testable (`App::default()` has `audio == None`).
+    let audio_tick_sub = if audio_tick_active(app) && app.audio.is_some() {
+        iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::AudioTick)
+    } else {
+        Subscription::none()
+    };
+
     if app.archive.is_none() {
-        return Subscription::batch([menu_sub, console_toggle_sub, console_tick_sub]);
+        return Subscription::batch([
+            menu_sub,
+            console_toggle_sub,
+            console_tick_sub,
+            audio_tick_sub,
+        ]);
     }
 
     // Tree navigation keys. The decision (F12 exclusion + only-act-on-unconsumed
@@ -1386,6 +1795,7 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         menu_sub,
         console_toggle_sub,
         console_tick_sub,
+        audio_tick_sub,
         tree_key_sub,
         hex_drag_sub,
     ])
@@ -1540,13 +1950,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
         let export_menu = app.export_menu.as_ref();
         let tabs = &app.tabs;
         let entries = &archive.entries;
+        let audio_device_available = app.audio.is_some();
 
         pane_grid(&app.panes, move |_pane, kind, _maximized| {
             let content: Element<'_, Message> = match kind {
                 PaneKind::Sidebar => {
                     sidebar::view(tree, accent, selected_row, context_row, export_menu)
                 }
-                PaneKind::Detail => content::view(tabs, entries, accent),
+                PaneKind::Detail => content::view(tabs, entries, accent, audio_device_available),
             };
             pane_grid::Content::new(content)
         })
@@ -4168,5 +4579,666 @@ mod tests {
         let _ = super::update(&mut app, super::Message::ConsoleCleared);
         assert!(app.log_buffer.snapshot().is_empty());
         assert!(app.console_follow, "clearing re-arms tail-follow");
+    }
+
+    // ── Task 7: AudioDecoded message wiring ──────────────────────────────────
+
+    /// Build an App whose active tab has `tab.audio.info` populated, mirroring
+    /// the postcondition of the `AssetLoaded` handler after a sound-wave load.
+    ///
+    /// The tab has no `TabContent::Ready` (left as `Loading`) because the
+    /// `AudioDecoded` arm looks up the tab by path and checks `audio.info`,
+    /// not the content variant. Setting `info` is sufficient to exercise all
+    /// four `AudioDecoded` paths (generation fence, path lookup, info guard,
+    /// Ok/Err decode result).
+    fn app_with_open_audio_tab() -> App {
+        use paksmith_core::asset::AudioInfo;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("Game/SFX_Hit.uasset");
+        let tab = app
+            .tabs
+            .active_tab_mut()
+            .expect("just-opened tab must be active");
+        tab.audio.info = Some(AudioInfo {
+            export_idx: 0,
+            codec_label: "Vorbis (Ogg)".to_owned(),
+            channels: Some(2),
+            duration_secs: Some(1.0),
+            playable: true,
+        });
+        app
+    }
+
+    /// Minimal non-trivial `DecodedAudio` for assertion tests.
+    ///
+    /// 2 mono frames so the waveform helper produces a non-empty result (min
+    /// effective columns = min(WAVEFORM_COLUMNS, frame_count) = min(512, 2) = 2).
+    /// Divergent values (MAX, MIN) pin the waveform normalization path: a
+    /// no-op body replacement would leave `waveform` empty, failing the
+    /// `!waveform.is_empty()` assertion.
+    fn two_frame_decoded_audio() -> crate::state::audio_view::DecodedAudio {
+        crate::state::audio_view::DecodedAudio {
+            samples: vec![i16::MAX, i16::MIN],
+            sample_rate: 44_100,
+            channels: 1,
+        }
+    }
+
+    #[test]
+    fn audio_decoded_stale_generation_is_dropped() {
+        let mut app = app_with_open_audio_tab();
+        app.archive_generation = 3;
+        let stale = 2u64;
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Ok(two_frame_decoded_audio()),
+                generation: stale,
+            },
+        );
+        assert!(
+            app.tabs.active_tab().unwrap().audio.decoded.is_none(),
+            "a stale-generation audio decode must be ignored"
+        );
+        assert!(
+            app.tabs.active_tab().unwrap().audio.waveform.is_empty(),
+            "a stale-generation audio decode must not populate the waveform"
+        );
+    }
+
+    #[test]
+    fn audio_decoded_current_generation_writes_decoded_and_waveform() {
+        let mut app = app_with_open_audio_tab();
+        app.archive_generation = 3;
+        // Pre-seed an error so the test verifies it is cleared on success.
+        app.tabs.active_tab_mut().unwrap().audio.error = Some("prev".to_owned());
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Ok(two_frame_decoded_audio()),
+                generation: 3,
+            },
+        );
+        let tab = app.tabs.active_tab().unwrap();
+        assert!(
+            tab.audio.decoded.is_some(),
+            "a current-generation Ok decode must populate audio.decoded"
+        );
+        assert!(
+            !tab.audio.waveform.is_empty(),
+            "a current-generation Ok decode must populate the waveform"
+        );
+        assert!(
+            tab.audio.error.is_none(),
+            "a successful decode must clear any previous error"
+        );
+    }
+
+    #[test]
+    fn audio_decoded_error_sets_error_field() {
+        let mut app = app_with_open_audio_tab();
+        app.archive_generation = 3;
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Err("boom".to_owned()),
+                generation: 3,
+            },
+        );
+        let tab = app.tabs.active_tab().unwrap();
+        assert_eq!(
+            tab.audio.error.as_deref(),
+            Some("boom"),
+            "an Err result must set audio.error to the error message"
+        );
+        assert!(
+            tab.audio.decoded.is_none(),
+            "an Err result must not populate audio.decoded"
+        );
+    }
+
+    #[test]
+    fn audio_decoded_ok_with_no_device_pushes_toast() {
+        // `App::default` opens no output device (`audio == None`), so a successful
+        // decode can't be played — the handler surfaces one toast (spec §"No audio
+        // device"; the transport is also rendered disabled in the view).
+        let mut app = app_with_open_audio_tab();
+        app.archive_generation = 3;
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Ok(two_frame_decoded_audio()),
+                generation: 3,
+            },
+        );
+        assert_eq!(
+            app.toasts.items().len(),
+            1,
+            "a successful decode with no output device must push one toast"
+        );
+        assert_eq!(
+            app.toasts.items()[0].severity,
+            crate::state::toast::Severity::Error
+        );
+    }
+
+    #[test]
+    fn audio_decoded_err_pushes_no_toast() {
+        // A decode FAILURE must NOT push the no-device toast (that's only for a
+        // successful-but-unplayable decode) — pins the `decoded_ok &&` half of the
+        // toast condition against the Ok case above.
+        let mut app = app_with_open_audio_tab();
+        app.archive_generation = 3;
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Err("boom".to_owned()),
+                generation: 3,
+            },
+        );
+        assert!(
+            app.toasts.is_empty(),
+            "a decode error must not push the no-device toast"
+        );
+    }
+
+    #[test]
+    fn audio_decoded_without_info_is_dropped() {
+        // Pins the `tab.audio.info.is_some()` guard: a decode arriving after a
+        // content reset (which sets `audio.info = None` via `set_content`) must
+        // not write onto the now-non-audio tab. Mirrors
+        // `texture_decoded_after_content_reset_is_dropped` (mips-empty guard).
+        let mut app = app_with_open_audio_tab();
+        app.archive_generation = 3;
+        // Clear info to simulate a content swap / reset.
+        app.tabs.active_tab_mut().unwrap().audio.info = None;
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Ok(two_frame_decoded_audio()),
+                generation: 3,
+            },
+        );
+        assert!(
+            app.tabs.active_tab().unwrap().audio.decoded.is_none(),
+            "a decode landing after audio.info was cleared must not write decoded"
+        );
+    }
+
+    #[test]
+    fn audio_decoded_after_tab_close_same_generation_is_noop() {
+        // Race guard: a decode completes after its tab was closed. The result
+        // carries the SAME generation (no archive swap), so the fence does not
+        // drop it — the path lookup must silently no-op and must not re-open
+        // the tab. Mirrors `texture_decoded_after_tab_close_same_generation_is_noop`.
+        let mut app = app_with_open_audio_tab();
+        app.tabs.close(0);
+        assert!(app.tabs.open.is_empty(), "precondition: the tab is closed");
+        let generation = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::AudioDecoded {
+                path: "Game/SFX_Hit.uasset".into(),
+                result: Ok(two_frame_decoded_audio()),
+                generation,
+            },
+        );
+        assert!(
+            app.tabs.open.is_empty(),
+            "a late AudioDecoded for a closed tab must not re-open it"
+        );
+    }
+
+    // ── Task 8: audio playback wiring ─────────────────────────────────────────
+
+    /// Build an `App` with an active tab that has decoded audio, so transport
+    /// arms have a real `decoded` payload to act on.
+    fn app_with_decoded_audio() -> App {
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("Game/SFX.uasset");
+        let tab = app
+            .tabs
+            .active_tab_mut()
+            .expect("just-opened tab must be active");
+        tab.audio.decoded = Some(crate::state::audio_view::DecodedAudio {
+            // 4 samples, stereo (2 ch): 2 frames at 44 100 Hz → tiny but non-empty.
+            samples: vec![1_i16, -1_i16, 2_i16, -2_i16],
+            sample_rate: 44_100,
+            channels: 2,
+        });
+        tab.audio.info = Some(paksmith_core::asset::AudioInfo {
+            export_idx: 0,
+            codec_label: "Vorbis (Ogg)".to_owned(),
+            channels: Some(2),
+            duration_secs: Some(1.0),
+            playable: true,
+        });
+        app
+    }
+
+    // --- audio_tick_active ---
+
+    #[test]
+    fn audio_tick_active_true_when_playing() {
+        let mut app = app_with_decoded_audio();
+        app.tabs.active_tab_mut().unwrap().audio.transport =
+            crate::state::audio_view::Transport::Playing;
+        assert!(
+            audio_tick_active(&app),
+            "audio_tick_active must return true when transport is Playing"
+        );
+    }
+
+    #[test]
+    fn audio_tick_active_false_when_paused() {
+        let mut app = app_with_decoded_audio();
+        app.tabs.active_tab_mut().unwrap().audio.transport =
+            crate::state::audio_view::Transport::Paused;
+        assert!(
+            !audio_tick_active(&app),
+            "audio_tick_active must return false when transport is Paused"
+        );
+    }
+
+    #[test]
+    fn audio_tick_active_false_when_stopped() {
+        let app = app_with_decoded_audio();
+        // Transport starts Stopped (default).
+        assert_eq!(
+            app.tabs.active_tab().unwrap().audio.transport,
+            crate::state::audio_view::Transport::Stopped,
+            "precondition: transport is Stopped"
+        );
+        assert!(
+            !audio_tick_active(&app),
+            "audio_tick_active must return false when transport is Stopped"
+        );
+    }
+
+    #[test]
+    fn audio_tick_active_false_when_no_tab() {
+        let app = App::default(); // no tabs open
+        assert!(
+            !audio_tick_active(&app),
+            "audio_tick_active must return false when no tab is open"
+        );
+    }
+
+    // --- AudioVolume arm ---
+
+    #[test]
+    fn audio_volume_arm_sets_and_clamps() {
+        let mut app = app_with_decoded_audio();
+        // `app.audio` is None so the seam call is skipped; only pure state is tested.
+        // Divergent in-range value: 0.5 ≠ the 1.0 default, so a mutant that drops
+        // the arm's `tab.audio.set_volume(v)` call (leaving volume at 1.0) fails.
+        let _ = update(&mut app, Message::AudioVolume(0.5));
+        assert!(
+            (app.tabs.active_tab().unwrap().audio.volume - 0.5).abs() < 1e-6,
+            "in-range volume 0.5 must be stored by the arm (got {})",
+            app.tabs.active_tab().unwrap().audio.volume
+        );
+        // Clamp high: 1.5 → 1.0.
+        let _ = update(&mut app, Message::AudioVolume(1.5));
+        assert!(
+            (app.tabs.active_tab().unwrap().audio.volume - 1.0).abs() < 1e-6,
+            "volume 1.5 must clamp to 1.0 (got {})",
+            app.tabs.active_tab().unwrap().audio.volume
+        );
+        // Clamp low: −0.5 → 0.0.
+        let _ = update(&mut app, Message::AudioVolume(-0.5));
+        assert!(
+            app.tabs.active_tab().unwrap().audio.volume.abs() < 1e-6,
+            "volume −0.5 must clamp to 0.0 (got {})",
+            app.tabs.active_tab().unwrap().audio.volume
+        );
+    }
+
+    // --- AudioStop arm ---
+
+    #[test]
+    fn audio_stop_resets_transport_and_position() {
+        let mut app = app_with_decoded_audio();
+        // Prime the tab into Playing state with a non-zero position.
+        {
+            let tab = app.tabs.active_tab_mut().unwrap();
+            tab.audio.transport = crate::state::audio_view::Transport::Playing;
+            tab.audio.position_secs = 3.0;
+        }
+        let _ = update(&mut app, Message::AudioStop);
+        let tab = app.tabs.active_tab().unwrap();
+        assert_eq!(
+            tab.audio.transport,
+            crate::state::audio_view::Transport::Stopped,
+            "transport must be Stopped after AudioStop"
+        );
+        assert!(
+            tab.audio.position_secs.abs() < 1e-6,
+            "position must reset to 0.0 after AudioStop (got {})",
+            tab.audio.position_secs
+        );
+    }
+
+    // --- AudioPlayPause arm ---
+
+    #[test]
+    fn audio_play_pause_toggles_transport() {
+        let mut app = app_with_decoded_audio();
+        // Stopped → Playing
+        let _ = update(&mut app, Message::AudioPlayPause);
+        assert_eq!(
+            app.tabs.active_tab().unwrap().audio.transport,
+            crate::state::audio_view::Transport::Playing,
+            "first toggle: Stopped → Playing"
+        );
+        // Playing → Paused
+        let _ = update(&mut app, Message::AudioPlayPause);
+        assert_eq!(
+            app.tabs.active_tab().unwrap().audio.transport,
+            crate::state::audio_view::Transport::Paused,
+            "second toggle: Playing → Paused"
+        );
+        // Paused → Playing
+        let _ = update(&mut app, Message::AudioPlayPause);
+        assert_eq!(
+            app.tabs.active_tab().unwrap().audio.transport,
+            crate::state::audio_view::Transport::Playing,
+            "third toggle: Paused → Playing"
+        );
+    }
+
+    // --- playback_offset_secs (feed-offset) ---
+
+    #[test]
+    fn audio_play_pins_offset_to_position() {
+        // Resume (Paused → Playing) produces a re-feed `Play`, so the arm must
+        // pin `playback_offset_secs` to the current `position_secs`. Divergent:
+        // position 2.5 ≠ the 0.0 offset default, so a mutant that drops the pin
+        // (offset stays 0.0) fails.
+        let mut app = app_with_decoded_audio();
+        {
+            let tab = app.tabs.active_tab_mut().unwrap();
+            tab.audio.transport = crate::state::audio_view::Transport::Paused;
+            tab.audio.position_secs = 2.5;
+        }
+        let _ = update(&mut app, Message::AudioPlayPause);
+        let tab = app.tabs.active_tab().unwrap();
+        assert_eq!(
+            tab.audio.transport,
+            crate::state::audio_view::Transport::Playing,
+            "precondition: resume moved transport to Playing"
+        );
+        assert!(
+            (tab.audio.playback_offset_secs - 2.5).abs() < 1e-6,
+            "Play must pin the feed-offset to position_secs (got {})",
+            tab.audio.playback_offset_secs
+        );
+    }
+
+    #[test]
+    fn audio_pause_leaves_offset_unchanged() {
+        // Pause (Playing → Paused) does NOT re-feed, so the arm must leave
+        // `playback_offset_secs` alone. A pre-set 1.0 offset diverges from the
+        // 2.5 position, so a mutant that pins the offset on every action (setting
+        // it to 2.5) fails.
+        let mut app = app_with_decoded_audio();
+        {
+            let tab = app.tabs.active_tab_mut().unwrap();
+            tab.audio.transport = crate::state::audio_view::Transport::Playing;
+            tab.audio.position_secs = 2.5;
+            tab.audio.playback_offset_secs = 1.0;
+        }
+        let _ = update(&mut app, Message::AudioPlayPause);
+        let tab = app.tabs.active_tab().unwrap();
+        assert_eq!(
+            tab.audio.transport,
+            crate::state::audio_view::Transport::Paused,
+            "precondition: toggle moved transport to Paused"
+        );
+        assert!(
+            (tab.audio.playback_offset_secs - 1.0).abs() < 1e-6,
+            "Pause must not touch the feed-offset (got {})",
+            tab.audio.playback_offset_secs
+        );
+    }
+
+    // ── Task 9: AudioSeek arm ─────────────────────────────────────────────────
+
+    /// Build an `App` with an active tab whose decoded audio has a known
+    /// duration (`duration_secs`), so seek-fraction tests can assert the exact
+    /// resulting `position_secs`.  Uses a 100 Hz mono PCM clip so the sample
+    /// count is easy to reason about.
+    fn app_with_audio_of_duration(duration_secs: f32) -> App {
+        use paksmith_core::asset::AudioInfo;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("Game/SFX_Seek.uasset");
+        let tab = app
+            .tabs
+            .active_tab_mut()
+            .expect("just-opened tab must be active");
+        let sample_rate: u32 = 100;
+        let channels: u16 = 1;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        // duration_secs is a small positive constant in tests (≤10 s);
+        // sample_rate (100) * duration_secs fits exactly in f32 (2^24 mantissa
+        // > 1000); the product is ≤ 1000 samples — no truncation or sign-loss.
+        let num_samples = (sample_rate as f32 * duration_secs) as usize;
+        tab.audio.decoded = Some(crate::state::audio_view::DecodedAudio {
+            samples: vec![0_i16; num_samples],
+            sample_rate,
+            channels,
+        });
+        tab.audio.info = Some(AudioInfo {
+            export_idx: 0,
+            codec_label: "PCM".to_owned(),
+            channels: Some(1),
+            duration_secs: Some(duration_secs),
+            playable: true,
+        });
+        app
+    }
+
+    #[test]
+    fn audio_seek_half_moves_position_and_pins_offset() {
+        // AudioSeek(0.5) on a 10.0 s clip must set position_secs to 5.0 and
+        // pin playback_offset_secs to that same value.  A mutant that drops the
+        // pin leaves offset at 0.0 (the default), which diverges from 5.0.
+        let mut app = app_with_audio_of_duration(10.0);
+        app.audio = None; // no live seam: pure-state effects only
+        let _ = update(&mut app, Message::AudioSeek(0.5));
+        let tab = app.tabs.active_tab().unwrap();
+        assert!(
+            (tab.audio.position_secs - 5.0).abs() < 1e-4,
+            "AudioSeek(0.5) on a 10.0 s clip must set position_secs to 5.0 (got {})",
+            tab.audio.position_secs
+        );
+        assert!(
+            (tab.audio.playback_offset_secs - tab.audio.position_secs).abs() < 1e-6,
+            "AudioSeek must pin playback_offset_secs == position_secs (offset={}, pos={})",
+            tab.audio.playback_offset_secs,
+            tab.audio.position_secs
+        );
+    }
+
+    #[test]
+    fn audio_seek_quarter_moves_position_to_2_5_secs() {
+        // AudioSeek(0.25) on a 10.0 s clip must set position_secs to 2.5 (not
+        // 5.0 and not 0.0).  A mutant that hard-codes a different fraction or
+        // calls seek_fraction with the wrong argument will produce a different
+        // position.
+        let mut app = app_with_audio_of_duration(10.0);
+        app.audio = None;
+        let _ = update(&mut app, Message::AudioSeek(0.25));
+        let tab = app.tabs.active_tab().unwrap();
+        assert!(
+            (tab.audio.position_secs - 2.5).abs() < 1e-4,
+            "AudioSeek(0.25) on a 10.0 s clip must set position_secs to 2.5 (got {})",
+            tab.audio.position_secs
+        );
+        assert!(
+            (tab.audio.playback_offset_secs - tab.audio.position_secs).abs() < 1e-6,
+            "AudioSeek must pin playback_offset_secs == position_secs (offset={}, pos={})",
+            tab.audio.playback_offset_secs,
+            tab.audio.position_secs
+        );
+    }
+
+    // ── Task 11: navigation stops playback ───────────────────────────────────────
+
+    #[test]
+    fn switching_to_a_different_tab_stops_outgoing_playback() {
+        use crate::state::audio_view::Transport;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset"); // idx 0
+        let _ = app.tabs.open_or_activate("B.uasset"); // idx 1 (now active)
+        app.tabs.activate(0); // make tab 0 the active/playing tab
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        let _ = update(&mut app, Message::TabActivated(1));
+
+        assert_eq!(
+            app.tabs.open[0].audio.transport,
+            Transport::Stopped,
+            "switching to a different tab must stop the outgoing tab's playback"
+        );
+        assert_eq!(
+            app.tabs.active,
+            Some(1),
+            "the target tab must become active"
+        );
+    }
+
+    #[test]
+    fn reactivating_the_active_tab_keeps_playback() {
+        use crate::state::audio_view::Transport;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset"); // idx 0, active
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        let _ = update(&mut app, Message::TabActivated(0)); // re-activate the SAME tab
+
+        assert_eq!(
+            app.tabs.open[0].audio.transport,
+            Transport::Playing,
+            "re-activating the already-active tab must NOT stop playback"
+        );
+    }
+
+    #[test]
+    fn closing_a_non_active_tab_keeps_active_playback() {
+        use crate::state::audio_view::Transport;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset"); // idx 0
+        let _ = app.tabs.open_or_activate("B.uasset"); // idx 1
+        app.tabs.activate(0); // tab 0 active + playing
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        let _ = update(&mut app, Message::TabClosed(1)); // close the NON-active tab
+
+        assert_eq!(
+            app.tabs.active,
+            Some(0),
+            "closing a later tab leaves active index unchanged"
+        );
+        assert_eq!(
+            app.tabs.open[0].audio.transport,
+            Transport::Playing,
+            "closing a non-active tab must NOT stop the active tab's playback"
+        );
+    }
+
+    #[test]
+    fn opening_another_asset_stops_playback() {
+        use crate::state::audio_view::Transport;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset"); // idx 0, active + playing
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        let _ = update(&mut app, Message::OpenAsset("B.uasset".into()));
+
+        assert_eq!(
+            app.tabs.open[0].audio.transport,
+            Transport::Stopped,
+            "opening another asset must stop the previously-playing tab"
+        );
+    }
+
+    #[test]
+    fn reopening_the_active_asset_keeps_playback() {
+        use crate::state::audio_view::Transport;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset"); // idx 0, active + playing
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        // Re-opening the already-active asset is not "opening another sound"
+        // (spec §3), so playback must continue — the path-equality guard.
+        let _ = update(&mut app, Message::OpenAsset("A.uasset".into()));
+
+        assert_eq!(
+            app.tabs.open[0].audio.transport,
+            Transport::Playing,
+            "re-opening the active asset must NOT stop its playback"
+        );
+    }
+
+    #[test]
+    fn archive_swap_clears_tabs_without_panicking() {
+        use crate::state::audio_view::Transport;
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset");
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        // `Locked` always calls `app.tabs.clear()`, so this pins the clearing
+        // branch: the stop runs first (on the live active tab), then clear()
+        // drops every tab. The observable *stop* itself is pinned separately by
+        // `archive_open_event_stops_active_playback` via the non-clearing `Core`
+        // path.
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
+                path: PathBuf::from("locked.pak"),
+            }))),
+        );
+
+        assert!(app.tabs.open.is_empty(), "archive swap clears all tabs");
+    }
+
+    #[test]
+    fn archive_open_event_stops_active_playback() {
+        use crate::state::audio_view::Transport;
+        // A `Core` open error with no archive loaded is the one `ArchiveOpened`
+        // path that does NOT clear tabs — the active tab survives, so the
+        // top-of-arm `stop_active_playback` is directly observable here. This
+        // pins the ArchiveOpened stop (which `is_empty()` on a clearing branch
+        // cannot): delete the stop and this tab stays `Playing`.
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("A.uasset"); // idx 0, active + playing
+        app.tabs.open[0].audio.transport = Transport::Playing;
+
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Core("boom".to_string())))),
+        );
+
+        assert_eq!(
+            app.tabs.open.len(),
+            1,
+            "a Core open error keeps the existing tab (no clear)"
+        );
+        assert_eq!(
+            app.tabs.open[0].audio.transport,
+            Transport::Stopped,
+            "any archive-open event must stop the active tab's playback"
+        );
     }
 }

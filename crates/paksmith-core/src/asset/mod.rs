@@ -49,6 +49,8 @@ pub use export_table::{ExportTable, ObjectExport};
 pub use exports::mesh::section::MeshSection;
 // Phase 7b: public texture-decode API (GUI texture viewer).
 pub use exports::texture::{DecodedTextureRgba, TextureInfo, classify_texture, decode_texture_mip};
+// Phase 7d: public audio-decode API (GUI audio player).
+pub use exports::audio::{AudioInfo, AudioPcm, classify_audio, decode_audio_to_pcm};
 pub use guid::FGuid;
 pub use import_table::{ImportTable, ObjectImport};
 pub use mappings::Usmap;

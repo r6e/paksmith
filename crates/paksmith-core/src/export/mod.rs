@@ -76,14 +76,21 @@ pub use skeletal_mesh::GltfSkeletalMeshHandler;
 pub use static_mesh::GltfStaticMeshHandler;
 pub use texture::{PngCompression, PngHandler};
 
-// Audio transcoders, surfaced to the `__test_utils` bench/fuzz seams in
-// `testing::bench` (the `adpcm` / `vorbis` modules are private, so the
-// `pub(crate)` fns aren't otherwise nameable from outside `export`).
-// Production code reaches them via the in-module path.
-#[cfg(feature = "__test_utils")]
+// Audio helpers: used by `decode_audio_to_pcm` (production) and the
+// `__test_utils` bench/fuzz seams. The `adpcm` / `audio` / `vorbis` / `pcm`
+// modules are private, so `pub(crate)` re-exports here are the only way to
+// name these functions from outside `export`.
 pub(crate) use adpcm::transcode_adpcm_to_pcm;
-#[cfg(feature = "__test_utils")]
+pub(crate) use audio::{active_codec, assemble_streaming, extract_nonstreaming};
+pub(crate) use pcm::parse_pcm_wav;
 pub(crate) use vorbis::transcode_vorbis_to_pcm;
+// `build_pcm_wav` lives in the private `pcm` submodule; consumers outside
+// `export` (specifically the `__test_utils`-gated decode tests in
+// `asset::exports::audio`) can't reach `crate::export::pcm` directly. Gate the
+// re-export to match its sole consumer so `unused_imports` never fires in the
+// plain lib build.
+#[cfg(all(test, feature = "__test_utils"))]
+pub(crate) use pcm::build_pcm_wav;
 
 /// Converts a typed [`Asset`] plus optional bulk data into
 /// target-format bytes. Handlers are **stateless and side-effect-free**.

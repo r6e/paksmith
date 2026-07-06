@@ -1,6 +1,11 @@
 //! Paksmith GUI — native-feeling explorer for Unreal Engine game assets.
 
 mod app;
+// The one place that touches `rodio`. Every `AudioOutput` method is now live on
+// the playback path (`app.rs`), so no dead-code suppression is needed here — a
+// module-wide `#[allow(dead_code)]` would only mask a future genuinely-unused
+// item inside the seam.
+mod audio_output;
 mod menu;
 mod panels;
 // The `state` module exposes tree/keyflow/archive/profile types.  Some public

@@ -12,13 +12,18 @@ dark-light = "2.0.0"
 # `Task::perform` executor tokio-backed, which `paksmith-core`'s reqwest-based
 # registry fetch (inside the async `resolve_pak_key`) requires at runtime — the
 # default `thread-pool` executor would panic with no tokio reactor.
-iced = { version = "0.14", features = ["tokio", "image-without-codecs"] }
+iced = { version = "0.14", features = ["tokio", "image-without-codecs", "canvas"] }
 # Phase 6 Task 11: native menu bar (File/View/Help) with ⌘/Ctrl-O accelerator.
 # Apache-2.0 OR MIT.  macOS: global app menu via init_for_nsapp().
 # Windows/Linux: menu built but not attached (no iced 0.14 window-handle API).
 muda = "0.19.3"
 # Phase 6: core library for container I/O and asset parsing.
 paksmith-core = { path = "../paksmith-core", version = "0.1" }
+# Phase 7d: audio-output backend for the audio player. `default-features = false`
+# drops rodio's decoder stack — paksmith-core decodes to i16 PCM, rodio only
+# plays raw samples via SamplesBuffer. See workspace Cargo.toml for the feature
+# rationale.
+rodio.workspace = true
 # Phase 6 Task 7: native file picker (open dialog) for macOS/Windows/Linux.
 # MIT/Apache-2.0.
 rfd = "0.17"

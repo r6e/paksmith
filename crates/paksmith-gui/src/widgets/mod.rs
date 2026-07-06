@@ -1,4 +1,5 @@
 /// UI widget components for the paksmith explorer.
+pub mod audio_player;
 pub mod context_menu;
 pub mod export_picker;
 pub mod file_tree;

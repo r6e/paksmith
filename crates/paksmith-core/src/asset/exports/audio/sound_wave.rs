@@ -481,7 +481,7 @@ fn maybe_skip_dummy_compression_name(
 }
 
 /// The scalar (`array_index == 0`) tagged property named `name`, if present.
-fn scalar_property<'a>(properties: &'a [Property], name: &str) -> Option<&'a Property> {
+pub(crate) fn scalar_property<'a>(properties: &'a [Property], name: &str) -> Option<&'a Property> {
     properties
         .iter()
         .find(|p| p.name() == name && p.array_index == 0)

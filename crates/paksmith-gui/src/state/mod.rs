@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod audio_view;
 pub mod console;
 pub mod export;
 pub mod hex_view;
