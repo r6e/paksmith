@@ -145,6 +145,34 @@ fn read_entry_surfaces_compressed_block_reserve_failed_under_oom() {
     );
 }
 
+/// Arm the OOM seam at `stream_lz4_to`'s output-buffer
+/// `try_reserve_exact` site (#636) and assert the typed
+/// `Lz4OutputReserveFailed` error surfaces. Uses the repak-written
+/// LZ4 fixture: the compressed-INPUT reservation shares the
+/// `CompressedReserve` seam with zlib (covered above), so this test
+/// arms only the LZ4-specific output site — `skip_count 0` fails the
+/// very next `Lz4OutputReserve` check, which is block 0's.
+#[test]
+fn read_entry_surfaces_lz4_output_reserve_failed_under_oom() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/real_v11_lz4.pak");
+    let reader = PakReader::open(&fixture).unwrap();
+
+    let _guard = arm_at(SeamSite::Pak(PakSeam::Lz4OutputReserve), 0);
+    let err = reader.read_entry("Content/Compressed.uasset").unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::Decompression {
+                fault: DecompressionFault::Lz4OutputReserveFailed { block_index: 0, .. },
+                ..
+            }
+        ),
+        "expected Decompression{{Lz4OutputReserveFailed {{ block_index: 0 }}}}; got {err:?}"
+    );
+}
+
 /// Arm the OOM seam at the `try_reserve(n)` site (mid-decode loop),
 /// skip the first invocation so iteration 1 succeeds and commits
 /// bytes to `block_out`, then fail iteration 2's reservation.

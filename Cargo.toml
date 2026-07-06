@@ -58,6 +58,15 @@ tracing = "0.1.40"
 # both consumers.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 flate2 = "1.1"
+# Raw-block LZ4 for pak entries (#636) — the same block form repak
+# writes and CUE4Parse decodes. `frame` (and its deps) excluded: UE
+# pak blocks are raw, never LZ4-frame. Safe codecs kept on
+# (untrusted input).
+lz4_flex = { version = "0.12.2", default-features = false, features = [
+    "std",
+    "safe-encode",
+    "safe-decode",
+] }
 sha1 = "0.11"
 tempfile = "3"
 proptest = "1"

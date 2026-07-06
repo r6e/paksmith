@@ -112,13 +112,21 @@ pub enum PakSeam {
     /// v10+ entries vec — parallel to [`Self::FlatIndexEntries`] but
     /// reached via the v10+ index parser.
     V10IndexEntries,
+    /// `stream_lz4_to`'s pre-decode per-block output-buffer
+    /// `try_reserve_exact` (#636). Surfaces as
+    /// [`crate::error::DecompressionFault::Lz4OutputReserveFailed`].
+    /// The LZ4 path's compressed-INPUT reservation shares
+    /// [`Self::CompressedReserve`] with the zlib path (identical
+    /// site semantics + fault variant). Appended at the enum tail so
+    /// existing discriminants (and their slot indices) are unchanged.
+    Lz4OutputReserve,
 }
 
 impl PakSeam {
     /// Total number of pak-side seam sites. Pinned by the `const _`
     /// guard below and by the exhaustive `match` in
     /// [`SeamSite::slot`].
-    pub const COUNT: usize = 14;
+    pub const COUNT: usize = 15;
 }
 
 // Compile-time guard: refuses to build when `COUNT` and the largest
@@ -126,7 +134,7 @@ impl PakSeam {
 // the `AssetSeam` guard below): variants are declared in source order
 // with no explicit `= N` assignments and no gaps, so that
 // `last as usize + 1` equals the variant count.
-const _: [(); PakSeam::COUNT] = [(); PakSeam::V10IndexEntries as usize + 1];
+const _: [(); PakSeam::COUNT] = [(); PakSeam::Lz4OutputReserve as usize + 1];
 
 /// Asset parser OOM seams (#276). The inner enum of [`SeamSite::Asset`].
 ///
@@ -310,6 +318,9 @@ mod tests {
                 PakSeam::V10IndexEntries => {
                     "read_v10_index_entries_surfaces_allocation_failed_under_oom"
                 }
+                PakSeam::Lz4OutputReserve => {
+                    "read_entry_surfaces_lz4_output_reserve_failed_under_oom"
+                }
             }
         }
         const fn asset_integration_test_name(site: AssetSeam) -> &'static str {
@@ -374,6 +385,7 @@ mod tests {
                 PakSeam::V10FdiBytes => 11,
                 PakSeam::V10PhiBytes => 12,
                 PakSeam::V10IndexEntries => 13,
+                PakSeam::Lz4OutputReserve => 14,
             }
         }
         const fn expected_asset_slot(site: AssetSeam) -> usize {
@@ -404,6 +416,7 @@ mod tests {
             PakSeam::V10FdiBytes,
             PakSeam::V10PhiBytes,
             PakSeam::V10IndexEntries,
+            PakSeam::Lz4OutputReserve,
         ];
         assert_eq!(pak_all.len(), PakSeam::COUNT);
         for site in pak_all {

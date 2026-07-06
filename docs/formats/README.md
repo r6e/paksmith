@@ -85,6 +85,7 @@ section "Format inventory" for column semantics.
 | `data/locres.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
 | `compression/pak-block-framing.md` | complete | complete | `container/pak/index/compression.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `8f56038` |
 | `compression/zlib.md` | complete | complete | `container/pak/mod.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `8f56038` |
+| `compression/lz4.md` | complete | complete | `container/pak/mod.rs` | repak @ `e215472` + CUE4Parse @ `c7e78422ec4858036c9bba5d9d3c55eb197f93c9` | `f3ebd06` |
 | `compression/oodle.md` | complete | partial | `container/pak/index/compression.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `crypto/aes-pak.md` | complete | partial | `container/pak/footer.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `8f56038` |
 

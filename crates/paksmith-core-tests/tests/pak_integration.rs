@@ -163,6 +163,236 @@ fn build_v7_pak(payload: &[u8]) -> Vec<u8> {
     pak
 }
 
+/// Wire size of one v3+ FPakEntry record carrying `n` compression
+/// blocks: 3×u64 + method u32 + sha1(20) + (count u32 + n×2×u64) +
+/// encrypted u8 + block_size u32.
+const fn pak_entry_wire_size(n: u64) -> u64 {
+    57 + 16 * n
+}
+
+/// Build a synthetic v8b pak with one LZ4-compressed entry that
+/// carries a REAL entry hash (repak-written fixtures zero theirs, so
+/// they can never reach `verify_entry`'s hash arm — this builder
+/// exists to make the LZ4 verify routing and the decode-failure
+/// negatives observable). Footer: guid(16) + encrypted(1) + magic +
+/// version 8 + index offset/size + index hash(20) + FIVE 32-byte
+/// compression-name slots (the 5-slot count is what classifies the
+/// footer as v8b rather than v8a); slot 0 = "LZ4", so the entry's
+/// 1-based method index 1 resolves to `CompressionMethod::Lz4`.
+///
+/// `streams` are pre-compressed raw LZ4 blocks laid back-to-back;
+/// `uncompressed_size` and `block_size` are written as given so
+/// tests can craft inconsistent claims (short/over-expanding blocks).
+fn build_v8b_lz4_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size: u32) -> Vec<u8> {
+    let header_size = pak_entry_wire_size(streams.len() as u64);
+    let mut blocks: Vec<(u64, u64)> = Vec::new();
+    let mut cursor = header_size;
+    for s in streams {
+        let end = cursor + s.len() as u64;
+        blocks.push((cursor, end));
+        cursor = end;
+    }
+    let compressed_size: u64 = streams.iter().map(|s| s.len() as u64).sum();
+
+    // Entry hash covers the on-disk COMPRESSED block bytes in block
+    // order (what `verify_entry` hashes).
+    let mut hasher = Sha1::new();
+    for s in streams {
+        hasher.update(s);
+    }
+    let sha1: [u8; 20] = hasher.finalize().into();
+
+    let mut data = Vec::new();
+    write_pak_entry(
+        &mut data,
+        0,
+        compressed_size,
+        uncompressed_size,
+        1, // 1-based index into the footer name table → slot 0 = "LZ4"
+        &sha1,
+        &blocks,
+        block_size,
+        false,
+    );
+    assert_eq!(
+        data.len() as u64,
+        header_size,
+        "pak_entry_wire_size drifted from write_pak_entry's layout"
+    );
+    for s in streams {
+        data.extend_from_slice(s);
+    }
+
+    let mut index = Vec::new();
+    write_fstring(&mut index, "../../../");
+    index.write_u32::<LittleEndian>(1).unwrap();
+    write_fstring(&mut index, "Content/lz4_synth.uasset");
+    write_pak_entry(
+        &mut index,
+        0,
+        compressed_size,
+        uncompressed_size,
+        1,
+        &sha1,
+        &blocks,
+        block_size,
+        false,
+    );
+
+    let index_offset = data.len() as u64;
+    let index_size = index.len() as u64;
+    let mut pak = data;
+    pak.extend_from_slice(&index);
+
+    pak.extend_from_slice(&[0u8; 16]); // encryption GUID
+    pak.push(0); // not encrypted
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(8).unwrap();
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&[0u8; 20]); // index hash (zero = skip)
+    // v8b: 5 compression-name slots, 32 bytes each, NUL-padded.
+    let mut slot0 = [0u8; 32];
+    slot0[..3].copy_from_slice(b"LZ4");
+    pak.extend_from_slice(&slot0);
+    pak.extend_from_slice(&[0u8; 32 * 4]);
+
+    pak
+}
+
+const LZ4_SYNTH_PATH: &str = "Content/lz4_synth.uasset";
+
+#[test]
+fn read_entry_lz4_synthetic_v8b_round_trips() {
+    let payload: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+    let stream = lz4_flex::block::compress(&payload);
+    let pak = build_v8b_lz4_pak(&[stream], payload.len() as u64, payload.len() as u32);
+    let reader = PakReader::from_bytes(pak).unwrap();
+    let mut out = Vec::new();
+    let written = reader.read_entry_to(LZ4_SYNTH_PATH, &mut out).unwrap();
+    assert_eq!(written, payload.len() as u64);
+    assert_eq!(out, payload);
+}
+
+/// THE pin for verify_entry's LZ4 routing: a non-zero entry hash
+/// reaches the method match, and Lz4 must take the block-walk hash
+/// arm (shared with Zlib) rather than the unsupported-method reject.
+#[test]
+fn verify_entry_lz4_succeeds() {
+    let payload: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+    let stream = lz4_flex::block::compress(&payload);
+    let pak = build_v8b_lz4_pak(&[stream], payload.len() as u64, payload.len() as u32);
+    let reader = PakReader::from_bytes(pak).unwrap();
+    assert_eq!(
+        reader.verify_entry(LZ4_SYNTH_PATH).unwrap(),
+        paksmith_core::container::pak::VerifyOutcome::Verified
+    );
+}
+
+/// Raw LZ4 blocks carry NO internal checksum — a literal-byte flip
+/// can decode "successfully" to wrong bytes. The entry SHA1 over the
+/// on-disk blocks is the integrity layer, and it must catch the
+/// tamper.
+#[test]
+fn verify_entry_lz4_detects_tampered_block() {
+    let payload: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+    let stream = lz4_flex::block::compress(&payload);
+    let mut pak = build_v8b_lz4_pak(&[stream], payload.len() as u64, payload.len() as u32);
+    // Last byte of the compressed block region (block bytes start at
+    // the 73-byte single-block header; tampering the tail avoids
+    // structural token bytes so decode-side tests stay orthogonal).
+    let block_start = usize::try_from(pak_entry_wire_size(1)).unwrap();
+    pak[block_start + 4] ^= 0x01;
+    let reader = PakReader::from_bytes(pak).unwrap();
+    let err = reader.verify_entry(LZ4_SYNTH_PATH).unwrap_err();
+    assert!(
+        matches!(err, paksmith_core::PaksmithError::HashMismatch { .. }),
+        "tampered block must surface HashMismatch, got {err:?}"
+    );
+}
+
+/// Every block except the last must inflate to exactly
+/// `compression_block_size` — same invariant (and fault) as zlib.
+#[test]
+fn read_entry_lz4_non_final_short_block_rejected() {
+    let short: Vec<u8> = vec![0x11; 64]; // inflates to 64, block_size says 128
+    let full: Vec<u8> = vec![0x22; 128];
+    let streams = [
+        lz4_flex::block::compress(&short),
+        lz4_flex::block::compress(&full),
+    ];
+    let pak = build_v8b_lz4_pak(&streams, 64 + 128, 128);
+    let reader = PakReader::from_bytes(pak).unwrap();
+    let mut out = Vec::new();
+    let err = reader.read_entry_to(LZ4_SYNTH_PATH, &mut out).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            paksmith_core::PaksmithError::Decompression {
+                fault: DecompressionFault::NonFinalBlockSizeMismatch {
+                    block_index: 0,
+                    expected: 128,
+                    actual: 64,
+                },
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// A final block inflating short of `uncompressed_size` is a
+/// truncation signal → SizeUnderrun, mirroring the zlib path.
+#[test]
+fn read_entry_lz4_short_final_block_surfaces_size_underrun() {
+    let actual_payload: Vec<u8> = vec![0x33; 100];
+    let stream = lz4_flex::block::compress(&actual_payload);
+    // Claims 300 uncompressed; the single (final) block only holds 100.
+    let pak = build_v8b_lz4_pak(&[stream], 300, 300);
+    let reader = PakReader::from_bytes(pak).unwrap();
+    let mut out = Vec::new();
+    let err = reader.read_entry_to(LZ4_SYNTH_PATH, &mut out).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            paksmith_core::PaksmithError::Decompression {
+                fault: DecompressionFault::SizeUnderrun {
+                    actual: 100,
+                    expected: 300,
+                },
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Decompression-bomb shape: a block whose real inflation exceeds the
+/// expected output. The pre-sized output buffer is a HARD cap —
+/// lz4_flex's `decompress_into` errors instead of growing, surfacing
+/// as Lz4DecodeError. (Contrast zlib, which needs the take(+1) trick
+/// and a post-check.)
+#[test]
+fn read_entry_lz4_over_expanding_block_rejected() {
+    let big: Vec<u8> = vec![0x44; 300];
+    let stream = lz4_flex::block::compress(&big);
+    // Claims only 100 uncompressed → expected output 100 < real 300.
+    let pak = build_v8b_lz4_pak(&[stream], 100, 100);
+    let reader = PakReader::from_bytes(pak).unwrap();
+    let mut out = Vec::new();
+    let err = reader.read_entry_to(LZ4_SYNTH_PATH, &mut out).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            paksmith_core::PaksmithError::Decompression {
+                fault: DecompressionFault::Lz4DecodeError { block_index: 0, .. },
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
 #[test]
 fn open_minimal_v6_pak() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
@@ -593,7 +823,7 @@ fn verify_entry_uncompressed_succeeds() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
     assert_eq!(
         reader.verify_entry("Content/Textures/hero.uasset").unwrap(),
-        VerifyOutcome::Verified
+        paksmith_core::container::pak::VerifyOutcome::Verified
     );
 }
 
@@ -602,7 +832,7 @@ fn verify_entry_zlib_single_block_succeeds() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
     assert_eq!(
         reader.verify_entry("Content/Text/lorem.txt").unwrap(),
-        VerifyOutcome::Verified
+        paksmith_core::container::pak::VerifyOutcome::Verified
     );
 }
 
@@ -611,7 +841,7 @@ fn verify_entry_zlib_multi_block_succeeds() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
     assert_eq!(
         reader.verify_entry("Content/Text/lorem_multi.txt").unwrap(),
-        VerifyOutcome::Verified
+        paksmith_core::container::pak::VerifyOutcome::Verified
     );
 }
 
@@ -1731,17 +1961,17 @@ fn read_zlib_rejects_pre_v5_compressed_entry() {
 
 /// V8B+ paks index compression methods via a 5-slot FName table in
 /// the footer; entries reference slots by 1-based index. Reading an
-/// entry whose slot resolves to `Lz4` (or `Zstd`, or `UnknownByName`)
-/// must surface a `Decompression` error naming the slot's content.
-/// Today `read_entry_rejects_unsupported_compression_methods` only
-/// covers v3-v7 raw-id rejection (Gzip, Oodle, Unknown(99)) — the
-/// v8+ FName-resolution arms in `index/entry_header.rs::PakEntryHeader::read_from`
-/// (the `compression_method` resolution against the footer's compression-
-/// methods table) are unexercised.
-/// Issue #31.
+/// entry whose slot resolves to a STILL-unsupported method (`Zstd`,
+/// or `UnknownByName`) must surface a `Decompression` error naming
+/// the slot's content — pinning the v8+ FName-resolution arms in
+/// `index/entry_header.rs::PakEntryHeader::read_from` against the
+/// footer's compression-methods table.
+/// Issue #31; retargeted from Lz4 to Zstd when #636 made Lz4 a
+/// SUPPORTED method (the LZ4 happy path now lives in the `*_lz4_*`
+/// tests above).
 #[test]
-fn read_entry_rejects_v8b_lz4_named_compression_slot() {
-    // Build a v8B pak with `compression_methods[0] = "Lz4"` and one
+fn read_entry_rejects_v8b_zstd_named_compression_slot() {
+    // Build a v8B pak with `compression_methods[0] = "Zstd"` and one
     // entry referencing slot 1 (1-based). v8B footer layout:
     //   uuid(16) + encrypted(1) + magic(4) + version(4=8) +
     //   index_offset(8) + index_size(8) + index_hash(20) +
@@ -1797,7 +2027,7 @@ fn read_entry_rejects_v8b_lz4_named_compression_slot() {
 
     // Compression slots: 5 × 32 bytes, zero-padded UTF-8.
     let mut slot0 = [0u8; 32];
-    slot0[..3].copy_from_slice(b"Lz4"); // 1-based slot 1 → index 0
+    slot0[..4].copy_from_slice(b"Zstd"); // 1-based slot 1 → index 0
     pak.extend_from_slice(&slot0);
     for _ in 1..5 {
         pak.extend_from_slice(&[0u8; 32]); // empty slots
@@ -1810,12 +2040,12 @@ fn read_entry_rejects_v8b_lz4_named_compression_slot() {
             &err,
             paksmith_core::PaksmithError::Decompression {
                 fault: DecompressionFault::UnsupportedMethod {
-                    method: CompressionMethod::Lz4,
+                    method: CompressionMethod::Zstd,
                 },
                 ..
             }
         ),
-        "expected Decompression{{UnsupportedMethod {{ Lz4 }}}}; got {err:?}"
+        "expected Decompression{{UnsupportedMethod {{ Zstd }}}}; got {err:?}"
     );
 }
 

@@ -977,12 +977,15 @@ impl PakReader {
                 }
                 sha1_of_reader(&mut file, entry.header().uncompressed_size(), &mut buf)?
             }
-            CompressionMethod::Zlib => {
-                // Hash the on-disk compressed bytes block-by-block.
+            CompressionMethod::Zlib | CompressionMethod::Lz4 => {
+                // Hash the on-disk compressed bytes block-by-block —
+                // method-agnostic: the index hash covers the on-disk
+                // payload, so no decompression happens here and zlib
+                // and LZ4 entries walk the identical path.
                 // All per-block validation (start-overlap, end-past-file,
                 // out-of-order) routes through `validate_block_bounds`
-                // shared with `stream_zlib_to` — keeps the verify and
-                // read paths from diverging on the same archive.
+                // shared with the stream_*_to readers — keeps the verify
+                // and read paths from diverging on the same archive.
                 let payload_start = entry
                     .header()
                     .offset()
@@ -1016,7 +1019,6 @@ impl PakReader {
             method @ (CompressionMethod::Gzip
             | CompressionMethod::Oodle
             | CompressionMethod::Zstd
-            | CompressionMethod::Lz4
             | CompressionMethod::Unknown(_)
             | CompressionMethod::UnknownByName(_)) => {
                 return Err(PaksmithError::Decompression {
@@ -1224,11 +1226,10 @@ impl PakReader {
             });
         }
         match entry.header().compression_method() {
-            CompressionMethod::None | CompressionMethod::Zlib => {}
+            CompressionMethod::None | CompressionMethod::Zlib | CompressionMethod::Lz4 => {}
             method @ (CompressionMethod::Gzip
             | CompressionMethod::Oodle
             | CompressionMethod::Zstd
-            | CompressionMethod::Lz4
             | CompressionMethod::Unknown(_)
             | CompressionMethod::UnknownByName(_)) => {
                 warn!(path, ?method, "rejected unsupported compression method");
@@ -1288,6 +1289,14 @@ impl PakReader {
                 self.version(),
                 writer,
             ),
+            CompressionMethod::Lz4 => stream_lz4_to(
+                &mut file,
+                entry,
+                self.file_size,
+                payload_start,
+                self.version(),
+                writer,
+            ),
             // Already rejected at the top of `stream_entry_to`; this
             // arm exists to keep the match exhaustive (per CLAUDE.md
             // "no panics in core") without an opaque `_` catch-all.
@@ -1298,7 +1307,6 @@ impl PakReader {
             m @ (CompressionMethod::Gzip
             | CompressionMethod::Oodle
             | CompressionMethod::Zstd
-            | CompressionMethod::Lz4
             | CompressionMethod::Unknown(_)
             | CompressionMethod::UnknownByName(_)) => Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression {
@@ -2028,6 +2036,216 @@ fn stream_zlib_to<R: Read + Seek>(
     Ok(bytes_written)
 }
 
+/// Stream the LZ4-decompressed payload of `entry` from `file` to
+/// `writer`. Returns the number of decompressed bytes written.
+///
+/// UE pak LZ4 payloads are independent RAW LZ4 blocks (no LZ4-frame
+/// header, no size prefix) — the block form repak writes via
+/// `lz4_flex::block::compress` and the CUE4Parse reference decodes
+/// (`K4os LZ4Codec.Decode` into a caller-sized buffer). The reader
+/// derives each block's decompressed size: every block except the
+/// last inflates to exactly `compression_block_size`; the last takes
+/// the remainder of `uncompressed_size`. See
+/// `docs/formats/compression/lz4.md`. Issue #636.
+///
+/// Buffer discipline mirrors [`stream_zlib_to`] (#373): one
+/// compressed-input buffer and one decompressed-output buffer,
+/// hoisted and capacity-reused across blocks; the full
+/// `uncompressed_size` never lives in memory at once. Unlike zlib
+/// there is no mid-decode growth loop — the output buffer is
+/// pre-sized to the block's expected output, which doubles as the
+/// decompression-bomb cap: `lz4_flex::block::decompress_into` errors
+/// on a block that would expand past it (surfaced as
+/// [`DecompressionFault::Lz4DecodeError`]), so over-expansion can
+/// never allocate beyond the per-block expected size.
+#[allow(clippy::too_many_lines)] // bounded by per-block error-reporting, mirroring stream_zlib_to
+fn stream_lz4_to<R: Read + Seek>(
+    file: &mut R,
+    entry: &PakIndexEntry,
+    file_size: u64,
+    payload_start: u64,
+    version: PakVersion,
+    writer: &mut dyn Write,
+) -> crate::Result<u64> {
+    let path = entry.filename();
+
+    if version < PakVersion::RelativeChunkOffsets {
+        // Pre-v5 paks store absolute file offsets in compression_blocks
+        // rather than offsets relative to the entry record — same
+        // explicit reject as `stream_zlib_to`.
+        return Err(PaksmithError::UnsupportedVersion {
+            version: version.wire_version(),
+        });
+    }
+
+    let uncompressed_size = entry.header().uncompressed_size();
+    let block_size = u64::from(entry.header().compression_block_size());
+    let mut bytes_written: u64 = 0;
+
+    // Hoisted per-block buffers (#373): `clear()` keeps capacity, so
+    // a K-block entry pays 2 allocations, not 2K.
+    let mut compressed: Vec<u8> = Vec::new();
+    let mut block_out: Vec<u8> = Vec::new();
+
+    let mut prev_abs_end: Option<u64> = None;
+
+    for (i, block) in entry.header().compression_blocks().iter().enumerate() {
+        let (abs_start, _abs_end) = validate_block_bounds(
+            block,
+            i,
+            entry.header().offset(),
+            payload_start,
+            file_size,
+            &mut prev_abs_end,
+            path,
+        )?;
+
+        let block_len = block.len();
+        let block_len_usize =
+            usize::try_from(block_len).map_err(|_| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::U64ExceedsPlatformUsize {
+                    field: WireField::BlockLength,
+                    value: block_len,
+                    path: Some(path.to_string()),
+                },
+            })?;
+
+        let _ = file.seek(SeekFrom::Start(abs_start))?;
+        // Compressed-input reservation: same site semantics and fault
+        // as `stream_zlib_to` (bounded by file_size via abs_end), so
+        // it shares the `CompressedReserve` seam.
+        compressed.clear();
+        let reserve_res = compressed.try_reserve_exact(block_len_usize);
+        crate::seams::seam_check!(
+            reserve_res,
+            crate::testing::oom::SeamSite::Pak(PakSeam::CompressedReserve)
+        );
+        reserve_res.map_err(|e| {
+            warn!(path, block = i, block_len, error = %e, "lz4 block reservation failed");
+            PaksmithError::Decompression {
+                path: path.to_string(),
+                offset: abs_start,
+                fault: DecompressionFault::CompressedBlockReserveFailed {
+                    block_index: i,
+                    requested: block_len_usize,
+                    source: e,
+                },
+            }
+        })?;
+        compressed.resize(block_len_usize, 0);
+        file.read_exact(&mut compressed)?;
+
+        // Expected decompressed size for THIS block: the fixed
+        // compression_block_size for every block except the last,
+        // which takes the remainder. `min` covers both (the remainder
+        // is < block_size only on the final block of a well-formed
+        // entry; a crafted entry with excess blocks yields expected 0
+        // for the extras, and a raw LZ4 block cannot inflate into a
+        // 0-byte buffer without erroring — fail closed).
+        let remaining = uncompressed_size.saturating_sub(bytes_written);
+        let expected_out = remaining.min(block_size);
+        let expected_out_usize =
+            usize::try_from(expected_out).map_err(|_| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::U64ExceedsPlatformUsize {
+                    field: WireField::BlockLength,
+                    value: expected_out,
+                    path: Some(path.to_string()),
+                },
+            })?;
+
+        // Output reservation, pre-sized to the expected block output
+        // (bounded by compression_block_size, itself capped at
+        // open-time). Fallible so OOM surfaces typed, with its own
+        // seam site (#636).
+        block_out.clear();
+        let out_reserve_res = block_out.try_reserve_exact(expected_out_usize);
+        crate::seams::seam_check!(
+            out_reserve_res,
+            crate::testing::oom::SeamSite::Pak(PakSeam::Lz4OutputReserve)
+        );
+        out_reserve_res.map_err(|e| {
+            warn!(
+                path,
+                block = i,
+                requested = expected_out_usize,
+                error = %e,
+                "lz4 output reservation failed"
+            );
+            PaksmithError::Decompression {
+                path: path.to_string(),
+                offset: abs_start,
+                fault: DecompressionFault::Lz4OutputReserveFailed {
+                    block_index: i,
+                    requested: expected_out_usize,
+                    source: e,
+                },
+            }
+        })?;
+        block_out.resize(expected_out_usize, 0);
+
+        // Raw-block decode into the pre-sized buffer. The buffer IS
+        // the bomb cap: over-expansion errors inside the decoder.
+        let produced =
+            lz4_flex::block::decompress_into(&compressed, &mut block_out).map_err(|e| {
+                warn!(path, block = i, abs_start, error = %e, "lz4 decompress failed");
+                PaksmithError::Decompression {
+                    path: path.to_string(),
+                    offset: abs_start,
+                    fault: DecompressionFault::Lz4DecodeError {
+                        block_index: i,
+                        message: e.to_string(),
+                    },
+                }
+            })?;
+
+        // Sanity: every block except possibly the last must produce
+        // exactly compression_block_size bytes — same invariant and
+        // fault as the zlib path.
+        if i + 1 < entry.header().compression_blocks().len() && produced as u64 != block_size {
+            let expected = entry.header().compression_block_size();
+            warn!(
+                path,
+                block = i,
+                produced,
+                expected,
+                "non-final lz4 block decompressed to wrong size"
+            );
+            return Err(PaksmithError::Decompression {
+                path: path.to_string(),
+                offset: abs_start,
+                fault: DecompressionFault::NonFinalBlockSizeMismatch {
+                    block_index: i,
+                    expected,
+                    actual: produced as u64,
+                },
+            });
+        }
+
+        // Block validated — commit exactly the produced bytes.
+        writer.write_all(&block_out[..produced])?;
+        bytes_written = bytes_written.saturating_add(produced as u64);
+    }
+
+    if bytes_written != uncompressed_size {
+        warn!(
+            path,
+            actual = bytes_written,
+            uncompressed_size,
+            "cumulative decompressed size mismatch"
+        );
+        return Err(PaksmithError::Decompression {
+            path: path.to_string(),
+            offset: entry.header().offset(),
+            fault: DecompressionFault::SizeUnderrun {
+                actual: bytes_written,
+                expected: uncompressed_size,
+            },
+        });
+    }
+
+    Ok(bytes_written)
+}
+
 /// Default scratch-buffer size for streaming SHA1 computation. Sized to
 /// match `BufReader`'s default capacity so we don't fragment reads against
 /// the underlying buffered reader. Stack-allocated by callers as
@@ -2647,6 +2865,129 @@ mod tests {
             buf.len(),
             "returned u64 must equal bytes actually written to the writer"
         );
+    }
+
+    // ---- LZ4 pak-entry decompression (#636) ----
+    //
+    // Fixtures are repak-written (`lz4_flex::block::compress` — raw
+    // LZ4 blocks, no size prefix), the same block form the CUE4Parse
+    // reference decodes (`K4os LZ4Codec.Decode` into a caller-sized
+    // buffer). Each block decompresses to exactly
+    // `compression_block_size` bytes; the last takes the remainder
+    // of `uncompressed_size`.
+
+    /// The compressible payload fixture-gen writes into every
+    /// `*_compressed.pak` / `*_lz4.pak` entry: 256 `'A'` bytes.
+    /// Content equality against this constant makes the round-trip
+    /// byte-exact against the repak oracle, not just size-exact.
+    const LZ4_FIXTURE_PAYLOAD_LEN: usize = 256;
+
+    fn lz4_fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../tests/fixtures/{name}"))
+    }
+
+    #[test]
+    fn read_lz4_entry_round_trips_v11() {
+        let reader = PakReader::open(lz4_fixture("real_v11_lz4.pak")).expect("open lz4 fixture");
+        let path = "Content/Compressed.uasset";
+        let entry = reader.index_entry(path).expect("lz4 entry present");
+        assert!(
+            matches!(entry.header().compression_method(), CompressionMethod::Lz4),
+            "fixture invariant: entry is LZ4-compressed, got {:?}",
+            entry.header().compression_method()
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        let written = reader
+            .read_entry_to(path, &mut buf)
+            .expect("read_entry_to(lz4) must succeed");
+        assert_eq!(written, entry.header().uncompressed_size());
+        assert_eq!(
+            buf,
+            vec![b'A'; LZ4_FIXTURE_PAYLOAD_LEN],
+            "decompressed content must be byte-exact against the repak-written payload"
+        );
+    }
+
+    #[test]
+    fn read_lz4_entry_round_trips_v8b() {
+        // v8b = earliest FName-slot-table version; exercises the
+        // CompressionMethod::Lz4 resolution path oldest layout.
+        let reader = PakReader::open(lz4_fixture("real_v8b_lz4.pak")).expect("open lz4 fixture");
+        let path = "Content/Compressed.uasset";
+        let mut buf: Vec<u8> = Vec::new();
+        let written = reader
+            .read_entry_to(path, &mut buf)
+            .expect("read_entry_to(lz4, v8b) must succeed");
+        assert_eq!(written, buf.len() as u64);
+        assert_eq!(buf, vec![b'A'; LZ4_FIXTURE_PAYLOAD_LEN]);
+    }
+
+    #[test]
+    fn verify_lz4_entry_no_longer_errors_unsupported() {
+        // repak leaves entry hash slots zeroed, so this fixture
+        // short-circuits to SkippedNoHash before the method match —
+        // it cannot reach the hash arm. What it DOES pin: verify on
+        // an LZ4 entry returns Ok (the pre-#636 code errored with
+        // UnsupportedMethod for LZ4 in verify_entry only when the
+        // hash was non-zero, but Ok-vs-Err is still the stable
+        // observable here). The hash-arm ROUTING (Lz4 shares the
+        // block-walk arm with Zlib) is pinned by the synthetic
+        // non-zero-hash test in paksmith-core-tests
+        // (`verify_entry_lz4_succeeds`).
+        let reader = PakReader::open(lz4_fixture("real_v11_lz4.pak")).expect("open lz4 fixture");
+        let outcome = reader
+            .verify_entry("Content/Compressed.uasset")
+            .expect("verify_entry(lz4) must succeed");
+        assert!(
+            matches!(outcome, VerifyOutcome::SkippedNoHash),
+            "repak writes zero hash slots; expected SkippedNoHash, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn read_lz4_entry_rejects_corrupt_block() {
+        // Overwrite the FIRST byte of the compressed block (the LZ4
+        // token) — structural corruption the decoder must reject
+        // with a typed Decompression fault, never a panic. NOTE: raw
+        // LZ4 blocks carry NO checksum, so a flip in literal DATA can
+        // decode "successfully" to wrong bytes — content integrity is
+        // the entry SHA1's job (see docs/formats/compression/lz4.md).
+        // The block's absolute start is derived from the parsed index
+        // rather than hardcoded, so fixture regeneration can't
+        // silently move the target into the in-data header (which
+        // would trip the index-mismatch guard instead).
+        let pristine =
+            PakReader::open(lz4_fixture("real_v11_lz4.pak")).expect("open pristine fixture");
+        let entry = pristine
+            .index_entry("Content/Compressed.uasset")
+            .expect("entry present");
+        let block0 = &entry.header().compression_blocks()[0];
+        let target = usize::try_from(entry.header().offset() + block0.start())
+            .expect("fixture offsets fit usize");
+        drop(pristine);
+        let original = std::fs::read(lz4_fixture("real_v11_lz4.pak")).expect("read fixture");
+        let mut corrupted = original.clone();
+        corrupted[target] = 0xFF; // token demanding more input than the block holds
+        let dir = std::env::temp_dir().join("paksmith-lz4-corrupt-test");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let corrupt_path = dir.join("corrupt_v11_lz4.pak");
+        std::fs::write(&corrupt_path, &corrupted).expect("write corrupt copy");
+        let reader =
+            PakReader::open(&corrupt_path).expect("index parses (corruption is in payload)");
+        let mut buf: Vec<u8> = Vec::new();
+        let result = reader.read_entry_to("Content/Compressed.uasset", &mut buf);
+        match result {
+            // Must be a DECODE-level fault from inside the LZ4 path —
+            // an UnsupportedMethod here would mean the dispatch never
+            // reached the decoder at all.
+            Err(PaksmithError::Decompression { fault, .. })
+                if !matches!(fault, DecompressionFault::UnsupportedMethod { .. }) => {}
+            other => panic!(
+                "expected a decode-level Decompression fault on a corrupt LZ4 block, got {other:?}"
+            ),
+        }
+        let _ = std::fs::remove_file(&corrupt_path);
     }
 
     /// The documented AES-256 key for the vendored encrypted fixtures

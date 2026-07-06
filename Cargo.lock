@@ -4231,6 +4231,7 @@ dependencies = [
  "glam 0.33.2",
  "gltf",
  "half",
+ "lz4_flex 0.12.2",
  "png",
  "proptest",
  "reqwest",
@@ -4256,6 +4257,7 @@ version = "0.0.0"
 dependencies = [
  "byteorder",
  "flate2",
+ "lz4_flex 0.12.2",
  "paksmith-core",
  "proptest",
  "sha1 0.11.0",

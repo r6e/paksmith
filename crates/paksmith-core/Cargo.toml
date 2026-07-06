@@ -20,6 +20,8 @@ csv.workspace = true
 byteorder.workspace = true
 tracing.workspace = true
 flate2.workspace = true
+# Raw-block LZ4 for pak entries (#636).
+lz4_flex.workspace = true
 sha1.workspace = true
 zstd.workspace = true
 brotli.workspace = true
