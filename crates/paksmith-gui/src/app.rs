@@ -164,9 +164,9 @@ impl Default for App {
             console_filters: crate::state::console::ConsoleFilters::default(),
             console_active: false,
             console_last_pushes: 0,
-            // Opened lazily when the audio player first needs it (later Phase 7d
-            // task); `None` keeps `App::default()` — used throughout the tests —
-            // free of any real audio-device side effect.
+            // `App::default()` — used throughout the tests — leaves the device
+            // unset so it stays free of any real audio-hardware side effect. The
+            // live path opens the real output device eagerly in `boot_app`.
             audio: None,
         }
     }

@@ -80,11 +80,13 @@ fn pcm_data_within_cap(byte_len: usize) -> crate::Result<()> {
 
 /// Parse a 16-bit PCM WAV into `(channels, sample_rate, interleaved i16 samples)`.
 ///
-/// Rejects non-PCM (`wFormatTag != 1`) or non-16-bit (`wBitsPerSample != 16`)
-/// with [`crate::PaksmithError::UnsupportedFeature`]; a `data` chunk exceeding
-/// [`MAX_AUDIO_DECODED_BYTES`] or with an odd byte length (not a whole number of
-/// 16-bit samples) with [`crate::PaksmithError::Internal`]; and a malformed
-/// RIFF/WAVE container with [`crate::PaksmithError::Internal`].
+/// Rejects, all as [`crate::PaksmithError::Internal`] unless noted: a malformed
+/// RIFF/WAVE container; non-PCM (`wFormatTag != 1`) or non-16-bit
+/// (`wBitsPerSample != 16`) — [`crate::PaksmithError::UnsupportedFeature`]; a
+/// `data` chunk exceeding [`MAX_AUDIO_DECODED_BYTES`]; zero channels or sample
+/// rate; and a `data` length that isn't a whole number of interleaved frames
+/// (`channels * 2` bytes each — a partial trailing frame would skew channels and
+/// the downstream duration/seek math).
 pub(crate) fn parse_pcm_wav(wav: &[u8]) -> crate::Result<(u16, u32, Vec<i16>)> {
     let (fmt, data) = parse_wav(wav).ok_or_else(|| crate::PaksmithError::Internal {
         context: "decoded audio is not a valid WAV".to_string(),
@@ -97,12 +99,29 @@ pub(crate) fn parse_pcm_wav(wav: &[u8]) -> crate::Result<(u16, u32, Vec<i16>)> {
             ),
         });
     }
-    pcm_data_within_cap(data.len())?;
-    // A 16-bit PCM `data` chunk is a whole number of samples; an odd byte length
-    // is a malformed container (`chunks_exact(2)` would silently drop the tail).
-    if data.len() % 2 != 0 {
+    // `channels`/`sample_rate` are wire-controlled; zero is malformed and would
+    // break the frame-alignment check below (and every downstream `/ channels`).
+    if fmt.channels == 0 || fmt.sample_rate == 0 {
         return Err(crate::PaksmithError::Internal {
-            context: format!("PCM WAV data chunk has an odd byte length ({})", data.len()),
+            context: format!(
+                "PCM WAV has zero channels ({}) or sample rate ({})",
+                fmt.channels, fmt.sample_rate
+            ),
+        });
+    }
+    pcm_data_within_cap(data.len())?;
+    // A 16-bit PCM `data` chunk must be a whole number of interleaved frames
+    // (`channels * 2` bytes each); a misaligned length is a malformed container —
+    // `chunks_exact(2)` would silently drop a partial trailing frame, skewing the
+    // channels. `channels >= 1` here, so `frame_bytes >= 2` (no divide-by-zero).
+    let frame_bytes = usize::from(fmt.channels) * 2;
+    if data.len() % frame_bytes != 0 {
+        return Err(crate::PaksmithError::Internal {
+            context: format!(
+                "PCM WAV data length ({}) is not a whole number of {}-channel frames",
+                data.len(),
+                fmt.channels
+            ),
         });
     }
     let samples = data
@@ -253,14 +272,49 @@ mod tests {
 
     #[test]
     fn parse_pcm_wav_rejects_odd_data_length() {
-        // A 16-bit PCM data chunk with an odd byte count is malformed: without the
-        // guard, `chunks_exact(2)` would silently drop the trailing byte and return
-        // Ok. Three data bytes → one whole sample + a dangling byte.
+        // A mono 16-bit PCM data chunk with an odd byte count is malformed: without
+        // the frame-alignment guard, `chunks_exact(2)` would silently drop the
+        // trailing byte and return Ok. Three data bytes → 1.5 mono frames.
         let wav = make_wav(1, 1, 22050, 16, &[1, 0, 2]);
         let err = parse_pcm_wav(&wav).unwrap_err();
         assert!(
             matches!(err, crate::PaksmithError::Internal { .. }),
             "odd-length PCM data must yield Internal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_pcm_wav_rejects_frame_misaligned_stereo() {
+        // Stereo, 6 data bytes = 3 i16 samples = 1.5 frames (a partial trailing
+        // frame). Byte-length is even but NOT a whole number of `channels*2`-byte
+        // frames; the frame-alignment guard rejects it (channel-skew defence).
+        let wav = make_wav(1, 2, 44100, 16, &[1, 0, 2, 0, 3, 0]);
+        let err = parse_pcm_wav(&wav).unwrap_err();
+        assert!(
+            matches!(err, crate::PaksmithError::Internal { .. }),
+            "frame-misaligned stereo PCM must yield Internal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_pcm_wav_rejects_zero_channels_or_rate() {
+        // Zero channels: would divide-by-zero the frame math + every downstream
+        // `/ channels`. Zero sample rate: an unplayable/degenerate clip.
+        let zero_ch = make_wav(1, 0, 44100, 16, &[]);
+        assert!(
+            matches!(
+                parse_pcm_wav(&zero_ch).unwrap_err(),
+                crate::PaksmithError::Internal { .. }
+            ),
+            "zero channels must yield Internal"
+        );
+        let zero_rate = make_wav(1, 1, 0, 16, &[1, 0]);
+        assert!(
+            matches!(
+                parse_pcm_wav(&zero_rate).unwrap_err(),
+                crate::PaksmithError::Internal { .. }
+            ),
+            "zero sample rate must yield Internal"
         );
     }
 }

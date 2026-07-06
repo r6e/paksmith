@@ -234,9 +234,18 @@ impl AudioState {
 
     /// Stop playback, reset the playhead to zero, and return
     /// [`PlaybackAction::Stop`].
+    ///
+    /// Resets `playback_offset_secs` alongside `position_secs` for
+    /// self-consistency: the offset is only meaningful mid-feed (a re-feed re-pins
+    /// it to `position_secs`), so leaving it non-zero while `position_secs == 0` is
+    /// a latent inconsistency. Since [`advance_playhead`](Self::advance_playhead)
+    /// reconstructs the playhead as `playback_offset_secs + get_pos()`, zeroing the
+    /// offset also bounds any stale-offset jump from a tick that races a stop down
+    /// to `get_pos()`.
     pub fn stop(&mut self) -> PlaybackAction {
         self.transport = Transport::Stopped;
         self.position_secs = 0.0;
+        self.playback_offset_secs = 0.0;
         PlaybackAction::Stop
     }
 
@@ -410,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_resets_position() {
+    fn stop_resets_position_and_offset() {
         let mut a = playable_state();
         // Drive transport OUT of Stopped first so `stop()` genuinely RESETS it
         // (default state is already Stopped, which would make the reset a no-op
@@ -418,8 +427,16 @@ mod tests {
         assert_eq!(a.toggle_play(), PlaybackAction::Play);
         assert!(matches!(a.transport, Transport::Playing));
         a.position_secs = 3.0;
+        a.playback_offset_secs = 3.0;
         assert_eq!(a.stop(), PlaybackAction::Stop);
         assert!(a.position_secs.abs() < 1e-6);
+        // Offset reset too: a late tick reconstructing `offset + get_pos()` after a
+        // stop must not jump the playhead to a stale offset.
+        assert!(
+            a.playback_offset_secs.abs() < 1e-6,
+            "stop() must reset playback_offset_secs, got {}",
+            a.playback_offset_secs
+        );
         assert!(matches!(a.transport, Transport::Stopped));
     }
 
