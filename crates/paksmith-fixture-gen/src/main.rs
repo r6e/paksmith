@@ -82,14 +82,15 @@ struct Fixture<'a> {
     /// branch real archives do.
     mount_point: &'static str,
     entries: &'a [Entry<'a>],
-    /// Issue #69: when `true`, configure repak with Zlib compression
-    /// support and pass `allow_compress: true` per entry. repak only
-    /// emits compressed output for v8+ archives (the FNameBased
-    /// compression slot table appeared in v8); ignored for v3-v7.
-    /// The fixture's payloads must compress well — repak always
-    /// stores compressed output, even when larger than uncompressed,
-    /// so any non-empty compressible input trips the compressed path.
-    compress: bool,
+    /// Issue #69 (Zlib) / #636 (LZ4): when `Some(method)`, configure
+    /// repak with that compression method in the FName slot table and
+    /// pass `allow_compress: true` per entry. repak only emits
+    /// compressed output for v8+ archives (the FNameBased compression
+    /// slot table appeared in v8); ignored for v3-v7. The fixture's
+    /// payloads must compress well — repak always stores compressed
+    /// output, even when larger than uncompressed, so any non-empty
+    /// compressible input trips the compressed path.
+    compression: Option<Compression>,
 }
 
 fn write_fixture(fixture: &Fixture<'_>) -> Result<(), Box<dyn std::error::Error>> {
@@ -117,19 +118,18 @@ fn write_fixture(fixture: &Fixture<'_>) -> Result<(), Box<dyn std::error::Error>
     {
         let file =
             File::create(&tmp_path).map_err(|e| format!("creating tempfile for `{name}`: {e}"))?;
-        // For compressed fixtures, declare Zlib in the FName slot
-        // table; repak's writer requires this BEFORE write_file
+        // For compressed fixtures, declare the method in the FName
+        // slot table; repak's writer requires this BEFORE write_file
         // can honor allow_compress=true.
-        let builder = if fixture.compress {
-            PakBuilder::new().compression([Compression::Zlib])
-        } else {
-            PakBuilder::new()
+        let builder = match fixture.compression {
+            Some(method) => PakBuilder::new().compression([method]),
+            None => PakBuilder::new(),
         };
         let mut writer =
             builder.writer(file, fixture.version, fixture.mount_point.to_string(), None);
         for entry in fixture.entries {
             writer
-                .write_file(entry.path, fixture.compress, entry.payload)
+                .write_file(entry.path, fixture.compression.is_some(), entry.payload)
                 .map_err(|e| {
                     format!("repak write_file in `{name}` (entry `{}`): {e}", entry.path)
                 })?;
@@ -221,21 +221,21 @@ fn main() {
             version: Version::V3,
             mount_point: mount,
             entries: minimal_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v3_multi.pak",
             version: Version::V3,
             mount_point: mount,
             entries: multi_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v3_mixed_paths.pak",
             version: Version::V3,
             mount_point: mount,
             entries: mixed_path_entries,
-            compress: false,
+            compression: None,
         },
         // v6 — DeleteRecords. Marked untested in repak's README but the
         // enum variant exists; if cross-validation passes, it works.
@@ -244,21 +244,21 @@ fn main() {
             version: Version::V6,
             mount_point: mount,
             entries: minimal_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v6_multi.pak",
             version: Version::V6,
             mount_point: mount,
             entries: multi_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v6_mixed_paths.pak",
             version: Version::V6,
             mount_point: mount,
             entries: mixed_path_entries,
-            compress: false,
+            compression: None,
         },
         // v7 — first to introduce the encryption_key_guid footer field.
         Fixture {
@@ -266,21 +266,21 @@ fn main() {
             version: Version::V7,
             mount_point: mount,
             entries: minimal_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v7_multi.pak",
             version: Version::V7,
             mount_point: mount,
             entries: multi_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v7_mixed_paths.pak",
             version: Version::V7,
             mount_point: mount,
             entries: mixed_path_entries,
-            compress: false,
+            compression: None,
         },
         // V8A — UE 4.22 only. 4-slot FName compression table; per-entry
         // compression byte is u8.
@@ -289,21 +289,21 @@ fn main() {
             version: Version::V8A,
             mount_point: mount,
             entries: minimal_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v8a_multi.pak",
             version: Version::V8A,
             mount_point: mount,
             entries: multi_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v8a_mixed_paths.pak",
             version: Version::V8A,
             mount_point: mount,
             entries: mixed_path_entries,
-            compress: false,
+            compression: None,
         },
         // V8B — UE 4.23-4.24. 5-slot FName compression table; per-entry
         // compression byte is u32 (back to v7 width).
@@ -312,21 +312,21 @@ fn main() {
             version: Version::V8B,
             mount_point: mount,
             entries: minimal_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v8b_multi.pak",
             version: Version::V8B,
             mount_point: mount,
             entries: multi_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v8b_mixed_paths.pak",
             version: Version::V8B,
             mount_point: mount,
             entries: mixed_path_entries,
-            compress: false,
+            compression: None,
         },
         // V9 — UE 4.25. V8B layout + 1 frozen-index byte in the footer.
         Fixture {
@@ -334,21 +334,21 @@ fn main() {
             version: Version::V9,
             mount_point: mount,
             entries: minimal_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v9_multi.pak",
             version: Version::V9,
             mount_point: mount,
             entries: multi_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v9_mixed_paths.pak",
             version: Version::V9,
             mount_point: mount,
             entries: mixed_path_entries,
-            compress: false,
+            compression: None,
         },
         // V10 — UE 4.26. PathHashIndex: wholly new index format
         // (mount + count + seed + path-hash table + full directory
@@ -360,21 +360,21 @@ fn main() {
             version: Version::V10,
             mount_point: mount,
             entries: minimal_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v10_multi.pak",
             version: Version::V10,
             mount_point: mount,
             entries: multi_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v10_mixed_paths.pak",
             version: Version::V10,
             mount_point: mount,
             entries: mixed_path_entries,
-            compress: false,
+            compression: None,
         },
         // V11 — UE 4.27+. Same shape as V10, with the FNV-64 bug fixed.
         // For ASCII paths the two are hash-identical, so the cross-
@@ -384,21 +384,21 @@ fn main() {
             version: Version::V11,
             mount_point: mount,
             entries: minimal_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v11_multi.pak",
             version: Version::V11,
             mount_point: mount,
             entries: multi_entries,
-            compress: false,
+            compression: None,
         },
         Fixture {
             name: "real_v11_mixed_paths.pak",
             version: Version::V11,
             mount_point: mount,
             entries: mixed_path_entries,
-            compress: false,
+            compression: None,
         },
         // Issue #69 compressed-entry coverage. v8+ only — earlier
         // versions don't have the FName slot table required for
@@ -411,21 +411,21 @@ fn main() {
             version: Version::V8A,
             mount_point: mount,
             entries: compressed_entries,
-            compress: true,
+            compression: Some(Compression::Zlib),
         },
         Fixture {
             name: "real_v8b_compressed.pak",
             version: Version::V8B,
             mount_point: mount,
             entries: compressed_entries,
-            compress: true,
+            compression: Some(Compression::Zlib),
         },
         Fixture {
             name: "real_v9_compressed.pak",
             version: Version::V9,
             mount_point: mount,
             entries: compressed_entries,
-            compress: true,
+            compression: Some(Compression::Zlib),
         },
         // Issue #90 (sev 7 / pr-test H3): compressed-entry coverage
         // for the v10+ encoded-blob path. The v3-v9 layer-3 oracle
@@ -438,14 +438,34 @@ fn main() {
             version: Version::V10,
             mount_point: mount,
             entries: compressed_entries,
-            compress: true,
+            compression: Some(Compression::Zlib),
         },
         Fixture {
             name: "real_v11_compressed.pak",
             version: Version::V11,
             mount_point: mount,
             entries: compressed_entries,
-            compress: true,
+            compression: Some(Compression::Zlib),
+        },
+        // Issue #636 LZ4 corpus. Same compressible single-entry shape
+        // as the zlib fixtures; repak writes raw LZ4 blocks via
+        // lz4_flex::block::compress — the same block form CUE4Parse
+        // decodes (K4os LZ4Codec.Decode) and paksmith's reader
+        // implements. v8b anchors the earliest FName-slot version
+        // (mirroring the zlib unit-test anchor), v11 the current one.
+        Fixture {
+            name: "real_v8b_lz4.pak",
+            version: Version::V8B,
+            mount_point: mount,
+            entries: compressed_entries,
+            compression: Some(Compression::LZ4),
+        },
+        Fixture {
+            name: "real_v11_lz4.pak",
+            version: Version::V11,
+            mount_point: mount,
+            entries: compressed_entries,
+            compression: Some(Compression::LZ4),
         },
     ];
 

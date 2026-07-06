@@ -133,10 +133,11 @@ jobs:
           # + 4 phase-5a AES-encrypted (real_v8b_encrypted_{entries,index,both}.pak
           #   + real_v11_encrypted_index.pak,
           #   VENDORED-STATIC — survive the wipe above, not regenerated)
-          # = 38.
+          # + 2 issue-#636 LZ4 (real_v{8b,11}_lz4.pak)
+          # = 40.
           # The pre-run rm + this count assertion together catch zero-write
           # bugs that the diff alone would miss.
-          expected=38
+          expected=40
           actual=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f | wc -l | tr -d ' ')
           # Emit the gate's verdict to the job-summary panel so reviewers
           # can see what was checked without scrolling raw step logs.
