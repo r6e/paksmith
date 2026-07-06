@@ -124,8 +124,10 @@ Cross-validated end-to-end against repak-written fixtures
 (`tests/fixtures/real_v8b_lz4.pak`, `real_v11_lz4.pak` — generated
 by `paksmith-fixture-gen`, which drives repak's writer): paksmith
 decompresses repak's raw LZ4 blocks back to the byte-exact source
-payload at both the earliest FName-slot version (v8b) and the
-current one (v11). Decode semantics additionally verified against
+payload at both v8b — the earliest 5-slot/u32-index FName-table
+layout; v8a's 4-slot/u8-index variant is exercised by the zlib
+corpus, and slot resolution is method-agnostic — and the current
+version (v11). Decode semantics additionally verified against
 the CUE4Parse reference (`Compression.cs` routes `LZ4` to the K4os
 raw-block `LZ4Codec.Decode`) — both anchors agree the block is raw
 and the output size is caller-derived.[^1]

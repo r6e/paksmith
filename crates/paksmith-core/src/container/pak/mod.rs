@@ -1781,6 +1781,93 @@ fn validate_block_bounds(
     Ok((abs_start, abs_end))
 }
 
+/// Read one compressed block from `file` into `buf`.
+///
+/// Shared input-side scaffold of [`stream_zlib_to`] and
+/// [`stream_lz4_to`]: narrow the block length to `usize`, seek to the
+/// block's absolute start, fallibly reserve through the
+/// [`PakSeam::CompressedReserve`] OOM seam, and read exactly the
+/// on-disk compressed bytes. `buf` is `clear()`ed, not dropped, so
+/// hoisted capacity survives across blocks (#373). `codec` labels the
+/// reservation-failure `warn!` ("zlib" / "lz4") so the per-codec
+/// operator log strings stay byte-identical to their pre-extraction
+/// forms.
+fn read_compressed_block<R: Read + Seek>(
+    file: &mut R,
+    buf: &mut Vec<u8>,
+    block_len: u64,
+    abs_start: u64,
+    block_index: usize,
+    codec: &'static str,
+    path: &str,
+) -> crate::Result<()> {
+    let block_len_usize = usize::try_from(block_len).map_err(|_| PaksmithError::InvalidIndex {
+        fault: IndexParseFault::U64ExceedsPlatformUsize {
+            field: WireField::BlockLength,
+            value: block_len,
+            path: Some(path.to_string()),
+        },
+    })?;
+
+    let _ = file.seek(SeekFrom::Start(abs_start))?;
+    // Bounded by file_size (via `validate_block_bounds`'s abs_end
+    // check). Allocate fallibly so OOM is typed; `clear()` preserves
+    // the hoisted capacity from prior blocks and `try_reserve_exact`
+    // re-allocates only if this block needs more room than any
+    // predecessor.
+    buf.clear();
+    let reserve_res = buf.try_reserve_exact(block_len_usize);
+    crate::seams::seam_check!(
+        reserve_res,
+        crate::testing::oom::SeamSite::Pak(PakSeam::CompressedReserve)
+    );
+    reserve_res.map_err(|e| {
+        warn!(path, block = block_index, block_len, error = %e, "{codec} block reservation failed");
+        PaksmithError::Decompression {
+            path: path.to_string(),
+            offset: abs_start,
+            fault: DecompressionFault::CompressedBlockReserveFailed {
+                block_index,
+                requested: block_len_usize,
+                source: e,
+            },
+        }
+    })?;
+    buf.resize(block_len_usize, 0);
+    file.read_exact(buf)?;
+    Ok(())
+}
+
+/// Enforce the end-of-entry size invariant shared by
+/// [`stream_zlib_to`] and [`stream_lz4_to`]: the cumulative
+/// decompressed byte count must equal the index-declared
+/// `uncompressed_size`, else the entry is truncated or corrupt
+/// ([`DecompressionFault::SizeUnderrun`]).
+fn check_cumulative_size(
+    bytes_written: u64,
+    uncompressed_size: u64,
+    entry_offset: u64,
+    path: &str,
+) -> crate::Result<()> {
+    if bytes_written == uncompressed_size {
+        return Ok(());
+    }
+    warn!(
+        path,
+        actual = bytes_written,
+        uncompressed_size,
+        "cumulative decompressed size mismatch"
+    );
+    Err(PaksmithError::Decompression {
+        path: path.to_string(),
+        offset: entry_offset,
+        fault: DecompressionFault::SizeUnderrun {
+            actual: bytes_written,
+            expected: uncompressed_size,
+        },
+    })
+}
+
 /// Stream the zlib-decompressed payload of `entry` from `file` to
 /// `writer`. Returns the number of decompressed bytes written.
 ///
@@ -1853,42 +1940,15 @@ fn stream_zlib_to<R: Read + Seek>(
             path,
         )?;
 
-        let block_len = block.len();
-        let block_len_usize =
-            usize::try_from(block_len).map_err(|_| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: WireField::BlockLength,
-                    value: block_len,
-                    path: Some(path.to_string()),
-                },
-            })?;
-
-        let _ = file.seek(SeekFrom::Start(abs_start))?;
-        // Per-block compressed buffer is bounded by file_size (via the
-        // abs_end check above). Allocate fallibly so OOM is typed.
-        // `clear()` preserves the hoisted capacity from prior blocks;
-        // `try_reserve_exact` re-allocates only if this block needs
-        // more room than any predecessor.
-        compressed.clear();
-        let reserve_res = compressed.try_reserve_exact(block_len_usize);
-        crate::seams::seam_check!(
-            reserve_res,
-            crate::testing::oom::SeamSite::Pak(PakSeam::CompressedReserve)
-        );
-        reserve_res.map_err(|e| {
-            warn!(path, block = i, block_len, error = %e, "zlib block reservation failed");
-            PaksmithError::Decompression {
-                path: path.to_string(),
-                offset: abs_start,
-                fault: DecompressionFault::CompressedBlockReserveFailed {
-                    block_index: i,
-                    requested: block_len_usize,
-                    source: e,
-                },
-            }
-        })?;
-        compressed.resize(block_len_usize, 0);
-        file.read_exact(&mut compressed)?;
+        read_compressed_block(
+            file,
+            &mut compressed,
+            block.len(),
+            abs_start,
+            i,
+            "zlib",
+            path,
+        )?;
 
         // Bound the decoder to the remaining output budget plus one byte.
         // The +1 lets us detect "decompressed more than we expected" without
@@ -2014,22 +2074,12 @@ fn stream_zlib_to<R: Read + Seek>(
         bytes_written = new_total;
     }
 
-    if bytes_written != uncompressed_size {
-        warn!(
-            path,
-            actual = bytes_written,
-            uncompressed_size,
-            "cumulative decompressed size mismatch"
-        );
-        return Err(PaksmithError::Decompression {
-            path: path.to_string(),
-            offset: entry.header().offset(),
-            fault: DecompressionFault::SizeUnderrun {
-                actual: bytes_written,
-                expected: uncompressed_size,
-            },
-        });
-    }
+    check_cumulative_size(
+        bytes_written,
+        uncompressed_size,
+        entry.header().offset(),
+        path,
+    )?;
 
     Ok(bytes_written)
 }
@@ -2125,39 +2175,7 @@ fn stream_lz4_to<R: Read + Seek>(
         )?;
 
         let block_len = block.len();
-        let block_len_usize =
-            usize::try_from(block_len).map_err(|_| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: WireField::BlockLength,
-                    value: block_len,
-                    path: Some(path.to_string()),
-                },
-            })?;
-
-        let _ = file.seek(SeekFrom::Start(abs_start))?;
-        // Compressed-input reservation: same site semantics and fault
-        // as `stream_zlib_to` (bounded by file_size via abs_end), so
-        // it shares the `CompressedReserve` seam.
-        compressed.clear();
-        let reserve_res = compressed.try_reserve_exact(block_len_usize);
-        crate::seams::seam_check!(
-            reserve_res,
-            crate::testing::oom::SeamSite::Pak(PakSeam::CompressedReserve)
-        );
-        reserve_res.map_err(|e| {
-            warn!(path, block = i, block_len, error = %e, "lz4 block reservation failed");
-            PaksmithError::Decompression {
-                path: path.to_string(),
-                offset: abs_start,
-                fault: DecompressionFault::CompressedBlockReserveFailed {
-                    block_index: i,
-                    requested: block_len_usize,
-                    source: e,
-                },
-            }
-        })?;
-        compressed.resize(block_len_usize, 0);
-        file.read_exact(&mut compressed)?;
+        read_compressed_block(file, &mut compressed, block_len, abs_start, i, "lz4", path)?;
 
         // Expected decompressed size for THIS block: the fixed
         // compression_block_size for every block except the last,
@@ -2169,14 +2187,9 @@ fn stream_lz4_to<R: Read + Seek>(
         let remaining = uncompressed_size.saturating_sub(bytes_written);
         let expected_out = remaining.min(block_size);
 
-        // SECURITY (#636): `compression_block_size` is attacker-
-        // controlled and NOT capped on the inline v3-v9 read path, so
-        // pre-sizing the output buffer to `expected_out` verbatim lets
-        // a tiny crafted block force a multi-gigabyte eager allocation.
-        // Bound the reservation to what THIS block can actually inflate
-        // to (input-proportional); a valid block's real output is
-        // always `≤ compressed_len × 255`, so this never under-sizes a
-        // well-formed decode. The capped buffer remains the bomb cap.
+        // SECURITY (#636): cap the reservation input-proportionally —
+        // see `lz4_block_output_cap` for the derivation and threat
+        // model. The capped buffer remains the decompression-bomb cap.
         let alloc_bound = lz4_block_output_cap(expected_out, block_len);
         let alloc_usize =
             usize::try_from(alloc_bound).map_err(|_| PaksmithError::InvalidIndex {
@@ -2258,22 +2271,12 @@ fn stream_lz4_to<R: Read + Seek>(
         bytes_written = bytes_written.saturating_add(produced as u64);
     }
 
-    if bytes_written != uncompressed_size {
-        warn!(
-            path,
-            actual = bytes_written,
-            uncompressed_size,
-            "cumulative decompressed size mismatch"
-        );
-        return Err(PaksmithError::Decompression {
-            path: path.to_string(),
-            offset: entry.header().offset(),
-            fault: DecompressionFault::SizeUnderrun {
-                actual: bytes_written,
-                expected: uncompressed_size,
-            },
-        });
-    }
+    check_cumulative_size(
+        bytes_written,
+        uncompressed_size,
+        entry.header().offset(),
+        path,
+    )?;
 
     Ok(bytes_written)
 }
@@ -2975,8 +2978,10 @@ mod tests {
 
     #[test]
     fn read_lz4_entry_round_trips_v8b() {
-        // v8b = earliest FName-slot-table version; exercises the
-        // CompressionMethod::Lz4 resolution path oldest layout.
+        // v8b = earliest 5-slot/u32-index FName-table layout (v8a's
+        // 4-slot/u8-index variant is exercised by the zlib corpus's
+        // real_v8a_compressed.pak; slot resolution is method-agnostic
+        // upstream of the decoder).
         let reader = PakReader::open(lz4_fixture("real_v8b_lz4.pak")).expect("open lz4 fixture");
         let path = "Content/Compressed.uasset";
         let mut buf: Vec<u8> = Vec::new();

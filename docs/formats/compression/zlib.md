@@ -159,9 +159,9 @@ in current code.
 ## Paksmith implementation
 
 **Parser module:** `crates/paksmith-core/src/container/pak/mod.rs`
-(`stream_zlib_to` at line 1314 plus the dispatch sites that route to
-it; `validate_block_bounds` at line 1241 enforces monotonic block
-ordering and file-bounds across both the extract and verify paths).
+(`stream_zlib_to` plus the dispatch sites that route to it;
+`validate_block_bounds` enforces monotonic block ordering and
+file-bounds across both the extract and verify paths).
 
 **Status:** `complete`.
 

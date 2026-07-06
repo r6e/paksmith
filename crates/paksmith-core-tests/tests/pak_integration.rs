@@ -188,7 +188,7 @@ fn verify_entry_lz4_succeeds() {
     let reader = PakReader::from_bytes(pak).unwrap();
     assert_eq!(
         reader.verify_entry(LZ4_SYNTH_PATH).unwrap(),
-        paksmith_core::container::pak::VerifyOutcome::Verified
+        VerifyOutcome::Verified
     );
 }
 
@@ -201,9 +201,10 @@ fn verify_entry_lz4_detects_tampered_block() {
     let payload: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
     let stream = lz4_flex::block::compress(&payload);
     let mut pak = build_v8b_lz4_pak(&[stream], payload.len() as u64, payload.len() as u32);
-    // Last byte of the compressed block region (block bytes start at
-    // the 73-byte single-block header; tampering the tail avoids
-    // structural token bytes so decode-side tests stay orthogonal).
+    // Flip one byte inside the compressed block (offset +4 from the
+    // block start, past the leading token byte). `verify_entry` hashes
+    // the on-disk compressed bytes without decoding, so any in-block
+    // flip must surface as a HashMismatch.
     let block_start = usize::try_from(pak_entry_wire_size(1)).unwrap();
     pak[block_start + 4] ^= 0x01;
     let reader = PakReader::from_bytes(pak).unwrap();
@@ -726,7 +727,7 @@ fn verify_entry_uncompressed_succeeds() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
     assert_eq!(
         reader.verify_entry("Content/Textures/hero.uasset").unwrap(),
-        paksmith_core::container::pak::VerifyOutcome::Verified
+        VerifyOutcome::Verified
     );
 }
 
@@ -735,7 +736,7 @@ fn verify_entry_zlib_single_block_succeeds() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
     assert_eq!(
         reader.verify_entry("Content/Text/lorem.txt").unwrap(),
-        paksmith_core::container::pak::VerifyOutcome::Verified
+        VerifyOutcome::Verified
     );
 }
 
@@ -744,7 +745,7 @@ fn verify_entry_zlib_multi_block_succeeds() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
     assert_eq!(
         reader.verify_entry("Content/Text/lorem_multi.txt").unwrap(),
-        paksmith_core::container::pak::VerifyOutcome::Verified
+        VerifyOutcome::Verified
     );
 }
 
@@ -2803,10 +2804,7 @@ fn verify_v10_plus_reports_both_regions_verified_on_clean_fixture() {
             .verify_index()
             .unwrap_or_else(|e| panic!("{fixture}: verify_index errored: {e:?}"));
         assert!(
-            matches!(
-                outcome,
-                paksmith_core::container::pak::VerifyOutcome::Verified
-            ),
+            matches!(outcome, VerifyOutcome::Verified),
             "{fixture}: verify_index outcome {outcome:?}",
         );
         let stats = reader

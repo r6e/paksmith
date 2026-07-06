@@ -116,14 +116,15 @@ The **relativity** of `start` and `end` depends on the pak version:
 - **V3 / V4** (`CompressionEncryption` / `IndexEncryption`): offsets are
   **file-relative**. Paksmith rejects compressed entries from these
   versions with `PaksmithError::UnsupportedVersion` rather than
-  attempting normalization (see `mod.rs:1334-1341`).
+  attempting normalization (see `stream_zlib_to`'s version guard in
+  `mod.rs`).
 - **V5+** (`RelativeChunkOffsets` onward): offsets are
   **entry-record-relative**. `start = 0x40` means "byte 0x40 after the
   entry's in-data record start" — i.e., the block sits inside the entry
   payload at file position `entry.offset + 0x40`. The reader normalizes
   by adding the entry record's offset, NOT the payload base offset (the
   wire encoding stores positions relative to the record start, and
-  `validate_block_bounds` at `mod.rs:1250-1268` enforces
+  `validate_block_bounds` in `mod.rs` enforces
   `abs_start >= payload_start` to catch any block that points inside
   the header region).
 - **V10+** (encoded entries): offsets are synthesized entry-relative
@@ -131,12 +132,12 @@ The **relativity** of `start` and `end` depends on the pak version:
 
 ### Decompression loop
 
-Pseudocode (paksmith's `stream_zlib_to` family, `mod.rs:1314+`):
+Pseudocode (paksmith's `stream_zlib_to` family in `mod.rs`):
 
 > **Note:** Encrypted entries never reach this loop:
-> - `stream_entry_to` rejects them at `mod.rs:1004-1008` with
+> - `stream_entry_to` rejects them with
 >   `PaksmithError::Decryption { path }`.
-> - `verify_entry` skips them at `mod.rs:686-688`, returning
+> - `verify_entry` skips them, returning
 >   `Ok(VerifyOutcome::SkippedEncrypted)` (no error — verification
 >   simply skips integrity checks on encrypted payloads).
 >
@@ -183,7 +184,7 @@ layout-dependent and vary by fixture. Tracked in
 
 V3 and V4 archives published block offsets relative to the file start.
 Paksmith's `stream_zlib_to` explicitly rejects these with
-`PaksmithError::UnsupportedVersion` (`mod.rs:1334-1341`) rather than
+`PaksmithError::UnsupportedVersion` rather than
 attempting normalization. Pre-v5 compressed archives are rare in
 practice (UE 4.4 through early UE 4.20 era), and supporting the
 normalization adds surface area for off-by-one bugs. The rejection is
@@ -216,7 +217,7 @@ in practice; paksmith handles them defensively for malformed input.
 ### Implementation hardening (recommended for any parser)
 
 - **`MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`**
-  (`crates/paksmith-core/src/container/pak/mod.rs:86`). Cap on the
+  (`crates/paksmith-core/src/container/pak/mod.rs`). Cap on the
   total `uncompressed_size` of any single entry. The block-loop's
   `remaining` counter is bounded by this from the start. Surfaces as
   `IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, value, limit, unit: BoundsUnit::Bytes, path }`.

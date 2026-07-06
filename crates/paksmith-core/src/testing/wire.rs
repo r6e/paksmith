@@ -163,7 +163,7 @@ pub fn build_v8b_lz4_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size
     let mut index = Vec::new();
     write_fstring(&mut index, "../../../");
     index.write_u32::<LittleEndian>(1).unwrap();
-    write_fstring(&mut index, "Content/lz4_synth.uasset");
+    write_fstring(&mut index, LZ4_SYNTH_PATH);
     write_pak_entry(
         &mut index,
         0,

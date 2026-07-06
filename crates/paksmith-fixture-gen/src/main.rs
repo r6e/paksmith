@@ -451,8 +451,10 @@ fn main() {
         // as the zlib fixtures; repak writes raw LZ4 blocks via
         // lz4_flex::block::compress — the same block form CUE4Parse
         // decodes (K4os LZ4Codec.Decode) and paksmith's reader
-        // implements. v8b anchors the earliest FName-slot version
-        // (mirroring the zlib unit-test anchor), v11 the current one.
+        // implements. v8b anchors the earliest 5-slot/u32-index
+        // FName-table layout (v8a's 4-slot/u8-index variant is covered
+        // by real_v8a_compressed.pak above; slot resolution is
+        // method-agnostic), v11 the current one.
         Fixture {
             name: "real_v8b_lz4.pak",
             version: Version::V8B,
