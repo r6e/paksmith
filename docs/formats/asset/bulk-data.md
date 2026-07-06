@@ -182,28 +182,67 @@ dispatch table.
 When `BULKDATA_SerializeCompressedZLIB` is set, the on-disk payload is
 zlib-compressed. In the engine this routes through
 `FArchive::SerializeCompressed`, which writes the **chunked
-`FCompressedChunkInfo` framing**: a magic-tag header
-(`FCompressedChunkInfo { CompressedSize = PACKAGE_FILE_TAG (0x9E2A83C1),
-UncompressedSize = block size }`), a summary `FCompressedChunkInfo`
-(total compressed / uncompressed sizes), a per-block size table of
-`FCompressedChunkInfo` entries, then the independently-zlib-compressed
-blocks, decompressed and concatenated. (The layout shown is the v1
-header; the v2 variant, tagged `ARCHIVE_V2_HEADER_TAG`, inserts an inline
-compression-format byte before the summary. `FByteBulkData` uses the v1
-"Zlib" path.) This is a **distinct framing** from both the pak per-block
+`FCompressedChunkInfo` framing**. Each `FCompressedChunkInfo` is two
+little-endian `i64`s (`CompressedSize`, `UncompressedSize`; the
+pre-UE4 `u32` layout is below paksmith's version floor). The layout:
+
+1. **Tag record** — `CompressedSize` carries the magic:
+   `PACKAGE_FILE_TAG` (`0x9E2A83C1`, v1) or `ARCHIVE_V2_HEADER_TAG`
+   (`0x22222222_9E2A83C1` — `PACKAGE_FILE_TAG` in the low 32 bits,
+   v2). `UncompressedSize` carries the compression chunk size, with a
+   legacy quirk: the value `PACKAGE_FILE_TAG` here is a sentinel
+   meaning `LOADING_COMPRESSION_CHUNK_SIZE` (131072 = 128 KiB).
+   Byte-swapped tag forms mark big-endian producers.
+2. **v2 only: compression-format byte** — `0` = inline FString-named
+   format, `1` = None, `2` = Oodle, `3` = Zlib, `4` = Gzip, `5` = LZ4.
+   The v1 header has no format field; readers decode v1 payloads with
+   the caller's legacy format (Zlib for `FByteBulkData`).
+3. **Summary record** — total compressed / total uncompressed sizes.
+4. **Chunk table** — `ceil(total_uncompressed / chunk_size)` records;
+   the per-field sums MUST equal the summary totals.
+5. **Chunk streams** — one independent zlib stream per table entry,
+   back to back; each decompresses to exactly its entry's
+   `UncompressedSize`, concatenated in order.
+
+This is a **distinct framing** from both the pak per-block
 `FPakCompressedBlock` path (see
 [`../compression/zlib.md`](../compression/zlib.md)) and a single raw
 zlib stream. The total decompressed size is `ElementCount` bytes (for
-byte bulk data); a reader MUST clamp this against
-`MAX_UNCOMPRESSED_ENTRY_BYTES` before allocating the output buffer
-(decompression-bomb guard).
+byte bulk data); a reader MUST bound its work by the real input
+length before trusting any wire-claimed size (decompression-bomb /
+allocation-amplification guard). Layout verified against the
+CUE4Parse reference (`FByteBulkData.cs` →
+`FArchive.SerializeCompressedNew`, `Compression.cs`) and
+cross-anchored against independent community decoders
+(Remnant-2-Save-Parser, revision-go).
 
-> **Paksmith divergence:** the current resolver decodes the payload as a
-> single zlib stream, not the chunked framing above — a deliberately
-> unverified limitation (bulk-level compression is rare in cooked
-> content), tracked for a follow-up. Verified against the CUE4Parse
-> reference (`FByteBulkData.cs` → `FArchive.SerializeCompressedNew`),
-> not against a real chunk-framed fixture.
+**Paksmith implementation** (`decompress_zlib` in
+`asset/bulk_data.rs`, [#644](https://github.com/r6e/paksmith/issues/644));
+deviations are all fail-closed:
+
+- **Little-endian only**: the byte-swapped tag forms
+  (`PACKAGE_FILE_TAG_SWAPPED`, 64-bit-swapped v1/v2 tags) are
+  recognized and rejected, not swap-decoded — consistent with the
+  parser-wide LE policy.
+- **Zlib only**: v2 named formats (None/Oodle/Gzip/LZ4) surface
+  `UnsupportedBulkCompression`; a v2 inline-FString format name is
+  rejected without parsing the string (no known bulk-data producer).
+- **Exact totals**: the summary's uncompressed total must equal
+  `ElementCount` exactly (the reference decoder tolerates `<=`; the
+  engine writer always emits `==`, so a mismatch is treated as
+  corruption), chunk-table sums must equal the summary, each chunk
+  must inflate to exactly its claimed size, and the framing must
+  consume the record's `SizeOnDisk` region exactly (no trailing
+  bytes).
+- **Bounded allocation**: the chunk table's byte size is validated
+  against the real remaining input before the table is allocated,
+  and the output buffer is pre-sized from the compressed input
+  length (never from wire claims), growing only as real bytes are
+  produced — each chunk's read is capped at its claimed size + 1 so
+  an over-long stream is detected rather than inflated.
+- A **zero-size record** carries no framing at all (the engine
+  early-outs before writing the header); empty input with
+  `ElementCount = 0` decodes to an empty payload.
 
 ### Alternate read paths (UE 5.0+ pre-baked metadata)
 

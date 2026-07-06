@@ -78,6 +78,27 @@ pub(crate) const MAX_BULK_DATA_RECORDS_PER_EXPORT: usize = 256;
 /// (see plan Design Decision #14).
 pub(crate) const MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE: u64 = 16 * 1024 * 1024 * 1024;
 
+/// v2 chunked-framing header tag: `PACKAGE_FILE_TAG` in the low 32
+/// bits, `0x22222222` in the high 32 (pair-anchored against
+/// [`crate::asset::version::PACKAGE_FILE_TAG`]; value
+/// `0x2222_2222_9E2A_83C1`). A tag record carrying this value means
+/// the framing header inserts an inline compression-format byte
+/// before the summary record. Verified against the CUE4Parse
+/// reference (`FArchive.SerializeCompressedNew`) and independent
+/// community decoders (Remnant-2-Save-Parser, revision-go).
+pub(crate) const ARCHIVE_V2_HEADER_TAG: u64 =
+    (0x2222_2222_u64 << 32) | (crate::asset::version::PACKAGE_FILE_TAG as u64);
+
+/// Fallback compression-chunk size (128 KiB) when the tag record's
+/// chunk-size field carries the legacy `PACKAGE_FILE_TAG` sentinel
+/// instead of a real size. Mirrors the reference decoder's
+/// `LOADING_COMPRESSION_CHUNK_SIZE`.
+pub(crate) const LOADING_COMPRESSION_CHUNK_SIZE: i64 = 131_072;
+
+/// Wire size of one `FCompressedChunkInfo`: two little-endian i64s
+/// (UE4+; the pre-UE4 u32 layout is below paksmith's version floor).
+const CHUNK_INFO_WIRE_SIZE: usize = 16;
+
 /// Test-only accessor for `MAX_BULK_DATA_SIZE` (8 GiB). Integration
 /// tests in `paksmith-core-tests` read the live value via this
 /// accessor so boundary fixtures stay synchronized with cap changes.
@@ -1303,10 +1324,58 @@ pub(crate) fn missing_companion_loader(
     }
 }
 
-/// Decompress a zlib-compressed bulk-data payload. Validates the
-/// decompressed length against `expected_size` (ElementCount). Used
-/// by `BulkDataResolver::resolve` and the `__test_utils` bench accessor
-/// (`crate::testing::bench::zlib_decompress`); `pub(crate)` for the latter.
+/// Read one `FCompressedChunkInfo` (two little-endian i64s) from
+/// `buf` at `*pos`, advancing `*pos`. `None` when fewer than 16
+/// bytes remain — callers surface their own truncation fault with
+/// positional context.
+fn read_chunk_info(buf: &[u8], pos: &mut usize) -> Option<(i64, i64)> {
+    let end = pos.checked_add(CHUNK_INFO_WIRE_SIZE)?;
+    let bytes = buf.get(*pos..end)?;
+    *pos = end;
+    let compressed = i64::from_le_bytes(bytes[..8].try_into().ok()?);
+    let uncompressed = i64::from_le_bytes(bytes[8..].try_into().ok()?);
+    Some((compressed, uncompressed))
+}
+
+/// Decompress a `BULKDATA_SerializeCompressedZLIB` bulk-data payload.
+///
+/// The on-disk layout is the engine's chunked `FCompressedChunkInfo`
+/// framing (NOT a bare zlib stream — see #644): a tag record
+/// (`PACKAGE_FILE_TAG` or `ARCHIVE_V2_HEADER_TAG`, plus the
+/// compression chunk size), for v2 an inline compression-format
+/// byte, a summary record (total compressed / uncompressed sizes), a
+/// chunk table of `ceil(total_uncompressed / chunk_size)` entries
+/// whose per-field sums MUST equal the summary, then the
+/// independently-zlib-compressed chunk streams back to back.
+/// Layout verified against the CUE4Parse reference
+/// (`FArchive.SerializeCompressedNew`) and independent community
+/// decoders; see `docs/formats/asset/bulk-data.md`.
+///
+/// Paksmith deviations (all fail-closed, documented in the format
+/// doc): byte-swapped (big-endian) tags are rejected rather than
+/// swap-decoded; the summary's uncompressed total must equal
+/// `expected_size` (ElementCount) exactly, not merely fit within it;
+/// the framing must consume the input exactly (no trailing bytes);
+/// v2 named formats other than Zlib surface
+/// `UnsupportedBulkCompression`.
+///
+/// SECURITY invariants (Phase 3 audit F1 discipline):
+/// - The chunk table's byte size is bounded by the REAL remaining
+///   input length before any table allocation — a lying summary
+///   cannot force a large allocation.
+/// - The output buffer is pre-sized from `compressed.len()`, never
+///   from wire-claimed sizes; growth is driven by actually-produced
+///   bytes, bounded per chunk by `take(chunk_uncompressed + 1)` and
+///   in total by the chunk-table sums equaling `expected_size`
+///   (which the resolver budget-checks before calling).
+///
+/// Used by `BulkDataResolver::resolve` and the `__test_utils` bench
+/// accessor (`crate::testing::bench::zlib_decompress`); `pub(crate)`
+/// for the latter.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear wire-format validation sequence; splitting would scatter the framing invariants"
+)]
 pub(crate) fn decompress_zlib(
     compressed: &[u8],
     expected_size: i64,
@@ -1329,39 +1398,246 @@ pub(crate) fn decompress_zlib(
     #[allow(clippy::cast_sign_loss, reason = "validated >= 0 above")]
     let expected = expected_size as u64;
 
-    let decoder = ZlibDecoder::new(compressed);
-    // Bound the read by MAX_BULK_DATA_SIZE so a 1-byte-of-input →
-    // 8-GiB-of-output decompression bomb dies early.
-    let mut limited = decoder.take(MAX_BULK_DATA_SIZE);
-    // SECURITY (Phase 3 audit F1): pre-size from the COMPRESSED input length, NOT
-    // the wire-claimed `expected` (ElementCount). `expected` is attacker-controlled
-    // and only sign-checked upstream — pre-sizing to `min(expected, 8 GiB)` let a
-    // few-byte `.ubulk` claiming ElementCount = 8 GiB force an 8 GiB eager
-    // allocation before a single byte was decompressed (alloc-failure/abort on
-    // non-overcommit / cgroup-limited / Windows). `compressed.len()` is the real,
-    // already-resident input (bounded by MAX_BULK_DATA_COMPRESSED_SIZE = 512 MiB),
-    // so the eager reservation is proportional to bytes actually present, never
-    // amplified by a lying count. `read_to_end` grows past it as the real output
-    // requires, bounded by `take(MAX_BULK_DATA_SIZE)` above and verified by the
-    // length check below.
-    let mut out: Vec<u8> = Vec::with_capacity(compressed.len());
-    let _ = limited
-        .read_to_end(&mut out)
-        .map_err(|e| crate::PaksmithError::AssetParse {
+    // A zero-size record serializes NO payload bytes at all (the
+    // engine early-outs before writing any framing).
+    if expected == 0 && compressed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let fail = |reason: String| crate::PaksmithError::AssetParse {
+        asset_path: asset_path.to_string(),
+        fault: crate::error::AssetParseFault::BulkDataCompressionDecodeFailed {
+            method: "zlib",
+            reason,
+        },
+    };
+
+    let mut pos = 0usize;
+
+    // 1. Tag record: (magic tag, compression chunk size).
+    let (tag_raw, tag_chunk_size) = read_chunk_info(compressed, &mut pos)
+        .ok_or_else(|| fail("truncated framing header (tag record)".to_string()))?;
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "bit-pattern comparison against magic tags"
+    )]
+    let tag = tag_raw as u64;
+    let v1_tag = u64::from(crate::asset::version::PACKAGE_FILE_TAG);
+    let is_v2 = tag == ARCHIVE_V2_HEADER_TAG;
+    if tag != v1_tag && !is_v2 {
+        // The reference decoder byte-swap-decodes these; paksmith
+        // parses little-endian cooked content only and fails loud.
+        let swapped_forms = [
+            u64::from(crate::asset::version::PACKAGE_FILE_TAG_SWAPPED),
+            v1_tag.swap_bytes(),
+            ARCHIVE_V2_HEADER_TAG.swap_bytes(),
+        ];
+        if swapped_forms.contains(&tag) {
+            return Err(fail(format!(
+                "byte-swapped (big-endian) chunk framing is unsupported \
+                 (tag 0x{tag:016X}); paksmith parses little-endian cooked content only"
+            )));
+        }
+        return Err(fail(format!(
+            "bad chunked-framing tag 0x{tag:016X} \
+             (expected PACKAGE_FILE_TAG or ARCHIVE_V2_HEADER_TAG)"
+        )));
+    }
+
+    // 2. v2 header: inline compression-format byte. Only Zlib (3)
+    // proceeds on this decode path.
+    if is_v2 {
+        let format_byte = *compressed
+            .get(pos)
+            .ok_or_else(|| fail("truncated framing header (v2 format byte)".to_string()))?;
+        pos += 1;
+        let unsupported = |method: &'static str| crate::PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
-            fault: crate::error::AssetParseFault::BulkDataCompressionDecodeFailed {
-                method: "zlib",
-                reason: e.to_string(),
-            },
-        })?;
-    if out.len() as u64 != expected {
+            fault: crate::error::AssetParseFault::UnsupportedBulkCompression { method },
+        };
+        match format_byte {
+            3 => {} // Zlib — the format this decoder implements
+            1 => return Err(unsupported("None")),
+            2 => return Err(unsupported("Oodle")),
+            4 => return Err(unsupported("Gzip")),
+            5 => return Err(unsupported("LZ4")),
+            0 => {
+                return Err(fail(
+                    "v2 framing with an inline FString-named compression format \
+                     is unsupported (no known bulk-data producer)"
+                        .to_string(),
+                ));
+            }
+            other => return Err(fail(format!("unknown v2 compression-format byte {other}"))),
+        }
+    }
+
+    // 3. Compression chunk size, honoring the legacy sentinel quirk:
+    // a chunk-size field carrying PACKAGE_FILE_TAG itself means
+    // "128 KiB" (files written before the size was stored).
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "PACKAGE_FILE_TAG fits in i64 positively"
+    )]
+    let sentinel = v1_tag as i64;
+    let chunk_size = if tag_chunk_size == sentinel {
+        LOADING_COMPRESSION_CHUNK_SIZE
+    } else {
+        tag_chunk_size
+    };
+    if chunk_size <= 0 {
+        return Err(fail(format!(
+            "nonpositive compression chunk size {chunk_size}"
+        )));
+    }
+
+    // 4. Summary record: total compressed / uncompressed sizes.
+    let (total_comp, total_unc) = read_chunk_info(compressed, &mut pos)
+        .ok_or_else(|| fail("truncated framing header (summary record)".to_string()))?;
+    if total_comp < 0 || total_unc < 0 {
+        return Err(fail(format!(
+            "negative summary size (compressed {total_comp}, uncompressed {total_unc})"
+        )));
+    }
+
+    // 5. The summary's uncompressed total IS the record's decompressed
+    // byte-count claim; it must match ElementCount exactly. (The
+    // reference decoder allows <=; for `FByteBulkData` the writer
+    // always emits ==, so a mismatch is a corruption signal.)
+    #[allow(clippy::cast_sign_loss, reason = "validated >= 0 above")]
+    if total_unc as u64 != expected {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "non-negative; 32-bit hosts with > 4 GiB claims are unsupported"
+        )]
         return Err(crate::PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
             fault: crate::error::AssetParseFault::BulkDataDecompressLengthMismatch {
                 expected: expected_size,
-                actual: out.len(),
+                actual: total_unc as usize,
             },
         });
+    }
+
+    // 6. Chunk count = ceil(total_unc / chunk_size), overflow-checked.
+    let chunk_count = total_unc
+        .checked_add(chunk_size - 1)
+        .map(|n| n / chunk_size)
+        .ok_or_else(|| {
+            fail(format!(
+                "chunk count overflow (uncompressed total {total_unc})"
+            ))
+        })?;
+    let chunk_count = usize::try_from(chunk_count).map_err(|_| {
+        fail(format!(
+            "chunk count {chunk_count} exceeds the address space"
+        ))
+    })?;
+
+    // 7. SECURITY: the chunk table must physically fit in the
+    // remaining input BEFORE any table allocation — a lying summary
+    // cannot force an allocation larger than the bytes actually
+    // present.
+    let remaining = compressed.len() - pos;
+    let table_bytes = chunk_count
+        .checked_mul(CHUNK_INFO_WIRE_SIZE)
+        .filter(|&n| n <= remaining)
+        .ok_or_else(|| {
+            fail(format!(
+                "truncated chunk table: {chunk_count} chunks need more bytes than \
+                 the {remaining} remaining"
+            ))
+        })?;
+
+    // 8. Chunk table. Entries are non-negative; per-field sums must
+    // equal the summary totals (reference-decoder parity).
+    let table_region = &compressed[pos..pos + table_bytes];
+    pos += table_bytes;
+    let mut chunks: Vec<(i64, i64)> = Vec::with_capacity(chunk_count);
+    let mut sum_comp: i64 = 0;
+    let mut sum_unc: i64 = 0;
+    for entry in table_region.chunks_exact(CHUNK_INFO_WIRE_SIZE) {
+        let mut entry_pos = 0usize;
+        let (chunk_comp, chunk_unc) = read_chunk_info(entry, &mut entry_pos)
+            .ok_or_else(|| fail("truncated chunk table entry".to_string()))?;
+        if chunk_comp < 0 || chunk_unc < 0 {
+            return Err(fail(format!(
+                "negative chunk table entry (compressed {chunk_comp}, uncompressed {chunk_unc})"
+            )));
+        }
+        sum_comp = sum_comp
+            .checked_add(chunk_comp)
+            .ok_or_else(|| fail("chunk table compressed-size sum overflow".to_string()))?;
+        sum_unc = sum_unc
+            .checked_add(chunk_unc)
+            .ok_or_else(|| fail("chunk table uncompressed-size sum overflow".to_string()))?;
+        chunks.push((chunk_comp, chunk_unc));
+    }
+    if sum_comp != total_comp {
+        return Err(fail(format!(
+            "chunk table compressed-size sum {sum_comp} != summary {total_comp} (sum mismatch)"
+        )));
+    }
+    if sum_unc != total_unc {
+        return Err(fail(format!(
+            "chunk table uncompressed-size sum {sum_unc} != summary {total_unc} (sum mismatch)"
+        )));
+    }
+
+    // 9. The chunk streams must consume the rest of the input
+    // exactly: SizeOnDisk delimits the framing, so both a shortfall
+    // and trailing bytes are corruption / crafted-input signals.
+    let streams_len = compressed.len() - pos;
+    #[allow(clippy::cast_sign_loss, reason = "validated >= 0 above")]
+    let sum_comp_u64 = sum_comp as u64;
+    if sum_comp_u64 > streams_len as u64 {
+        return Err(fail(format!(
+            "truncated chunk streams: table claims {sum_comp_u64} bytes, {streams_len} remain"
+        )));
+    }
+    if sum_comp_u64 < streams_len as u64 {
+        return Err(fail(format!(
+            "{} trailing byte(s) after the final chunk stream",
+            streams_len as u64 - sum_comp_u64
+        )));
+    }
+
+    // 10. Decompress chunk by chunk, appending into one output
+    // buffer. SECURITY (Phase 3 audit F1): pre-size from the
+    // COMPRESSED input length, NOT the wire-claimed `expected` —
+    // the eager reservation stays proportional to bytes actually
+    // present (bounded by MAX_BULK_DATA_COMPRESSED_SIZE = 512 MiB
+    // upstream), never amplified by a lying count. Each chunk's
+    // read is bounded by `take(chunk_unc + 1)`: the `+ 1` makes an
+    // over-long stream detectable while capping a decompression
+    // bomb at one byte past the table's claim, and the table sums
+    // were pinned to `expected` above.
+    let mut out: Vec<u8> = Vec::with_capacity(compressed.len());
+    for (index, &(chunk_comp, chunk_unc)) in chunks.iter().enumerate() {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "non-negative; bounded by streams_len (a usize) via the sum check above"
+        )]
+        let chunk_len = chunk_comp as usize;
+        // In-bounds: sum(chunk_comp) == streams_len exactly (step 9),
+        // and `pos` advances by each stream's length in turn.
+        let stream = &compressed[pos..pos + chunk_len];
+        pos += chunk_len;
+        let before = out.len();
+        #[allow(clippy::cast_sign_loss, reason = "validated >= 0 above")]
+        let mut limited = ZlibDecoder::new(stream).take(chunk_unc as u64 + 1);
+        let _ = limited
+            .read_to_end(&mut out)
+            .map_err(|e| fail(format!("chunk {index}: {e}")))?;
+        let produced = out.len() - before;
+        #[allow(clippy::cast_sign_loss, reason = "validated >= 0 above")]
+        if produced as u64 != chunk_unc as u64 {
+            return Err(fail(format!(
+                "chunk {index} decompressed to {produced} bytes, expected {chunk_unc}"
+            )));
+        }
     }
     Ok(out)
 }
@@ -1379,6 +1655,23 @@ mod tests {
     /// doc-comments with a calibrated value; changing the constant
     /// without updating the doc-comment is a frequent drift mode
     /// (see commit `3bf6370`).
+    /// Pins the chunked-framing wire constants against the reference
+    /// values (CUE4Parse `FArchive.SerializeCompressedNew` +
+    /// `Compression.cs`; cross-anchored against community decoders).
+    /// Kills arithmetic/shift mutants on the const expressions, and
+    /// pair-anchors the v2 tag's low 32 bits to `PACKAGE_FILE_TAG`.
+    #[test]
+    fn framing_constants_pin_expected_values() {
+        assert_eq!(ARCHIVE_V2_HEADER_TAG, 0x2222_2222_9E2A_83C1);
+        assert_eq!(
+            ARCHIVE_V2_HEADER_TAG & 0xFFFF_FFFF,
+            u64::from(crate::asset::version::PACKAGE_FILE_TAG),
+            "v2 tag's low 32 bits are PACKAGE_FILE_TAG"
+        );
+        assert_eq!(LOADING_COMPRESSION_CHUNK_SIZE, 131_072, "128 KiB");
+        assert_eq!(CHUNK_INFO_WIRE_SIZE, 16, "two LE i64s");
+    }
+
     #[test]
     fn caps_pin_expected_values() {
         assert_eq!(MAX_BULK_DATA_SIZE, 8_589_934_592, "8 GiB");
@@ -2276,13 +2569,11 @@ mod tests {
         reason = "test inputs are always small bounded values"
     )]
     fn resolve_zlib_decompresses() {
-        use flate2::Compression;
-        use flate2::write::ZlibEncoder;
-        use std::io::Write;
-        let original = b"hello bulk data world".to_vec();
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&original).unwrap();
-        let compressed = encoder.finish().unwrap();
+        // End-to-end through the resolver: a 200_000-byte payload in
+        // engine chunked framing (two 128 KiB-boundary chunks — the
+        // multi-chunk path) resolves to the original bytes.
+        let original: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let compressed = frame_zlib(&original, 131_072, (TEST_V1_TAG, TEST_CHUNK_128K), None);
 
         let mut uasset = vec![0u8; 64];
         uasset.extend_from_slice(&compressed);
@@ -2600,16 +2891,12 @@ mod tests {
     #[test]
     fn decompress_zlib_accepts_zero_element_count() {
         // Boundary: ElementCount = 0 must PASS the `< 0` check (it's
-        // strictly-less, not `<= 0`). Empty zlib stream encodes
-        // empty payload; round-trip should succeed. Kills the
-        // `< -> <=` mutant which would reject zero.
-        use flate2::Compression;
-        use flate2::write::ZlibEncoder;
-        use std::io::Write;
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&[]).unwrap();
-        let compressed = encoder.finish().unwrap();
-        let result = decompress_zlib(&compressed, 0, "test.uasset").expect("zero len ok");
+        // strictly-less, not `<= 0`). A zero-size record serializes
+        // NO payload bytes at all (the engine early-outs before
+        // writing any framing), so empty input + zero count succeeds
+        // with an empty payload. Kills the `< -> <=` mutant which
+        // would reject zero.
+        let result = decompress_zlib(&[], 0, "test.uasset").expect("zero len ok");
         assert!(result.is_empty());
     }
 
@@ -2618,28 +2905,517 @@ mod tests {
     fn decompress_zlib_grows_past_compressed_len_pre_size() {
         // SECURITY F1 regression: the output is pre-sized from `compressed.len()`,
         // not the wire `expected`. A highly-compressible payload (256 KiB of zeros
-        // → a few-hundred-byte stream) decompresses to FAR more than the pre-size,
-        // so `read_to_end` must grow past `Vec::with_capacity(compressed.len())`.
-        // Pins that the proportional pre-size still yields the full output (and
-        // that a tiny compressed stream does NOT pre-allocate from the claim).
-        use flate2::Compression;
-        use flate2::write::ZlibEncoder;
-        use std::io::Write;
+        // → a few-hundred-byte framed input) decompresses to FAR more than the
+        // pre-size, so the decode loop must grow past
+        // `Vec::with_capacity(compressed.len())`. Pins that the proportional
+        // pre-size still yields the full output (and that a tiny compressed
+        // input does NOT pre-allocate from the claim). 256 KiB at the default
+        // 128 KiB chunk size also exercises the two-chunk path.
         let original = vec![0u8; 256 * 1024];
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&original).unwrap();
-        let compressed = encoder.finish().unwrap();
+        let framed = frame_zlib(&original, 131_072, (TEST_V1_TAG, TEST_CHUNK_128K), None);
         assert!(
-            compressed.len() < original.len() / 100,
+            framed.len() < original.len() / 100,
             "payload is highly compressible (pre-size << output)"
         );
         let out = decompress_zlib(
-            &compressed,
+            &framed,
             i64::try_from(original.len()).unwrap(),
             "test.uasset",
         )
         .expect("decompress grows past the compressed-len pre-size");
         assert_eq!(out, original);
+    }
+
+    // ---- chunked FCompressedChunkInfo framing (#644) ----
+    //
+    // Wire literals per the CUE4Parse reference
+    // (`FArchive.SerializeCompressedNew` + `Compression.cs`),
+    // cross-anchored against independent community implementations
+    // (Remnant-2-Save-Parser, revision-go). Tests hardcode the
+    // literals independently of the implementation
+    // constants so a drifted constant fails loudly here.
+
+    /// `PACKAGE_FILE_TAG` as the i64 the tag record carries.
+    #[cfg(feature = "__test_utils")]
+    const TEST_V1_TAG: i64 = 0x9E2A_83C1;
+    /// `ARCHIVE_V2_HEADER_TAG` = `PACKAGE_FILE_TAG | (0x22222222 << 32)`.
+    #[cfg(feature = "__test_utils")]
+    const TEST_V2_TAG: i64 = 0x2222_2222_9E2A_83C1;
+    /// `LOADING_COMPRESSION_CHUNK_SIZE` (128 KiB).
+    #[cfg(feature = "__test_utils")]
+    const TEST_CHUNK_128K: i64 = 131_072;
+
+    /// One `FCompressedChunkInfo`: two little-endian i64s.
+    #[cfg(feature = "__test_utils")]
+    fn chunk_info(compressed: i64, uncompressed: i64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(16);
+        out.extend_from_slice(&compressed.to_le_bytes());
+        out.extend_from_slice(&uncompressed.to_le_bytes());
+        out
+    }
+
+    /// One raw zlib stream over `payload`.
+    #[cfg(feature = "__test_utils")]
+    fn zlib_stream(payload: &[u8]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(payload).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// Assemble a framing from explicit parts. Malformed-input tests
+    /// pass deliberately inconsistent values; `frame_zlib` passes
+    /// consistent ones.
+    #[cfg(feature = "__test_utils")]
+    fn assemble_framing(
+        tag: (i64, i64),
+        format_byte: Option<u8>,
+        summary: (i64, i64),
+        table: &[(i64, i64)],
+        streams: &[u8],
+    ) -> Vec<u8> {
+        let mut out = chunk_info(tag.0, tag.1);
+        if let Some(b) = format_byte {
+            out.push(b);
+        }
+        out.extend_from_slice(&chunk_info(summary.0, summary.1));
+        for &(c, u) in table {
+            out.extend_from_slice(&chunk_info(c, u));
+        }
+        out.extend_from_slice(streams);
+        out
+    }
+
+    /// Valid engine framing: split `payload` at `split` bytes,
+    /// zlib-compress each piece, derive the summary + chunk table
+    /// from the real sizes. `tag` is written verbatim so the
+    /// chunk-size-quirk test can claim a different chunk size than
+    /// the split actually used.
+    #[cfg(feature = "__test_utils")]
+    fn frame_zlib(
+        payload: &[u8],
+        split: usize,
+        tag: (i64, i64),
+        format_byte: Option<u8>,
+    ) -> Vec<u8> {
+        let pieces: Vec<(Vec<u8>, usize)> = payload
+            .chunks(split.max(1))
+            .map(|c| (zlib_stream(c), c.len()))
+            .collect();
+        let table: Vec<(i64, i64)> = pieces
+            .iter()
+            .map(|(s, u)| (i64::try_from(s.len()).unwrap(), i64::try_from(*u).unwrap()))
+            .collect();
+        let total_comp: i64 = table.iter().map(|&(c, _)| c).sum();
+        let total_unc = i64::try_from(payload.len()).unwrap();
+        let streams: Vec<u8> = pieces.into_iter().flat_map(|(s, _)| s).collect();
+        assemble_framing(tag, format_byte, (total_comp, total_unc), &table, &streams)
+    }
+
+    /// Expect `BulkDataCompressionDecodeFailed` whose reason contains
+    /// `needle`; panics with the actual result otherwise.
+    #[cfg(feature = "__test_utils")]
+    #[track_caller]
+    fn expect_decode_failed(result: crate::Result<Vec<u8>>, needle: &str) {
+        match result {
+            Err(crate::PaksmithError::AssetParse {
+                fault:
+                    crate::error::AssetParseFault::BulkDataCompressionDecodeFailed { method, reason },
+                ..
+            }) => {
+                assert_eq!(method, "zlib");
+                assert!(
+                    reason.contains(needle),
+                    "reason {reason:?} does not contain {needle:?}"
+                );
+            }
+            other => panic!("expected BulkDataCompressionDecodeFailed, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_round_trips_single_chunk() {
+        let payload: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let framed = frame_zlib(&payload, 131_072, (TEST_V1_TAG, TEST_CHUNK_128K), None);
+        let out = decompress_zlib(&framed, 1000, "test.uasset").expect("single chunk");
+        assert_eq!(out, payload);
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_round_trips_multi_chunk() {
+        // 10_000 bytes at a 4096 chunk size → 3 chunks, short last.
+        let payload: Vec<u8> = (0..10_000u32).map(|i| (i % 249) as u8).collect();
+        let framed = frame_zlib(&payload, 4096, (TEST_V1_TAG, 4096), None);
+        let out = decompress_zlib(&framed, 10_000, "test.uasset").expect("multi chunk");
+        assert_eq!(out, payload);
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_chunk_size_tag_quirk_defaults_to_128k() {
+        // Legacy quirk: a tag record whose UncompressedSize field is
+        // itself PACKAGE_FILE_TAG means "128 KiB chunks". 200_000
+        // bytes split at 131_072 → 2 chunks; without the quirk the
+        // claimed chunk size (~2.6 GiB) would predict 1 chunk and the
+        // table would mismatch.
+        let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 247) as u8).collect();
+        let framed = frame_zlib(&payload, 131_072, (TEST_V1_TAG, TEST_V1_TAG), None);
+        let out = decompress_zlib(&framed, 200_000, "test.uasset").expect("quirk chunking");
+        assert_eq!(out, payload);
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_v2_header_zlib_format_round_trips() {
+        // v2 header: ARCHIVE_V2_HEADER_TAG + inline format byte 3 (Zlib).
+        let payload: Vec<u8> = (0..5000u32).map(|i| (i % 243) as u8).collect();
+        let framed = frame_zlib(&payload, 4096, (TEST_V2_TAG, 4096), Some(3));
+        let out = decompress_zlib(&framed, 5000, "test.uasset").expect("v2 zlib");
+        assert_eq!(out, payload);
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_zero_element_count_framed_zero_chunks_ok() {
+        // A framing whose totals are zero carries no chunk table and
+        // no streams; with ElementCount = 0 it decodes to empty.
+        let framed = frame_zlib(&[], 4096, (TEST_V1_TAG, 4096), None);
+        let out = decompress_zlib(&framed, 0, "test.uasset").expect("framed zero");
+        assert!(out.is_empty());
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_framing_hex_anchor() {
+        // Byte-level anchor for the v1 framing layout: little-endian
+        // i64 pairs. Pins the test builders' field order/width (and
+        // through the round-trip, the parser's) against the reference
+        // hex: tag record = C1 83 2A 9E 00 00 00 00 | 00 00 02 00 00
+        // 00 00 00 (PACKAGE_FILE_TAG, 131072).
+        let payload = [0x01u8, 0x02, 0x03, 0x04];
+        let framed = frame_zlib(&payload, 131_072, (TEST_V1_TAG, TEST_CHUNK_128K), None);
+        assert_eq!(
+            &framed[..16],
+            &[
+                0xC1, 0x83, 0x2A, 0x9E, 0x00, 0x00, 0x00, 0x00, // tag
+                0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, // 131072
+            ],
+            "tag record hex anchor"
+        );
+        let stream_len = framed.len() - 48; // tag + summary + 1 table entry
+        // Summary and the single-chunk table entry carry identical
+        // values here: (stream compressed size, 4 uncompressed).
+        let expected_info = chunk_info(i64::try_from(stream_len).unwrap(), 4);
+        assert_eq!(&framed[16..32], &expected_info[..], "summary record");
+        assert_eq!(&framed[32..48], &expected_info[..], "chunk table entry");
+        let out = decompress_zlib(&framed, 4, "test.uasset").expect("anchor decodes");
+        assert_eq!(out, payload);
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_raw_zlib_stream() {
+        // THE #644 regression: the old decoder accepted a bare zlib
+        // stream, which no engine writer produces for compressed bulk
+        // records. A raw stream has no framing tag and must fail loud.
+        let raw = zlib_stream(b"hello bulk data world");
+        expect_decode_failed(decompress_zlib(&raw, 21, "test.uasset"), "tag");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_unknown_tag() {
+        let payload = b"0123456789";
+        let mut framed = frame_zlib(payload, 4096, (0x1234_5678, 4096), None);
+        expect_decode_failed(decompress_zlib(&framed, 10, "test.uasset"), "tag");
+        // Zero tag as well (all-zero header).
+        framed = frame_zlib(payload, 4096, (0, 4096), None);
+        expect_decode_failed(decompress_zlib(&framed, 10, "test.uasset"), "tag");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[allow(clippy::cast_possible_wrap, reason = "bit-pattern tags")]
+    fn chunked_zlib_rejects_byte_swapped_tags() {
+        // Byte-swapped (big-endian producer) framings are recognized
+        // and rejected: paksmith is little-endian-only. All four
+        // swapped forms from the reference decoder.
+        let payload = b"0123456789";
+        for tag in [
+            0x0000_0000_C183_2A9Ei64,        // PACKAGE_FILE_TAG_SWAPPED
+            0xC183_2A9E_0000_0000u64 as i64, // BYTESWAP_ORDER64(v1 tag)
+            0xC183_2A9E_2222_2222u64 as i64, // BYTESWAP_ORDER64(v2 tag)
+        ] {
+            let framed = frame_zlib(payload, 4096, (tag, 4096), None);
+            expect_decode_failed(decompress_zlib(&framed, 10, "test.uasset"), "byte-swapped");
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_v2_rejects_named_formats() {
+        // v2 format bytes 1/2/4/5 name compression formats paksmith
+        // does not decode on this path — typed unsupported fault, not
+        // a corruption fault.
+        let payload = b"0123456789";
+        for (byte, name) in [(1u8, "None"), (2, "Oodle"), (4, "Gzip"), (5, "LZ4")] {
+            let framed = frame_zlib(payload, 4096, (TEST_V2_TAG, 4096), Some(byte));
+            match decompress_zlib(&framed, 10, "test.uasset") {
+                Err(crate::PaksmithError::AssetParse {
+                    fault: crate::error::AssetParseFault::UnsupportedBulkCompression { method },
+                    ..
+                }) => assert_eq!(method, name),
+                other => panic!("expected UnsupportedBulkCompression({name}), got {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_v2_rejects_fstring_format_name() {
+        // Format byte 0 = inline FString-named format. No known
+        // engine writer emits it for bulk data; fail closed without
+        // growing an FString parser into this path.
+        let payload = b"0123456789";
+        let framed = frame_zlib(payload, 4096, (TEST_V2_TAG, 4096), Some(0));
+        expect_decode_failed(decompress_zlib(&framed, 10, "test.uasset"), "format");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_v2_rejects_unknown_format_byte() {
+        let payload = b"0123456789";
+        let framed = frame_zlib(payload, 4096, (TEST_V2_TAG, 4096), Some(9));
+        expect_decode_failed(decompress_zlib(&framed, 10, "test.uasset"), "format");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_nonpositive_chunk_size() {
+        let payload = b"0123456789";
+        for chunk_size in [0i64, -4096] {
+            let framed = frame_zlib(payload, 4096, (TEST_V1_TAG, chunk_size), None);
+            expect_decode_failed(decompress_zlib(&framed, 10, "test.uasset"), "chunk size");
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_summary_total_mismatching_element_count() {
+        // The summary's total uncompressed size IS the decompressed
+        // byte count claim; when it disagrees with ElementCount the
+        // record is corrupt. Typed as the length-mismatch fault.
+        let payload: Vec<u8> = vec![0xAB; 1000];
+        let framed = frame_zlib(&payload, 4096, (TEST_V1_TAG, 4096), None);
+        match decompress_zlib(&framed, 999, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault:
+                    crate::error::AssetParseFault::BulkDataDecompressLengthMismatch { expected, actual },
+                ..
+            }) => {
+                assert_eq!(expected, 999);
+                assert_eq!(actual, 1000);
+            }
+            other => panic!("expected BulkDataDecompressLengthMismatch, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_negative_summary_fields() {
+        let stream = zlib_stream(b"0123456789");
+        let stream_len = i64::try_from(stream.len()).unwrap();
+        let neg_comp = assemble_framing(
+            (TEST_V1_TAG, 4096),
+            None,
+            (-1, 10),
+            &[(stream_len, 10)],
+            &stream,
+        );
+        expect_decode_failed(decompress_zlib(&neg_comp, 10, "test.uasset"), "negative");
+        let neg_unc = assemble_framing(
+            (TEST_V1_TAG, 4096),
+            None,
+            (stream_len, -1),
+            &[(stream_len, 10)],
+            &stream,
+        );
+        expect_decode_failed(decompress_zlib(&neg_unc, 10, "test.uasset"), "negative");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_truncated_header() {
+        // Empty, mid-tag, tag-only, and mid-summary inputs all die
+        // with a truncation fault before any allocation.
+        let valid = frame_zlib(b"0123456789", 4096, (TEST_V1_TAG, 4096), None);
+        for len in [0usize, 15, 16, 24] {
+            expect_decode_failed(
+                decompress_zlib(&valid[..len], 10, "test.uasset"),
+                "truncated",
+            );
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_truncated_chunk_table() {
+        // Summary claims 1_000_000 uncompressed bytes at chunk size 1
+        // → 1M table entries (16 MiB of table), but the input holds
+        // one. Must fail on the input-length bound BEFORE allocating
+        // table space — a lying header cannot force a large
+        // allocation (F1 discipline at the framing layer).
+        let stream = zlib_stream(&[0u8; 1]);
+        let stream_len = i64::try_from(stream.len()).unwrap();
+        let framed = assemble_framing(
+            (TEST_V1_TAG, 1),
+            None,
+            (stream_len, 1_000_000),
+            &[(stream_len, 1)],
+            &stream,
+        );
+        expect_decode_failed(
+            decompress_zlib(&framed, 1_000_000, "test.uasset"),
+            "truncated",
+        );
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_survives_huge_uncompressed_claim() {
+        // i64::MAX-scale claims must fail cleanly (no overflow, no
+        // panic, no allocation proportional to the claim).
+        let stream = zlib_stream(&[0u8; 16]);
+        let stream_len = i64::try_from(stream.len()).unwrap();
+        let framed = assemble_framing(
+            (TEST_V1_TAG, 2),
+            None,
+            (stream_len, i64::MAX),
+            &[(stream_len, 16)],
+            &stream,
+        );
+        let result = decompress_zlib(&framed, i64::MAX, "test.uasset");
+        assert!(result.is_err(), "huge claim must fail closed");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_chunk_table_sum_mismatch() {
+        // Chunk-table sums must equal the summary totals (reference
+        // decoder parity) — both the compressed and the uncompressed
+        // direction.
+        let stream = zlib_stream(b"0123456789");
+        let stream_len = i64::try_from(stream.len()).unwrap();
+        let bad_comp_sum = assemble_framing(
+            (TEST_V1_TAG, 4096),
+            None,
+            (stream_len + 1, 10),
+            &[(stream_len, 10)],
+            &stream,
+        );
+        expect_decode_failed(decompress_zlib(&bad_comp_sum, 10, "test.uasset"), "sum");
+        let bad_unc_sum = assemble_framing(
+            (TEST_V1_TAG, 4096),
+            None,
+            (stream_len, 10),
+            &[(stream_len, 9)],
+            &stream,
+        );
+        expect_decode_failed(decompress_zlib(&bad_unc_sum, 10, "test.uasset"), "sum");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_negative_chunk_table_entry() {
+        let stream = zlib_stream(b"0123456789");
+        let stream_len = i64::try_from(stream.len()).unwrap();
+        let neg_comp = assemble_framing(
+            (TEST_V1_TAG, 4096),
+            None,
+            (stream_len, 10),
+            &[(-1, 10)],
+            &stream,
+        );
+        expect_decode_failed(decompress_zlib(&neg_comp, 10, "test.uasset"), "negative");
+        let neg_unc = assemble_framing(
+            (TEST_V1_TAG, 4096),
+            None,
+            (stream_len, 10),
+            &[(stream_len, -1)],
+            &stream,
+        );
+        expect_decode_failed(decompress_zlib(&neg_unc, 10, "test.uasset"), "negative");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_truncated_chunk_streams() {
+        // Table and summary agree, but the stream region is one byte
+        // short of the table's compressed-size total.
+        let framed = frame_zlib(b"0123456789", 4096, (TEST_V1_TAG, 4096), None);
+        expect_decode_failed(
+            decompress_zlib(&framed[..framed.len() - 1], 10, "test.uasset"),
+            "truncated",
+        );
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_trailing_bytes() {
+        // SizeOnDisk delimits the framing exactly; trailing bytes are
+        // a corruption / crafted-input signal.
+        let mut framed = frame_zlib(b"0123456789", 4096, (TEST_V1_TAG, 4096), None);
+        framed.push(0xAA);
+        expect_decode_failed(decompress_zlib(&framed, 10, "test.uasset"), "trailing");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_chunk_decompressing_to_wrong_length() {
+        // A chunk stream that inflates to FEWER bytes than its table
+        // entry claims (10 real vs 11 claimed)...
+        let stream = zlib_stream(b"0123456789");
+        let stream_len = i64::try_from(stream.len()).unwrap();
+        let under = assemble_framing(
+            (TEST_V1_TAG, 4096),
+            None,
+            (stream_len, 11),
+            &[(stream_len, 11)],
+            &stream,
+        );
+        expect_decode_failed(decompress_zlib(&under, 11, "test.uasset"), "chunk");
+        // ...and one that inflates to MORE (11 real vs 10 claimed).
+        let stream = zlib_stream(b"0123456789A");
+        let stream_len = i64::try_from(stream.len()).unwrap();
+        let over = assemble_framing(
+            (TEST_V1_TAG, 4096),
+            None,
+            (stream_len, 10),
+            &[(stream_len, 10)],
+            &stream,
+        );
+        expect_decode_failed(decompress_zlib(&over, 10, "test.uasset"), "chunk");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_corrupt_chunk_stream() {
+        // Garbage bytes where a zlib stream should be → the codec's
+        // stream error surfaces through the decode-failed fault.
+        let garbage = [0xFFu8; 16];
+        let framed = assemble_framing((TEST_V1_TAG, 4096), None, (16, 10), &[(16, 10)], &garbage);
+        let result = decompress_zlib(&framed, 10, "test.uasset");
+        match result {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BulkDataCompressionDecodeFailed { .. },
+                ..
+            }) => {}
+            other => panic!("expected BulkDataCompressionDecodeFailed, got {other:?}"),
+        }
     }
 
     #[cfg(feature = "__test_utils")]
