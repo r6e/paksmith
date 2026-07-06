@@ -1,16 +1,24 @@
 name: Mutation Testing
 
-# Runs on every PR. The `changes` job decides whether the diff touches
-# parsing-relevant code; non-matching PRs skip-as-success so this can
-# safely become a required check without deadlocking docs-only PRs.
-# (Bare `paths:` filters produce no run at all, leaving required checks
-# pending forever — see ci.yml `changes` job and PR #152 for that trap.)
-# `--in-diff` keeps each matching run scoped to the changed lines, and
-# the mutant list is split across a `--shard` matrix so wall-clock is
-# roughly (single-job time / shard count) plus one baseline
-# build + test per shard. The `mutants` aggregator is the single
-# stable status; point any future required-check entry at it, never
-# at the per-shard jobs.
+# Runs on every PR, as a four-stage graph:
+# `changes` -> `enumerate` -> `shard` (x N matrix) -> `mutants`.
+#
+# `changes` decides whether the diff touches parsing-relevant code;
+# non-matching PRs skip-as-success so this can safely become a
+# required check without deadlocking docs-only PRs. (Bare `paths:`
+# filters produce no run at all, leaving required checks pending
+# forever — see ci.yml `changes` job and PR #152 for that trap.)
+# `enumerate` then counts the mutants in the PR diff without
+# building; a clean zero count (Cargo.lock bumps, comment-only
+# edits) also skips-as-success without spawning shard runners. The
+# accepted cost: mutant-bearing PRs pay the enumerate hop (~1-2 min
+# of checkout + toolchain) serially before the shards start.
+# `--in-diff` keeps each matching run scoped to the changed lines,
+# and the mutant list is split across the `--shard` matrix so
+# wall-clock is roughly (single-job time / shard count) plus one
+# baseline build + test per shard. The `mutants` aggregator is the
+# single stable status; point any future required-check entry at
+# it, never at the per-shard jobs.
 on:
   pull_request:
 
@@ -69,9 +77,12 @@ jobs:
   # shard runners. CAUTION: the enumeration arguments must stay in
   # lockstep with the shard invocation (same pinned diff, same
   # `--all-features`) — argument drift here could silently skip real
-  # mutation testing. The step fails loud on any cargo-mutants error
-  # (default shell is `bash -e -o pipefail`); only a clean zero count
-  # skips the shards, and the aggregator fails if this job fails.
+  # mutation testing. The step fails loud on any cargo-mutants error:
+  # the count is captured via a simple-command assignment, which
+  # bash's default `-e` covers (NOTE: no pipefail here — the
+  # implicit `run:` shell is `bash -e {0}` — so keep the capture
+  # pipe-free). Only a clean zero count skips the shards, and the
+  # aggregator fails if this job fails.
   enumerate:
     name: Enumerate mutants
     needs: changes
