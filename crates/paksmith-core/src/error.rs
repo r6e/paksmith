@@ -2696,13 +2696,18 @@ pub enum AssetParseFault {
         /// `SizeOnDisk` from the wire record.
         size: u64,
     },
-    /// `FByteBulkData::SizeOnDisk` exceeds `MAX_BULK_DATA_SIZE`
-    /// (8 GiB; defined in `crate::asset::bulk_data`). For
-    /// uncompressed records this caps the on-disk payload size;
-    /// for compressed records `BulkDataCompressedSizeExceeded`
-    /// (512 MiB) fires first at a tighter threshold.
+    /// A bulk-data size claim exceeds `MAX_BULK_DATA_SIZE` (8 GiB;
+    /// defined in `crate::asset::bulk_data`). Two firing sites: the
+    /// wire reader caps `FByteBulkData::SizeOnDisk` for uncompressed
+    /// records (compressed records hit the tighter 512 MiB
+    /// `BulkDataCompressedSizeExceeded` on `SizeOnDisk` first), and
+    /// `decompress_zlib` caps the decompressed claim (`ElementCount`)
+    /// for compressed records before parsing the chunk framing — the
+    /// per-record transient-output ceiling.
     BulkDataSizeExceeded {
-        /// The wire record's claimed `SizeOnDisk`.
+        /// The wire record's claimed size: `SizeOnDisk` at the
+        /// read-side cap, or `ElementCount`'s decompressed-byte
+        /// claim at the decompression boundary.
         size: u64,
         /// The compile-time cap.
         cap: u64,
@@ -2776,13 +2781,18 @@ pub enum AssetParseFault {
         /// Flags as read from the wire (both tier bits set).
         flags: u32,
     },
-    /// `BULKDATA_SerializeCompressedZLIB` payload decompressed to a
-    /// different byte count than `ElementCount` claims. Surfaces
-    /// truncated, over-long, or stream-corrupted compressed inputs.
+    /// A `BULKDATA_SerializeCompressedZLIB` payload's framing
+    /// summary claims a decompressed byte total different from what
+    /// `ElementCount` claims — the two wire-level size claims for
+    /// the same record disagree, a corruption / crafted-input
+    /// signal caught before any decompression. (A chunk stream that
+    /// DECODES to the wrong byte count surfaces
+    /// `BulkDataCompressionDecodeFailed` instead.)
     BulkDataDecompressLengthMismatch {
         /// `ElementCount` from the wire record.
         expected: i64,
-        /// Actual decompressed byte count.
+        /// Decompressed-byte total claimed by the
+        /// `FCompressedChunkInfo` framing summary.
         actual: usize,
     },
     /// `BulkDataFlags` carries bits outside the documented catalog
@@ -2804,12 +2814,17 @@ pub enum AssetParseFault {
         /// set is open-ended across Phase 3 follow-ups.
         method: &'static str,
     },
-    /// Stream-level failure decoding a compressed bulk-data payload
-    /// (zlib in Phase 3b; LZO / BitWindow / Oodle in future phases).
-    /// Distinguished from `BulkDataDecompressLengthMismatch` (which
-    /// fires when the stream decoded successfully but to the wrong
-    /// byte count) — this variant captures stream-corruption / IO
-    /// errors during decoding.
+    /// Failure decoding a compressed bulk-data payload (chunked
+    /// `FCompressedChunkInfo` framing + zlib in Phase 3b; LZO /
+    /// BitWindow / Oodle in future phases). Covers structural
+    /// framing violations (truncated or invalid headers, bad tags,
+    /// negative sizes, chunk-table sum mismatches, trailing bytes)
+    /// AND codec-level stream failures — including a chunk that
+    /// decodes to a byte count different from its table entry; the
+    /// `reason` names the specific violation. Distinguished from
+    /// `BulkDataDecompressLengthMismatch` (which fires when the
+    /// framing summary's total disagrees with `ElementCount`,
+    /// before any decoding).
     BulkDataCompressionDecodeFailed {
         /// Compression method that failed ("zlib", "Oodle", etc.).
         /// `&'static str` for the same forward-compat reason as
@@ -3353,7 +3368,10 @@ impl fmt::Display for AssetParseFault {
                  + size {size} > u64::MAX"
             ),
             Self::BulkDataSizeExceeded { size, cap } => {
-                write!(f, "bulk-data SizeOnDisk {size} exceeds cap {cap}")
+                // Site-neutral label: `size` is SizeOnDisk at the
+                // read-side cap but ElementCount's decompressed claim
+                // at the decompression boundary (see the variant doc).
+                write!(f, "bulk-data size claim {size} exceeds cap {cap}")
             }
             Self::BulkDataCompressedSizeExceeded { size, cap } => write!(
                 f,
@@ -3383,7 +3401,8 @@ impl fmt::Display for AssetParseFault {
             ),
             Self::BulkDataDecompressLengthMismatch { expected, actual } => write!(
                 f,
-                "zlib bulk-data decompressed to {actual} bytes; record ElementCount claims {expected}"
+                "zlib bulk-data framing summary claims {actual} decompressed bytes; \
+                 record ElementCount claims {expected}"
             ),
             Self::UnknownBulkDataFlags { bits } => write!(
                 f,
@@ -8086,7 +8105,7 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "asset deserialization failed for `Game/Texture.uasset`: \
-             bulk-data SizeOnDisk 9663676416 exceeds cap 8589934592"
+             bulk-data size claim 9663676416 exceeds cap 8589934592"
         );
     }
 
@@ -8194,7 +8213,8 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "asset deserialization failed for `Game/Texture.uasset`: \
-             zlib bulk-data decompressed to 3500 bytes; record ElementCount claims 4096"
+             zlib bulk-data framing summary claims 3500 decompressed bytes; \
+             record ElementCount claims 4096"
         );
     }
 
