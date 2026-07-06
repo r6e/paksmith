@@ -1,13 +1,17 @@
 # LZ4 decompression
 
-Per-block codec documentation for LZ4-compressed pak entries. The
-block *framing* (how an entry's payload is split into
+> Per-block codec for LZ4-compressed pak entries: each compression
+> block is one raw **LZ4 Block Format** stream (no frame magic, no
+> stored size). Resolvable only in v8+ archives, via the footer's
+> FName compression-slot table.
+
+## Overview
+
+The block *framing* (how an entry's payload is split into
 `FPakCompressedBlock` regions) is method-agnostic and documented in
 [`pak-block-framing.md`](pak-block-framing.md); this doc covers what
 lives inside each block when the entry's compression method resolves
 to `LZ4`.
-
-## Overview
 
 Each compression block of an LZ4 pak entry is one independent **raw
 LZ4 block** (the `LZ4 Block Format`): no LZ4-frame magic, no frame
@@ -25,13 +29,12 @@ caller-sized buffer.[^1]
 
 ## Versions
 
-LZ4 is expressible in pak archives from **v8 onward only**: the
-method field became a 1-based index into the footer's FName
-compression-slot table in v8, and `"LZ4"` is resolved by name. The
-v3-v7 numeric method IDs have no standard LZ4 assignment (see
-`container/pak/index/compression.rs::CompressionMethod::from_u32`),
-so a pre-v8 archive cannot declare LZ4 through any documented wire
-value. The raw block codec itself is version-independent.
+| UE version range | Wire-format change | Source |
+|------------------|--------------------|--------|
+| Wire version 8+ | LZ4 resolvable. The compression method became a 1-based index into the footer's FName compression-slot table in v8; `"LZ4"` is matched by name (`CompressionMethod::from_name`). The v3-v7 numeric method IDs paksmith recognizes are `Zlib=1`, `Gzip=2`, `Oodle=4` (`CompressionMethod::from_u32`) — none is LZ4 — so paksmith resolves LZ4 only through the v8+ FName slot table. | `trumank/repak/repak/src/entry.rs@e215472c51db69328b1ce77be2db24d24c1d646b`[^1] |
+
+The raw block codec itself is version-independent: only the *method
+resolution* is version-gated, not the block format.
 
 ## Wire layout
 
@@ -86,6 +89,11 @@ decompression-bomb attempt).
   bytes — an inherent bound on window state, not on output size.
 - A raw block has no self-declared output size; the *pak layer*
   bounds it via `compression_block_size` and `uncompressed_size`.
+- A raw LZ4 block of N compressed bytes decodes to at most `N × 255`
+  bytes (literals copy 1:1; each match-length extension byte
+  contributes ≤ 255 output bytes). This is the maximum expansion
+  ratio a parser can rely on to bound a per-block allocation without
+  trusting the (attacker-controlled) `compression_block_size`.
 
 ### Implementation hardening (recommended for any parser)
 
@@ -93,6 +101,12 @@ decompression-bomb attempt).
   BEFORE decoding; treat over-expansion as a hard error (paksmith:
   the pre-sized buffer makes `decompress_into` fail on
   over-expansion — the buffer IS the bomb cap).
+- Additionally cap that pre-sized buffer by `compressed_len × 255`
+  (the max block expansion above), so a crafted
+  `compression_block_size` cannot force a huge *eager* allocation
+  before the decode even runs (paksmith: `lz4_block_output_cap`,
+  #636). A valid block's real output never exceeds this bound, so the
+  cap never rejects well-formed data.
 - Enforce the non-final-block == `compression_block_size` invariant
   and the cumulative == `uncompressed_size` invariant (truncation /
   padding detection).
@@ -116,26 +130,43 @@ the CUE4Parse reference (`Compression.cs` routes `LZ4` to the K4os
 raw-block `LZ4Codec.Decode`) — both anchors agree the block is raw
 and the output size is caller-derived.[^1]
 
-Negative behavior (short non-final block, short final block,
+Integrity-path coverage: repak writes a **real** entry SHA1, but
+only the *legacy* directory index (v8b) stores a per-entry hash
+field, so `verify_entry` on `real_v8b_lz4.pak` reaches the hash arm
+and returns `Verified` — an end-to-end check that paksmith's entry
+hashing matches repak's over real blocks. The v10+ **encoded** index
+(v11) carries no per-entry hash field, so `verify_entry` on
+`real_v11_lz4.pak` returns `SkippedNoHash` (structural, not a zeroed
+slot). Negative behavior (short non-final block, short final block,
 over-expanding block, structural corruption, OOM at the output
-reservation) is pinned by synthetic v8b paks built in
-`paksmith-core-tests` (`build_v8b_lz4_pak`) with real entry hashes —
-repak zeroes entry hash slots, so the hash-path tests require the
-synthetic writer.
+reservation) is pinned by synthetic v8b paks built with
+`testing::wire::build_v8b_lz4_pak`, which writes a legacy index with
+a real hash so the hash arm and the decode-failure faults are
+observable — and lets tests craft the inconsistent claims a real
+writer never produces.
 
 ## Paksmith implementation
+
+**Status:** `complete`.
 
 `stream_lz4_to` in `crates/paksmith-core/src/container/pak/mod.rs`
 (issue #636), mirroring `stream_zlib_to`'s discipline:
 
-- Same version guard (pre-v5 relative-offset floor), same shared
-  `validate_block_bounds` walk, same hoisted two-buffer scheme (one
-  compressed-input + one decompressed-output buffer reused across
-  blocks; the full `uncompressed_size` never lives in memory).
+- Same shared `validate_block_bounds` walk and the same hoisted
+  two-buffer scheme (one compressed-input + one decompressed-output
+  buffer reused across blocks; the full `uncompressed_size` never
+  lives in memory). Unlike `stream_zlib_to` it takes no `version` and
+  has no pre-v5 relative-offset guard: `LZ4` is reachable only via the
+  v8+ FName slot table, so any entry reaching the decoder already
+  parsed as v8+ (where block offsets are relative) — the guard would
+  be unreachable dead code.
 - Decodes with `lz4_flex::block::decompress_into` into a buffer
-  pre-sized to the block's expected output — over-expansion errors
-  inside the decoder (`DecompressionFault::Lz4DecodeError`) instead
-  of allocating, so no `take(+1)`-style trick is needed.
+  pre-sized to the block's expected output, capped by
+  `lz4_block_output_cap` (`compressed_len × 255`) so a crafted
+  `compression_block_size` cannot force a huge eager allocation
+  (#636). Over-expansion errors inside the decoder
+  (`DecompressionFault::Lz4DecodeError`) instead of allocating, so no
+  `take(+1)`-style trick is needed.
 - Faults: corrupt blocks → `Lz4DecodeError`; short non-final blocks
   → `NonFinalBlockSizeMismatch`; cumulative shortfall →
   `SizeUnderrun`; fallible reservations → 
@@ -152,4 +183,4 @@ synthetic writer.
 
 ## References
 
-[^1]: Decode-side oracle: `FabianFG/CUE4Parse/CUE4Parse/Compression/Compression.cs` (routes `CompressionMethod.LZ4` to the K4os raw-block `LZ4Codec.Decode`). Write-side oracle: `trumank/repak` `repak/src/data.rs` (`lz4_flex::block::compress`) and `repak/src/entry.rs` (`lz4_flex::block::decompress_into` with `chunks_mut(compression_block_size)` — the per-block size derivation this doc specifies). Block-format specification: the LZ4 project's `lz4_Block_format.md` (lz4/lz4 on GitHub).
+[^1]: Decode-side oracle: `FabianFG/CUE4Parse/CUE4Parse/Compression/Compression.cs@c7e78422ec4858036c9bba5d9d3c55eb197f93c9` (routes `CompressionMethod.LZ4` to the K4os raw-block `LZ4Codec.Decode`). Write-side oracle: `trumank/repak/repak/src/data.rs@e215472c51db69328b1ce77be2db24d24c1d646b` (`lz4_flex::block::compress`) and `trumank/repak/repak/src/entry.rs@e215472c51db69328b1ce77be2db24d24c1d646b` (`lz4_flex::block::decompress_into` with `chunks_mut(compression_block_size)` — the per-block size derivation this doc specifies). Block-format specification: the LZ4 project's `lz4_Block_format.md` (`lz4/lz4` on GitHub).

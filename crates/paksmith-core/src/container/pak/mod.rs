@@ -21,7 +21,8 @@
 //!   each payload at [`crate::container::pak::index::PakEntryHeader::offset`],
 //!   with cross-validation against the index entry.
 //! - Zlib decompression for v5+ archives (block offsets are relative to the
-//!   entry record start).
+//!   entry record start), and LZ4 decompression for v8+ archives (the
+//!   only versions where the `"LZ4"` FName slot is resolvable).
 //! - SHA1 verification of the index and per-entry stored bytes via opt-in
 //!   [`PakReader::verify_index`], [`PakReader::verify_entry`], and
 //!   [`PakReader::verify`]. **v10+ encoded entries omit SHA1**, so
@@ -39,8 +40,8 @@
 //!   oracle fixture for that path yet, paksmith returns
 //!   [`crate::PaksmithError::UnsupportedFeature`] rather than feed ciphertext
 //!   to the inflater. Encrypted *uncompressed* entries decrypt normally.
-//! - Gzip / Oodle / Zstd / LZ4 compression — only zlib is wired up
-//!   downstream of the FName resolution.
+//! - Gzip / Oodle / Zstd compression — resolved from the FName table
+//!   but not wired up downstream (only Zlib and LZ4 decompress).
 //! - Pre-v5 absolute-offset compression blocks (rare in real archives).
 //! - V9 frozen-index format (rejected at open).
 //!
@@ -855,8 +856,10 @@ impl PakReader {
     ///   verifying ciphertext without the key is not supported.
     /// - `Err(EntryNotFound)` for unknown paths.
     /// - `Err(Decompression)` for unsupported compression methods (Gzip,
-    ///   Oodle, Zstd, Lz4, UnknownByName, Unknown). We refuse to hash
-    ///   arbitrary bytes that we can't interpret; doing otherwise risks
+    ///   Oodle, Zstd, UnknownByName, Unknown). Zlib and LZ4 verify
+    ///   normally (the entry SHA1 covers the on-disk compressed bytes,
+    ///   so no decompression happens on the verify path). We refuse to
+    ///   hash arbitrary bytes we can't interpret; doing otherwise risks
     ///   reporting a misleading `HashMismatch` for a well-formed archive
     ///   in a method we don't support yet.
     /// - `Err(InvalidIndex)` for offset/bounds problems uncovered while
@@ -1289,14 +1292,9 @@ impl PakReader {
                 self.version(),
                 writer,
             ),
-            CompressionMethod::Lz4 => stream_lz4_to(
-                &mut file,
-                entry,
-                self.file_size,
-                payload_start,
-                self.version(),
-                writer,
-            ),
+            CompressionMethod::Lz4 => {
+                stream_lz4_to(&mut file, entry, self.file_size, payload_start, writer)
+            }
             // Already rejected at the top of `stream_entry_to`; this
             // arm exists to keep the match exhaustive (per CLAUDE.md
             // "no panics in core") without an opaque `_` catch-all.
@@ -2058,25 +2056,51 @@ fn stream_zlib_to<R: Read + Seek>(
 /// on a block that would expand past it (surfaced as
 /// [`DecompressionFault::Lz4DecodeError`]), so over-expansion can
 /// never allocate beyond the per-block expected size.
+/// Maximum factor by which one raw LZ4 block can inflate: a block of
+/// N compressed bytes decodes to at most `N × 255` output bytes.
+/// Literals copy 1:1; the only amplifying construct is a match-length
+/// extension byte, and each 0xFF extension byte contributes at most
+/// 255 output bytes (LZ4 Block Format). The true supremum is strictly
+/// below 255 (offset/token overhead is never zero), so `N × 255` is a
+/// safe over-estimate that never under-sizes a valid decode.
+const MAX_LZ4_BLOCK_EXPANSION_RATIO: u64 = 255;
+
+/// Bound the pre-decode output reservation for one LZ4 block.
+///
+/// `expected_out` is the pak-derived output size for this block
+/// (`min(compression_block_size, remaining)`) — but
+/// `compression_block_size` is attacker-controlled and NOT capped on
+/// the inline v3-v9 read path, so pre-allocating it verbatim lets a
+/// tiny crafted block force a multi-gigabyte eager allocation
+/// (memory-amplification DoS, #636). Intersecting with
+/// `compressed_len × `[`MAX_LZ4_BLOCK_EXPANSION_RATIO`] keeps the
+/// reservation input-proportional: a valid block's real output is
+/// always `≤ compressed_len × 255`, so the cap is transparent for
+/// well-formed entries and only bites the crafted case. The resulting
+/// buffer is still the decompression-bomb cap — `decompress_into`
+/// errors if the block tries to inflate past it.
+fn lz4_block_output_cap(expected_out: u64, compressed_len: u64) -> u64 {
+    expected_out.min(compressed_len.saturating_mul(MAX_LZ4_BLOCK_EXPANSION_RATIO))
+}
+
 #[allow(clippy::too_many_lines)] // bounded by per-block error-reporting, mirroring stream_zlib_to
 fn stream_lz4_to<R: Read + Seek>(
     file: &mut R,
     entry: &PakIndexEntry,
     file_size: u64,
     payload_start: u64,
-    version: PakVersion,
     writer: &mut dyn Write,
 ) -> crate::Result<u64> {
+    // NOTE: unlike `stream_zlib_to`, this takes no `version` and has no
+    // pre-v5 relative-offset guard. `CompressionMethod::Lz4` is
+    // obtainable ONLY through the v8+ FName compression-slot table
+    // (`CompressionMethod::from_name`); the v3-v7 numeric method IDs
+    // (`from_u32`) never yield `Lz4`. So any entry reaching here parsed
+    // as v8 or newer, where compression-block offsets are already
+    // relative — the guard `stream_zlib_to` needs (zlib IS reachable
+    // pre-v5 via numeric method 1) would be structurally unreachable
+    // dead code here.
     let path = entry.filename();
-
-    if version < PakVersion::RelativeChunkOffsets {
-        // Pre-v5 paks store absolute file offsets in compression_blocks
-        // rather than offsets relative to the entry record — same
-        // explicit reject as `stream_zlib_to`.
-        return Err(PaksmithError::UnsupportedVersion {
-            version: version.wire_version(),
-        });
-    }
 
     let uncompressed_size = entry.header().uncompressed_size();
     let block_size = u64::from(entry.header().compression_block_size());
@@ -2144,21 +2168,29 @@ fn stream_lz4_to<R: Read + Seek>(
         // 0-byte buffer without erroring — fail closed).
         let remaining = uncompressed_size.saturating_sub(bytes_written);
         let expected_out = remaining.min(block_size);
-        let expected_out_usize =
-            usize::try_from(expected_out).map_err(|_| PaksmithError::InvalidIndex {
+
+        // SECURITY (#636): `compression_block_size` is attacker-
+        // controlled and NOT capped on the inline v3-v9 read path, so
+        // pre-sizing the output buffer to `expected_out` verbatim lets
+        // a tiny crafted block force a multi-gigabyte eager allocation.
+        // Bound the reservation to what THIS block can actually inflate
+        // to (input-proportional); a valid block's real output is
+        // always `≤ compressed_len × 255`, so this never under-sizes a
+        // well-formed decode. The capped buffer remains the bomb cap.
+        let alloc_bound = lz4_block_output_cap(expected_out, block_len);
+        let alloc_usize =
+            usize::try_from(alloc_bound).map_err(|_| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: WireField::BlockLength,
-                    value: expected_out,
+                    field: WireField::CompressionBlockSize,
+                    value: alloc_bound,
                     path: Some(path.to_string()),
                 },
             })?;
 
-        // Output reservation, pre-sized to the expected block output
-        // (bounded by compression_block_size, itself capped at
-        // open-time). Fallible so OOM surfaces typed, with its own
-        // seam site (#636).
+        // Fallible output reservation so OOM surfaces typed, with its
+        // own seam site (#636).
         block_out.clear();
-        let out_reserve_res = block_out.try_reserve_exact(expected_out_usize);
+        let out_reserve_res = block_out.try_reserve_exact(alloc_usize);
         crate::seams::seam_check!(
             out_reserve_res,
             crate::testing::oom::SeamSite::Pak(PakSeam::Lz4OutputReserve)
@@ -2167,7 +2199,7 @@ fn stream_lz4_to<R: Read + Seek>(
             warn!(
                 path,
                 block = i,
-                requested = expected_out_usize,
+                requested = alloc_usize,
                 error = %e,
                 "lz4 output reservation failed"
             );
@@ -2176,12 +2208,12 @@ fn stream_lz4_to<R: Read + Seek>(
                 offset: abs_start,
                 fault: DecompressionFault::Lz4OutputReserveFailed {
                     block_index: i,
-                    requested: expected_out_usize,
+                    requested: alloc_usize,
                     source: e,
                 },
             }
         })?;
-        block_out.resize(expected_out_usize, 0);
+        block_out.resize(alloc_usize, 0);
 
         // Raw-block decode into the pre-sized buffer. The buffer IS
         // the bomb cap: over-expansion errors inside the decoder.
@@ -2540,6 +2572,38 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    /// A well-formed LZ4 block: a 64 KiB output derived from ~300
+    /// compressed bytes. `compressed_len × 255` (76_500) exceeds the
+    /// pak-derived `expected_out`, so the cap is transparent — it
+    /// returns `expected_out` unchanged and never under-sizes a valid
+    /// decode.
+    #[test]
+    fn lz4_block_output_cap_passes_through_valid_block() {
+        assert_eq!(lz4_block_output_cap(65_536, 300), 65_536);
+    }
+
+    /// The security property (#636): a 400-byte compressed block that
+    /// claims a 4 GiB `compression_block_size` must NOT force a 4 GiB
+    /// eager allocation. The cap clamps the reservation to
+    /// input-proportional size (`400 × 255`), so the crafted claim
+    /// cannot amplify.
+    #[test]
+    fn lz4_block_output_cap_bounds_crafted_oversized_claim() {
+        assert_eq!(
+            lz4_block_output_cap(4 * 1024 * 1024 * 1024, 400),
+            400 * MAX_LZ4_BLOCK_EXPANSION_RATIO
+        );
+    }
+
+    /// `compressed_len × 255` must saturate (not overflow/panic) for a
+    /// pathological length, in which case `expected_out` wins the
+    /// `min`. Pins the `saturating_mul` against a `checked`/wrapping
+    /// mutant.
+    #[test]
+    fn lz4_block_output_cap_saturates_without_overflow() {
+        assert_eq!(lz4_block_output_cap(1_000, u64::MAX), 1_000);
+    }
 
     /// The `locked()` helper recovers from a poisoned mutex
     /// via `PoisonError::into_inner`. The safety contract is "every
@@ -2925,23 +2989,45 @@ mod tests {
 
     #[test]
     fn verify_lz4_entry_no_longer_errors_unsupported() {
-        // repak leaves entry hash slots zeroed, so this fixture
-        // short-circuits to SkippedNoHash before the method match —
-        // it cannot reach the hash arm. What it DOES pin: verify on
-        // an LZ4 entry returns Ok (the pre-#636 code errored with
-        // UnsupportedMethod for LZ4 in verify_entry only when the
-        // hash was non-zero, but Ok-vs-Err is still the stable
-        // observable here). The hash-arm ROUTING (Lz4 shares the
-        // block-walk arm with Zlib) is pinned by the synthetic
-        // non-zero-hash test in paksmith-core-tests
-        // (`verify_entry_lz4_succeeds`).
+        // The v11 fixture uses the v10+ ENCODED directory index, whose
+        // compact per-entry encoding carries NO SHA1 field (repak does
+        // write a real hash into the legacy in-data record, but the
+        // parsed index entry — the one `verify_entry` sees — has none).
+        // So verify short-circuits to SkippedNoHash before the method
+        // match and cannot reach the hash arm. What it DOES pin: verify
+        // on an LZ4 entry returns Ok (the pre-#636 code errored with
+        // UnsupportedMethod for LZ4). The hash-arm ROUTING (Lz4 shares
+        // the block-walk arm with Zlib) is pinned against a REAL hash by
+        // `verify_lz4_entry_v8b_legacy_index_verifies` below (v8b's
+        // legacy index does carry the SHA1) and by the synthetic
+        // `verify_entry_lz4_succeeds` in paksmith-core-tests.
         let reader = PakReader::open(lz4_fixture("real_v11_lz4.pak")).expect("open lz4 fixture");
         let outcome = reader
             .verify_entry("Content/Compressed.uasset")
             .expect("verify_entry(lz4) must succeed");
         assert!(
             matches!(outcome, VerifyOutcome::SkippedNoHash),
-            "repak writes zero hash slots; expected SkippedNoHash, got {outcome:?}"
+            "v10+ encoded index carries no per-entry hash; expected SkippedNoHash, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn verify_lz4_entry_v8b_legacy_index_verifies() {
+        // The v8b fixture uses the LEGACY directory index, which stores
+        // the full FPakEntry — including its real SHA1 — per entry. So
+        // verify reaches the hash arm and recomputes the digest over the
+        // on-disk compressed LZ4 block bytes. This is an end-to-end
+        // cross-check that paksmith's entry hashing matches repak's over
+        // real repak-written blocks: the outcome is Verified, NOT
+        // SkippedNoHash, proving the LZ4 method routes through the
+        // block-walk hash arm on a REAL (non-zero) stored hash.
+        let reader = PakReader::open(lz4_fixture("real_v8b_lz4.pak")).expect("open lz4 fixture");
+        let outcome = reader
+            .verify_entry("Content/Compressed.uasset")
+            .expect("verify_entry(lz4, v8b) must succeed");
+        assert!(
+            matches!(outcome, VerifyOutcome::Verified),
+            "v8b legacy index carries a real SHA1; expected Verified, got {outcome:?}"
         );
     }
 
@@ -2969,9 +3055,8 @@ mod tests {
         let original = std::fs::read(lz4_fixture("real_v11_lz4.pak")).expect("read fixture");
         let mut corrupted = original.clone();
         corrupted[target] = 0xFF; // token demanding more input than the block holds
-        let dir = std::env::temp_dir().join("paksmith-lz4-corrupt-test");
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let corrupt_path = dir.join("corrupt_v11_lz4.pak");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let corrupt_path = dir.path().join("corrupt_v11_lz4.pak");
         std::fs::write(&corrupt_path, &corrupted).expect("write corrupt copy");
         let reader =
             PakReader::open(&corrupt_path).expect("index parses (corruption is in payload)");
@@ -2987,7 +3072,77 @@ mod tests {
                 "expected a decode-level Decompression fault on a corrupt LZ4 block, got {other:?}"
             ),
         }
-        let _ = std::fs::remove_file(&corrupt_path);
+        // `dir` (and the corrupt copy inside it) is removed on drop.
+    }
+
+    // The next two tests exercise `stream_lz4_to`'s non-final-block
+    // size guard with SYNTHETIC multi-block v8b paks. They live
+    // in-package (not only in `paksmith-core-tests`) because
+    // cargo-mutants scopes each mutant's test run to the mutated
+    // package: the cross-crate integration copies do NOT credit
+    // mutants in `mod.rs`, so the `i + 1 < len` and `produced !=
+    // block_size` operators in that guard survive without these.
+    // Gated on `__test_utils` because the shared builder lives in
+    // `crate::testing::wire`.
+
+    /// A valid multi-block LZ4 entry (two full non-final blocks that
+    /// each inflate to EXACTLY `compression_block_size`, plus a short
+    /// final block) must round-trip byte-exact. Pins the non-final
+    /// guard's `produced != block_size` comparison: a `== block_size`
+    /// inversion would reject each valid non-final block and break this
+    /// decode.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_lz4_entry_multi_block_round_trips() {
+        let block_size = 128u32;
+        let payload: Vec<u8> = (0..296u32).map(|i| (i % 251) as u8).collect();
+        let streams: Vec<Vec<u8>> = payload
+            .chunks(block_size as usize)
+            .map(lz4_flex::block::compress)
+            .collect();
+        assert_eq!(streams.len(), 3, "fixture invariant: 2 full + 1 remainder");
+        let pak =
+            crate::testing::wire::build_v8b_lz4_pak(&streams, payload.len() as u64, block_size);
+        let reader = PakReader::from_bytes(pak).expect("synthetic multi-block v8b pak parses");
+        let mut out = Vec::new();
+        let written = reader
+            .read_entry_to(crate::testing::wire::LZ4_SYNTH_PATH, &mut out)
+            .expect("multi-block lz4 round-trip must succeed");
+        assert_eq!(written, payload.len() as u64);
+        assert_eq!(out, payload, "multi-block decode must be byte-exact");
+    }
+
+    /// A non-final block that inflates to FEWER than
+    /// `compression_block_size` bytes must surface
+    /// `NonFinalBlockSizeMismatch` at that exact block. Pins the
+    /// guard's `i + 1 < len` predicate: inverting `<` to `>` makes the
+    /// guard never fire, so the shortfall would instead surface as a
+    /// cumulative `SizeUnderrun` — asserting the EXACT fault (and block
+    /// index) distinguishes the two and kills that mutant.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_lz4_entry_short_non_final_block_surfaces_non_final_mismatch() {
+        let block_size = 128u32;
+        // block0 inflates to 64 (< 128) yet is non-final; block1
+        // supplies the remaining 64 of a 192-byte uncompressed size.
+        let short = lz4_flex::block::compress(&[b'A'; 64]);
+        let tail = lz4_flex::block::compress(&[b'B'; 64]);
+        let pak = crate::testing::wire::build_v8b_lz4_pak(&[short, tail], 192, block_size);
+        let reader = PakReader::from_bytes(pak).expect("synthetic pak parses");
+        let mut out = Vec::new();
+        let err = reader
+            .read_entry_to(crate::testing::wire::LZ4_SYNTH_PATH, &mut out)
+            .expect_err("short non-final block must be rejected");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::Decompression {
+                    fault: DecompressionFault::NonFinalBlockSizeMismatch { block_index: 0, .. },
+                    ..
+                }
+            ),
+            "expected NonFinalBlockSizeMismatch at block 0, got {err:?}"
+        );
     }
 
     /// The documented AES-256 key for the vendored encrypted fixtures

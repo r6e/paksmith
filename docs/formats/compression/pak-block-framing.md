@@ -267,8 +267,8 @@ See `docs/security/allocation-caps.md` for the broader policy.
   `PakEntryHeader::{Inline, Encoded}` with the per-block array;
   `encoded_entry_in_data_record_size` for the cursor base offset.
 - `crates/paksmith-core/src/container/pak/mod.rs` — `stream_zlib_to`
-  block loop (the canonical reference implementation; other methods
-  share the same outer loop shape).
+  block loop (the canonical reference implementation); `stream_lz4_to`
+  shares the same outer loop shape for raw LZ4 blocks.
 
 **Status:** `complete` for v5-v11. V3-V4 compressed entries are
 rejected at `stream_zlib_to` with `UnsupportedVersion`.
@@ -288,8 +288,9 @@ rejected at `stream_zlib_to` with `UnsupportedVersion`.
 - `DecompressionFault::CompressedBlockReserveFailed { block_index, requested, source }`.
 - `DecompressionFault::DecompressionBomb { block_index, actual, claimed_uncompressed }`.
 - `DecompressionFault::ZlibStreamError { block_index, kind, message }`
-  (for the zlib path; other methods get analogous variants when
-  implemented).
+  (zlib path) and `DecompressionFault::Lz4DecodeError { block_index,
+  message }` (LZ4 path); other methods get analogous variants when
+  implemented.
 
 **Cap constants:** see *Caps & limits* above.
 

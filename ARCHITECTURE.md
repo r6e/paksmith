@@ -38,8 +38,8 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
   `ContainerReader` trait. Currently ships `pak` only; `iostore` is planned.
   - `container/pak/` — UE pak format reader, versions v3 through v11. Streaming
     `read_entry_to`, opt-in SHA-1 verification (`verify`, `verify_entry`,
-    `verify_index`, including FDI/PHI region hashing on v10+), zlib
-    decompression. Bounded against decompression bombs and adversarial input
+    `verify_index`, including FDI/PHI region hashing on v10+), zlib and
+    LZ4 decompression. Bounded against decompression bombs and adversarial input
     via fallible reservation (`try_reserve_exact`) and structural caps.
   - `container/pak/index/` — index parsing split per format generation:
     `flat.rs` (v3-v9 sequential index), `path_hash.rs` (v10/v11 FDI + PHI),

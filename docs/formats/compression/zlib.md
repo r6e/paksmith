@@ -1,9 +1,9 @@
 # Zlib decompression
 
 > The default `.pak` compression backend — Zlib (RFC 1950) wrapping a
-> deflate stream (RFC 1951). The only decompressor paksmith fully
-> implements; every other UE compression method is detected but not
-> decompressed.
+> deflate stream (RFC 1951). One of two decompressors paksmith fully
+> implements (the other is [LZ4](lz4.md)); the remaining UE
+> compression methods are detected but not decompressed.
 
 ## Overview
 
@@ -166,7 +166,7 @@ ordering and file-bounds across both the extract and verify paths).
 **Status:** `complete`.
 
 **Public surface:**
-- Zlib is the only `CompressionMethod` paksmith's
+- Zlib and [LZ4](lz4.md) are the `CompressionMethod`s paksmith's
   `PakReader::read_entry` / `read_entry_to` / `verify_entry` will
   fully process. Other methods route to
   `PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method } }`.
