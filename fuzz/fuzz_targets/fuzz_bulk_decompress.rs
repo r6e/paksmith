@@ -5,8 +5,8 @@
 //   - Panics / aborts from the framing parser: arbitrary bytes exercise the
 //     tag/summary/chunk-table validation (truncation, negative sizes, sum
 //     mismatches, overflow-checked chunk-count math) and the F1 pre-size
-//     discipline (table allocation bounded by real input; output pre-sized
-//     from `compressed.len()`).
+//     discipline (chunk table bounded by real input and consumed in place,
+//     never materialized; output pre-sized from `compressed.len()`).
 //   - Decompression bombs: a tiny compressed input claiming a huge size must
 //     surface an `Err` (the `MAX_BULK_DATA_SIZE` claim cap, framing-sum
 //     checks, per-chunk `take(chunk_unc + 1)` bounds), never inflate
