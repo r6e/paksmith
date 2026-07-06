@@ -112,7 +112,7 @@ dirs = "6"
 # Phase 5c: ed25519 signature verification for the registry payload. Default
 # features include the signing machinery (used by tests only — production
 # path is verify-only). MIT/Apache-2.0.
-ed25519-dalek = "2"
+ed25519-dalek = "3"
 # Phase 5c: async HTTPS registry fetch (rustls TLS — no OpenSSL dep).
 # `default-features = false` drops the default-tls backend; `rustls-tls`
 # enables the rustls backend. MIT/Apache-2.0.
