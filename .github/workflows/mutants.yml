@@ -57,7 +57,10 @@ jobs:
   # shard count: the `/N` denominators derive from
   # `strategy.job-total`, which equals the shard count only while
   # `shard` stays this job's ONLY matrix axis — adding a second axis
-  # would multiply it and break the partition.
+  # would multiply it and break the partition. Matrix values are the
+  # HUMAN-FACING 1-based indices (jobs read "1/4".."4/4"); the single
+  # `--shard` call site converts to the 0-based `k/n` (k in 0..n-1)
+  # that cargo-mutants requires.
   shard:
     name: cargo-mutants shard (${{ matrix.shard }}/${{ strategy.job-total }})
     needs: changes
@@ -69,7 +72,7 @@ jobs:
       # outcome is diagnostic signal.
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [1, 2, 3, 4]
     env:
       # Mutated builds routinely produce warnings (the mutation IS the
       # divergence). `-D warnings` would mask the mutation signal.
@@ -116,7 +119,7 @@ jobs:
             --no-shuffle \
             -j 2 \
             --all-features \
-            --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+            --shard $(( ${{ matrix.shard }} - 1 ))/${{ strategy.job-total }}
       # cargo-mutants writes per-outcome lists to mutants.out/{caught,
       # missed,timeout,unviable}.txt. The `missed.txt` set is the only
       # actionable signal — those are mutations that survived the test
