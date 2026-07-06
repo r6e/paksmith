@@ -1669,15 +1669,6 @@ pub(crate) fn decompress_zlib(
 mod tests {
     use super::*;
 
-    /// Pins the five cap values directly. Kills cargo-mutants
-    /// arithmetic mutations on the constant definitions (e.g.
-    /// `8 * 1024 * 1024 * 1024` → `8 + 1024 + 1024 + 1024`
-    /// would produce 4120, not 8 GiB; this assertion catches the
-    /// drift). Also pins values against accidental tightening or
-    /// loosening — every cap is documented in the parent module's
-    /// doc-comments with a calibrated value; changing the constant
-    /// without updating the doc-comment is a frequent drift mode
-    /// (see commit `3bf6370`).
     /// Pins the chunked-framing wire constants against the reference
     /// values (CUE4Parse `FArchive.SerializeCompressedNew` +
     /// `Compression.cs`; cross-anchored against community decoders).
@@ -1695,6 +1686,15 @@ mod tests {
         assert_eq!(CHUNK_INFO_WIRE_SIZE, 16, "two LE i64s");
     }
 
+    /// Pins the five cap values directly. Kills cargo-mutants
+    /// arithmetic mutations on the constant definitions (e.g.
+    /// `8 * 1024 * 1024 * 1024` → `8 + 1024 + 1024 + 1024`
+    /// would produce 4120, not 8 GiB; this assertion catches the
+    /// drift). Also pins values against accidental tightening or
+    /// loosening — every cap is documented in the parent module's
+    /// doc-comments with a calibrated value; changing the constant
+    /// without updating the doc-comment is a frequent drift mode
+    /// (see commit `3bf6370`).
     #[test]
     fn caps_pin_expected_values() {
         assert_eq!(MAX_BULK_DATA_SIZE, 8_589_934_592, "8 GiB");
@@ -2820,12 +2820,13 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn resolve_zlib_decompression_failure_rolls_back_budget() {
-        // Compressed record with corrupted zlib payload. The decoder
-        // fails mid-stream; the resolver must roll back the budget
-        // reserve so subsequent resolves see a consistent counter.
-        // Kills any regression that drops the `inspect_err` rollback.
+        // Compressed record with corrupted payload. The decoder
+        // rejects it (0xFF fill = bad framing tag); the resolver must
+        // roll back the budget reserve so subsequent resolves see a
+        // consistent counter. Kills any regression that drops the
+        // `inspect_err` rollback.
         let mut uasset = vec![0u8; 64];
-        // Corrupted zlib data (not a valid zlib stream).
+        // Corrupted payload (no valid chunked framing).
         uasset.extend_from_slice(&[0xFF; 32]);
         let uasset_len = uasset.len();
         let mut bytes = Vec::new();
