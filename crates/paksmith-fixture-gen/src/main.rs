@@ -26,11 +26,12 @@
 //!
 //! repak v0.2.3 only writes a subset of the format:
 //! - **Compression: v8+ only.** Issue #69 added zlib-compressed
-//!   fixtures (`real_v{8a,8b,9}_compressed.pak`); v3-v7 can't carry
-//!   them because the FName-based compression slot table didn't
-//!   exist before v8 (repak's writer rejects compression on those
-//!   versions). repak ships compressed output reliably on v8+ when
-//!   `PakBuilder::compression([Compression::Zlib])` is declared and
+//!   fixtures (`real_v{8a,8b,9,10,11}_compressed.pak`) and issue #636
+//!   added LZ4-compressed fixtures (`real_v{8b,11}_lz4.pak`); v3-v7
+//!   can't carry them because the FName-based compression slot table
+//!   didn't exist before v8 (repak's writer rejects compression on
+//!   those versions). repak ships compressed output reliably on v8+
+//!   when `PakBuilder::compression([...])` declares the method and
 //!   the input compresses non-trivially.
 //! - **No UTF-16 filenames**: API takes `&str`, encodes as positive-length
 //!   FString (UTF-8 with null terminator). Synthetic generator covers this.
@@ -44,8 +45,10 @@
 //! # Fixture matrix
 //!
 //! Eight versions (v3, v6, v7, v8a, v8b, v9, v10, v11) × three
-//! shape variants (minimal / multi / mixed_paths) + three compressed
-//! variants (v8a/v8b/v9). Total 27 fixtures, each well under 1 KiB.
+//! shape variants (minimal / multi / mixed_paths) + five
+//! zlib-compressed variants (v8a/v8b/v9/v10/v11) + two
+//! LZ4-compressed variants (v8b/v11, #636). Total 31 fixtures, each
+//! well under 1 KiB.
 
 use std::fs::File;
 

@@ -2101,7 +2101,7 @@ const MAX_LZ4_BLOCK_EXPANSION_RATIO: u64 = 255;
 /// the inline v3-v9 read path, so pre-allocating it verbatim lets a
 /// tiny crafted block force a multi-gigabyte eager allocation
 /// (memory-amplification DoS, #636). Intersecting with
-/// `compressed_len × `[`MAX_LZ4_BLOCK_EXPANSION_RATIO`] keeps the
+/// `compressed_len` × [`MAX_LZ4_BLOCK_EXPANSION_RATIO`] keeps the
 /// reservation input-proportional: a valid block's real output is
 /// always `≤ compressed_len × 255`, so the cap is transparent for
 /// well-formed entries and only bites the crafted case. The resulting
