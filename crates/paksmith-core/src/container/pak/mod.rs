@@ -436,15 +436,19 @@ impl PakReader {
         // multi-block, and zero-block entries uniformly through
         // the same single iteration.
         //
-        // For encrypted entries `compressed_size` is the sum of the
-        // AES-ALIGNED per-block footprints (#634) — i.e. the actual
-        // on-disk extent — so this open-time bound is exact, not an
-        // under-check. (The v10+ encoded parser enforces
-        // `compressed_size == aligned footprint sum`; the v3-v9
-        // inline parser has no such cross-check, but the read-time
-        // per-block bound and the decrypt-path `payload_end` /
-        // `aligned_end` checks still catch any claim that would walk
-        // past EOF.)
+        // For encrypted COMPRESSED entries `compressed_size` is the sum
+        // of the AES-ALIGNED per-block footprints (#634) — i.e. the
+        // actual on-disk extent — so this bound is exact for that class.
+        // For encrypted UNCOMPRESSED entries `compressed_size` mirrors
+        // the unaligned `uncompressed_size` (`real_v8b_encrypted_entries`
+        // `test.txt`: 446, not the 448-aligned footprint), so this
+        // open-time bound UNDER-counts the real on-disk extent by up to
+        // 15 bytes. That gap is caught fail-closed at read time — the
+        // `checked_payload_end` on the AES-aligned length inside
+        // `stream_uncompressed_to` / `read_decrypted_compressed_payload`
+        // rejects a truncated tail with `OffsetPastFileSize` rather than
+        // reading past EOF; nothing here relies on this bound being exact
+        // for the uncompressed class.
         for entry in index.entries() {
             let header = entry.header();
             let offset = header.offset();
@@ -957,16 +961,8 @@ impl PakReader {
             // hash — ahead of the plaintext method match — keeps `verify()`
             // gracefully degrading over modern encrypted archives instead of
             // fail-fasting on the first unsupported-method entry.
-            let payload_start = entry
-                .header()
-                .offset()
-                .checked_add(in_data.wire_size())
-                .ok_or_else(|| PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::U64ArithmeticOverflow {
-                        path: Some(path.to_string()),
-                        operation: OverflowSite::OffsetPlusHeader,
-                    },
-                })?;
+            let payload_start =
+                checked_payload_start(entry.header().offset(), in_data.wire_size(), path)?;
             let compressed = entry.header().compressed_size();
             let _ = checked_payload_end(payload_start, compressed, self.file_size, path)?;
             let _ = file.seek(SeekFrom::Start(payload_start))?;
@@ -995,16 +991,8 @@ impl PakReader {
                     // (start-overlap, end-past-file, out-of-order) — shared
                     // with the stream_*_to readers so verify and read can't
                     // diverge on the same archive.
-                    let payload_start = entry
-                        .header()
-                        .offset()
-                        .checked_add(in_data.wire_size())
-                        .ok_or_else(|| PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::U64ArithmeticOverflow {
-                                path: Some(path.to_string()),
-                                operation: OverflowSite::OffsetPlusHeader,
-                            },
-                        })?;
+                    let payload_start =
+                        checked_payload_start(entry.header().offset(), in_data.wire_size(), path)?;
                     let mut hasher = Sha1::new();
                     let mut prev_abs_end: Option<u64> = None;
                     for (i, block) in entry.header().compression_blocks().iter().enumerate() {
@@ -1254,16 +1242,8 @@ impl PakReader {
         // change to the wire format only needs updating in
         // PakEntryHeader::read_from (which `wire_size` mirrors by
         // construction).
-        let payload_start = entry
-            .header()
-            .offset()
-            .checked_add(in_data.wire_size())
-            .ok_or_else(|| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: Some(path.to_string()),
-                    operation: OverflowSite::OffsetPlusHeader,
-                },
-            })?;
+        let payload_start =
+            checked_payload_start(entry.header().offset(), in_data.wire_size(), path)?;
 
         match entry.header().compression_method() {
             CompressionMethod::None => {
@@ -1397,14 +1377,34 @@ fn read_decrypted_compressed_payload<R: Read + Seek>(
     let path = entry.filename();
     let comp = entry.header().compressed_size();
 
+    // Cap the per-entry allocation at `MAX_UNCOMPRESSED_ENTRY_BYTES`
+    // (8 GiB) BEFORE reading — the same ceiling the open-time sweep
+    // enforces on `uncompressed_size`, the v10+ encoded parser enforces
+    // on `compressed_size` (`entry_header.rs`), and the crypto hardening
+    // policy (`docs/formats/crypto/aes-pak.md`) requires of any AES
+    // reader. The v3-v9 INLINE index applies no parse-time cap on
+    // `compressed_size`, so without this an inline encrypted+compressed
+    // entry could drive a single-shot decrypt buffer bounded only by the
+    // file size, not by the codebase's stated per-entry ceiling.
+    if comp > MAX_UNCOMPRESSED_ENTRY_BYTES {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded {
+                field: WireField::CompressedSize,
+                value: comp,
+                limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
+                unit: BoundsUnit::Bytes,
+                path: Some(path.to_string()),
+            },
+        });
+    }
+
     // Reject a `compressed_size` claim past EOF BEFORE the alignment
     // arithmetic: it bounds `comp` by the real file size, which makes
     // the `div_ceil`/`* 16` below overflow-free and the allocation
     // file-proportional.
     let _ = checked_payload_end(payload_start, comp, file_size, path)?;
-    // `comp <= file_size < 2^63`, so this cannot actually overflow — but
-    // unlike `uncompressed_size` there is no 8 GiB cap on `compressed_size`,
-    // only the file-size bound, so use `checked_mul` for a typed fault
+    // `comp <= min(file_size, 8 GiB) < 2^63`, so this cannot actually
+    // overflow — but use `checked_mul` for a typed fault
     // rather than an unchecked `* 16` (defense-in-depth, R3 security note).
     let aligned = comp
         .div_ceil(16)
@@ -1835,6 +1835,21 @@ fn stream_uncompressed_to<R: Read + Seek>(
         });
     }
     Ok(written)
+}
+
+/// Compute an entry's payload start (`offset + in-data record size`),
+/// mapping an overflow to the typed `OffsetPlusHeader` fault. The
+/// `checked_payload_end` sibling for the leading-add half of the same
+/// payload-bounds pattern.
+fn checked_payload_start(offset: u64, wire_size: u64, path: &str) -> crate::Result<u64> {
+    offset
+        .checked_add(wire_size)
+        .ok_or_else(|| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ArithmeticOverflow {
+                path: Some(path.to_string()),
+                operation: OverflowSite::OffsetPlusHeader,
+            },
+        })
 }
 
 /// Compute a payload's end offset (`start + size`) and reject it if it
