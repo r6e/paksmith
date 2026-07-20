@@ -512,12 +512,12 @@ impl PakEntryHeader {
                 PakSeam::EncodedCompressionBlocks,
             )?;
             let mut cursor = in_data_record_size;
-            // Accumulate the UNALIGNED per-block size sum so we can
-            // cross-check the wire `compressed_size` claim after the
-            // loop. The cursor walk uses the aligned advance for
-            // encrypted entries; `compressed_total` tracks the
-            // logical (unaligned) payload size that the wire
-            // `compressed_size` field represents.
+            // Accumulate the ON-DISK per-block footprint (the cursor
+            // advance: AES-aligned for encrypted entries, unaligned
+            // otherwise) so we can cross-check the wire
+            // `compressed_size` claim after the loop — UnrealPak
+            // stores the ALIGNED total for encrypted entries (see the
+            // wire-claim note at the check below).
             let mut compressed_total: u64 = 0;
             for _ in 0..block_count {
                 let block_compressed_size = u64::from(reader.read_u32::<LittleEndian>()?);
@@ -526,14 +526,6 @@ impl PakEntryHeader {
                     .checked_add(block_compressed_size)
                     .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockEnd))?;
                 blocks.push(CompressionBlock::new(start, end)?);
-                // Bounded by `65 535 * u32::MAX ≈ 256 TiB ≪ u64::MAX`,
-                // matching the cursor-walk overflow reasoning above —
-                // a checked_add would never trip with valid wire
-                // shapes, but defensive_discipline says keep it
-                // uniform with the surrounding adds.
-                compressed_total = compressed_total
-                    .checked_add(block_compressed_size)
-                    .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockEnd))?;
                 // Encrypted blocks are padded to AES-block-aligned sizes
                 // on disk; the next block's start advances by the aligned
                 // size, not the unaligned size. AES block = 16 bytes.
@@ -548,31 +540,41 @@ impl PakEntryHeader {
                 } else {
                     block_compressed_size
                 };
+                // Bounded by `65 535 * (u32::MAX + 15) ≈ 256 TiB ≪
+                // u64::MAX`, matching the cursor-walk overflow
+                // reasoning above — a checked_add would never trip
+                // with valid wire shapes, but defensive_discipline
+                // says keep it uniform with the surrounding adds.
+                compressed_total = compressed_total
+                    .checked_add(advance)
+                    .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockEnd))?;
                 cursor = start
                     .checked_add(advance)
                     .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockCursor))?;
             }
             // Issue #58: cross-check the wire `compressed_size` against
-            // the actual sum of per-block sizes. Without this check, an
+            // the actual on-disk block footprint. Without this check, an
             // attacker can claim e.g. `compressed_size = u64::MAX - 1`
             // (the u64 varint width is wire-attacker-controlled via
             // bit-29) while the per-block sizes sum to a few KiB —
             // and the lie propagates to `compressed_size()` and any
             // downstream consumer reporting the entry's payload size.
             //
-            // **Wire-format claim verification**: the equality
-            // `compressed_size == sum_of_unaligned_per_block_sizes`
-            // is verified against the trumank/repak reference
-            // implementation (`build_partial_entry` in repak's
-            // `data.rs` accumulates `compressed_size += data.len()`
-            // where `data` is the raw `compress(chunk)?` output, no
-            // AES alignment applied before storing). NOT verified
-            // against a first-party UE-authored encrypted v10/v11
-            // fixture — the project has zero such fixtures today.
-            // Per the project memory note on empirical wire-format
-            // verification, repak is a high-quality mirror but not
-            // authoritative; if a UE-authored archive ever fails
-            // here, audit this assumption first.
+            // **Wire-format claim verification (#634)**: for
+            // UNENCRYPTED entries `compressed_size` equals the sum of
+            // the unaligned per-block sizes (trumank/repak's
+            // `build_partial_entry` accumulates raw `compress(chunk)`
+            // lengths). For ENCRYPTED entries UnrealPak stores the sum
+            // of the AES-ALIGNED per-block footprints — verified
+            // empirically against the first-party UnrealPak-authored
+            // `real_v11_encrypted_compressed.pak` fixture, whose
+            // `test.png` claims 7760 (= aligned footprint) while the
+            // unaligned block sum is 7746. The earlier caveat here
+            // ("if a UE-authored archive ever fails, audit this
+            // assumption") fired exactly as predicted; the accumulator
+            // above now tracks the cursor advance (aligned when
+            // encrypted), which equals the correct expectation for
+            // both classes.
             if compressed_total != compressed_size {
                 return Err(PaksmithError::InvalidIndex {
                     fault: IndexParseFault::Encoded {

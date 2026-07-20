@@ -526,10 +526,18 @@ proptest! {
             1 => 0x3e * 0x800,          // largest non-sentinel 5-bit value
             _ => 0x1234,                // forces sentinel + extra u32 (not a multiple of 0x800)
         };
-        // All blocks the same size (simplest valid). Sum
-        // = block_count * per_block_size, which is `compressed`.
+        // All blocks the same size (simplest valid). `compressed`
+        // is the on-disk footprint sum: the raw per-block size for
+        // plaintext entries, the AES-16-aligned footprint for
+        // encrypted ones (the UnrealPak convention verified against
+        // real_v11_encrypted_compressed.pak — issue #634).
         let per_block_sizes: Vec<u32> = vec![per_block_size; block_count as usize];
-        let compressed: u64 = u64::from(per_block_size) * u64::from(block_count);
+        let per_block_footprint: u64 = if encrypted {
+            (u64::from(per_block_size) + 15) & !15
+        } else {
+            u64::from(per_block_size)
+        };
+        let compressed: u64 = per_block_footprint * u64::from(block_count);
         // uncompressed bounded by block_count * block_size per
         // issue #58 sibling cap.
         let max_uncompressed: u64 = u64::from(block_count) * u64::from(block_size);
