@@ -2,9 +2,10 @@
 
 > Unreal Engine's pak encryption scheme — AES-256 in ECB mode applied
 > at two granularities (whole index region; per-entry payload).
-> Paksmith detects encryption metadata at every layer but does not
-> decrypt: encrypted archives are rejected at open time, encrypted
-> entries skip integrity verification.
+> Paksmith decrypts the v3-v9 index and encrypted entries (uncompressed
+> and compressed) given a key; encrypted entries verify keylessly (the
+> stored SHA1 covers the on-disk ciphertext). Still rejected:
+> whole-archive-encrypted paks at open, and v10+ encrypted indexes.
 
 ## Overview
 
@@ -380,14 +381,17 @@ detection is a known gap.
   `PaksmithError::Decryption { path: Option<String> }` for any
   `footer.is_encrypted() == true` archive.
 - `PakReader::verify_entry(path)` verifies encrypted entries KEYLESSLY
-  (#634): the stored SHA1 covers the on-disk ciphertext, so encrypted
-  entries hash through the same arms as plaintext ones (the retired
+  and METHOD-AGNOSTICALLY (#634): the stored SHA1 covers the on-disk
+  ciphertext and verify never decompresses, so an encrypted entry hashes
+  its opaque ciphertext regardless of codec (an encrypted Oodle entry
+  verifies like an encrypted Zlib one). The retired
   `VerifyOutcome::SkippedEncrypted` / `entries_skipped_encrypted()`
-  counter stays at 0). An entry with an unsupported compression method
-  still declines with `Err(Decompression)` regardless of encryption.
-- `PakReader::stream_entry_to(entry: &PakIndexEntry, writer: &mut dyn Write)`
-  decrypts-then-decompresses an encrypted entry when a key is present
-  (`open_with_key`); without a key it returns
+  counter stays at 0. The unsupported-method `Err(Decompression)` decline
+  applies only to PLAINTEXT entries.
+- `PakReader::read_entry(path)` / `read_entry_to(path, writer)` (the
+  public read API; `stream_entry_to` is the private helper behind them)
+  decrypt-then-decompress an encrypted entry when a key is present
+  (`open_with_key`); without a key they return
   `PaksmithError::Decryption { path }`. `from_reader` still rejects
   whole-archive-encrypted archives at open time.
 
