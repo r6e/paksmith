@@ -852,12 +852,17 @@ impl PakReader {
     /// packers, treat `IntegrityStripped` as a distinguishable warning
     /// rather than a hard rejection at the call site.
     ///
+    /// AES-encrypted entries verify KEYLESSLY (#634): UE stores the entry
+    /// SHA1 over the on-disk CIPHERTEXT, so the encrypted/unencrypted
+    /// distinction doesn't affect this path — encrypted entries hash
+    /// through the same arms as plaintext. (Whole-archive-encrypted paks
+    /// are rejected at open; v10+ encrypted INDEXES are `UnsupportedFeature`.)
+    ///
     /// Returns:
     /// - `Ok(VerifyOutcome::Verified)` on a hash match.
     /// - `Ok(VerifyOutcome::SkippedNoHash)` when the entry's stored SHA1
-    ///   is all zeros (no integrity claim recorded at write time).
-    /// - `Ok(VerifyOutcome::SkippedEncrypted)` for AES-encrypted entries —
-    ///   verifying ciphertext without the key is not supported.
+    ///   is all zeros (no integrity claim recorded at write time), or the
+    ///   entry is a v10+ encoded record (which omits SHA1 from the wire).
     /// - `Err(EntryNotFound)` for unknown paths.
     /// - `Err(Decompression)` for unsupported compression methods (Gzip,
     ///   Oodle, Zstd, UnknownByName, Unknown). Zlib and LZ4 verify
@@ -865,7 +870,9 @@ impl PakReader {
     ///   so no decompression happens on the verify path). We refuse to
     ///   hash arbitrary bytes we can't interpret; doing otherwise risks
     ///   reporting a misleading `HashMismatch` for a well-formed archive
-    ///   in a method we don't support yet.
+    ///   in a method we don't support yet. This policy is method-driven,
+    ///   not encryption-driven: an encrypted entry with an unsupported
+    ///   method declines here exactly as a plaintext one does.
     /// - `Err(InvalidIndex)` for offset/bounds problems uncovered while
     ///   reading.
     /// - `Err(HashMismatch { target: Entry { path }, .. })` when the
@@ -1101,11 +1108,13 @@ impl PakReader {
     /// `HashMismatch` and returns the error.
     ///
     /// **Skips are reported, not silenced.** Entries that have no recorded
-    /// hash (UE didn't enable integrity at write time) and entries that are
-    /// AES-encrypted (we have no key) are counted in the returned
-    /// [`VerifyStats`]. Callers can inspect the report to decide whether
-    /// `Ok` means "all bytes intact" or "some bytes weren't verifiable" —
-    /// avoiding the silent partial-success failure mode that returning bare
+    /// hash (UE didn't enable integrity at write time, or a v10+ encoded
+    /// record with no SHA1 on the wire) are counted in the returned
+    /// [`VerifyStats`]. (Encrypted entries are NOT skipped as of #634 —
+    /// they verify keylessly against the on-disk ciphertext hash.) Callers
+    /// can inspect the report to decide whether `Ok` means "all bytes
+    /// intact" or "some bytes weren't verifiable" — avoiding the silent
+    /// partial-success failure mode that returning bare
     /// `Result<()>` would create.
     pub fn verify(&self) -> crate::Result<VerifyStats> {
         let mut stats = VerifyStats::default();
@@ -1329,22 +1338,9 @@ impl PakReader {
                         key,
                     )?;
                     let mut rebased = RebasedReader::new(&decrypted, payload_start);
-                    return if *method == CompressionMethod::Zlib {
-                        stream_zlib_to(
-                            &mut rebased,
-                            entry,
-                            self.file_size,
-                            payload_start,
-                            self.version(),
-                            writer,
-                        )
-                    } else {
-                        stream_lz4_to(&mut rebased, entry, self.file_size, payload_start, writer)
-                    };
-                }
-                if *method == CompressionMethod::Zlib {
-                    stream_zlib_to(
-                        &mut file,
+                    dispatch_compressed(
+                        &mut rebased,
+                        method,
                         entry,
                         self.file_size,
                         payload_start,
@@ -1352,7 +1348,15 @@ impl PakReader {
                         writer,
                     )
                 } else {
-                    stream_lz4_to(&mut file, entry, self.file_size, payload_start, writer)
+                    dispatch_compressed(
+                        &mut file,
+                        method,
+                        entry,
+                        self.file_size,
+                        payload_start,
+                        self.version(),
+                        writer,
+                    )
                 }
             }
             // Already rejected at the top of `stream_entry_to`; this
@@ -1372,6 +1376,29 @@ impl PakReader {
                 },
             }),
         }
+    }
+}
+
+/// Route a `Zlib | Lz4` entry to its per-block streamer over `reader`.
+///
+/// `reader` is either the pak file (plaintext entries) or a
+/// [`RebasedReader`] over the decrypted payload (encrypted entries,
+/// #634) — the streamers are generic over `R: Read + Seek`, so the same
+/// dispatch serves both. `method` MUST be `Zlib` or `Lz4` (the caller's
+/// match guarantees it); the `else` branch is `Lz4`.
+fn dispatch_compressed<R: Read + Seek>(
+    reader: &mut R,
+    method: &CompressionMethod,
+    entry: &PakIndexEntry,
+    file_size: u64,
+    payload_start: u64,
+    version: PakVersion,
+    writer: &mut dyn Write,
+) -> crate::Result<u64> {
+    if *method == CompressionMethod::Zlib {
+        stream_zlib_to(reader, entry, file_size, payload_start, version, writer)
+    } else {
+        stream_lz4_to(reader, entry, file_size, payload_start, writer)
     }
 }
 
@@ -1502,19 +1529,27 @@ impl Read for RebasedReader<'_> {
 
 impl Seek for RebasedReader<'_> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let rebased = match pos {
-            SeekFrom::Start(abs) => {
-                let rel = abs.checked_sub(self.base).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "seek before encrypted payload base",
-                    )
-                })?;
-                SeekFrom::Start(rel)
+        // Only `Start(abs)` is meaningful for a rebasing view: the block
+        // streamers seek exclusively by absolute file offset. `Current`
+        // and `End` would silently diverge from the pak-file reader this
+        // substitutes (`End(0)` = payload end, not file end), so reject
+        // them fail-closed rather than answer a subtly wrong position.
+        let abs = match pos {
+            SeekFrom::Start(abs) => abs,
+            SeekFrom::Current(_) | SeekFrom::End(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "RebasedReader supports only SeekFrom::Start",
+                ));
             }
-            other @ (SeekFrom::Current(_) | SeekFrom::End(_)) => other,
         };
-        let rel_pos = self.inner.seek(rebased)?;
+        let rel = abs.checked_sub(self.base).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek before encrypted payload base",
+            )
+        })?;
+        let rel_pos = self.inner.seek(SeekFrom::Start(rel))?;
         rel_pos
             .checked_add(self.base)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rebased position overflow"))
@@ -2552,9 +2587,13 @@ pub enum VerifyOutcome {
     /// The stored hash slot is all zeros — UE's "no integrity claim
     /// recorded" sentinel. Nothing was hashed.
     SkippedNoHash,
-    /// The entry is AES-encrypted; verifying ciphertext without the key is
-    /// not supported. Only ever returned by [`PakReader::verify_entry`],
-    /// never by [`PakReader::verify_index`].
+    /// RETIRED (#634): had NO producer as of encrypted-entry keyless
+    /// verification — the stored SHA1 covers the on-disk ciphertext, so
+    /// encrypted entries now verify through the normal arms rather than
+    /// skipping. Retained (the enum is `#[non_exhaustive]`, and
+    /// [`VerifyStats::entries_skipped_encrypted`] still reports its count,
+    /// pinned at 0) for API stability. Never produced by
+    /// [`PakReader::verify_index`] either.
     SkippedEncrypted,
 }
 
@@ -2652,8 +2691,9 @@ impl VerifyStats {
         self.entries_skipped_no_hash
     }
 
-    /// Number of entries skipped because they are AES-encrypted (hashing
-    /// ciphertext is meaningless without the key).
+    /// RETIRED counter (#634): always 0 now that encrypted entries verify
+    /// keylessly (the stored SHA1 covers the on-disk ciphertext). Retained
+    /// for API stability; see [`VerifyOutcome::SkippedEncrypted`].
     pub fn entries_skipped_encrypted(&self) -> usize {
         self.entries_skipped_encrypted
     }
