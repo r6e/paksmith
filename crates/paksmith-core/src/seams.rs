@@ -224,9 +224,12 @@ impl AssetSeam {
 // Same compile-time guard pattern as PakSeam above (see precondition).
 const _: [(); AssetSeam::COUNT] = [(); AssetSeam::DataTableRows as usize + 1];
 
-// `COUNT`/`slot` are consumed only by the `__test_utils` machinery;
-// dead in the no-feature lib-test compile CI's package-scoped
-// compile guard builds (same pattern as the enum's attr above).
+// In the feature-off LIB target `COUNT`/`slot` are dead: their only
+// production consumers live in the `__test_utils`-gated
+// `testing::oom` module. (The ungated seam test below keeps them
+// used in the lib-TEST compile.) CI's package-scoped compile guard
+// builds that lib target under `-D warnings`; same pattern as the
+// enum's attr above.
 #[cfg_attr(not(feature = "__test_utils"), allow(dead_code))]
 impl SeamSite {
     /// Total number of seam sites across all domains. Used to size
