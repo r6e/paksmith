@@ -54,6 +54,10 @@ use crate::error::{
     AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,
     CompanionFileKind, PaksmithError, try_reserve_asset,
 };
+// `SeamSite` goes unused in the no-`__test_utils` lib-test compile
+// (the seam machinery no-ops there); that build mode is exercised by
+// CI's package-scoped compile guard under `-D warnings`.
+#[cfg_attr(not(feature = "__test_utils"), allow(unused_imports))]
 use crate::seams::{AssetSeam, SeamSite, seam_check};
 
 /// Maximum permitted per-export payload size. Defense-in-depth against

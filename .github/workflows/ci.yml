@@ -133,10 +133,11 @@ jobs:
           # + 4 phase-5a AES-encrypted (real_v8b_encrypted_{entries,index,both}.pak
           #   + real_v11_encrypted_index.pak,
           #   VENDORED-STATIC — survive the wipe above, not regenerated)
-          # = 38.
+          # + 2 issue-#636 LZ4 (real_v{8b,11}_lz4.pak)
+          # = 40.
           # The pre-run rm + this count assertion together catch zero-write
           # bugs that the diff alone would miss.
-          expected=38
+          expected=40
           actual=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f | wc -l | tr -d ' ')
           # Emit the gate's verdict to the job-summary panel so reviewers
           # can see what was checked without scrolling raw step logs.
@@ -186,9 +187,26 @@ jobs:
       # test` command every contributor's pre-commit hook runs. Runs
       # before nextest so the failure surfaces in seconds instead of
       # after the long all-features run.
+      #
+      # TWO invocations, deliberately. Only the PACKAGE-scoped form
+      # catches an UNGATED in-package test (e.g. a `mod.rs` test using
+      # `crate::testing::wire` without
+      # `#[cfg(feature = "__test_utils")]` — the #636 R8/R9 finding):
+      # any invocation that resolves the wider graph unifies
+      # `__test_utils` onto paksmith-core (paksmith-core-tests' dep
+      # AND paksmith-gui's dev-dep both enable it, so even the bare
+      # default-members `cargo test --no-run` compiles the gated
+      # surface — empirically verified). `-p paksmith-core` keeps the
+      # feature off, matching every package-scoped build
+      # (cargo-mutants baseline, `cargo test -p paksmith-core`,
+      # publish). The `--workspace` form runs second as a fast
+      # full-graph compile check for test targets nextest would only
+      # fail on later.
       - name: Verify default cargo test still compiles
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test --workspace --no-run
+        run: |
+          cargo test -p paksmith-core --no-run
+          cargo test --workspace --no-run
       # nextest runs unit + integration tests in parallel and emits
       # JUnit XML at target/nextest/ci/junit.xml (configured in
       # .config/nextest.toml). Doctests are NOT covered by nextest
@@ -445,8 +463,9 @@ jobs:
       # sanitizer out of the box. Same override applied in fuzz.yml.
       # No target arg → builds every harness registered in
       # `fuzz/Cargo.toml`: `fuzz_pak_open`, `fuzz_usmap_parse`,
-      # `fuzz_asset_parse`, plus the Phase 3 decode harnesses
-      # `fuzz_bulk_decompress`, `fuzz_texture_decode`,
-      # `fuzz_audio_decode`, `fuzz_export_pipeline`.
+      # `fuzz_asset_parse`, plus the decode harnesses
+      # `fuzz_bulk_decompress`, `fuzz_lz4_decompress` (#636),
+      # `fuzz_texture_decode`, `fuzz_audio_decode`,
+      # `fuzz_export_pipeline`.
       - name: Build fuzz harness
         run: cargo fuzz build --target x86_64-unknown-linux-gnu

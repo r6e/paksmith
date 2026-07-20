@@ -441,11 +441,11 @@ impl std::fmt::Display for InvalidFooterFault {
 #[non_exhaustive]
 pub enum DecompressionFault {
     /// The entry's compression method isn't supported by paksmith.
-    /// Currently fires for Gzip, Oodle, Zstd, Lz4, Unknown(_), and
-    /// UnknownByName(_); only None and Zlib are wired up. Both
+    /// Currently fires for Gzip, Oodle, Zstd, Unknown(_), and
+    /// UnknownByName(_); None, Zlib, and LZ4 are wired up. Both
     /// `read_entry` (and its `stream_entry_to` worker) and
-    /// `verify_entry` reject these uniformly rather than silently
-    /// returning ciphertext / unhashed bytes.
+    /// `verify_entry` reject the unsupported methods uniformly rather
+    /// than silently returning ciphertext / unhashed bytes.
     UnsupportedMethod {
         /// The unsupported method's typed value, as parsed from the
         /// entry header (or resolved through the v8+ FName slot).
@@ -490,7 +490,8 @@ pub enum DecompressionFault {
     /// Per-block compressed-bytes buffer reservation failed before
     /// any decompression has started. Fired by the
     /// `try_reserve_exact(block_len_usize)` site in
-    /// `stream_zlib_to`. Distinct from a generic OOM because the
+    /// `read_compressed_block` — the compressed-input read shared by
+    /// the zlib and LZ4 paths. Distinct from a generic OOM because the
     /// path is bounded by `MAX_UNCOMPRESSED_ENTRY_BYTES` upstream
     /// — surfacing here means a fallible reservation legitimately
     /// failed at the pre-decode stage.
@@ -537,6 +538,39 @@ pub enum DecompressionFault {
         /// Kind of the underlying [`io::Error`].
         kind: io::ErrorKind,
         /// Display string of the underlying error.
+        message: String,
+    },
+    /// Per-block decompressed-output buffer reservation failed in
+    /// `stream_lz4_to`, BEFORE decoding. LZ4 raw blocks decode into
+    /// a buffer pre-sized to the block's decode budget
+    /// (`min(remaining, compression_block_size)` for non-final
+    /// blocks, the remaining output for the final block — see
+    /// `lz4_block_budget`),
+    /// capped input-proportionally by `lz4_block_output_cap` at
+    /// `compressed_len × 255` so a crafted claim cannot force a huge
+    /// eager allocation. Unlike zlib there is no mid-decode growth
+    /// site — this is the LZ4 path's only output-side reservation.
+    /// Issue #636.
+    Lz4OutputReserveFailed {
+        /// 0-based block index for context.
+        block_index: usize,
+        /// Bytes the reservation requested (the block's capped
+        /// expected output; see `lz4_block_output_cap`).
+        requested: usize,
+        /// Underlying `try_reserve_exact` failure reason.
+        source: TryReserveError,
+    },
+    /// The LZ4 raw-block decoder rejected the block (corrupt
+    /// compressed bytes, or a block that would expand past its
+    /// expected output size — the pre-sized output buffer is a hard
+    /// cap, so over-expansion surfaces here rather than as a
+    /// [`Self::DecompressionBomb`]). `lz4_flex`'s error type isn't
+    /// `Clone`/`PartialEq`; its Display string is preserved.
+    /// Issue #636.
+    Lz4DecodeError {
+        /// 0-based index of the block that failed.
+        block_index: usize,
+        /// Display string of the underlying `lz4_flex` error.
         message: String,
     },
 }
@@ -597,6 +631,21 @@ impl fmt::Display for DecompressionFault {
                 message,
                 ..
             } => write!(f, "zlib block {block_index}: {message}"),
+            // Mirrors the CompressedBlockReserveFailed text shape with
+            // the method named, so operator log greps anchored on
+            // "could not reserve" match both paths.
+            Self::Lz4OutputReserveFailed {
+                block_index,
+                requested,
+                source,
+            } => write!(
+                f,
+                "could not reserve {requested} output bytes for lz4 block {block_index}: {source}"
+            ),
+            Self::Lz4DecodeError {
+                block_index,
+                message,
+            } => write!(f, "lz4 block {block_index}: {message}"),
         }
     }
 }
@@ -773,9 +822,10 @@ pub enum IndexParseFault {
     StreamEntryToDispatchedUnsupportedCompression {
         /// The [`CompressionMethod`] that reached the unsupported
         /// arm. Carries the full typed value so operators see whether
-        /// the dispatch hit `Gzip` / `Oodle` / `Zstd` / `Lz4` /
+        /// the dispatch hit `Gzip` / `Oodle` / `Zstd` /
         /// `Unknown(...)` / `UnknownByName(...)` without needing to
-        /// re-derive the variant from log context.
+        /// re-derive the variant from log context. (`Lz4` no longer
+        /// routes here — it gained its own streaming arm in #636.)
         method: CompressionMethod,
     },
     /// An encoded entry declared a compression method but
@@ -5329,6 +5379,35 @@ mod tests {
                 "could not reserve 1024 more bytes for zlib block 2 (block_out.len() = 4096): "
             ),
             "wire-stable prefix drifted: got {s:?}"
+        );
+    }
+
+    #[test]
+    fn decompression_fault_display_lz4_output_reserve_failed() {
+        let source = Vec::<u8>::new()
+            .try_reserve_exact(usize::MAX)
+            .expect_err("usize::MAX byte reservation must fail");
+        let fault = DecompressionFault::Lz4OutputReserveFailed {
+            block_index: 3,
+            requested: 65536,
+            source,
+        };
+        let s = fault.to_string();
+        assert!(
+            s.starts_with("could not reserve 65536 output bytes for lz4 block 3: "),
+            "wire-stable prefix drifted: got {s:?}"
+        );
+    }
+
+    #[test]
+    fn decompression_fault_display_lz4_decode_error() {
+        let fault = DecompressionFault::Lz4DecodeError {
+            block_index: 1,
+            message: "expected another byte, found none".into(),
+        };
+        assert_eq!(
+            fault.to_string(),
+            "lz4 block 1: expected another byte, found none"
         );
     }
 

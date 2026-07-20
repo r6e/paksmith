@@ -91,6 +91,122 @@ pub fn write_pak_entry(
     buf.write_u32::<LittleEndian>(block_size).unwrap();
 }
 
+/// Wire size of one v3+ FPakEntry record carrying `n` compression
+/// blocks: 3×u64 + method u32 + sha1(20) + (count u32 + n×2×u64) +
+/// encrypted u8 + block_size u32 = `57 + 16n`.
+///
+/// COMPRESSED entries only (`compression_method != 0`):
+/// `write_pak_entry` omits the block-count u32 and block table
+/// entirely for method-0 records, making those 53 bytes — this
+/// formula does not apply to them. `build_v8b_lz4_pak` pins the
+/// compressed shape against `write_pak_entry`'s actual output at
+/// runtime.
+#[must_use]
+pub const fn pak_entry_wire_size(n: u64) -> u64 {
+    57 + 16 * n
+}
+
+/// Build a synthetic v8b pak with one LZ4-compressed entry carrying a
+/// REAL entry hash. The repak-written v11 fixture uses the v10+
+/// encoded index, which has no per-entry SHA1 field, so it can never
+/// exercise `verify_entry`'s hash arm (the repak-written v8b fixture
+/// does — its legacy index stores a real hash); this builder also
+/// writes a legacy v8b index (full FPakEntry incl. its SHA1) so the
+/// LZ4 verify routing and the decode-failure negatives are observable
+/// on CRAFTED input, not just on well-formed oracle output. It lets
+/// callers craft inconsistent claims (short / over-expanding /
+/// under-declared blocks) that a real writer never produces.
+///
+/// Footer: guid(16) + encrypted(1) + magic + version 8 + index
+/// offset/size + index hash(20) + FIVE 32-byte compression-name slots
+/// (the 5-slot count is what classifies the footer as v8b rather than
+/// v8a); slot 0 = "LZ4", so the entry's 1-based method index 1
+/// resolves to `CompressionMethod::Lz4`.
+///
+/// `streams` are pre-compressed raw LZ4 blocks laid back-to-back;
+/// `uncompressed_size` and `block_size` are written as given so tests
+/// can craft inconsistent claims.
+#[must_use]
+pub fn build_v8b_lz4_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size: u32) -> Vec<u8> {
+    use sha1::{Digest, Sha1};
+
+    let header_size = pak_entry_wire_size(streams.len() as u64);
+    let mut blocks: Vec<(u64, u64)> = Vec::new();
+    let mut cursor = header_size;
+    for s in streams {
+        let end = cursor + s.len() as u64;
+        blocks.push((cursor, end));
+        cursor = end;
+    }
+    let compressed_size: u64 = streams.iter().map(|s| s.len() as u64).sum();
+
+    // Entry hash covers the on-disk COMPRESSED block bytes in block
+    // order (what `verify_entry` hashes).
+    let mut hasher = Sha1::new();
+    for s in streams {
+        hasher.update(s);
+    }
+    let sha1: [u8; 20] = hasher.finalize().into();
+
+    // The in-data record and the index record MUST be identical
+    // (`verify_entry` cross-validates them); one closure guarantees
+    // the two call sites can't drift.
+    let write_entry = |buf: &mut Vec<u8>| {
+        write_pak_entry(
+            buf,
+            0,
+            compressed_size,
+            uncompressed_size,
+            1, // 1-based index into the footer name table → slot 0 = "LZ4"
+            &sha1,
+            &blocks,
+            block_size,
+            false,
+        );
+    };
+
+    let mut data = Vec::new();
+    write_entry(&mut data);
+    assert_eq!(
+        data.len() as u64,
+        header_size,
+        "pak_entry_wire_size drifted from write_pak_entry's layout"
+    );
+    for s in streams {
+        data.extend_from_slice(s);
+    }
+
+    let mut index = Vec::new();
+    write_fstring(&mut index, "../../../");
+    index.write_u32::<LittleEndian>(1).unwrap();
+    write_fstring(&mut index, LZ4_SYNTH_PATH);
+    write_entry(&mut index);
+
+    let index_offset = data.len() as u64;
+    let index_size = index.len() as u64;
+    let mut pak = data;
+    pak.extend_from_slice(&index);
+
+    pak.extend_from_slice(&[0u8; 16]); // encryption GUID
+    pak.push(0); // not encrypted
+    pak.write_u32::<LittleEndian>(crate::container::pak::version::PAK_MAGIC)
+        .unwrap();
+    pak.write_u32::<LittleEndian>(8).unwrap();
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&[0u8; 20]); // index hash (zero = skip)
+    // v8b: 5 compression-name slots, 32 bytes each, NUL-padded.
+    let mut slot0 = [0u8; 32];
+    slot0[..3].copy_from_slice(b"LZ4");
+    pak.extend_from_slice(&slot0);
+    pak.extend_from_slice(&[0u8; 32 * 4]);
+
+    pak
+}
+
+/// Path of the single entry emitted by [`build_v8b_lz4_pak`].
+pub const LZ4_SYNTH_PATH: &str = "Content/lz4_synth.uasset";
+
 #[cfg(test)]
 mod tests {
     use super::*;
