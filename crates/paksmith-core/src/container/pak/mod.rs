@@ -879,21 +879,15 @@ impl PakReader {
                 path: path.to_string(),
             })?;
 
-        // Encryption check first: if the bytes at entry.header().offset() are
-        // ciphertext, hashing them is meaningless. This priority is
-        // intentional — an encrypted-AND-zero-hash entry reports as
-        // SkippedEncrypted, not SkippedNoHash, because encryption is the
-        // stronger reason we can't verify.
-        //
-        // TODO(Task-4): when per-entry decryption is added, verify whether
-        // UE stores the entry SHA1 over plaintext or ciphertext (the index
-        // path confirmed hash-before-encrypt for the index — but that wire
-        // fact must be verified separately for individual entries before
-        // being assumed here). See verify_main_index_region's encrypted branch.
-        if entry.header().is_encrypted() {
-            debug!(path, "entry is encrypted; skipping SHA1 verification");
-            return Ok(VerifyOutcome::SkippedEncrypted);
-        }
+        // Task-4 RESOLVED (#634): UE stores the entry SHA1 over the on-disk
+        // CIPHERTEXT truncated to `compressed_size` — verified empirically
+        // against the UnrealPak-produced vendored fixtures for BOTH entry
+        // classes (uncompressed `test.txt`: the 446-byte `compressed_size`
+        // range matches the stored hash, the 448-byte aligned region does
+        // not; every compressed entry matches its ciphertext range too).
+        // Encrypted entries therefore verify KEYLESSLY through the same
+        // hash arms as plaintext entries: the bytes on disk are exactly
+        // what the hash covers. No `is_encrypted` branch is needed here.
 
         // V10+ encoded entries have NO sha1 field on the wire (the
         // bit-packed `FPakEntry::EncodeTo` format omits it; only the
@@ -1214,24 +1208,6 @@ impl PakReader {
                 path: Some(path.to_string()),
             });
         }
-        // Encrypted + compressed entries are not yet supported. UE encrypts the
-        // compressed payload, so correct support requires decrypting the 16-aligned
-        // region BEFORE per-block inflation — and no oracle fixture exercises that
-        // path yet. Rather than feed ciphertext into the inflater (which rejects it
-        // with a misleading Decompression error), reject explicitly. The key may be
-        // correct; this is a deferred layout, not a wrong-key situation. Mirrors the
-        // v10+ encrypted-index UnsupportedFeature deferral.
-        if is_encrypted_compressed(
-            entry.header().is_encrypted(),
-            entry.header().compression_method(),
-        ) {
-            return Err(PaksmithError::UnsupportedFeature {
-                context: format!(
-                    "encrypted + compressed entry '{path}' is not yet supported: paksmith \
-                     currently decrypts only uncompressed encrypted entries; your key may be correct"
-                ),
-            });
-        }
         match entry.header().compression_method() {
             CompressionMethod::None | CompressionMethod::Zlib | CompressionMethod::Lz4 => {}
             method @ (CompressionMethod::Gzip
@@ -1288,16 +1264,53 @@ impl PakReader {
                 };
                 stream_uncompressed_to(&mut file, entry, self.file_size, key, writer)
             }
-            CompressionMethod::Zlib => stream_zlib_to(
-                &mut file,
-                entry,
-                self.file_size,
-                payload_start,
-                self.version(),
-                writer,
-            ),
-            CompressionMethod::Lz4 => {
-                stream_lz4_to(&mut file, entry, self.file_size, payload_start, writer)
+            method @ (CompressionMethod::Zlib | CompressionMethod::Lz4) => {
+                // Encrypted + compressed (#634): UE encrypts the 16-aligned
+                // compressed payload as one contiguous AES-256-ECB region, so
+                // it must be decrypted BEFORE per-block inflation. Decrypt
+                // into memory and run the unchanged codec streamers over a
+                // rebased view of the plaintext-compressed bytes; the
+                // `is_encrypted && key.is_none()` case was already rejected
+                // above, so a missing key here is unreachable.
+                if entry.header().is_encrypted() {
+                    let Some(key) = self.key.as_ref() else {
+                        return Err(PaksmithError::Decryption {
+                            path: Some(path.to_string()),
+                        });
+                    };
+                    let decrypted = read_decrypted_compressed_payload(
+                        &mut file,
+                        entry,
+                        self.file_size,
+                        payload_start,
+                        key,
+                    )?;
+                    let mut rebased = RebasedReader::new(&decrypted, payload_start);
+                    return if *method == CompressionMethod::Zlib {
+                        stream_zlib_to(
+                            &mut rebased,
+                            entry,
+                            self.file_size,
+                            payload_start,
+                            self.version(),
+                            writer,
+                        )
+                    } else {
+                        stream_lz4_to(&mut rebased, entry, self.file_size, payload_start, writer)
+                    };
+                }
+                if *method == CompressionMethod::Zlib {
+                    stream_zlib_to(
+                        &mut file,
+                        entry,
+                        self.file_size,
+                        payload_start,
+                        self.version(),
+                        writer,
+                    )
+                } else {
+                    stream_lz4_to(&mut file, entry, self.file_size, payload_start, writer)
+                }
             }
             // Already rejected at the top of `stream_entry_to`; this
             // arm exists to keep the match exhaustive (per CLAUDE.md
@@ -1319,15 +1332,150 @@ impl PakReader {
     }
 }
 
-/// Returns `true` when an entry is BOTH encrypted AND compressed.
+/// Read and decrypt an encrypted entry's compressed payload (#634).
 ///
-/// Encrypted + compressed entries require decrypting the 16-byte-aligned
-/// payload region BEFORE per-block inflation — a layout that paksmith does
-/// not yet support. Pulled out as a pure predicate so the fail-closed
-/// decision in [`PakReader::stream_entry_to`] is unit-testable without an
-/// (intentionally absent) encrypted+compressed fixture.
-fn is_encrypted_compressed(is_encrypted: bool, method: &CompressionMethod) -> bool {
-    is_encrypted && *method != CompressionMethod::None
+/// UE encrypts the compressed payload as ONE contiguous AES-256-ECB
+/// region padded to 16-byte alignment (per the repak/UnrealPak wire
+/// reference), so the whole aligned region is read and decrypted up
+/// front, then truncated to `compressed_size` — the per-block
+/// decompressors then walk the plaintext-compressed bytes through a
+/// [`RebasedReader`]. Mirrors `stream_uncompressed_to`'s encrypted arm:
+/// same `Zeroizing` hygiene, same `AllocationFailed` fault, same
+/// EOF bounds discipline.
+fn read_decrypted_compressed_payload<R: Read + Seek>(
+    file: &mut R,
+    entry: &PakIndexEntry,
+    file_size: u64,
+    payload_start: u64,
+    key: &AesKey,
+) -> crate::Result<Zeroizing<Vec<u8>>> {
+    let path = entry.filename();
+    let comp = entry.header().compressed_size();
+
+    // Reject a `compressed_size` claim past EOF BEFORE the alignment
+    // arithmetic: it bounds `comp` by the real file size, which makes
+    // the `div_ceil` below overflow-free and the allocation
+    // file-proportional.
+    let payload_end =
+        payload_start
+            .checked_add(comp)
+            .ok_or_else(|| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::U64ArithmeticOverflow {
+                    path: Some(path.to_string()),
+                    operation: OverflowSite::PayloadEnd,
+                },
+            })?;
+    if payload_end > file_size {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::OffsetPastFileSize {
+                path: path.to_string(),
+                kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                    payload_end,
+                    file_size_max: file_size,
+                },
+            },
+        });
+    }
+    let aligned = comp.div_ceil(16) * 16;
+    let aligned_end =
+        payload_start
+            .checked_add(aligned)
+            .ok_or_else(|| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::U64ArithmeticOverflow {
+                    path: Some(path.to_string()),
+                    operation: OverflowSite::PayloadEnd,
+                },
+            })?;
+    if aligned_end > file_size {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::OffsetPastFileSize {
+                path: path.to_string(),
+                kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                    payload_end: aligned_end,
+                    file_size_max: file_size,
+                },
+            },
+        });
+    }
+    let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
+        fault: IndexParseFault::U64ExceedsPlatformUsize {
+            field: WireField::CompressedSize,
+            value: aligned,
+            path: Some(path.to_string()),
+        },
+    })?;
+    let comp_usize = usize::try_from(comp).map_err(|_| PaksmithError::InvalidIndex {
+        fault: IndexParseFault::U64ExceedsPlatformUsize {
+            field: WireField::CompressedSize,
+            value: comp,
+            path: Some(path.to_string()),
+        },
+    })?;
+
+    let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+    buf.try_reserve_exact(aligned_usize)
+        .map_err(|source| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::AllocationFailed {
+                context: AllocationContext::EntryPayloadBytes,
+                requested: aligned_usize,
+                source,
+                path: Some(path.to_string()),
+            },
+        })?;
+    buf.resize(aligned_usize, 0);
+    let _ = file.seek(SeekFrom::Start(payload_start))?;
+    file.read_exact(&mut buf)?;
+    crypto::aes256_ecb_decrypt(key, &mut buf)?;
+    buf.truncate(comp_usize);
+    Ok(buf)
+}
+
+/// `Read + Seek` view over a decrypted in-memory payload that answers
+/// ABSOLUTE file offsets (#634): `Seek(Start(abs))` maps to
+/// `abs - base` within the buffer, so the per-block decompressors —
+/// whose block tables carry real file offsets — run unchanged over the
+/// plaintext-compressed bytes. Seeks or reads outside the payload
+/// region surface as `io::Error` (fail-closed; a block table pointing
+/// outside its own entry's payload is malformed for encrypted entries).
+struct RebasedReader<'a> {
+    inner: io::Cursor<&'a [u8]>,
+    base: u64,
+}
+
+impl<'a> RebasedReader<'a> {
+    fn new(payload: &'a [u8], base: u64) -> Self {
+        Self {
+            inner: io::Cursor::new(payload),
+            base,
+        }
+    }
+}
+
+impl Read for RebasedReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Seek for RebasedReader<'_> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let rebased = match pos {
+            SeekFrom::Start(abs) => {
+                let rel = abs.checked_sub(self.base).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "seek before encrypted payload base",
+                    )
+                })?;
+                SeekFrom::Start(rel)
+            }
+            other @ (SeekFrom::Current(_) | SeekFrom::End(_)) => other,
+        };
+        let rel_pos = self.inner.seek(rebased)?;
+        rel_pos
+            .checked_add(self.base)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rebased position overflow"))
+    }
 }
 
 impl ContainerReader for PakReader {
@@ -3807,44 +3955,133 @@ mod tests {
         );
     }
 
-    // ── is_encrypted_compressed predicate truth table ──────────────────────
-    // These four cases must all be covered to resist `&&`→`||`, `!=`→`==`,
-    // and `-> true` mutants (see project accessor-negative-coverage convention).
+    // ── encrypted + COMPRESSED entries (issue #634) ────────────────────────
 
+    /// UnrealPak-produced fixture whose entries are both zlib-compressed
+    /// AND AES-256-ECB encrypted (plaintext index; same four-entry corpus
+    /// and key as the encrypted-entries fixture). Vendored from repak's
+    /// test suite — see tests/fixtures/PROVENANCE-encrypted.md.
+    fn encrypted_compressed_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v8b_encrypted_compressed.pak")
+    }
+
+    /// v11 (encoded-index) sibling of [`encrypted_compressed_fixture`].
+    fn encrypted_compressed_v11_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v11_encrypted_compressed.pak")
+    }
+
+    /// RED→GREEN oracle for decrypt-then-decompress (#634): `test.txt` in
+    /// the encrypted+compressed fixture must round-trip to the same known
+    /// plaintext as the uncompressed encrypted fixture (same source corpus,
+    /// now behind AES over the zlib-compressed payload).
     #[test]
-    fn is_encrypted_compressed_enc_zlib_true() {
-        // Encrypted + compressed → must be detected (the deferred layout).
-        assert!(
-            is_encrypted_compressed(true, &CompressionMethod::Zlib),
-            "encrypted Zlib entry must be flagged as encrypted+compressed"
+    fn reads_encrypted_compressed_entry_as_plaintext_test_txt() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_compressed_fixture(), key)
+            .expect("open encrypted+compressed fixture");
+        let bytes = reader
+            .read_entry("test.txt")
+            .expect("read_entry must decrypt-then-decompress test.txt");
+        assert_eq!(
+            bytes, FIXTURE_PLAINTEXT_TEST_TXT,
+            "decrypt-then-decompress must recover the known plaintext"
         );
     }
 
+    /// Second text entry, distinct plaintext — guards against a decode that
+    /// happens to work for only one block shape.
     #[test]
-    fn is_encrypted_compressed_enc_none_false() {
-        // Encrypted but uncompressed → currently supported, must NOT be flagged.
+    fn reads_encrypted_compressed_entry_nested_txt() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_compressed_fixture(), key)
+            .expect("open encrypted+compressed fixture");
+        let bytes = reader
+            .read_entry("directory/nested.txt")
+            .expect("read_entry must decrypt-then-decompress nested.txt");
+        assert_eq!(bytes, FIXTURE_PLAINTEXT_NESTED_TXT);
+    }
+
+    /// Binary entries: zeros.bin must be exactly 2048 zero bytes; test.png
+    /// must have its full length and the PNG magic.
+    #[test]
+    fn reads_encrypted_compressed_entry_binaries() {
+        const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_compressed_fixture(), key)
+            .expect("open encrypted+compressed fixture");
+
+        let zeros = reader.read_entry("zeros.bin").expect("read zeros.bin");
+        assert_eq!(zeros.len(), FIXTURE_ZEROS_BIN_LEN);
+        assert!(zeros.iter().all(|&b| b == 0), "zeros.bin must be all zero");
+
+        let png = reader.read_entry("test.png").expect("read test.png");
+        assert_eq!(png.len(), FIXTURE_TEST_PNG_LEN);
+        assert_eq!(&png[..8], &PNG_MAGIC);
+    }
+
+    /// The v11 sibling exercises the encoded-index generation end-to-end
+    /// (bit-packed entries, no per-entry SHA1 in the index).
+    #[test]
+    fn reads_encrypted_compressed_entry_v11() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_compressed_v11_fixture(), key)
+            .expect("open v11 encrypted+compressed fixture");
+        let bytes = reader
+            .read_entry("test.txt")
+            .expect("read_entry must decrypt-then-decompress on the encoded index");
+        assert_eq!(bytes, FIXTURE_PLAINTEXT_TEST_TXT);
+    }
+
+    /// Fail-closed: plaintext index → keyless open succeeds; reading an
+    /// encrypted+compressed entry without a key must be `Decryption`, not
+    /// `UnsupportedFeature` (the layout is supported now) and not garbage.
+    #[test]
+    fn encrypted_compressed_entry_without_key_returns_decryption_error() {
+        let reader = PakReader::open(encrypted_compressed_fixture())
+            .expect("open with plaintext index and no key must succeed");
+        let err = reader
+            .read_entry("test.txt")
+            .expect_err("reading an encrypted+compressed entry without a key must fail");
         assert!(
-            !is_encrypted_compressed(true, &CompressionMethod::None),
-            "encrypted uncompressed entry must NOT be flagged as encrypted+compressed"
+            matches!(err, PaksmithError::Decryption { .. }),
+            "must fail closed as Decryption, got: {err:?}"
         );
     }
 
+    /// TODO(Task-4) resolution pin (#634): the stored entry SHA-1 covers the
+    /// on-disk CIPHERTEXT truncated to `compressed_size` — verified
+    /// empirically against the UnrealPak-produced fixtures (for `test.txt`
+    /// in the uncompressed fixture, the 446-byte `compressed_size` range
+    /// matches and the 448-byte aligned region does NOT). Verification
+    /// therefore needs no key: an encrypted+compressed entry must verify
+    /// keylessly.
     #[test]
-    fn is_encrypted_compressed_plain_zlib_false() {
-        // Plaintext compressed → currently supported, must NOT be flagged.
-        assert!(
-            !is_encrypted_compressed(false, &CompressionMethod::Zlib),
-            "plaintext Zlib entry must NOT be flagged as encrypted+compressed"
+    fn verify_encrypted_compressed_entry_hashes_ciphertext_keylessly() {
+        let reader = PakReader::open(encrypted_compressed_fixture())
+            .expect("keyless open (plaintext index)");
+        let outcome = reader
+            .verify_entry("test.txt")
+            .expect("verify_entry must run keylessly on an encrypted entry");
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Verified,
+            "stored SHA1 covers the ciphertext, so keyless verify must pass"
         );
     }
 
+    /// Same pin for the UNCOMPRESSED encrypted class, where
+    /// `compressed_size` (446) is not 16-aligned — passing requires hashing
+    /// the TRUNCATED ciphertext, not the aligned read region.
     #[test]
-    fn is_encrypted_compressed_plain_none_false() {
-        // Plaintext uncompressed → trivially supported, must NOT be flagged.
-        assert!(
-            !is_encrypted_compressed(false, &CompressionMethod::None),
-            "plaintext uncompressed entry must NOT be flagged as encrypted+compressed"
-        );
+    fn verify_encrypted_uncompressed_entry_hashes_truncated_ciphertext() {
+        let reader =
+            PakReader::open(encrypted_entries_fixture()).expect("keyless open (plaintext index)");
+        let outcome = reader
+            .verify_entry("test.txt")
+            .expect("verify_entry must run keylessly on an encrypted entry");
+        assert_eq!(outcome, VerifyOutcome::Verified);
     }
 
     // ---- Surviving-mutant kill tests (Phase 5a decrypt paths) --------------
