@@ -70,6 +70,24 @@ the final block to the remaining byte count. A block inflating past
 its expected size is malformed (and, defensively, a
 decompression-bomb attempt).
 
+Both cited references normalize **single-block** entries instead of
+applying the formula: repak substitutes the entry's `uncompressed`
+size when there is exactly one block (`entry.rs`,
+`ranges.len() == 1` branch), and CUE4Parse's encoded-entry
+constructor does the same (`compressionBlocksCount == 1 →
+UncompressedSize`). For well-formed entries the results are
+identical — a single block's expected output IS the remaining byte
+count — so paksmith keeps the uniform formula. The derivations
+diverge only on a single-block entry whose stored
+`compression_block_size` is *smaller* than its `uncompressed_size`:
+the references decode that shape via the normalization, while
+paksmith rejects it earlier, at index-parse time
+(`uncompressed_size > block_count × compression_block_size` →
+`IndexParseFault::BoundsExceeded`), fail-closed. No writer in
+paksmith's fixture corpus produces the shape (repak always stores a
+full `compression_block_size`); whether real UE 4.26-era v10
+archives do is unconfirmed and tracked in issue #685.
+
 ## Variants
 
 - **Raw block vs LZ4 frame**: pak entries use raw blocks only. The
@@ -149,7 +167,12 @@ writer never produces.
 
 ## Paksmith implementation
 
-**Status:** `complete`.
+**Status:** `complete`. One documented derivation divergence vs the
+cited references: a single-block entry whose stored
+`compression_block_size` is smaller than its `uncompressed_size` is
+rejected fail-closed at index parse rather than decoded via
+single-block normalization — see "Per-block decompressed size
+derivation" and issue #685.
 
 `stream_lz4_to` in `crates/paksmith-core/src/container/pak/mod.rs`
 (issue #636), mirroring `stream_zlib_to`'s discipline:
@@ -185,4 +208,4 @@ writer never produces.
 
 ## References
 
-[^1]: Decode-side oracle: `FabianFG/CUE4Parse/CUE4Parse/Compression/Compression.cs@c7e78422ec4858036c9bba5d9d3c55eb197f93c9` (routes `CompressionMethod.LZ4` to the K4os raw-block `LZ4Codec.Decode`). Write-side oracle: `trumank/repak/repak/src/data.rs@e215472c51db69328b1ce77be2db24d24c1d646b` (`lz4_flex::block::compress`) and `trumank/repak/repak/src/entry.rs@e215472c51db69328b1ce77be2db24d24c1d646b` (`lz4_flex::block::decompress_into` with `chunks_mut(compression_block_size)` — the per-block size derivation this doc specifies). Block-format specification: the LZ4 project's `lz4_Block_format.md` (`lz4/lz4` on GitHub).
+[^1]: Decode-side oracle: `FabianFG/CUE4Parse/CUE4Parse/Compression/Compression.cs@c7e78422ec4858036c9bba5d9d3c55eb197f93c9` (routes `CompressionMethod.LZ4` to the K4os raw-block `LZ4Codec.Decode`). Write-side oracle: `trumank/repak/repak/src/data.rs@e215472c51db69328b1ce77be2db24d24c1d646b` (`lz4_flex::block::compress`) and `trumank/repak/repak/src/entry.rs@e215472c51db69328b1ce77be2db24d24c1d646b` (`lz4_flex::block::decompress_into` with `chunks_mut(chunk_size)`, where `chunk_size` is the entry's `uncompressed` size for single-block entries and `compression_block_size` otherwise — see "Per-block decompressed size derivation" for how that maps onto the formula this doc specifies). Block-format specification: the LZ4 project's `lz4_Block_format.md` (`lz4/lz4` on GitHub).
