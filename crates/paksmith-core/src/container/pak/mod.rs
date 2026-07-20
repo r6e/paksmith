@@ -1291,7 +1291,10 @@ impl PakReader {
                     // rebased cursor. `payload_start + decrypted.len()`
                     // was already EOF-checked inside
                     // `read_decrypted_compressed_payload`, so it can't
-                    // overflow here.
+                    // overflow here. The `buffer_end` vs `self.file_size`
+                    // ceiling choice has no mutation-killing test yet — that
+                    // needs a synthetic encrypted multi-block pak (real
+                    // ciphertext); tracked as #688.
                     let buffer_end = payload_start + decrypted.len() as u64;
                     dispatch_compressed(
                         &mut rebased,
@@ -4441,6 +4444,91 @@ mod tests {
                 }
             ),
             "must reject as PayloadEndBounds; got: {err:?}"
+        );
+    }
+
+    /// `read_decrypted_compressed_payload`'s compressed-size cap (#634): an
+    /// inline encrypted+compressed entry whose `compressed_size` exceeds
+    /// `MAX_UNCOMPRESSED_ENTRY_BYTES` (8 GiB) must be rejected as
+    /// `BoundsExceeded` on `CompressedSize` BEFORE any I/O. The v3-v9 inline
+    /// index applies no parse-time cap on `compressed_size` (unlike the v10+
+    /// encoded parser at `entry_header.rs`), so this free-function check is
+    /// the only enforcement point for inline entries. The cap runs first in
+    /// the body, ahead of every seek/read/decrypt, so an empty in-memory
+    /// `Cursor` suffices — no multi-GiB file is required.
+    ///
+    /// Kills the delete-cap-body mutant: with the check gone, `comp = MAX+1`
+    /// would flow to `checked_payload_end` and surface as `OffsetPastFileSize`
+    /// (the tiny `file_size`), not `BoundsExceeded`, failing this assertion.
+    #[test]
+    fn read_decrypted_compressed_payload_over_cap_is_bounds_exceeded() {
+        use std::io::Cursor;
+
+        // `inline_for_test` sets `compressed_size == uncompressed_size`, so
+        // `MAX + 1` yields a `compressed_size` exactly one byte over the cap.
+        let header = PakEntryHeader::inline_for_test(MAX_UNCOMPRESSED_ENTRY_BYTES + 1, true);
+        let entry = PakIndexEntry::for_test("over_cap.bin".to_string(), header);
+        let key = AesKey::new(FIXTURE_AES_KEY);
+
+        let mut file = Cursor::new(Vec::<u8>::new());
+        let err = read_decrypted_compressed_payload(&mut file, &entry, 100, 0, &key)
+            .expect_err("compressed_size past the 8 GiB cap must be rejected before any read");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::CompressedSize,
+                        ..
+                    }
+                }
+            ),
+            "must reject as BoundsExceeded on CompressedSize; got: {err:?}"
+        );
+    }
+
+    /// Boundary sibling of the over-cap test: a `compressed_size` EXACTLY at
+    /// `MAX_UNCOMPRESSED_ENTRY_BYTES` must PASS the cap (strict `>`) and then
+    /// fail later for a different reason — here the `checked_payload_end` EOF
+    /// check, since `file_size` (100) is far below `payload_start + comp`.
+    /// The discriminator is that the error is NOT `BoundsExceeded`.
+    ///
+    /// Kills the `>`→`>=` mutant on `comp > MAX_UNCOMPRESSED_ENTRY_BYTES`:
+    /// under `>=`, `comp == cap` IS rejected as `BoundsExceeded`, which this
+    /// assertion forbids.
+    #[test]
+    fn read_decrypted_compressed_payload_at_cap_is_not_bounds_exceeded() {
+        use std::io::Cursor;
+
+        let header = PakEntryHeader::inline_for_test(MAX_UNCOMPRESSED_ENTRY_BYTES, true);
+        let entry = PakIndexEntry::for_test("at_cap.bin".to_string(), header);
+        let key = AesKey::new(FIXTURE_AES_KEY);
+
+        let mut file = Cursor::new(Vec::<u8>::new());
+        let err = read_decrypted_compressed_payload(&mut file, &entry, 100, 0, &key)
+            .expect_err("comp at the cap still fails the EOF check against a tiny file_size");
+        assert!(
+            !matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded { .. }
+                }
+            ),
+            "comp == MAX_UNCOMPRESSED_ENTRY_BYTES must NOT be BoundsExceeded (strict `>`); got: {err:?}"
+        );
+        // Positive discriminator: it falls through to the EOF check and
+        // surfaces as PayloadEndBounds, confirming the cap did not fire.
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::OffsetPastFileSize {
+                        kind: OffsetPastFileSizeKind::PayloadEndBounds { .. },
+                        ..
+                    }
+                }
+            ),
+            "at-cap comp must fall through to the EOF check as PayloadEndBounds; got: {err:?}"
         );
     }
 
