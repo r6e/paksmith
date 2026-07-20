@@ -968,55 +968,22 @@ impl PakReader {
                     },
                 })?;
             let compressed = entry.header().compressed_size();
-            let payload_end = payload_start.checked_add(compressed).ok_or_else(|| {
-                PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::U64ArithmeticOverflow {
-                        path: Some(path.to_string()),
-                        operation: OverflowSite::PayloadEnd,
-                    },
-                }
-            })?;
-            if payload_end > self.file_size {
-                return Err(PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::OffsetPastFileSize {
-                        path: path.to_string(),
-                        kind: OffsetPastFileSizeKind::PayloadEndBounds {
-                            payload_end,
-                            file_size_max: self.file_size,
-                        },
-                    },
-                });
-            }
+            let _ = checked_payload_end(payload_start, compressed, self.file_size, path)?;
             let _ = file.seek(SeekFrom::Start(payload_start))?;
             sha1_of_reader(&mut file, compressed, &mut buf)?
         } else {
             match entry.header().compression_method() {
                 CompressionMethod::None => {
-                    // Plaintext uncompressed entry. Mirror the payload-end
-                    // bounds check from `stream_uncompressed_to` so a
-                    // truncated archive surfaces as the structured
-                    // `OffsetPastFileSize` variant rather than a bare
+                    // Plaintext uncompressed entry. Bounds-check the payload
+                    // end so a truncated archive surfaces as the structured
+                    // `OffsetPastFileSize` rather than a bare
                     // `Io::UnexpectedEof` partway through hashing (issue #48).
-                    let payload_end = file
-                        .stream_position()?
-                        .checked_add(entry.header().uncompressed_size())
-                        .ok_or_else(|| PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::U64ArithmeticOverflow {
-                                path: Some(path.to_string()),
-                                operation: OverflowSite::PayloadEnd,
-                            },
-                        })?;
-                    if payload_end > self.file_size {
-                        return Err(PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::OffsetPastFileSize {
-                                path: path.to_string(),
-                                kind: OffsetPastFileSizeKind::PayloadEndBounds {
-                                    payload_end,
-                                    file_size_max: self.file_size,
-                                },
-                            },
-                        });
-                    }
+                    let _ = checked_payload_end(
+                        file.stream_position()?,
+                        entry.header().uncompressed_size(),
+                        self.file_size,
+                        path,
+                    )?;
                     sha1_of_reader(&mut file, entry.header().uncompressed_size(), &mut buf)?
                 }
                 CompressionMethod::Zlib | CompressionMethod::Lz4 => {
@@ -1338,7 +1305,8 @@ impl PakReader {
                     // buffer's extent as the ceiling. A malformed v3-v9
                     // inline block pointing past the payload (no
                     // block-sum cross-check exists for that index form)
-                    // then surfaces as a typed `OffsetPastFileSize`
+                    // then surfaces as a typed `BlockBoundsViolation`
+                    // (`EndPastFileSize`) from `validate_block_bounds`
                     // rather than a bare `Io(UnexpectedEof)` from the
                     // rebased cursor. `payload_start + decrypted.len()`
                     // was already EOF-checked inside
@@ -1431,49 +1399,23 @@ fn read_decrypted_compressed_payload<R: Read + Seek>(
 
     // Reject a `compressed_size` claim past EOF BEFORE the alignment
     // arithmetic: it bounds `comp` by the real file size, which makes
-    // the `div_ceil` below overflow-free and the allocation
+    // the `div_ceil`/`* 16` below overflow-free and the allocation
     // file-proportional.
-    let payload_end =
-        payload_start
-            .checked_add(comp)
-            .ok_or_else(|| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: Some(path.to_string()),
-                    operation: OverflowSite::PayloadEnd,
-                },
-            })?;
-    if payload_end > file_size {
-        return Err(PaksmithError::InvalidIndex {
-            fault: IndexParseFault::OffsetPastFileSize {
-                path: path.to_string(),
-                kind: OffsetPastFileSizeKind::PayloadEndBounds {
-                    payload_end,
-                    file_size_max: file_size,
-                },
+    let _ = checked_payload_end(payload_start, comp, file_size, path)?;
+    // `comp <= file_size < 2^63`, so this cannot actually overflow — but
+    // unlike `uncompressed_size` there is no 8 GiB cap on `compressed_size`,
+    // only the file-size bound, so use `checked_mul` for a typed fault
+    // rather than an unchecked `* 16` (defense-in-depth, R3 security note).
+    let aligned = comp
+        .div_ceil(16)
+        .checked_mul(16)
+        .ok_or_else(|| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ArithmeticOverflow {
+                path: Some(path.to_string()),
+                operation: OverflowSite::PayloadEnd,
             },
-        });
-    }
-    let aligned = comp.div_ceil(16) * 16;
-    let aligned_end =
-        payload_start
-            .checked_add(aligned)
-            .ok_or_else(|| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: Some(path.to_string()),
-                    operation: OverflowSite::PayloadEnd,
-                },
-            })?;
-    if aligned_end > file_size {
-        return Err(PaksmithError::InvalidIndex {
-            fault: IndexParseFault::OffsetPastFileSize {
-                path: path.to_string(),
-                kind: OffsetPastFileSizeKind::PayloadEndBounds {
-                    payload_end: aligned_end,
-                    file_size_max: file_size,
-                },
-            },
-        });
-    }
+        })?;
+    let _ = checked_payload_end(payload_start, aligned, file_size, path)?;
     let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
         fault: IndexParseFault::U64ExceedsPlatformUsize {
             field: WireField::CompressedSize,
@@ -1843,26 +1785,7 @@ fn stream_uncompressed_to<R: Read + Seek>(
 
         // Bounds-check the aligned read against EOF.
         let payload_start = file.stream_position()?;
-        let payload_end =
-            payload_start
-                .checked_add(aligned)
-                .ok_or_else(|| PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::U64ArithmeticOverflow {
-                        path: Some(path.to_string()),
-                        operation: OverflowSite::PayloadEnd,
-                    },
-                })?;
-        if payload_end > file_size {
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::OffsetPastFileSize {
-                    path: path.to_string(),
-                    kind: OffsetPastFileSizeKind::PayloadEndBounds {
-                        payload_end,
-                        file_size_max: file_size,
-                    },
-                },
-            });
-        }
+        let _ = checked_payload_end(payload_start, aligned, file_size, path)?;
 
         // Read the aligned ciphertext into a zeroize-on-drop buffer, decrypt,
         // then write only the `size` real bytes to the caller's writer.
@@ -1894,26 +1817,7 @@ fn stream_uncompressed_to<R: Read + Seek>(
     // For uncompressed entries the payload immediately follows the in-data
     // header, so the reader is already positioned correctly. Bounds-check
     // the payload against EOF before reading.
-    let payload_end =
-        file.stream_position()?
-            .checked_add(size)
-            .ok_or_else(|| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: Some(path.to_string()),
-                    operation: OverflowSite::PayloadEnd,
-                },
-            })?;
-    if payload_end > file_size {
-        return Err(PaksmithError::InvalidIndex {
-            fault: IndexParseFault::OffsetPastFileSize {
-                path: path.to_string(),
-                kind: OffsetPastFileSizeKind::PayloadEndBounds {
-                    payload_end,
-                    file_size_max: file_size,
-                },
-            },
-        });
-    }
+    let _ = checked_payload_end(file.stream_position()?, size, file_size, path)?;
 
     let mut limited = file.by_ref().take(size);
     let written = io::copy(&mut limited, writer)?;
@@ -1931,6 +1835,36 @@ fn stream_uncompressed_to<R: Read + Seek>(
         });
     }
     Ok(written)
+}
+
+/// Compute a payload's end offset (`start + size`) and reject it if it
+/// runs past `file_size`, returning typed faults. Shared by every
+/// fixed-length payload read/verify path so a truncated archive surfaces
+/// as `OffsetPastFileSize` (or `U64ArithmeticOverflow` on the add)
+/// instead of a bare `Io(UnexpectedEof)` partway through the read — the
+/// non-block-table sibling of [`validate_block_bounds`], which
+/// consolidates the same check for the block-table case.
+fn checked_payload_end(start: u64, size: u64, file_size: u64, path: &str) -> crate::Result<u64> {
+    let end = start
+        .checked_add(size)
+        .ok_or_else(|| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ArithmeticOverflow {
+                path: Some(path.to_string()),
+                operation: OverflowSite::PayloadEnd,
+            },
+        })?;
+    if end > file_size {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::OffsetPastFileSize {
+                path: path.to_string(),
+                kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                    payload_end: end,
+                    file_size_max: file_size,
+                },
+            },
+        });
+    }
+    Ok(end)
 }
 
 /// Validate one compression block's `(start, end)` pair against
@@ -2722,6 +2656,11 @@ impl VerifyStats {
     /// stored hash slot — UE's writer either records integrity for the
     /// whole archive or for none of it, so a partial-skip in a context
     /// you control end-to-end is a tampering signal.
+    ///
+    /// Since #634, per-entry-encrypted entries verify keylessly (they no
+    /// longer count as skips), so a fully-encrypted archive whose stored
+    /// hashes all match now reports `true` here — where it previously
+    /// reported `false` on the retired `SkippedEncrypted` skip.
     ///
     /// Equivalent to manually checking that the index was verified, no
     /// entries were skipped for either reason, and at least one entry was
@@ -4129,6 +4068,23 @@ mod tests {
             .expect("read_entry must decrypt-then-decompress on the encoded index");
         assert_eq!(bytes.len(), FIXTURE_TEST_PNG_LEN);
         assert_eq!(&bytes[..8], &PNG_MAGIC);
+    }
+
+    /// Pin the encrypted v10+ ENCODED verify outcome (R3 architect
+    /// finding): removing the entry-level `SkippedEncrypted` short-circuit
+    /// means the "no SHA1 on the wire" gate now runs first for encrypted
+    /// encoded entries too, so a v11 encrypted entry reports
+    /// `SkippedNoHash` (its true reason — encoded records omit the SHA1
+    /// field regardless of encryption) rather than the retired
+    /// `SkippedEncrypted`. Keyless open (plaintext index) suffices.
+    #[test]
+    fn verify_encrypted_v11_encoded_entry_is_skipped_no_hash() {
+        let reader = PakReader::open(encrypted_compressed_v11_fixture())
+            .expect("keyless open (plaintext index)");
+        assert_eq!(
+            reader.verify_entry("test.png").expect("verify must run"),
+            VerifyOutcome::SkippedNoHash,
+        );
     }
 
     /// Fail-closed: plaintext index → keyless open succeeds; reading an
