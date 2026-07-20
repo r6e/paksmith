@@ -204,7 +204,7 @@ fn read_asset_collection_elements_surfaces_allocation_failed_under_oom() {
             paksmith_core::Asset::Generic(PropertyBag::Opaque { .. })
         ),
         "armed AssetSeam::CollectionElements seam must flip Tree→Opaque (fallback fired); got {:?}",
-        &parsed.payloads[0]
+        parsed.payloads[0]
     );
 }
 
