@@ -2,8 +2,12 @@
 
 > Per-block codec for LZ4-compressed pak entries: each compression
 > block is one raw **LZ4 Block Format** stream (no frame magic, no
-> stored size). Resolvable only in v8+ archives, via the footer's
-> FName compression-slot table.
+> stored size). The *name* "LZ4" is resolvable only in v8+ archives,
+> via the footer's FName compression-slot table. Pre-v8, LZ4 can
+> ride the game-defined `COMPRESS_Custom` numeric ID (0x04) in some
+> titles (CUE4Parse maps it per-game, e.g. Sea of Thieves); paksmith
+> resolves numeric 4 as Oodle and rejects it fail-closed as
+> unsupported.
 
 ## Overview
 
@@ -87,7 +91,9 @@ block, so its budget is the full `uncompressed_size` regardless of
 the stored `compression_block_size` — a single-block entry declaring
 a `compression_block_size` *smaller* than its `uncompressed_size`
 (a shape no writer in paksmith's fixture corpus produces) decodes
-here exactly as repak decodes it.
+here exactly as repak decodes it, on the paths where it reaches the
+decoder at all (the v3-v9 inline index — the v10+ encoded index
+rejects it upstream at parse; see the next paragraph).
 
 The inconsistent claim `uncompressed_size > block_count ×
 compression_block_size` splits by index generation: the v10+
@@ -107,8 +113,13 @@ consistent with its own zlib path (`take(remaining + 1)`), which
 accepts the identical framing. Adversarial-only (no real writer
 emits it); pinned by
 `read_lz4_entry_multi_block_final_overflow_decodes`. A multi-block
-entry that misdeclares a NON-final block still dies at the
-exact-size check. One further strict-direction mechanism
+entry that misdeclares a NON-final block still dies fail-closed in
+both directions — under-production at the post-decode exact-size
+check (`NonFinalBlockSizeMismatch`), over-production earlier,
+inside the decoder (`OutputTooSmall` against the
+`min(remaining, block_size)` buffer → `Lz4DecodeError`; pinned by
+`read_lz4_entry_over_producing_non_final_block_rejected`). One
+further strict-direction mechanism
 difference: trailing junk after a valid stream WITHIN one block is
 ignored by zlib (the decoder stops at stream end) but rejected by
 LZ4 (`decompress_into` parses the whole input) — fail-closed, so
@@ -236,6 +247,10 @@ references reject it.
   `SizeUnderrun`; fallible reservations →
   `CompressedBlockReserveFailed` (input, shared seam with zlib) and
   `Lz4OutputReserveFailed` (output, seam `PakSeam::Lz4OutputReserve`).
+  Operator note: the bomb-class attack (a block inflating past its
+  budget) surfaces as `Lz4DecodeError` on this path — the pre-sized
+  buffer IS the cap — where the zlib path names the same attack
+  `DecompressionBomb`; grep for both when hunting that pattern.
 - `verify_entry` routes LZ4 through the same block-walk hash arm as
   zlib (the entry SHA1 covers on-disk compressed bytes; no
   decompression happens on the verify path). Because raw LZ4 blocks
