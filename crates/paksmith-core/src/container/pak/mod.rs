@@ -40,7 +40,8 @@
 //!   oracle fixture for that path yet, paksmith returns
 //!   [`crate::PaksmithError::UnsupportedFeature`] rather than feed ciphertext
 //!   to the inflater. Encrypted *uncompressed* entries decrypt normally.
-//! - Gzip / Oodle / Zstd compression — resolved from the FName table
+//! - Gzip / Oodle / Zstd compression — resolvable (Gzip and Oodle
+//!   also via the v3-v7 numeric IDs, Zstd via the v8+ FName table)
 //!   but not wired up downstream (only Zlib and LZ4 decompress).
 //! - Pre-v5 absolute-offset compression blocks (rare in real archives).
 //! - V9 frozen-index format (rejected at open).
@@ -2107,9 +2108,11 @@ const MAX_LZ4_BLOCK_EXPANSION_RATIO: u64 = 255;
 /// budgeted at `remaining` — NOT `min(remaining, block_size)` — the
 /// exact mirror of `stream_zlib_to`'s `take(remaining + 1)`: a
 /// single-block entry can legitimately declare a
-/// `compression_block_size` smaller than `uncompressed_size` (both
-/// references decode that shape via single-block normalization —
-/// issue #685), and the v3-v9 inline index applies no parse-time
+/// `compression_block_size` smaller than `uncompressed_size` (repak
+/// decodes that shape everywhere and CUE4Parse on its encoded/v10+
+/// path, both via single-block normalization; CUE4Parse's legacy
+/// v3-v9 reader has no normalization and rejects it — issue #685),
+/// and the v3-v9 inline index applies no parse-time
 /// `block_count × block_size` bound that would reject it first.
 fn lz4_block_budget(remaining: u64, block_size: u64, is_final: bool) -> u64 {
     if is_final {
@@ -2158,11 +2161,13 @@ fn lz4_block_output_cap(expected_out: u64, compressed_len: u64) -> u64 {
 /// there is no mid-decode growth loop — the output buffer is
 /// pre-sized to the block's decode budget (`lz4_block_budget`:
 /// `min(remaining, compression_block_size)` for non-final blocks,
-/// the remaining output for the final block), which doubles as the
+/// the remaining output for the final block), capped
+/// input-proportionally by `lz4_block_output_cap` at
+/// `compressed_len × 255`. The capped buffer doubles as the
 /// decompression-bomb cap: `lz4_flex::block::decompress_into` errors
 /// on a block that would expand past it (surfaced as
 /// [`DecompressionFault::Lz4DecodeError`]), so over-expansion can
-/// never allocate beyond the per-block budget.
+/// never allocate beyond the per-block capped budget.
 #[allow(clippy::too_many_lines)] // bounded by per-block error-reporting, mirroring stream_zlib_to
 fn stream_lz4_to<R: Read + Seek>(
     file: &mut R,
@@ -2298,7 +2303,7 @@ fn stream_lz4_to<R: Read + Seek>(
         // Sanity: every block except possibly the last must produce
         // exactly compression_block_size bytes — same invariant and
         // fault as the zlib path.
-        if i + 1 < entry.header().compression_blocks().len() && produced as u64 != block_size {
+        if !is_final && produced as u64 != block_size {
             let expected = entry.header().compression_block_size();
             warn!(
                 path,
@@ -3163,13 +3168,18 @@ mod tests {
     // They live in-package (not only in `paksmith-core-tests`) because
     // cargo-mutants scopes each mutant's test run to the mutated
     // package: the cross-crate integration copies do NOT credit
-    // mutants in `mod.rs`, so the `i + 1 < len` and `produced !=
-    // block_size` operators in that guard survive without these.
+    // mutants in `mod.rs`, so the `is_final` derivation
+    // (`i + 1 == len`) and the guard's `produced != block_size`
+    // operator survive without these.
     // EVERY test that touches the shared builder MUST be gated on
     // `__test_utils` because `crate::testing::wire` is — an ungated
-    // test breaks the default (feature-less) `cargo test` compile,
-    // and no CI lane catches that (workspace feature unification
-    // turns the feature on everywhere).
+    // test breaks every PACKAGE-SCOPED build of paksmith-core
+    // (cargo-mutants baseline, `cargo test -p paksmith-core`,
+    // publish). Wider invocations mask it: feature unification turns
+    // `__test_utils` on whenever paksmith-core-tests or
+    // paksmith-gui's dev-dep is in the resolved graph, which
+    // includes the bare default-members `cargo test`. CI's guard is
+    // therefore `-p paksmith-core`-scoped (#636 R8/R9).
 
     /// A valid multi-block LZ4 entry (two full non-final blocks that
     /// each inflate to EXACTLY `compression_block_size`, plus a short
@@ -3201,9 +3211,9 @@ mod tests {
     /// A single-block entry whose stored `compression_block_size` is
     /// SMALLER than `uncompressed_size`. The v3-v9 inline index has no
     /// parse-time `block_count × block_size` bound, so the shape
-    /// reaches the decoder; both cited references decode it (repak's
-    /// `ranges.len() == 1` normalization, CUE4Parse's
-    /// `compressionBlocksCount == 1` normalization) and the zlib path
+    /// reaches the decoder; repak decodes it (`ranges.len() == 1`
+    /// normalization — CUE4Parse normalizes only on its encoded/v10+
+    /// path and rejects this shape on v3-v9) and the zlib path
     /// decodes it too (its per-block budget is remaining-based, not
     /// `block_size`-bounded). The final block's budget must therefore
     /// be `remaining`, not `min(remaining, block_size)` — issue #685
@@ -3263,10 +3273,11 @@ mod tests {
     /// A non-final block that inflates to FEWER than
     /// `compression_block_size` bytes must surface
     /// `NonFinalBlockSizeMismatch` at that exact block. Pins the
-    /// guard's `i + 1 < len` predicate: inverting `<` to `>` makes the
-    /// guard never fire, so the shortfall would instead surface as a
-    /// cumulative `SizeUnderrun` — asserting the EXACT fault (and block
-    /// index) distinguishes the two and kills that mutant.
+    /// guard's `!is_final` predicate (derived from `i + 1 == len`): a
+    /// mutant that makes the guard never fire would instead surface
+    /// the shortfall as a cumulative `SizeUnderrun` — asserting the
+    /// EXACT fault (and block index) distinguishes the two and kills
+    /// that mutant.
     #[cfg(feature = "__test_utils")]
     #[test]
     fn read_lz4_entry_short_non_final_block_surfaces_non_final_mismatch() {

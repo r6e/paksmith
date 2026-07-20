@@ -94,6 +94,13 @@ pub fn write_pak_entry(
 /// Wire size of one v3+ FPakEntry record carrying `n` compression
 /// blocks: 3×u64 + method u32 + sha1(20) + (count u32 + n×2×u64) +
 /// encrypted u8 + block_size u32 = `57 + 16n`.
+///
+/// COMPRESSED entries only (`compression_method != 0`):
+/// `write_pak_entry` omits the block-count u32 and block table
+/// entirely for method-0 records, making those 53 bytes — this
+/// formula does not apply to them. `build_v8b_lz4_pak` pins the
+/// compressed shape against `write_pak_entry`'s actual output at
+/// runtime.
 #[must_use]
 pub const fn pak_entry_wire_size(n: u64) -> u64 {
     57 + 16 * n
