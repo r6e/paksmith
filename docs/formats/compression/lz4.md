@@ -74,17 +74,20 @@ total must equal `uncompressed_size` exactly. A block inflating
 past its budget is malformed (and, defensively, a
 decompression-bomb attempt).
 
-Both cited references normalize **single-block** entries: repak
-substitutes the entry's `uncompressed` size when there is exactly
-one block (`entry.rs`, `ranges.len() == 1` branch), and CUE4Parse's
-encoded-entry constructor does the same (`compressionBlocksCount ==
-1 → UncompressedSize`). The remaining-based budget above is
-observably equivalent: a single block is also the final block, so
-its budget is the full `uncompressed_size` regardless of the stored
-`compression_block_size` — a single-block entry declaring a
-`compression_block_size` *smaller* than its `uncompressed_size` (a
-shape no writer in paksmith's fixture corpus produces, but which
-both references accept) decodes identically here.
+The cited references normalize **single-block** entries with
+different scope: repak substitutes the entry's `uncompressed` size
+whenever there is exactly one block (`entry.rs`, `ranges.len() == 1`
+branch, all versions), while CUE4Parse does so ONLY in its
+encoded-entry (v10+) constructor (`compressionBlocksCount == 1 →
+UncompressedSize`) — its legacy v3-v9 reader takes the stored
+`compression_block_size` raw and rejects the inconsistent shape.
+Paksmith's final-block budget is observably equivalent to the
+normalization where it applies: a single block is also the final
+block, so its budget is the full `uncompressed_size` regardless of
+the stored `compression_block_size` — a single-block entry declaring
+a `compression_block_size` *smaller* than its `uncompressed_size`
+(a shape no writer in paksmith's fixture corpus produces) decodes
+here exactly as repak decodes it.
 
 The inconsistent claim `uncompressed_size > block_count ×
 compression_block_size` splits by index generation: the v10+
@@ -93,19 +96,26 @@ compression_block_size` splits by index generation: the v10+
 while the v3-v9 **inline** index applies no parse-time bound — the
 shape reaches the decoder, where BOTH sub-shapes decode.
 Single-block entries decode via the final-block budget (see above,
-convergent with the references). Multi-block entries whose FINAL
-block carries the excess also decode — a second, deliberate
-divergence in the LENIENT direction: the references bound the final
-chunk by `compression_block_size` and reject that framing, while
-paksmith's final-block budget is `remaining`, consistent with its
-own zlib path (`take(remaining + 1)`), which accepts the identical
-shape. Adversarial-only (no real writer emits it); pinned by
+matching repak; CUE4Parse's legacy reader rejects this shape — the
+references disagree with each other here, and paksmith sides with
+repak and its own zlib path). Multi-block entries whose FINAL block
+carries the excess also decode — a divergence in the LENIENT
+direction against BOTH references: repak bounds the final chunk by
+`compression_block_size` and CUE4Parse's legacy reader fails the
+shape too, while paksmith's final-block budget is `remaining`,
+consistent with its own zlib path (`take(remaining + 1)`), which
+accepts the identical framing. Adversarial-only (no real writer
+emits it); pinned by
 `read_lz4_entry_multi_block_final_overflow_decodes`. A multi-block
 entry that misdeclares a NON-final block still dies at the
-exact-size check. Whether real UE 4.26-era v10 archives emit a
-truncated single-block `compression_block_size` (and would thus
-need the references' normalization on the encoded-parse path) is
-unconfirmed and tracked in issue #685.
+exact-size check. One further strict-direction mechanism
+difference: trailing junk after a valid stream WITHIN one block is
+ignored by zlib (the decoder stops at stream end) but rejected by
+LZ4 (`decompress_into` parses the whole input) — fail-closed, so
+not a compatibility risk. Whether real UE 4.26-era v10 archives
+emit a truncated single-block `compression_block_size` (and would
+thus need the references' normalization on the encoded-parse path)
+is unconfirmed and tracked in issue #685.
 
 ## Variants
 
@@ -186,18 +196,20 @@ writer never produces.
 
 ## Paksmith implementation
 
-**Status:** `complete`. Two documented derivation divergences vs the
-cited references remain, both on adversarial-only shapes (see
-"Per-block decompressed size derivation"): (1) on the v10+
-**encoded** index, a single-block entry whose stored
-`compression_block_size` is smaller than its `uncompressed_size` is
-rejected fail-closed at index parse
+**Status:** `complete`. Three documented derivation divergences vs
+at least one cited reference remain, all on adversarial-only shapes
+(see "Per-block decompressed size derivation"; note the references
+also disagree with EACH OTHER on the v3-v9 single-block case):
+(1) on the v10+ **encoded** index, a single-block entry whose
+stored `compression_block_size` is smaller than its
+`uncompressed_size` is rejected fail-closed at index parse
 (`IndexParseFault::BoundsExceeded`) rather than decoded via the
-references' single-block normalization — issue #685; on v3-v9
-legacy indexes the same shape decodes identically to the
-references. (2) On v3-v9, a multi-block entry whose FINAL block
-carries the excess decodes (lenient, consistent with paksmith's own
-zlib path) where the references reject it.
+single-block normalization both references apply there — issue
+#685. (2) On v3-v9, the same single-block shape decodes (matching
+repak) where CUE4Parse's legacy reader rejects it. (3) On v3-v9, a
+multi-block entry whose FINAL block carries the excess decodes
+(lenient, consistent with paksmith's own zlib path) where both
+references reject it.
 
 `stream_lz4_to` in `crates/paksmith-core/src/container/pak/mod.rs`
 (issue #636), mirroring `stream_zlib_to`'s discipline:
