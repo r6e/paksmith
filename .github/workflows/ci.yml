@@ -187,9 +187,21 @@ jobs:
       # test` command every contributor's pre-commit hook runs. Runs
       # before nextest so the failure surfaces in seconds instead of
       # after the long all-features run.
+      #
+      # TWO invocations, deliberately: the bare default-members
+      # `cargo test --no-run` catches an UNGATED in-package test
+      # (e.g. a `mod.rs` test using `crate::testing::wire` without
+      # `#[cfg(feature = "__test_utils")]` — the #636 R8 finding),
+      # which the `--workspace` form structurally CANNOT catch:
+      # paksmith-core-tests' `features = ["__test_utils"]` dependency
+      # unifies the feature onto paksmith-core for the whole workspace
+      # build. The `--workspace` form still runs second to catch a
+      # cross-crate consumer missing its own feature opt-in (#406).
       - name: Verify default cargo test still compiles
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test --workspace --no-run
+        run: |
+          cargo test --no-run
+          cargo test --workspace --no-run
       # nextest runs unit + integration tests in parallel and emits
       # JUnit XML at target/nextest/ci/junit.xml (configured in
       # .config/nextest.toml). Doctests are NOT covered by nextest
