@@ -81,6 +81,9 @@ use crate::error::{
     IndexParseFault, IndexRegionKind, OffsetPastFileSizeKind, OverflowSite, PaksmithError,
     WireField, check_region_bounds,
 };
+// Unused in the no-`__test_utils` lib-test compile (seam machinery
+// no-ops there); exercised by CI's package-scoped compile guard.
+#[cfg_attr(not(feature = "__test_utils"), allow(unused_imports))]
 use crate::seams::PakSeam;
 
 use self::footer::PakFooter;
@@ -3297,6 +3300,39 @@ mod tests {
             ),
             "expected NonFinalBlockSizeMismatch at block 0, got {err:?}"
         );
+    }
+
+    /// A single-block entry whose stream inflates to FEWER bytes than
+    /// the declared `uncompressed_size` must surface `SizeUnderrun`
+    /// from the shared `check_cumulative_size` — the final block has
+    /// no exact-size guard, so the post-loop cumulative check is the
+    /// only thing standing. Lives in-package (not just the
+    /// integration copy) so cargo-mutants credits the
+    /// `check_cumulative_size -> Ok(())` gut mutant, which the CI
+    /// shard run proved survives on integration coverage alone.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_lz4_entry_short_final_block_surfaces_size_underrun() {
+        // Stream decodes to 200 bytes; the entry claims 300.
+        let stream = lz4_flex::block::compress(&[b'A'; 200]);
+        let pak = crate::testing::wire::build_v8b_lz4_pak(std::slice::from_ref(&stream), 300, 300);
+        let reader = PakReader::from_bytes(pak).expect("synthetic pak parses");
+        let mut out = Vec::new();
+        let err = reader
+            .read_entry_to(crate::testing::wire::LZ4_SYNTH_PATH, &mut out)
+            .expect_err("short final block must be rejected");
+        match &err {
+            PaksmithError::Decompression {
+                fault: DecompressionFault::SizeUnderrun { actual, expected },
+                ..
+            } => {
+                assert_eq!(*actual, 200, "actual must be the produced byte count");
+                assert_eq!(*expected, 300, "expected must be the declared size");
+            }
+            other => {
+                panic!("expected SizeUnderrun {{ actual: 200, expected: 300 }}; got {other:?}")
+            }
+        }
     }
 
     /// The mirror direction: a non-final block that inflates PAST
