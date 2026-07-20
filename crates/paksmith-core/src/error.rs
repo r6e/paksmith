@@ -490,7 +490,8 @@ pub enum DecompressionFault {
     /// Per-block compressed-bytes buffer reservation failed before
     /// any decompression has started. Fired by the
     /// `try_reserve_exact(block_len_usize)` site in
-    /// `stream_zlib_to`. Distinct from a generic OOM because the
+    /// `read_compressed_block` — the compressed-input read shared by
+    /// the zlib and LZ4 paths. Distinct from a generic OOM because the
     /// path is bounded by `MAX_UNCOMPRESSED_ENTRY_BYTES` upstream
     /// — surfacing here means a fallible reservation legitimately
     /// failed at the pre-decode stage.

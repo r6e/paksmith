@@ -1,13 +1,16 @@
 //! Integration tests for the typed OOM-failure variants
 //! [`DecompressionFault::CompressedBlockReserveFailed`] and
-//! [`DecompressionFault::ZlibScratchReserveFailed`] (issue #124).
+//! [`DecompressionFault::ZlibScratchReserveFailed`] (issue #124), plus
+//! [`DecompressionFault::Lz4OutputReserveFailed`] (issue #636).
 //!
 //! These variants fire only on real allocator pressure in production,
 //! which integration tests can't reliably induce. Instead, we exercise
 //! the production code paths through `__test_utils`-feature-gated
-//! injection seams that synthesize a `TryReserveError` at the two
-//! `try_reserve*` sites in `stream_zlib_to`. See
-//! `paksmith_core::testing::oom` for the seam API.
+//! injection seams that synthesize a `TryReserveError` at the
+//! `try_reserve*` sites in the pak decompression paths
+//! (`read_compressed_block`, shared by zlib and LZ4;
+//! `stream_zlib_to`'s scratch-growth loop; `stream_lz4_to`'s output
+//! reservation). See `paksmith_core::testing::oom` for the seam API.
 //!
 //! The Display unit tests for these variants live in
 //! `crates/paksmith-core/src/error.rs::tests` (added in PR #123 R3) and

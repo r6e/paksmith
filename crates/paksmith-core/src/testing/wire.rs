@@ -100,13 +100,15 @@ pub const fn pak_entry_wire_size(n: u64) -> u64 {
 }
 
 /// Build a synthetic v8b pak with one LZ4-compressed entry carrying a
-/// REAL entry hash. repak-written fixtures use the v10+ encoded index,
-/// which has no per-entry SHA1 field, so they can never exercise
-/// `verify_entry`'s hash arm; this builder writes a legacy v8b index
-/// (which stores the full FPakEntry incl. its SHA1) so the LZ4 verify
-/// routing and the decode-failure negatives are observable. It also
-/// lets callers craft inconsistent claims (short / over-expanding
-/// blocks) that a real writer never produces.
+/// REAL entry hash. The repak-written v11 fixture uses the v10+
+/// encoded index, which has no per-entry SHA1 field, so it can never
+/// exercise `verify_entry`'s hash arm (the repak-written v8b fixture
+/// does — its legacy index stores a real hash); this builder also
+/// writes a legacy v8b index (full FPakEntry incl. its SHA1) so the
+/// LZ4 verify routing and the decode-failure negatives are observable
+/// on CRAFTED input, not just on well-formed oracle output. It lets
+/// callers craft inconsistent claims (short / over-expanding /
+/// under-declared blocks) that a real writer never produces.
 ///
 /// Footer: guid(16) + encrypted(1) + magic + version 8 + index
 /// offset/size + index hash(20) + FIVE 32-byte compression-name slots

@@ -61,7 +61,10 @@ flate2 = "1.1"
 # Raw-block LZ4 for pak entries (#636) — the same block form repak
 # writes and CUE4Parse decodes. `frame` (and its deps) excluded: UE
 # pak blocks are raw, never LZ4-frame. Safe codecs kept on
-# (untrusted input).
+# (untrusted input). The 0.12.2 floor is deliberate:
+# RUSTSEC-2026-0041 (reused-output-buffer memory disclosure in the
+# block API) is fixed in 0.12.1+ — don't loosen to "0.12", which
+# would readmit the vulnerable 0.12.0.
 lz4_flex = { version = "0.12.2", default-features = false, features = [
     "std",
     "safe-encode",

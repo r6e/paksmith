@@ -61,32 +61,40 @@ SHA1 (computed over the on-disk *compressed* block bytes — see
 ### Per-block decompressed size derivation
 
 ```
-expected(i) = min(compression_block_size,
-                  uncompressed_size - sum(expected(0..i)))
+budget(i) = uncompressed_size - sum(produced(0..i))
 ```
 
-Non-final blocks MUST inflate to exactly `compression_block_size`;
-the final block to the remaining byte count. A block inflating past
-its expected size is malformed (and, defensively, a
+Every block decodes into a budget bounded by the REMAINING output —
+mirroring the zlib path's `take(remaining + 1)` bound. Non-final
+blocks MUST produce exactly `compression_block_size` (checked after
+decode); the final block takes whatever remains, and the cumulative
+total must equal `uncompressed_size` exactly. A block inflating
+past its budget is malformed (and, defensively, a
 decompression-bomb attempt).
 
-Both cited references normalize **single-block** entries instead of
-applying the formula: repak substitutes the entry's `uncompressed`
-size when there is exactly one block (`entry.rs`,
-`ranges.len() == 1` branch), and CUE4Parse's encoded-entry
-constructor does the same (`compressionBlocksCount == 1 →
-UncompressedSize`). For well-formed entries the results are
-identical — a single block's expected output IS the remaining byte
-count — so paksmith keeps the uniform formula. The derivations
-diverge only on a single-block entry whose stored
-`compression_block_size` is *smaller* than its `uncompressed_size`:
-the references decode that shape via the normalization, while
-paksmith rejects it earlier, at index-parse time
-(`uncompressed_size > block_count × compression_block_size` →
-`IndexParseFault::BoundsExceeded`), fail-closed. No writer in
-paksmith's fixture corpus produces the shape (repak always stores a
-full `compression_block_size`); whether real UE 4.26-era v10
-archives do is unconfirmed and tracked in issue #685.
+Both cited references normalize **single-block** entries: repak
+substitutes the entry's `uncompressed` size when there is exactly
+one block (`entry.rs`, `ranges.len() == 1` branch), and CUE4Parse's
+encoded-entry constructor does the same (`compressionBlocksCount ==
+1 → UncompressedSize`). The remaining-based budget above is
+observably equivalent: a single block is also the final block, so
+its budget is the full `uncompressed_size` regardless of the stored
+`compression_block_size` — a single-block entry declaring a
+`compression_block_size` *smaller* than its `uncompressed_size` (a
+shape no writer in paksmith's fixture corpus produces, but which
+both references accept) decodes identically here.
+
+The inconsistent claim `uncompressed_size > block_count ×
+compression_block_size` splits by index generation: the v10+
+**encoded** index rejects it at parse time
+(`IndexParseFault::BoundsExceeded`, fail-closed, both codecs),
+while the v3-v9 **inline** index applies no parse-time bound — the
+shape reaches the decoder, where single-block entries decode (see
+above) and lying multi-block entries die at the non-final
+exact-size check. Whether real UE 4.26-era v10 archives emit a
+truncated single-block `compression_block_size` (and would thus
+need the references' normalization on the encoded-parse path) is
+unconfirmed and tracked in issue #685.
 
 ## Variants
 
@@ -168,11 +176,13 @@ writer never produces.
 ## Paksmith implementation
 
 **Status:** `complete`. One documented derivation divergence vs the
-cited references: a single-block entry whose stored
-`compression_block_size` is smaller than its `uncompressed_size` is
-rejected fail-closed at index parse rather than decoded via
-single-block normalization — see "Per-block decompressed size
-derivation" and issue #685.
+cited references remains, on the v10+ **encoded** index only: a
+single-block entry whose stored `compression_block_size` is smaller
+than its `uncompressed_size` is rejected fail-closed at index parse
+(`IndexParseFault::BoundsExceeded`) rather than decoded via the
+references' single-block normalization — see "Per-block decompressed
+size derivation" and issue #685. On v3-v9 legacy indexes the same
+shape decodes identically to the references.
 
 `stream_lz4_to` in `crates/paksmith-core/src/container/pak/mod.rs`
 (issue #636), mirroring `stream_zlib_to`'s discipline:
