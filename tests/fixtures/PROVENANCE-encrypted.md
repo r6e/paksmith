@@ -53,8 +53,11 @@ list is not verified by paksmith tests (the index cannot be decrypted at this
 phase); provenance only is recorded here.
 
 The `_encrypted_compressed` pair (issue #634) carries the same four-entry
-corpus with entries that are BOTH zlib-compressed AND AES-256-ECB encrypted
-(plaintext indexes: legacy v8b and encoded v11 respectively). They are the
+corpus, AES-256-ECB encrypted, behind plaintext indexes (legacy v8b and
+encoded v11 respectively). In the v8b fixture all four entries are
+zlib-compressed; in the v11 fixture only `test.png` and `zeros.bin` are
+compressed (UnrealPak stored the two already-incompressible small text
+entries uncompressed). They are the
 empirical anchors for two wire facts: the stored entry SHA-1 covers the
 on-disk ciphertext truncated to `compressed_size`, and — for encrypted
 entries — UnrealPak stores `compressed_size` as the sum of the AES-aligned

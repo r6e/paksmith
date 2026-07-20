@@ -979,14 +979,10 @@ impl PakReader {
                 sha1_of_reader(&mut file, entry.header().uncompressed_size(), &mut buf)?
             }
             CompressionMethod::Zlib | CompressionMethod::Lz4 => {
-                // Hash the on-disk compressed bytes block-by-block —
-                // method-agnostic: the index hash covers the on-disk
-                // payload, so no decompression happens here and zlib
-                // and LZ4 entries walk the identical path.
-                // All per-block validation (start-overlap, end-past-file,
-                // out-of-order) routes through `validate_block_bounds`
-                // shared with the stream_*_to readers — keeps the verify
-                // and read paths from diverging on the same archive.
+                // Hash the on-disk compressed bytes — method-agnostic
+                // (the stored SHA1 covers the on-disk payload, so no
+                // decompression happens here and zlib and LZ4 entries
+                // walk the identical path).
                 let payload_start = entry
                     .header()
                     .offset()
@@ -997,22 +993,69 @@ impl PakReader {
                             operation: OverflowSite::OffsetPlusHeader,
                         },
                     })?;
-                let mut hasher = Sha1::new();
-                let mut prev_abs_end: Option<u64> = None;
-                for (i, block) in entry.header().compression_blocks().iter().enumerate() {
-                    let (abs_start, _abs_end) = validate_block_bounds(
-                        block,
-                        i,
-                        entry.header().offset(),
-                        payload_start,
-                        self.file_size,
-                        &mut prev_abs_end,
-                        path,
-                    )?;
-                    let _ = file.seek(SeekFrom::Start(abs_start))?;
-                    feed_hasher(&mut hasher, &mut file, block.len(), &mut buf)?;
+                if entry.header().is_encrypted() {
+                    // Encrypted entries store one contiguous
+                    // AES-16-aligned ciphertext region, and the stored
+                    // SHA1 covers exactly `[payload_start, payload_start
+                    // + compressed_size)` — INCLUDING the intra-block
+                    // AES padding (empirically pinned against the
+                    // UnrealPak fixtures: v8b `test.png` hashes 7760, not
+                    // the 7746 unaligned block sum). The per-block walk
+                    // below would hash only the unaligned block ranges
+                    // and skip the padding gaps, producing a false
+                    // `HashMismatch` on pristine archives (#634 R1).
+                    // Hash the contiguous ciphertext instead — keyless,
+                    // no decryption. `compressed_size` is AES-aligned for
+                    // encrypted entries, so it equals the aligned region.
+                    let compressed = entry.header().compressed_size();
+                    let payload_end = payload_start.checked_add(compressed).ok_or_else(|| {
+                        PaksmithError::InvalidIndex {
+                            fault: IndexParseFault::U64ArithmeticOverflow {
+                                path: Some(path.to_string()),
+                                operation: OverflowSite::PayloadEnd,
+                            },
+                        }
+                    })?;
+                    if payload_end > self.file_size {
+                        return Err(PaksmithError::InvalidIndex {
+                            fault: IndexParseFault::OffsetPastFileSize {
+                                path: path.to_string(),
+                                kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                                    payload_end,
+                                    file_size_max: self.file_size,
+                                },
+                            },
+                        });
+                    }
+                    let _ = file.seek(SeekFrom::Start(payload_start))?;
+                    sha1_of_reader(&mut file, compressed, &mut buf)?
+                } else {
+                    // Plaintext compressed entries: hash the on-disk
+                    // compressed bytes block-by-block. Blocks are
+                    // contiguous (no AES padding), so this equals the
+                    // contiguous `compressed_size` range — but the walk
+                    // additionally routes every block through
+                    // `validate_block_bounds` (start-overlap,
+                    // end-past-file, out-of-order), shared with the
+                    // stream_*_to readers so verify and read can't
+                    // diverge on the same archive.
+                    let mut hasher = Sha1::new();
+                    let mut prev_abs_end: Option<u64> = None;
+                    for (i, block) in entry.header().compression_blocks().iter().enumerate() {
+                        let (abs_start, _abs_end) = validate_block_bounds(
+                            block,
+                            i,
+                            entry.header().offset(),
+                            payload_start,
+                            self.file_size,
+                            &mut prev_abs_end,
+                            path,
+                        )?;
+                        let _ = file.seek(SeekFrom::Start(abs_start))?;
+                        feed_hasher(&mut hasher, &mut file, block.len(), &mut buf)?;
+                    }
+                    Sha1Digest::from(<[u8; 20]>::from(hasher.finalize()))
                 }
-                Sha1Digest::from(<[u8; 20]>::from(hasher.finalize()))
             }
             // Already rejected at the top of read_entry for known unsupported
             // methods; here we extend the same policy to verify_entry rather
@@ -4022,16 +4065,22 @@ mod tests {
     }
 
     /// The v11 sibling exercises the encoded-index generation end-to-end
-    /// (bit-packed entries, no per-entry SHA1 in the index).
+    /// (bit-packed entries, no per-entry SHA1 in the index). `test.png`
+    /// (not `test.txt`) is the target: in the v11 fixture only `test.png`
+    /// and `zeros.bin` are genuinely encrypted+COMPRESSED — `test.txt`
+    /// and `nested.txt` are stored encrypted-uncompressed, so they'd
+    /// exercise the pre-existing uncompressed arm, not the new path.
     #[test]
     fn reads_encrypted_compressed_entry_v11() {
+        const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
         let key = AesKey::new(FIXTURE_AES_KEY);
         let reader = PakReader::open_with_key(encrypted_compressed_v11_fixture(), key)
             .expect("open v11 encrypted+compressed fixture");
         let bytes = reader
-            .read_entry("test.txt")
+            .read_entry("test.png")
             .expect("read_entry must decrypt-then-decompress on the encoded index");
-        assert_eq!(bytes, FIXTURE_PLAINTEXT_TEST_TXT);
+        assert_eq!(bytes.len(), FIXTURE_TEST_PNG_LEN);
+        assert_eq!(&bytes[..8], &PNG_MAGIC);
     }
 
     /// Fail-closed: plaintext index → keyless open succeeds; reading an
@@ -4051,24 +4100,31 @@ mod tests {
     }
 
     /// TODO(Task-4) resolution pin (#634): the stored entry SHA-1 covers the
-    /// on-disk CIPHERTEXT truncated to `compressed_size` — verified
-    /// empirically against the UnrealPak-produced fixtures (for `test.txt`
-    /// in the uncompressed fixture, the 446-byte `compressed_size` range
-    /// matches and the 448-byte aligned region does NOT). Verification
-    /// therefore needs no key: an encrypted+compressed entry must verify
-    /// keylessly.
+    /// on-disk CIPHERTEXT `[payload_start, payload_start + compressed_size)`,
+    /// including the intra-block AES padding. Every entry in the compressed
+    /// fixture must verify keylessly — CRUCIALLY including `test.png`
+    /// (compressed_size 7760 = aligned footprint), `nested.txt` (352), and
+    /// `zeros.bin` (32), whose block sums are SHORTER than `compressed_size`.
+    /// The per-block-walk hash (unaligned block ranges) would mis-hash these
+    /// and only pass `test.txt`, whose 272-byte size is coincidentally
+    /// 16-aligned — the R1 false-`HashMismatch` regression. Iterating all
+    /// four entries makes that degenerate mask impossible.
     #[test]
-    fn verify_encrypted_compressed_entry_hashes_ciphertext_keylessly() {
+    fn verify_encrypted_compressed_entries_hash_ciphertext_keylessly() {
         let reader = PakReader::open(encrypted_compressed_fixture())
             .expect("keyless open (plaintext index)");
-        let outcome = reader
-            .verify_entry("test.txt")
-            .expect("verify_entry must run keylessly on an encrypted entry");
-        assert_eq!(
-            outcome,
-            VerifyOutcome::Verified,
-            "stored SHA1 covers the ciphertext, so keyless verify must pass"
-        );
+        for path in ["test.txt", "directory/nested.txt", "zeros.bin", "test.png"] {
+            let outcome = reader
+                .verify_entry(path)
+                .unwrap_or_else(|e| panic!("verify_entry({path}) must run keylessly: {e:?}"));
+            assert_eq!(
+                outcome,
+                VerifyOutcome::Verified,
+                "stored SHA1 covers the contiguous ciphertext, so keyless verify of \
+                 {path} must pass (a block-walk hash would false-mismatch the \
+                 non-16-aligned entries)"
+            );
+        }
     }
 
     /// Same pin for the UNCOMPRESSED encrypted class, where
