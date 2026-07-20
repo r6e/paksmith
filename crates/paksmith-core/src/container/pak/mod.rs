@@ -1702,8 +1702,9 @@ fn stream_uncompressed_to<R: Read + Seek>(
 /// computed absolute `(abs_start, abs_end)` and updates
 /// `prev_abs_end` so the next call sees this block's end.
 ///
-/// Colocated with both call sites (`stream_zlib_to` for the
-/// extract path and `verify_entry`'s Zlib arm for the hash path)
+/// Colocated with all three call sites (`stream_zlib_to` and
+/// `stream_lz4_to` for the extract paths, `verify_entry`'s shared
+/// `Zlib | Lz4` arm for the hash path)
 /// so the three checks (`StartOverlapsHeader`, `EndPastFileSize`,
 /// `OutOfOrder`) live in one place. Without the shared helper a
 /// regression that hardens one path silently leaves the other
