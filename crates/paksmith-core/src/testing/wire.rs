@@ -148,18 +148,25 @@ pub fn build_v8b_lz4_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size
     }
     let sha1: [u8; 20] = hasher.finalize().into();
 
+    // The in-data record and the index record MUST be identical
+    // (`verify_entry` cross-validates them); one closure guarantees
+    // the two call sites can't drift.
+    let write_entry = |buf: &mut Vec<u8>| {
+        write_pak_entry(
+            buf,
+            0,
+            compressed_size,
+            uncompressed_size,
+            1, // 1-based index into the footer name table → slot 0 = "LZ4"
+            &sha1,
+            &blocks,
+            block_size,
+            false,
+        );
+    };
+
     let mut data = Vec::new();
-    write_pak_entry(
-        &mut data,
-        0,
-        compressed_size,
-        uncompressed_size,
-        1, // 1-based index into the footer name table → slot 0 = "LZ4"
-        &sha1,
-        &blocks,
-        block_size,
-        false,
-    );
+    write_entry(&mut data);
     assert_eq!(
         data.len() as u64,
         header_size,
@@ -173,17 +180,7 @@ pub fn build_v8b_lz4_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size
     write_fstring(&mut index, "../../../");
     index.write_u32::<LittleEndian>(1).unwrap();
     write_fstring(&mut index, LZ4_SYNTH_PATH);
-    write_pak_entry(
-        &mut index,
-        0,
-        compressed_size,
-        uncompressed_size,
-        1,
-        &sha1,
-        &blocks,
-        block_size,
-        false,
-    );
+    write_entry(&mut index);
 
     let index_offset = data.len() as u64;
     let index_size = index.len() as u64;

@@ -2215,18 +2215,13 @@ fn stream_lz4_to<R: Read + Seek>(
         let block_len = block.len();
         read_compressed_block(file, &mut compressed, block_len, abs_start, i, "lz4", path)?;
 
-        // Expected decompressed size for THIS block — see
-        // `lz4_block_budget` for the full rationale: non-final blocks
-        // are budgeted (and thus allocated) at `min(remaining,
-        // block_size)` since the post-decode check below pins them to
-        // exactly `block_size`; the FINAL block is budgeted at
-        // `remaining`, the mirror of `stream_zlib_to`'s
-        // `take(remaining + 1)`, so a single-block entry declaring a
-        // `compression_block_size` smaller than `uncompressed_size`
-        // decodes the way both references do (issue #685). A crafted
-        // entry with excess blocks yields expected 0 for the extras
-        // (remaining is exhausted): non-final extras die at the
-        // block-size check below (a 0-byte decode != block_size), and
+        // Decode budget for THIS block — see `lz4_block_budget` for
+        // the non-final/final split and its rationale. A crafted
+        // entry with excess blocks yields budget 0 for the extras
+        // (remaining is exhausted): a content-carrying extra dies
+        // INSIDE the decoder (`OutputTooSmall` against the 0-byte
+        // buffer → `Lz4DecodeError`), a zero-output non-final extra
+        // dies at the block-size check below (0 != block_size), and
         // while a single TRAILING zero-output block (e.g. the 1-byte
         // `0x00` "empty last sequence" block) does decode Ok into an
         // empty buffer, it produces no bytes — output stays exactly
@@ -3301,6 +3296,40 @@ mod tests {
                 }
             ),
             "expected NonFinalBlockSizeMismatch at block 0, got {err:?}"
+        );
+    }
+
+    /// The mirror direction: a non-final block that inflates PAST
+    /// `compression_block_size` dies INSIDE the decoder
+    /// (`OutputTooSmall` against the `min(remaining, block_size)`
+    /// buffer → `Lz4DecodeError`) — a different fault than the
+    /// under-produce direction's post-decode `NonFinalBlockSizeMismatch`
+    /// above. Pins the budget's non-final `min` arm (a
+    /// `remaining`-sized mutant buffer would decode this block
+    /// successfully) and the doc's fault-taxonomy claim (R10 review).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_lz4_entry_over_producing_non_final_block_rejected() {
+        let block_size = 64u32;
+        // block0 inflates to 128 (> 64) and is non-final; block1
+        // supplies a valid 64-byte tail of a 192-byte total.
+        let over = lz4_flex::block::compress(&[b'A'; 128]);
+        let tail = lz4_flex::block::compress(&[b'B'; 64]);
+        let pak = crate::testing::wire::build_v8b_lz4_pak(&[over, tail], 192, block_size);
+        let reader = PakReader::from_bytes(pak).expect("synthetic pak parses");
+        let mut out = Vec::new();
+        let err = reader
+            .read_entry_to(crate::testing::wire::LZ4_SYNTH_PATH, &mut out)
+            .expect_err("over-producing non-final block must be rejected");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::Decompression {
+                    fault: DecompressionFault::Lz4DecodeError { block_index: 0, .. },
+                    ..
+                }
+            ),
+            "expected Lz4DecodeError at block 0 (decoder-level OutputTooSmall), got {err:?}"
         );
     }
 
