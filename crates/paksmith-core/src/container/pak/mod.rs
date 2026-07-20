@@ -2183,19 +2183,31 @@ fn stream_lz4_to<R: Read + Seek>(
 
         // Expected decompressed size for THIS block: the fixed
         // compression_block_size for every block except the last,
-        // which takes the remainder. `min` covers both (the remainder
-        // is < block_size only on the final block of a well-formed
-        // entry). A crafted entry with excess blocks yields expected 0
-        // for the extras: non-final extras die at the block-size check
-        // below (a 0-byte decode != block_size), and while a single
-        // TRAILING zero-output block (e.g. the 1-byte `0x00` "empty
-        // last sequence" block) does decode Ok into an empty buffer,
-        // it produces no bytes — output stays exactly the declared
-        // `uncompressed_size` via `check_cumulative_size`. The repak
-        // oracle is more lenient still (it silently ignores ALL excess
-        // blocks), so this is matching-or-stricter behavior.
+        // which takes the remainder. The decode budget is REMAINING-
+        // based — the exact mirror of `stream_zlib_to`'s
+        // `take(remaining + 1)` — NOT `min(remaining, block_size)`:
+        // a single-block entry can legitimately store a
+        // `compression_block_size` smaller than `uncompressed_size`
+        // (both references decode that shape via single-block
+        // normalization: repak's `ranges.len() == 1` branch,
+        // CUE4Parse's `compressionBlocksCount == 1` arm — issue #685),
+        // and the v3-v9 inline index applies no parse-time
+        // `block_count × block_size` bound that would reject it
+        // first. Bounding the budget by `block_size` made LZ4 reject
+        // framing the zlib path decodes. Non-final blocks are still
+        // pinned to exactly `block_size` by the post-decode check
+        // below. A crafted entry with excess blocks yields expected 0
+        // for the extras (remaining is exhausted): non-final extras
+        // die at the block-size check below (a 0-byte decode !=
+        // block_size), and while a single TRAILING zero-output block
+        // (e.g. the 1-byte `0x00` "empty last sequence" block) does
+        // decode Ok into an empty buffer, it produces no bytes —
+        // output stays exactly the declared `uncompressed_size` via
+        // `check_cumulative_size`. The repak oracle is more lenient
+        // still (it silently ignores ALL excess blocks), so this is
+        // matching-or-stricter behavior.
         let remaining = uncompressed_size.saturating_sub(bytes_written);
-        let expected_out = remaining.min(block_size);
+        let expected_out = remaining;
 
         // SECURITY (#636): cap the reservation input-proportionally —
         // see `lz4_block_output_cap` for the derivation and threat
@@ -3125,6 +3137,35 @@ mod tests {
             .expect("multi-block lz4 round-trip must succeed");
         assert_eq!(written, payload.len() as u64);
         assert_eq!(out, payload, "multi-block decode must be byte-exact");
+    }
+
+    /// A single-block entry whose stored `compression_block_size` is
+    /// SMALLER than `uncompressed_size`. The v3-v9 inline index has no
+    /// parse-time `block_count × block_size` bound, so the shape
+    /// reaches the decoder; both cited references decode it (repak's
+    /// `ranges.len() == 1` normalization, CUE4Parse's
+    /// `compressionBlocksCount == 1` normalization) and the zlib path
+    /// decodes it too (its per-block budget is remaining-based, not
+    /// `block_size`-bounded). The final block's budget must therefore
+    /// be `remaining`, not `min(remaining, block_size)` — issue #685
+    /// context, R7 review finding.
+    #[test]
+    fn read_lz4_entry_single_block_smaller_declared_block_size_round_trips() {
+        let payload: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+        let stream = lz4_flex::block::compress(&payload);
+        // block_size (128) < uncompressed_size (300), one block.
+        let pak = crate::testing::wire::build_v8b_lz4_pak(
+            std::slice::from_ref(&stream),
+            payload.len() as u64,
+            128,
+        );
+        let reader = PakReader::from_bytes(pak).expect("synthetic v8b pak parses");
+        let mut out = Vec::new();
+        let written = reader
+            .read_entry_to(crate::testing::wire::LZ4_SYNTH_PATH, &mut out)
+            .expect("single-block entry with an under-declared block_size must decode");
+        assert_eq!(written, payload.len() as u64);
+        assert_eq!(out, payload, "decode must be byte-exact");
     }
 
     /// A non-final block that inflates to FEWER than
