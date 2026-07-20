@@ -317,11 +317,13 @@ See `docs/security/allocation-caps.md` for the broader policy.
   AES-encrypted — all four entries zlib-compressed in the v8b fixture,
   and `test.png`/`zeros.bin` compressed while `test.txt`/`nested.txt`
   are stored uncompressed in the v11 fixture.
-- **Cross-validation oracle:** repak[^1] (paksmith's primary pak
-  oracle; covers the per-entry-flag and footer-flag detection
-  identically, and the aligned-read + ECB-decrypt entry framing) and
-  CUE4Parse[^2] (for the block-cipher specifics and the
-  `Crypto.json` key-file format).
+- **Cross-validation oracle:** repak (paksmith's primary pak oracle):
+  the per-entry-flag and footer-flag detection mirror repak's on-wire
+  encryption-metadata parsing[^1]; the aligned-read + ECB-decrypt entry
+  framing is cross-validated against repak's `entry.rs::read_file` read
+  path[^3] — the git-dep rev that produced the vendored fixtures.
+  CUE4Parse[^2] covers the block-cipher specifics and the `Crypto.json`
+  key-file format.
 - **Fixture-anchored wire facts (#634):**
   - The stored per-entry SHA-1 covers the on-disk **ciphertext
     truncated to `compressed_size`** — not the plaintext, and not the
@@ -343,6 +345,15 @@ See `docs/security/allocation-caps.md` for the broader policy.
     repak's read-side cursor logic (CUE4Parse-corroborated), not on a
     UnrealPak-authored multi-block archive. Fail-closed
     (`CompressedSizeMismatch` on a mismatch); tracked as issue #688.
+  - **Encrypted + LZ4 entries unverified against a fixture.** Every
+    vendored encrypted+compressed fixture entry is zlib-compressed, so
+    the encrypted+LZ4 decrypt-then-decompress path (LZ4 over the
+    `RebasedReader`) is exercised only by code inspection — its reader
+    access is `read_compressed_block`, which is `Seek(Start)`-only and
+    thus honours the `RebasedReader` contract. It is reachable by
+    crafted input via the v8+ compression-method slot; a first-party
+    encrypted+LZ4 fixture is blocked on the same synthetic-pak
+    scaffolding as the multi-block case, and is tracked under issue #688.
 
 ## Paksmith implementation
 
@@ -408,18 +419,21 @@ detection is a known gap.
 - `PaksmithError::Decryption { path: Option<String> }` — the only
   decryption-related variant today. Path is `Some` when opening by
   path; `None` from `from_reader`.
-- Future: `DecryptionFault::InvalidKey { … }`,
-  `DecryptionFault::KeyNotFound { guid }`,
-  `DecryptionFault::BadKeyLength { … }` etc. when AES decryption
-  lands.
+- Not yet surfaced as typed sub-variants: `InvalidKey`,
+  `KeyNotFound { guid }`, `BadKeyLength`, etc. AES decryption has
+  shipped (see Phase plan below), but every decryption failure today
+  collapses into the single `Decryption` variant above; a finer-grained
+  `DecryptionFault` taxonomy is a possible future refinement, not a
+  pending prerequisite.
 
 **Cap constants:** none specific to encryption.
 
 **Phase plan:**
-- Detection (current): `docs/plans/phase-1-foundation.md` (shipped as part of pak footer + entry-header parsing).
-- AES decryption + key management: not yet in a phase plan. Phase 5 (game profiles) is the natural insertion point — the profile system will own the key registry.
+- Detection: `docs/plans/phase-1-foundation.md` (shipped as part of pak footer + entry-header parsing).
+- AES decryption + key management: shipped in Phase 5 — index and uncompressed-entry decryption in Phase 5a (#589), the profile-owned key registry and key store in Phase 5b (#590) — extended by #634 with decrypt-then-decompress for zlib/LZ4 compressed entries. Remaining gaps (v10+ encrypted indexes #635, V4–V6 detection) are tracked under Known divergences above.
 
 ## References
 
 [^1]: `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` plus `repak/src/lib.rs` — primary oracle for the on-wire encryption metadata. paksmith's detection paths mirror repak's exactly.
 [^2]: `FabianFG/CUE4Parse/CUE4Parse/Encryption/Aes/Aes.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — secondary oracle for the AES-256 ECB block-cipher specifics (confirms ECB mode, no padding, no IV, 16-byte block size). `FabianFG/CUE4Parse/CUE4Parse/Encryption/Aes/FAesKey.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — key-wrapping type; implements the `0x`-prefixed hex-string parser and 32-byte validation cited in the `Crypto.json` §Key field encoding. NIST FIPS 197 is the upstream reference for AES itself; not cited inline as it is external to UE.
+[^3]: `trumank/repak/repak/src/entry.rs@e215472c51db69328b1ce77be2db24d24c1d646b::read_file` — oracle for the read-side decrypt-then-decompress entry framing (aligned ciphertext read, ECB-decrypt, truncate to `compressed_size`, per-block inflate). This is the git-dep rev pinned in `crates/paksmith-fixture-gen/Cargo.toml` and the source commit recorded in `tests/fixtures/PROVENANCE-encrypted.md`; the vendored encrypted+compressed fixtures were produced against it.
