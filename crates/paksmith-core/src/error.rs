@@ -819,9 +819,10 @@ pub enum IndexParseFault {
     StreamEntryToDispatchedUnsupportedCompression {
         /// The [`CompressionMethod`] that reached the unsupported
         /// arm. Carries the full typed value so operators see whether
-        /// the dispatch hit `Gzip` / `Oodle` / `Zstd` / `Lz4` /
+        /// the dispatch hit `Gzip` / `Oodle` / `Zstd` /
         /// `Unknown(...)` / `UnknownByName(...)` without needing to
-        /// re-derive the variant from log context.
+        /// re-derive the variant from log context. (`Lz4` no longer
+        /// routes here — it gained its own streaming arm in #636.)
         method: CompressionMethod,
     },
     /// An encoded entry declared a compression method but
