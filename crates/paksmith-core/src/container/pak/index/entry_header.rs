@@ -577,7 +577,7 @@ impl PakEntryHeader {
             // fixture (all are single-block); it rests on repak's
             // read-side cursor advance (`entry.rs` `read_encoded`
             // aligns each block start by 16 for encrypted entries),
-            // which CUE4Parse corroborates. The accumulator above now
+            // which CUE4Parse corroborates. Tracked as issue #688. The accumulator above now
             // tracks the cursor advance (aligned when encrypted),
             // which equals the correct expectation for both classes.
             if compressed_total != compressed_size {

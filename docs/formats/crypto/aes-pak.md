@@ -313,8 +313,10 @@ See `docs/security/allocation-caps.md` for the broader policy.
   `tests/fixtures/PROVENANCE-encrypted.md`): the phase-5a quartet
   (`real_v8b_encrypted_{entries,index,both}.pak`,
   `real_v11_encrypted_index.pak`) plus the issue-#634 pair
-  (`real_v{8b,11}_encrypted_compressed.pak`) whose entries are both
-  zlib-compressed and encrypted.
+  (`real_v{8b,11}_encrypted_compressed.pak`) whose entries are
+  AES-encrypted — all four entries zlib-compressed in the v8b fixture,
+  and `test.png`/`zeros.bin` compressed while `test.txt`/`nested.txt`
+  are stored uncompressed in the v11 fixture.
 - **Cross-validation oracle:** repak[^1] (paksmith's primary pak
   oracle; covers the per-entry-flag and footer-flag detection
   identically, and the aligned-read + ECB-decrypt entry framing) and
@@ -334,6 +336,13 @@ See `docs/security/allocation-caps.md` for the broader policy.
   - **V10+ encrypted indexes** remain `UnsupportedFeature` — the
     path-hash/full-directory index decryption layout is issue #635.
   - **V4–V6 index encryption gap.** Paksmith treats any V4–V6 archive as plaintext — see Wire layout §*Footer fields* for the root cause (`FOOTER_SIZE_LEGACY = 44` probe window excludes the `encrypted` byte). repak reads it; we don't.
+  - **Multi-block encrypted entries unverified against a first-party
+    fixture.** Every vendored encrypted+compressed fixture entry is
+    single-block, so the AES-aligned-per-block-footprint `compressed_size`
+    convention and the multi-block decrypt-then-decompress walk rest on
+    repak's read-side cursor logic (CUE4Parse-corroborated), not on a
+    UnrealPak-authored multi-block archive. Fail-closed
+    (`CompressedSizeMismatch` on a mismatch); tracked as issue #688.
 
 ## Paksmith implementation
 
