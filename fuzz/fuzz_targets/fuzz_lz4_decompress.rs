@@ -49,14 +49,17 @@ fuzz_target!(|data: &[u8]| {
         u64::from(u32::from_le_bytes(data[..4].try_into().expect("4 bytes")) % MAX_CLAIMED_BYTES);
     let block_size =
         u32::from_le_bytes(data[4..8].try_into().expect("4 bytes")) % MAX_CLAIMED_BYTES;
-    let split = usize::from(data[8]);
+    let split = u64::from(data[8]);
     let rest = &data[9..];
 
     // One or two compression blocks: a mid-payload pivot derived from
     // the split byte exercises the non-final block-size invariant and
     // the multi-block accounting; a pivot of 0 / len degenerates to a
-    // single block.
-    let pivot = split * rest.len() / 256;
+    // single block. The multiply is widened to u64 so it can't
+    // overflow usize on a 32-bit target with a pathologically large
+    // input (fuzz builds carry overflow checks); the quotient is
+    // <= rest.len(), so the narrowing cast back is lossless.
+    let pivot = (split * rest.len() as u64 / 256) as usize;
     let streams: Vec<Vec<u8>> = if pivot > 0 && pivot < rest.len() {
         vec![rest[..pivot].to_vec(), rest[pivot..].to_vec()]
     } else {
