@@ -2242,14 +2242,15 @@ fn stream_lz4_to<R: Read + Seek>(
         let alloc_bound = lz4_block_output_cap(expected_out, block_len);
         // 32-bit-only: `value` is the DERIVED allocation bound
         // (`min(budget, block_len × 255)`), not a raw wire field.
-        // `field` names the wire input that dominates a non-final
-        // block's budget; a final block's budget derives from
-        // `uncompressed_size` instead. Diagnostic labeling only —
-        // unreachable on 64-bit (budget ≤ the 8 GiB entry cap).
+        // The narrow can only fail for the FINAL block: a non-final
+        // budget is capped by `compression_block_size`, a u32 that
+        // always fits a 32-bit usize, so a failing bound always
+        // derives from the `uncompressed_size` claim — `field` names
+        // that. Unreachable on 64-bit (budget ≤ the 8 GiB entry cap).
         let alloc_usize =
             usize::try_from(alloc_bound).map_err(|_| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: WireField::CompressionBlockSize,
+                    field: WireField::UncompressedSize,
                     value: alloc_bound,
                     path: Some(path.to_string()),
                 },
