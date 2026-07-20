@@ -565,16 +565,21 @@ impl PakEntryHeader {
             // the unaligned per-block sizes (trumank/repak's
             // `build_partial_entry` accumulates raw `compress(chunk)`
             // lengths). For ENCRYPTED entries UnrealPak stores the sum
-            // of the AES-ALIGNED per-block footprints — verified
-            // empirically against the first-party UnrealPak-authored
+            // of the AES-ALIGNED per-block footprints. The
+            // single-block case is verified EMPIRICALLY against the
+            // first-party UnrealPak-authored
             // `real_v11_encrypted_compressed.pak` fixture, whose
             // `test.png` claims 7760 (= aligned footprint) while the
-            // unaligned block sum is 7746. The earlier caveat here
+            // unaligned block size is 7746 — the earlier caveat here
             // ("if a UE-authored archive ever fails, audit this
-            // assumption") fired exactly as predicted; the accumulator
-            // above now tracks the cursor advance (aligned when
-            // encrypted), which equals the correct expectation for
-            // both classes.
+            // assumption") fired exactly as predicted. The MULTI-block
+            // per-block-aligned-sum form is not exercised by any
+            // fixture (all are single-block); it rests on repak's
+            // read-side cursor advance (`entry.rs` `read_encoded`
+            // aligns each block start by 16 for encrypted entries),
+            // which CUE4Parse corroborates. The accumulator above now
+            // tracks the cursor advance (aligned when encrypted),
+            // which equals the correct expectation for both classes.
             if compressed_total != compressed_size {
                 return Err(PaksmithError::InvalidIndex {
                     fault: IndexParseFault::Encoded {

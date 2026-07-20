@@ -38,11 +38,15 @@ ciphertext content is not a format property and is therefore
 outside this doc's scope.
 
 **Paksmith parser status: `partial`.** Detection of every
-encryption metadata surface is complete; decryption is unimplemented.
-paksmith rejects whole-archive-encrypted archives at `from_reader`
-time with `PaksmithError::Decryption`, and skips per-entry-encrypted
-entries during verification (`VerifyOutcome::SkippedEncrypted`). Key
-management is gated by the Phase 5 profile-system work.
+encryption metadata surface is complete. Decryption is implemented for
+the v3-v9 index, for encrypted uncompressed entries, and — as of issue
+#634 — for encrypted COMPRESSED (zlib/LZ4) entries; a key is supplied
+via `PakReader::open_with_key`, the CLI `--aes-key`, or the profile key
+store. paksmith still rejects whole-archive-encrypted archives at
+`from_reader` time (`PaksmithError::Decryption`) and v10+ encrypted
+INDEXES (`UnsupportedFeature`, issue #635). Encrypted ENTRIES verify
+keylessly — the stored SHA1 covers the on-disk ciphertext — so
+verification no longer skips them.
 
 ## Versions
 
@@ -375,15 +379,17 @@ detection is a known gap.
 - `PakReader::open()` / `from_reader()` returns
   `PaksmithError::Decryption { path: Option<String> }` for any
   `footer.is_encrypted() == true` archive.
-- `PakReader::verify_entry(path)` skips encrypted entries with
-  `VerifyOutcome::SkippedEncrypted` (countered separately in
-  `IntegrityStats::entries_skipped_encrypted()`).
-- `PakReader::stream_entry_to(entry: &PakIndexEntry, writer: &mut dyn Write)` returns
-  `PaksmithError::Decryption { path }` at `mod.rs:1003` when the
-  requested entry's `is_encrypted()` flag is set. This is the runtime
-  extraction path: `from_reader` rejects whole-archive-encrypted at
-  open time; `stream_entry_to` rejects per-entry-encrypted at
-  extraction time.
+- `PakReader::verify_entry(path)` verifies encrypted entries KEYLESSLY
+  (#634): the stored SHA1 covers the on-disk ciphertext, so encrypted
+  entries hash through the same arms as plaintext ones (the retired
+  `VerifyOutcome::SkippedEncrypted` / `entries_skipped_encrypted()`
+  counter stays at 0). An entry with an unsupported compression method
+  still declines with `Err(Decompression)` regardless of encryption.
+- `PakReader::stream_entry_to(entry: &PakIndexEntry, writer: &mut dyn Write)`
+  decrypts-then-decompresses an encrypted entry when a key is present
+  (`open_with_key`); without a key it returns
+  `PaksmithError::Decryption { path }`. `from_reader` still rejects
+  whole-archive-encrypted archives at open time.
 
 **Error variants:**
 - `PaksmithError::Decryption { path: Option<String> }` — the only

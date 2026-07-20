@@ -134,14 +134,15 @@ The **relativity** of `start` and `end` depends on the pak version:
 
 Pseudocode (paksmith's `stream_zlib_to` family in `mod.rs`):
 
-> **Note:** Encrypted entries never reach this loop:
-> - `stream_entry_to` rejects them with
->   `PaksmithError::Decryption { path }`.
-> - `verify_entry` skips them, returning
->   `Ok(VerifyOutcome::SkippedEncrypted)` (no error — verification
->   simply skips integrity checks on encrypted payloads).
->
-> This loop only ever sees non-encrypted compressed bytes.
+> **Note (encrypted entries, #634):** for an encrypted+compressed
+> entry the payload is AES-256-ECB-decrypted up front (one contiguous
+> 16-aligned region → `Zeroizing` buffer → truncate to
+> `compressed_size`), and this loop then runs UNCHANGED over the
+> decrypted-compressed bytes via a rebasing reader that maps the block
+> table's absolute file offsets into the buffer. So the loop sees
+> plaintext-compressed bytes whether or not the entry was encrypted.
+> `verify_entry` hashes the on-disk ciphertext directly (keyless) and
+> never enters this loop.
 
 ```
 bytes_written = 0

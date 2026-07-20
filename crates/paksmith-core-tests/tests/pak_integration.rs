@@ -1097,6 +1097,55 @@ fn verify_counts_encrypted_zero_hash_as_skipped_no_hash() {
     assert!(!stats.is_fully_verified());
 }
 
+/// Post-#634 policy pin (deep-impact R1 finding F3): verify's
+/// unsupported-method rejection is method-driven, not encryption-driven.
+/// An encrypted entry with an unsupported compression method (here Oodle,
+/// numeric ID 4) and a non-zero hash slot now declines with
+/// `Err(Decompression)` — exactly as a plaintext one does — where the
+/// retired entry-level encrypted short-circuit used to return
+/// `SkippedEncrypted`. Encryption no longer changes the outcome.
+#[test]
+fn verify_entry_encrypted_unsupported_method_declines_like_plaintext() {
+    let sha1 = [0x11u8; 20]; // non-zero → clears the SkippedNoHash gate
+    let payload = b"ciphertext-stand-in";
+    // Single block spanning the payload so the entry parses as compressed.
+    let blocks: [(u64, u64); 1] = [(0, payload.len() as u64)];
+
+    let encrypted = build_single_entry_pak_with_flags(
+        6,
+        4,
+        sha1,
+        &blocks,
+        payload.len() as u32,
+        payload,
+        None,
+        true,
+        None,
+    );
+    let plaintext = build_single_entry_pak_with_flags(
+        6,
+        4,
+        sha1,
+        &blocks,
+        payload.len() as u32,
+        payload,
+        None,
+        false,
+        None,
+    );
+
+    for (label, bytes) in [("encrypted", encrypted), ("plaintext", plaintext)] {
+        let reader = PakReader::from_bytes(bytes).unwrap();
+        let err = reader
+            .verify_entry("Content/x.uasset")
+            .expect_err("unsupported (Oodle) method must decline verification");
+        assert!(
+            matches!(err, paksmith_core::PaksmithError::Decompression { .. }),
+            "{label} Oodle entry must decline with Decompression, got: {err:?}"
+        );
+    }
+}
+
 /// `is_fully_verified()` requires `entries_verified > 0` to defend
 /// against the "empty-but-hashed shell" substitution attack: an
 /// attacker who replaces a populated archive with a zero-entry archive
