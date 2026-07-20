@@ -40,7 +40,11 @@ pub use path_hash::{max_fdi_bytes, max_index_bytes};
 // fixtures via the `EntryCommon { ..make_common(...) }` spread idiom)
 // still resolves `super::EntryCommon`, without exposing it to
 // downstream crates as a name they could mistakenly think is reachable.
+// (The consuming fixtures are `__test_utils`-gated, so the re-export
+// goes unused in the no-feature lib-test compile — allowed rather
+// than double-gated so any future ungated test can still use it.)
 #[cfg(test)]
+#[cfg_attr(not(feature = "__test_utils"), allow(unused_imports))]
 pub(crate) use entry_header::EntryCommon;
 
 use std::io::{Read, Seek, SeekFrom};

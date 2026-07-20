@@ -19,6 +19,9 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use crate::error::{
     AllocationContext, FStringEncoding, FStringFault, IndexParseFault, PaksmithError,
 };
+// Unused in the no-`__test_utils` lib-test compile (seam machinery
+// no-ops there); exercised by CI's package-scoped compile guard.
+#[cfg_attr(not(feature = "__test_utils"), allow(unused_imports))]
 use crate::seams::PakSeam;
 
 /// Maximum length (in bytes for UTF-8, code units for UTF-16) accepted
