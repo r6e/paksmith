@@ -2094,17 +2094,44 @@ fn stream_zlib_to<R: Read + Seek>(
 /// safe over-estimate that never under-sizes a valid decode.
 const MAX_LZ4_BLOCK_EXPANSION_RATIO: u64 = 255;
 
+/// Per-block decode budget for one LZ4 block: the size the output
+/// buffer is pre-sized to (before the [`lz4_block_output_cap`]
+/// intersection).
+///
+/// Non-final blocks are budgeted at `min(remaining, block_size)` —
+/// the post-decode guard requires them to produce EXACTLY
+/// `compression_block_size`, so a larger buffer could only be dead
+/// weight (an eager `remaining`-sized reservation here was R8's
+/// memory-discipline finding: block 0 of a multi-block entry would
+/// reserve and zero-fill up to the whole entry). The FINAL block is
+/// budgeted at `remaining` — NOT `min(remaining, block_size)` — the
+/// exact mirror of `stream_zlib_to`'s `take(remaining + 1)`: a
+/// single-block entry can legitimately declare a
+/// `compression_block_size` smaller than `uncompressed_size` (both
+/// references decode that shape via single-block normalization —
+/// issue #685), and the v3-v9 inline index applies no parse-time
+/// `block_count × block_size` bound that would reject it first.
+fn lz4_block_budget(remaining: u64, block_size: u64, is_final: bool) -> u64 {
+    if is_final {
+        remaining
+    } else {
+        remaining.min(block_size)
+    }
+}
+
 /// Bound the pre-decode output reservation for one LZ4 block.
 ///
-/// `expected_out` is the pak-derived output size for this block
-/// (`min(compression_block_size, remaining)`) — but
-/// `compression_block_size` is attacker-controlled and NOT capped on
-/// the inline v3-v9 read path, so pre-allocating it verbatim lets a
-/// tiny crafted block force a multi-gigabyte eager allocation
-/// (memory-amplification DoS, #636). Intersecting with
-/// `compressed_len` × [`MAX_LZ4_BLOCK_EXPANSION_RATIO`] keeps the
-/// reservation input-proportional: a valid block's real output is
-/// always `≤ compressed_len × 255`, so the cap is transparent for
+/// `expected_out` is the block's decode budget from
+/// [`lz4_block_budget`] — for the final block that is the entry's
+/// full remaining output (bounded upstream by the 8 GiB
+/// `MAX_UNCOMPRESSED_ENTRY_BYTES` open-time cap), which is
+/// entry-scale, not block-scale: pre-allocating it verbatim would
+/// let a tiny crafted final block inside a large-claim entry force a
+/// multi-gigabyte eager allocation (memory-amplification DoS, #636).
+/// Intersecting with `compressed_len` ×
+/// [`MAX_LZ4_BLOCK_EXPANSION_RATIO`] keeps the reservation
+/// input-proportional: a valid block's real output is always
+/// `≤ compressed_len × 255`, so the cap is transparent for
 /// well-formed entries and only bites the crafted case. The resulting
 /// buffer is still the decompression-bomb cap — `decompress_into`
 /// errors if the block tries to inflate past it.
@@ -2129,11 +2156,13 @@ fn lz4_block_output_cap(expected_out: u64, compressed_len: u64) -> u64 {
 /// hoisted and capacity-reused across blocks; the full
 /// `uncompressed_size` never lives in memory at once. Unlike zlib
 /// there is no mid-decode growth loop — the output buffer is
-/// pre-sized to the block's expected output, which doubles as the
+/// pre-sized to the block's decode budget (`lz4_block_budget`:
+/// `min(remaining, compression_block_size)` for non-final blocks,
+/// the remaining output for the final block), which doubles as the
 /// decompression-bomb cap: `lz4_flex::block::decompress_into` errors
 /// on a block that would expand past it (surfaced as
 /// [`DecompressionFault::Lz4DecodeError`]), so over-expansion can
-/// never allocate beyond the per-block expected size.
+/// never allocate beyond the per-block budget.
 #[allow(clippy::too_many_lines)] // bounded by per-block error-reporting, mirroring stream_zlib_to
 fn stream_lz4_to<R: Read + Seek>(
     file: &mut R,
@@ -2181,38 +2210,39 @@ fn stream_lz4_to<R: Read + Seek>(
         let block_len = block.len();
         read_compressed_block(file, &mut compressed, block_len, abs_start, i, "lz4", path)?;
 
-        // Expected decompressed size for THIS block: the fixed
-        // compression_block_size for every block except the last,
-        // which takes the remainder. The decode budget is REMAINING-
-        // based — the exact mirror of `stream_zlib_to`'s
-        // `take(remaining + 1)` — NOT `min(remaining, block_size)`:
-        // a single-block entry can legitimately store a
+        // Expected decompressed size for THIS block — see
+        // `lz4_block_budget` for the full rationale: non-final blocks
+        // are budgeted (and thus allocated) at `min(remaining,
+        // block_size)` since the post-decode check below pins them to
+        // exactly `block_size`; the FINAL block is budgeted at
+        // `remaining`, the mirror of `stream_zlib_to`'s
+        // `take(remaining + 1)`, so a single-block entry declaring a
         // `compression_block_size` smaller than `uncompressed_size`
-        // (both references decode that shape via single-block
-        // normalization: repak's `ranges.len() == 1` branch,
-        // CUE4Parse's `compressionBlocksCount == 1` arm — issue #685),
-        // and the v3-v9 inline index applies no parse-time
-        // `block_count × block_size` bound that would reject it
-        // first. Bounding the budget by `block_size` made LZ4 reject
-        // framing the zlib path decodes. Non-final blocks are still
-        // pinned to exactly `block_size` by the post-decode check
-        // below. A crafted entry with excess blocks yields expected 0
-        // for the extras (remaining is exhausted): non-final extras
-        // die at the block-size check below (a 0-byte decode !=
-        // block_size), and while a single TRAILING zero-output block
-        // (e.g. the 1-byte `0x00` "empty last sequence" block) does
-        // decode Ok into an empty buffer, it produces no bytes —
-        // output stays exactly the declared `uncompressed_size` via
+        // decodes the way both references do (issue #685). A crafted
+        // entry with excess blocks yields expected 0 for the extras
+        // (remaining is exhausted): non-final extras die at the
+        // block-size check below (a 0-byte decode != block_size), and
+        // while a single TRAILING zero-output block (e.g. the 1-byte
+        // `0x00` "empty last sequence" block) does decode Ok into an
+        // empty buffer, it produces no bytes — output stays exactly
+        // the declared `uncompressed_size` via
         // `check_cumulative_size`. The repak oracle is more lenient
         // still (it silently ignores ALL excess blocks), so this is
         // matching-or-stricter behavior.
         let remaining = uncompressed_size.saturating_sub(bytes_written);
-        let expected_out = remaining;
+        let is_final = i + 1 == entry.header().compression_blocks().len();
+        let expected_out = lz4_block_budget(remaining, block_size, is_final);
 
         // SECURITY (#636): cap the reservation input-proportionally —
         // see `lz4_block_output_cap` for the derivation and threat
         // model. The capped buffer remains the decompression-bomb cap.
         let alloc_bound = lz4_block_output_cap(expected_out, block_len);
+        // 32-bit-only: `value` is the DERIVED allocation bound
+        // (`min(budget, block_len × 255)`), not a raw wire field.
+        // `field` names the wire input that dominates a non-final
+        // block's budget; a final block's budget derives from
+        // `uncompressed_size` instead. Diagnostic labeling only —
+        // unreachable on 64-bit (budget ≤ the 8 GiB entry cap).
         let alloc_usize =
             usize::try_from(alloc_bound).map_err(|_| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
@@ -2628,6 +2658,32 @@ mod tests {
     #[test]
     fn lz4_block_output_cap_saturates_without_overflow() {
         assert_eq!(lz4_block_output_cap(1_000, u64::MAX), 1_000);
+    }
+
+    /// Non-final blocks are budgeted at `min(remaining, block_size)`
+    /// — the memory-discipline half of `lz4_block_budget` (#636 R8):
+    /// block 0 of a large entry must NOT be budgeted at the whole
+    /// remaining output.
+    #[test]
+    fn lz4_block_budget_bounds_non_final_by_block_size() {
+        assert_eq!(lz4_block_budget(8_000_000, 65_536, false), 65_536);
+    }
+
+    /// A non-final block past the declared total (excess-block shape)
+    /// is budgeted at the exhausted remainder, not `block_size`.
+    #[test]
+    fn lz4_block_budget_non_final_exhausted_remainder_wins() {
+        assert_eq!(lz4_block_budget(100, 65_536, false), 100);
+    }
+
+    /// The FINAL block is budgeted at `remaining` even when the
+    /// declared `compression_block_size` is smaller — the
+    /// reference-compatible single-block shape (#685). A
+    /// `min(remaining, block_size)` regression here reintroduces the
+    /// R7 rejection bug.
+    #[test]
+    fn lz4_block_budget_final_block_takes_full_remaining() {
+        assert_eq!(lz4_block_budget(300, 128, true), 300);
     }
 
     /// The `locked()` helper recovers from a poisoned mutex
@@ -3102,15 +3158,18 @@ mod tests {
         // `dir` (and the corrupt copy inside it) is removed on drop.
     }
 
-    // The next two tests exercise `stream_lz4_to`'s non-final-block
-    // size guard with SYNTHETIC multi-block v8b paks. They live
-    // in-package (not only in `paksmith-core-tests`) because
+    // The following synthetic-pak tests exercise `stream_lz4_to`'s
+    // budget and non-final-block size guards with SYNTHETIC v8b paks.
+    // They live in-package (not only in `paksmith-core-tests`) because
     // cargo-mutants scopes each mutant's test run to the mutated
     // package: the cross-crate integration copies do NOT credit
     // mutants in `mod.rs`, so the `i + 1 < len` and `produced !=
     // block_size` operators in that guard survive without these.
-    // Gated on `__test_utils` because the shared builder lives in
-    // `crate::testing::wire`.
+    // EVERY test that touches the shared builder MUST be gated on
+    // `__test_utils` because `crate::testing::wire` is — an ungated
+    // test breaks the default (feature-less) `cargo test` compile,
+    // and no CI lane catches that (workspace feature unification
+    // turns the feature on everywhere).
 
     /// A valid multi-block LZ4 entry (two full non-final blocks that
     /// each inflate to EXACTLY `compression_block_size`, plus a short
@@ -3149,6 +3208,7 @@ mod tests {
     /// `block_size`-bounded). The final block's budget must therefore
     /// be `remaining`, not `min(remaining, block_size)` — issue #685
     /// context, R7 review finding.
+    #[cfg(feature = "__test_utils")]
     #[test]
     fn read_lz4_entry_single_block_smaller_declared_block_size_round_trips() {
         let payload: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
@@ -3164,6 +3224,38 @@ mod tests {
         let written = reader
             .read_entry_to(crate::testing::wire::LZ4_SYNTH_PATH, &mut out)
             .expect("single-block entry with an under-declared block_size must decode");
+        assert_eq!(written, payload.len() as u64);
+        assert_eq!(out, payload, "decode must be byte-exact");
+    }
+
+    /// A multi-block entry whose FINAL block carries the excess
+    /// (`uncompressed_size > block_count × compression_block_size`,
+    /// non-final blocks exact) decodes successfully: the final block's
+    /// budget is `remaining`, so the 172-byte overflow fits. This is a
+    /// DOCUMENTED divergence from the references (repak/CUE4Parse
+    /// bound the final chunk by `compression_block_size` and would
+    /// reject this shape) — paksmith is deliberately consistent with
+    /// its own zlib path (`take(remaining + 1)`) instead, which
+    /// accepts the identical framing. See lz4.md's derivation
+    /// section; adversarial-only shape, no real writer emits it.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_lz4_entry_multi_block_final_overflow_decodes() {
+        let block_size = 128u32;
+        let payload: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+        // Block 0 inflates to exactly block_size (128); the final
+        // block carries the remaining 172 (> block_size).
+        let streams: Vec<Vec<u8>> = vec![
+            lz4_flex::block::compress(&payload[..128]),
+            lz4_flex::block::compress(&payload[128..]),
+        ];
+        let pak =
+            crate::testing::wire::build_v8b_lz4_pak(&streams, payload.len() as u64, block_size);
+        let reader = PakReader::from_bytes(pak).expect("synthetic v8b pak parses");
+        let mut out = Vec::new();
+        let written = reader
+            .read_entry_to(crate::testing::wire::LZ4_SYNTH_PATH, &mut out)
+            .expect("final-block overflow shape must decode (documented lenient divergence)");
         assert_eq!(written, payload.len() as u64);
         assert_eq!(out, payload, "decode must be byte-exact");
     }

@@ -542,8 +542,10 @@ pub enum DecompressionFault {
     },
     /// Per-block decompressed-output buffer reservation failed in
     /// `stream_lz4_to`, BEFORE decoding. LZ4 raw blocks decode into
-    /// a buffer pre-sized to the block's expected output
-    /// (`compression_block_size`, or the final-block remainder),
+    /// a buffer pre-sized to the block's decode budget
+    /// (`min(remaining, compression_block_size)` for non-final
+    /// blocks, the remaining output for the final block — see
+    /// `lz4_block_budget`),
     /// capped input-proportionally by `lz4_block_output_cap` at
     /// `compressed_len × 255` so a crafted claim cannot force a huge
     /// eager allocation. Unlike zlib there is no mid-decode growth

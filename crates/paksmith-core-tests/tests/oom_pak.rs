@@ -44,6 +44,7 @@ use paksmith_core::container::pak::version::PAK_MAGIC;
 use paksmith_core::error::{AllocationContext, DecompressionFault, IndexParseFault};
 use paksmith_core::testing::oom::{PakSeam, SeamSite, arm_at};
 use paksmith_core::testing::v10::{V10Fixture, build_v10_buffer};
+use paksmith_core::testing::wire::{LZ4_SYNTH_PATH, build_v8b_lz4_pak};
 // Issue #140: shared v3+ wire-format synthesizers.
 use paksmith_core::testing::wire::{write_fstring, write_fstring_utf16, write_pak_entry};
 
@@ -174,6 +175,44 @@ fn read_entry_surfaces_lz4_output_reserve_failed_under_oom() {
         ),
         "expected Decompression{{Lz4OutputReserveFailed {{ block_index: 0 }}}}; got {err:?}"
     );
+}
+
+/// Pin a NON-final block's output budget to `compression_block_size`,
+/// not the entry's full remaining output: arm the output seam so block
+/// 0 of a three-block entry fails its reservation, and assert the
+/// `requested` size is the 128-byte block size rather than the 296-byte
+/// entry remainder. Guards `lz4_block_budget`'s is-final branch (#636
+/// R8 finding): a regression to a remaining-based non-final budget
+/// eagerly reserves (and zero-fills) up to the whole entry per block.
+#[test]
+fn lz4_output_reserve_for_non_final_block_requests_block_size() {
+    let block_size = 128u32;
+    let payload: Vec<u8> = (0..296u32).map(|i| (i % 251) as u8).collect();
+    let streams: Vec<Vec<u8>> = payload
+        .chunks(block_size as usize)
+        .map(lz4_flex::block::compress)
+        .collect();
+    let pak = build_v8b_lz4_pak(&streams, payload.len() as u64, block_size);
+    let reader = PakReader::from_bytes(pak).unwrap();
+
+    let _guard = arm_at(SeamSite::Pak(PakSeam::Lz4OutputReserve), 0);
+    let err = reader.read_entry(LZ4_SYNTH_PATH).unwrap_err();
+
+    match &err {
+        PaksmithError::Decompression {
+            fault:
+                DecompressionFault::Lz4OutputReserveFailed {
+                    block_index: 0,
+                    requested,
+                    ..
+                },
+            ..
+        } => assert_eq!(
+            *requested, block_size as usize,
+            "non-final block 0 must reserve exactly compression_block_size"
+        ),
+        other => panic!("expected Lz4OutputReserveFailed for block 0; got {other:?}"),
+    }
 }
 
 /// Arm the OOM seam at the `try_reserve(n)` site (mid-decode loop),
