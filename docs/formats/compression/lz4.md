@@ -61,13 +61,15 @@ SHA1 (computed over the on-disk *compressed* block bytes — see
 ### Per-block decompressed size derivation
 
 ```
-budget(i) = uncompressed_size - sum(produced(0..i))
+remaining(i) = uncompressed_size - sum(produced(0..i))
+budget(i)    = min(remaining(i), compression_block_size)   # non-final
+budget(last) = remaining(last)                             # final block
 ```
 
-Every block decodes into a budget bounded by the REMAINING output —
-mirroring the zlib path's `take(remaining + 1)` bound. Non-final
-blocks MUST produce exactly `compression_block_size` (checked after
-decode); the final block takes whatever remains, and the cumulative
+Non-final blocks MUST produce exactly `compression_block_size`
+(checked after decode), so their budget — and output allocation —
+is bounded by it. The FINAL block takes whatever remains, mirroring
+the zlib path's `take(remaining + 1)` bound, and the cumulative
 total must equal `uncompressed_size` exactly. A block inflating
 past its budget is malformed (and, defensively, a
 decompression-bomb attempt).
@@ -89,8 +91,17 @@ compression_block_size` splits by index generation: the v10+
 **encoded** index rejects it at parse time
 (`IndexParseFault::BoundsExceeded`, fail-closed, both codecs),
 while the v3-v9 **inline** index applies no parse-time bound — the
-shape reaches the decoder, where single-block entries decode (see
-above) and lying multi-block entries die at the non-final
+shape reaches the decoder, where BOTH sub-shapes decode.
+Single-block entries decode via the final-block budget (see above,
+convergent with the references). Multi-block entries whose FINAL
+block carries the excess also decode — a second, deliberate
+divergence in the LENIENT direction: the references bound the final
+chunk by `compression_block_size` and reject that framing, while
+paksmith's final-block budget is `remaining`, consistent with its
+own zlib path (`take(remaining + 1)`), which accepts the identical
+shape. Adversarial-only (no real writer emits it); pinned by
+`read_lz4_entry_multi_block_final_overflow_decodes`. A multi-block
+entry that misdeclares a NON-final block still dies at the
 exact-size check. Whether real UE 4.26-era v10 archives emit a
 truncated single-block `compression_block_size` (and would thus
 need the references' normalization on the encoded-parse path) is
@@ -175,14 +186,18 @@ writer never produces.
 
 ## Paksmith implementation
 
-**Status:** `complete`. One documented derivation divergence vs the
-cited references remains, on the v10+ **encoded** index only: a
-single-block entry whose stored `compression_block_size` is smaller
-than its `uncompressed_size` is rejected fail-closed at index parse
+**Status:** `complete`. Two documented derivation divergences vs the
+cited references remain, both on adversarial-only shapes (see
+"Per-block decompressed size derivation"): (1) on the v10+
+**encoded** index, a single-block entry whose stored
+`compression_block_size` is smaller than its `uncompressed_size` is
+rejected fail-closed at index parse
 (`IndexParseFault::BoundsExceeded`) rather than decoded via the
-references' single-block normalization — see "Per-block decompressed
-size derivation" and issue #685. On v3-v9 legacy indexes the same
-shape decodes identically to the references.
+references' single-block normalization — issue #685; on v3-v9
+legacy indexes the same shape decodes identically to the
+references. (2) On v3-v9, a multi-block entry whose FINAL block
+carries the excess decodes (lenient, consistent with paksmith's own
+zlib path) where the references reject it.
 
 `stream_lz4_to` in `crates/paksmith-core/src/container/pak/mod.rs`
 (issue #636), mirroring `stream_zlib_to`'s discipline:
@@ -196,10 +211,12 @@ shape decodes identically to the references.
   parsed as v8+ (where block offsets are relative) — the guard would
   be unreachable dead code.
 - Decodes with `lz4_flex::block::decompress_into` into a buffer
-  pre-sized to the block's expected output, capped by
+  pre-sized to the block's decode budget (`lz4_block_budget`:
+  `min(remaining, compression_block_size)` for non-final blocks, the
+  remaining output for the final block), capped by
   `lz4_block_output_cap` (`compressed_len × 255`) so a crafted
-  `compression_block_size` cannot force a huge eager allocation
-  (#636). Over-expansion errors inside the decoder
+  `compression_block_size` or `uncompressed_size` cannot force a huge
+  eager allocation (#636). Over-expansion errors inside the decoder
   (`DecompressionFault::Lz4DecodeError`) instead of allocating, so no
   `take(+1)`-style trick is needed.
 - Faults: corrupt blocks → `Lz4DecodeError`; short non-final blocks
