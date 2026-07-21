@@ -1364,6 +1364,38 @@ fn dispatch_compressed<R: Read + Seek>(
     }
 }
 
+/// Cap a claimed `compressed_size` at `MAX_UNCOMPRESSED_ENTRY_BYTES`
+/// (8 GiB) — the per-entry allocation ceiling (#634).
+///
+/// The same ceiling the open-time sweep enforces on `uncompressed_size`,
+/// the v10+ encoded parser enforces on `compressed_size`
+/// (`entry_header.rs`), and the crypto hardening policy
+/// (`docs/formats/crypto/aes-pak.md`) requires of any AES reader. The
+/// v3-v9 INLINE index applies no parse-time cap on `compressed_size`, so
+/// without this an inline encrypted+compressed entry could drive a
+/// single-shot decrypt buffer bounded only by the file size, not by the
+/// codebase's stated per-entry ceiling.
+///
+/// Extracted from `read_decrypted_compressed_payload` so the boundary is
+/// unit-testable WITHOUT driving the multi-GiB allocation the full read
+/// path would attempt at `comp == MAX` — a `checked_payload_end` mutant
+/// that bypasses the later EOF guard would otherwise let an at-cap test
+/// allocate 8 GiB and time the whole test binary out.
+fn ensure_compressed_size_within_cap(comp: u64, path: &str) -> crate::Result<()> {
+    if comp > MAX_UNCOMPRESSED_ENTRY_BYTES {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded {
+                field: WireField::CompressedSize,
+                value: comp,
+                limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
+                unit: BoundsUnit::Bytes,
+                path: Some(path.to_string()),
+            },
+        });
+    }
+    Ok(())
+}
+
 /// Read and decrypt an encrypted entry's compressed payload (#634).
 ///
 /// UE encrypts the compressed payload as ONE contiguous AES-256-ECB
@@ -1385,25 +1417,9 @@ fn read_decrypted_compressed_payload<R: Read + Seek>(
     let comp = entry.header().compressed_size();
 
     // Cap the per-entry allocation at `MAX_UNCOMPRESSED_ENTRY_BYTES`
-    // (8 GiB) BEFORE reading — the same ceiling the open-time sweep
-    // enforces on `uncompressed_size`, the v10+ encoded parser enforces
-    // on `compressed_size` (`entry_header.rs`), and the crypto hardening
-    // policy (`docs/formats/crypto/aes-pak.md`) requires of any AES
-    // reader. The v3-v9 INLINE index applies no parse-time cap on
-    // `compressed_size`, so without this an inline encrypted+compressed
-    // entry could drive a single-shot decrypt buffer bounded only by the
-    // file size, not by the codebase's stated per-entry ceiling.
-    if comp > MAX_UNCOMPRESSED_ENTRY_BYTES {
-        return Err(PaksmithError::InvalidIndex {
-            fault: IndexParseFault::BoundsExceeded {
-                field: WireField::CompressedSize,
-                value: comp,
-                limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
-                unit: BoundsUnit::Bytes,
-                path: Some(path.to_string()),
-            },
-        });
-    }
+    // (8 GiB) BEFORE reading (see the helper's docs for why the inline
+    // index needs this and why it lives in a testable free function).
+    ensure_compressed_size_within_cap(comp, path)?;
 
     // Reject a `compressed_size` claim past EOF before the alignment
     // arithmetic: a fail-fast on the unaligned claim that keeps the
@@ -4671,48 +4687,23 @@ mod tests {
     }
 
     /// Boundary sibling of the over-cap test: a `compressed_size` EXACTLY at
-    /// `MAX_UNCOMPRESSED_ENTRY_BYTES` must PASS the cap (strict `>`) and then
-    /// fail later for a different reason — here the `checked_payload_end` EOF
-    /// check, since `file_size` (100) is far below `payload_start + comp`.
-    /// The discriminator is that the error is NOT `BoundsExceeded`.
+    /// `MAX_UNCOMPRESSED_ENTRY_BYTES` must PASS the cap (strict `>`).
+    ///
+    /// Tests `ensure_compressed_size_within_cap` DIRECTLY — not through
+    /// `read_decrypted_compressed_payload` — precisely so a
+    /// `checked_payload_end` mutant that bypasses the downstream EOF guard
+    /// can't make this at-cap case allocate the full 8 GiB and time the whole
+    /// mutation run out. The over-cap sibling still exercises the in-path call
+    /// (comp = MAX+1 is rejected before any allocation), so the call site stays
+    /// covered.
     ///
     /// Kills the `>`→`>=` mutant on `comp > MAX_UNCOMPRESSED_ENTRY_BYTES`:
-    /// under `>=`, `comp == cap` IS rejected as `BoundsExceeded`, which this
-    /// assertion forbids.
+    /// under `>=`, `comp == cap` returns `BoundsExceeded`, which `Ok(())`
+    /// forbids.
     #[test]
-    fn read_decrypted_compressed_payload_at_cap_is_not_bounds_exceeded() {
-        use std::io::Cursor;
-
-        let header = PakEntryHeader::inline_for_test(MAX_UNCOMPRESSED_ENTRY_BYTES, true);
-        let entry = PakIndexEntry::for_test("at_cap.bin".to_string(), header);
-        let key = AesKey::new(FIXTURE_AES_KEY);
-
-        let mut file = Cursor::new(Vec::<u8>::new());
-        let err = read_decrypted_compressed_payload(&mut file, &entry, 100, 0, &key)
-            .expect_err("comp at the cap still fails the EOF check against a tiny file_size");
-        assert!(
-            !matches!(
-                err,
-                PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::BoundsExceeded { .. }
-                }
-            ),
-            "comp == MAX_UNCOMPRESSED_ENTRY_BYTES must NOT be BoundsExceeded (strict `>`); got: {err:?}"
-        );
-        // Positive discriminator: it falls through to the EOF check and
-        // surfaces as PayloadEndBounds, confirming the cap did not fire.
-        assert!(
-            matches!(
-                err,
-                PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::OffsetPastFileSize {
-                        kind: OffsetPastFileSizeKind::PayloadEndBounds { .. },
-                        ..
-                    }
-                }
-            ),
-            "at-cap comp must fall through to the EOF check as PayloadEndBounds; got: {err:?}"
-        );
+    fn ensure_compressed_size_at_cap_is_accepted() {
+        ensure_compressed_size_within_cap(MAX_UNCOMPRESSED_ENTRY_BYTES, "at_cap.bin")
+            .expect("comp == MAX_UNCOMPRESSED_ENTRY_BYTES must pass the cap (strict `>`)");
     }
 
     /// `PakReader`'s `Debug` impl must render the struct name and the `key`
