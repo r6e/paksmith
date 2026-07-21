@@ -1288,18 +1288,28 @@ impl PakReader {
                     // then surfaces as a typed `BlockBoundsViolation`
                     // (`EndPastFileSize`) from `validate_block_bounds`
                     // rather than a bare `Io(UnexpectedEof)` from the
-                    // rebased cursor. `payload_start + decrypted.len()`
-                    // was already EOF-checked inside
-                    // `read_decrypted_compressed_payload`, so it can't
-                    // overflow here. The `buffer_end` vs `self.file_size`
-                    // ceiling choice is pinned by the in-source test
+                    // rebased cursor. `payload_start + decrypted.len()` was
+                    // already EOF-checked inside
+                    // `read_decrypted_compressed_payload`, so it cannot
+                    // actually overflow — but use `checked_add` for a typed
+                    // fault anyway, matching this file's defense-in-depth
+                    // arithmetic convention. The `buffer_end` vs
+                    // `self.file_size` ceiling choice is pinned by the
+                    // in-source test
                     // `read_encrypted_compressed_block_end_between_buffer_and_file_uses_buffer_ceiling`
                     // (in-source, not the integration crate, so cargo-mutants —
                     // which runs only default-members — actually credits the
                     // kill): a forged single-block `end` between the two values
                     // must reject as `EndPastFileSize`, which the wider
                     // `self.file_size` ceiling would let through.
-                    let buffer_end = payload_start + decrypted.len() as u64;
+                    let buffer_end = payload_start
+                        .checked_add(decrypted.len() as u64)
+                        .ok_or_else(|| PaksmithError::InvalidIndex {
+                            fault: IndexParseFault::U64ArithmeticOverflow {
+                                path: Some(path.to_string()),
+                                operation: OverflowSite::PayloadEnd,
+                            },
+                        })?;
                     dispatch_compressed(
                         &mut rebased,
                         method,
@@ -4320,6 +4330,67 @@ mod tests {
         assert_eq!(out, plaintext, "encrypted+LZ4 decode must be byte-exact");
     }
 
+    /// #634 (R8 architect): a MULTI-BLOCK encrypted+compressed entry
+    /// round-trips through decrypt → `RebasedReader` → per-block inflate. The
+    /// single-block LZ4/zlib tests + fixtures never exercise the block loop
+    /// walking 2+ blocks across the AES-aligned inter-block gaps inside the
+    /// decrypted buffer — this pins that self-consistency (SEPARATE from the
+    /// #688 question of whether the aligned-footprint convention matches a
+    /// real UnrealPak multi-block archive, which stays deferred).
+    ///
+    /// Each non-final block decompresses to exactly `compression_block_size`;
+    /// on disk each block's lz4 bytes occupy an AES-aligned footprint, so the
+    /// block table's `(start, end)` spans the UNALIGNED lz4 length while the
+    /// next block starts at the previous block's 16-aligned end.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn reads_encrypted_lz4_multi_block_round_trips() {
+        let block_size = 128u32;
+        // 2 full blocks + a 40-byte remainder → 3 blocks.
+        let plaintext: Vec<u8> = (0..296u32).map(|i| (i % 251) as u8).collect();
+        let chunks: Vec<Vec<u8>> = plaintext
+            .chunks(block_size as usize)
+            .map(lz4_flex::block::compress)
+            .collect();
+        assert_eq!(chunks.len(), 3, "fixture invariant: 2 full + 1 remainder");
+
+        // Lay each block's lz4 bytes at its AES-aligned footprint offset and
+        // ECB-encrypt the whole contiguous region.
+        let payload_start = crate::testing::wire::pak_entry_wire_size(chunks.len() as u64);
+        let mut payload = Vec::new();
+        let mut blocks: Vec<(u64, u64)> = Vec::new();
+        let mut cursor = payload_start;
+        for c in &chunks {
+            blocks.push((cursor, cursor + c.len() as u64)); // end = UNALIGNED lz4 length
+            payload.extend_from_slice(c);
+            let footprint = c.len().next_multiple_of(16);
+            payload.resize(payload.len() + (footprint - c.len()), 0); // pad to 16
+            cursor += footprint as u64;
+        }
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        crypto::aes256_ecb_encrypt(&key, &mut payload)
+            .expect("encrypt aligned multi-block payload");
+
+        let pak = build_v8b_encrypted_single_entry(
+            "LZ4",
+            &payload,
+            plaintext.len() as u64,
+            &blocks,
+            block_size,
+        );
+        let reader = PakReader::from_reader_with_key(std::io::Cursor::new(pak), key)
+            .expect("open v8b (plaintext index) with key");
+        let mut out = Vec::new();
+        let written = reader
+            .read_entry_to("Content/x.uasset", &mut out)
+            .expect("multi-block encrypted+LZ4 must decrypt-then-decompress every block");
+        assert_eq!(written, plaintext.len() as u64);
+        assert_eq!(
+            out, plaintext,
+            "multi-block encrypted decode must be byte-exact across all 3 blocks"
+        );
+    }
+
     /// TODO(Task-4) resolution pin (#634): the stored entry SHA-1 covers the
     /// on-disk CIPHERTEXT `[payload_start, payload_start + compressed_size)`,
     /// including the intra-block AES padding. Every entry in the compressed
@@ -4346,6 +4417,27 @@ mod tests {
                  non-16-aligned entries)"
             );
         }
+    }
+
+    /// #634 (R8 architect): end-to-end pin of the documented semantic change —
+    /// `verify()` reports a fully-per-entry-encrypted archive as FULLY
+    /// verified. Pre-#634 the entry-level encrypted skip forced
+    /// `is_fully_verified()` to `false`; now the stored per-entry SHA-1 covers
+    /// the on-disk ciphertext, so keyless verification of every (encrypted)
+    /// entry plus the matching plaintext index hash suffices. The fixture's
+    /// footer carries a real (non-zero) index hash, so this exercises the
+    /// full `verify()` → `is_fully_verified()` composition, not just the
+    /// per-entry arm.
+    #[test]
+    fn verify_encrypted_compressed_archive_is_fully_verified() {
+        let reader = PakReader::open(encrypted_compressed_fixture())
+            .expect("keyless open (plaintext index)");
+        let stats = reader.verify().expect("verify must run keylessly");
+        assert!(
+            stats.is_fully_verified(),
+            "a pristine fully-encrypted archive with a matching index hash and \
+             all entries hashing keylessly must be fully verified: {stats:?}"
+        );
     }
 
     /// Same pin for the UNCOMPRESSED encrypted class, where
