@@ -858,21 +858,24 @@ impl PakReader {
         // index is verified via `verify_main_index_region` +
         // `decrypt_index_region`, so `Main` never reaches this function; it
         // shares the `Fdi` arm as a harmless exhaustiveness default (the
-        // grouped value is never rendered). Map each region to its byte-size
-        // wire field and a human-readable label for typed faults.
-        let (field, region_label) = match region_kind {
-            IndexRegionKind::Phi => (WireField::PhiSize, "path-hash index"),
-            IndexRegionKind::Fdi | IndexRegionKind::Main => {
-                (WireField::FdiSize, "full-directory index")
-            }
+        // grouped value is never rendered). Map the region to its byte-size
+        // wire field for typed faults; the human-readable `path` label comes
+        // from the shared `IndexRegionKind::human_label` (one home, #635).
+        let field = match region_kind {
+            IndexRegionKind::Phi => WireField::PhiSize,
+            IndexRegionKind::Fdi | IndexRegionKind::Main => WireField::FdiSize,
         };
         let size = region.size();
         // Bounds-check the 16-aligned on-disk extent against EOF and get
         // the aligned length through the shared align-then-check helper
         // (one home with the open-path region reads, #635) — so verify
         // reads exactly the same extent open does.
-        let aligned =
-            checked_aligned_payload_len(region.offset(), size, self.file_size, region_label)?;
+        let aligned = checked_aligned_payload_len(
+            region.offset(),
+            size,
+            self.file_size,
+            region_kind.human_label(),
+        )?;
         let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
             fault: IndexParseFault::U64ExceedsPlatformUsize {
                 field,
@@ -1778,8 +1781,12 @@ fn decrypt_index_region<R: Read + Seek>(
     // overshoots EOF surfaces as a typed `OffsetPastFileSize`, not a bare
     // `Io(UnexpectedEof)` from `read_exact` (matches the v10+ region reads,
     // #635).
-    let aligned =
-        checked_aligned_payload_len(footer.index_offset(), index_size, file_size, "index")?;
+    let aligned = checked_aligned_payload_len(
+        footer.index_offset(),
+        index_size,
+        file_size,
+        IndexRegionKind::Main.human_label(),
+    )?;
     let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
         fault: IndexParseFault::U64ExceedsPlatformUsize {
             field: WireField::IndexSize,

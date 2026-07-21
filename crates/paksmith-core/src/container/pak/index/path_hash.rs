@@ -73,28 +73,30 @@ fn read_region_maybe_decrypt<R: Read + Seek>(
     reader: &mut R,
     size: u64,
     file_size: u64,
-    field: WireField,
+    region_kind: IndexRegionKind,
     context: AllocationContext,
     seam: PakSeam,
     key: Option<&AesKey>,
 ) -> crate::Result<Zeroizing<Vec<u8>>> {
+    // Wire field for typed conversion faults, derived from the region kind.
+    // Exhaustive over the 3-variant enum — no wildcard, so a dropped arm
+    // fails to compile rather than silently mislabelling.
+    let field = match region_kind {
+        IndexRegionKind::Main => WireField::IndexSize,
+        IndexRegionKind::Fdi => WireField::FdiSize,
+        IndexRegionKind::Phi => WireField::PhiSize,
+    };
     let on_disk = if key.is_some() {
         // The reader is positioned at the region start; bounds-check the
         // 16-aligned on-disk extent against EOF and get the aligned length.
-        // Label the fault by region (derived from `field`) so a crafted
-        // overshoot carries diagnostic context instead of an empty path.
+        // Label the fault by region (`human_label`) so a crafted overshoot
+        // carries diagnostic context instead of an empty path.
         let region_start = reader.stream_position()?;
-        let region_label = match field {
-            WireField::IndexSize => "primary index",
-            WireField::FdiSize => "full-directory index",
-            WireField::PhiSize => "path-hash index",
-            _ => "index region",
-        };
         crate::container::pak::checked_aligned_payload_len(
             region_start,
             size,
             file_size,
-            region_label,
+            region_kind.human_label(),
         )?
     } else {
         size
@@ -335,7 +337,7 @@ impl PakIndex {
             reader,
             index_size,
             file_size,
-            WireField::IndexSize,
+            IndexRegionKind::Main,
             AllocationContext::V10MainIndexBytes,
             PakSeam::V10MainIndexBytes,
             key,
@@ -488,7 +490,7 @@ impl PakIndex {
             reader,
             fdi_size,
             file_size,
-            WireField::FdiSize,
+            IndexRegionKind::Fdi,
             AllocationContext::V10FdiBytes,
             PakSeam::V10FdiBytes,
             key,
@@ -520,7 +522,7 @@ impl PakIndex {
                 reader,
                 phi.size,
                 file_size,
-                WireField::PhiSize,
+                IndexRegionKind::Phi,
                 AllocationContext::V10PhiBytes,
                 PakSeam::V10PhiBytes,
                 key,
@@ -806,7 +808,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::read_region_maybe_decrypt;
-    use crate::error::{AllocationContext, WireField};
+    use crate::error::{AllocationContext, IndexRegionKind};
     use crate::seams::PakSeam;
 
     /// A v10+ index region whose LOGICAL size is not a multiple of 16 is
@@ -844,7 +846,7 @@ mod tests {
             &mut reader,
             20, // logical size
             32, // file_size — exactly the on-disk region
-            WireField::FdiSize,
+            IndexRegionKind::Fdi,
             AllocationContext::V10FdiBytes,
             PakSeam::V10FdiBytes,
             Some(&key),
@@ -869,7 +871,7 @@ mod tests {
             &mut reader,
             20,
             40,
-            WireField::FdiSize,
+            IndexRegionKind::Fdi,
             AllocationContext::V10FdiBytes,
             PakSeam::V10FdiBytes,
             None,
