@@ -81,8 +81,21 @@ fn read_region_maybe_decrypt<R: Read + Seek>(
     let on_disk = if key.is_some() {
         // The reader is positioned at the region start; bounds-check the
         // 16-aligned on-disk extent against EOF and get the aligned length.
+        // Label the fault by region (derived from `field`) so a crafted
+        // overshoot carries diagnostic context instead of an empty path.
         let region_start = reader.stream_position()?;
-        crate::container::pak::checked_aligned_payload_len(region_start, size, file_size, "")?
+        let region_label = match field {
+            WireField::IndexSize => "primary index",
+            WireField::FdiSize => "full-directory index",
+            WireField::PhiSize => "path-hash index",
+            _ => "index region",
+        };
+        crate::container::pak::checked_aligned_payload_len(
+            region_start,
+            size,
+            file_size,
+            region_label,
+        )?
     } else {
         size
     };
