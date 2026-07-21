@@ -2,10 +2,12 @@
 
 > Unreal Engine's pak encryption scheme — AES-256 in ECB mode applied
 > at two granularities (whole index region; per-entry payload).
-> Paksmith decrypts the v3-v9 index and encrypted entries (uncompressed
-> and compressed) given a key; encrypted entries verify keylessly (the
-> stored SHA1 covers the on-disk ciphertext). Still rejected:
-> whole-archive-encrypted paks at open, and v10+ encrypted indexes.
+> Paksmith decrypts the v3-v9 flat index, the v10+ path-hash index
+> (primary/PHI/FDI regions), and encrypted entries (uncompressed and
+> compressed) given a key. Encrypted ENTRIES verify keylessly (the stored
+> SHA1 covers the on-disk ciphertext); encrypted INDEX regions verify
+> WITH the key (their SHA1 covers the plaintext). Still rejected:
+> whole-archive-encrypted paks at open.
 
 ## Overview
 
@@ -40,12 +42,12 @@ outside this doc's scope.
 
 **Paksmith parser status: `partial`.** Detection of every
 encryption metadata surface is complete. Decryption is implemented for
-the v3-v9 index, for encrypted uncompressed entries, and — as of issue
+the v3-v9 flat index, the v10+ path-hash index (primary/PHI/FDI regions,
+issue #635), for encrypted uncompressed entries, and — as of issue
 #634 — for encrypted COMPRESSED (zlib/LZ4) entries; a key is supplied
 via `PakReader::open_with_key`, the CLI `--aes-key`, or the profile key
 store. paksmith still rejects whole-archive-encrypted archives at
-`from_reader` time (`PaksmithError::Decryption`) and v10+ encrypted
-INDEXES (`UnsupportedFeature`, issue #635). Encrypted ENTRIES verify
+`from_reader` time (`PaksmithError::Decryption`). Encrypted ENTRIES verify
 keylessly — the stored SHA1 covers the on-disk ciphertext — so
 verification no longer skips them.
 
@@ -334,9 +336,15 @@ See `docs/security/allocation-caps.md` for the broader policy.
     **AES-aligned per-block footprints** (v11 `test.png`: claimed
     7760 = aligned footprint; unaligned block sum 7746). Unencrypted
     entries store the unaligned sum (repak's writer convention).
+- **V10+ encrypted index regions hash their PLAINTEXT.** The footer
+  index hash and the primary-index-recorded PHI/FDI hashes each cover the
+  DECRYPTED region bytes (truncated to the logical size), so index
+  verification requires the key — the OPPOSITE of the per-entry
+  convention (entry SHA1s cover the ciphertext, keyless). Each region is
+  AES-256-ECB encrypted in place and 16-aligned on disk; verify decrypts
+  before hashing (issue #635). Anchored empirically to
+  `real_v11_encrypted_index.pak`.
 - **Known divergences:**
-  - **V10+ encrypted indexes** remain `UnsupportedFeature` — the
-    path-hash/full-directory index decryption layout is issue #635.
   - **V4–V6 index encryption gap.** Paksmith treats any V4–V6 archive as plaintext — see Wire layout §*Footer fields* for the root cause (`FOOTER_SIZE_LEGACY = 44` probe window excludes the `encrypted` byte). repak reads it; we don't.
   - **Multi-block encrypted entries: self-consistency covered
     synthetically; first-party fixture deferred.** Paksmith's own
@@ -392,11 +400,11 @@ above).
   `read_decrypted_compressed_payload` + `RebasedReader` (#634), and
   `verify_entry`'s keyless ciphertext hashing.
 
-**Status:** `partial`. v3-v9 index decryption, entry decryption
-(uncompressed and compressed), and keyless verification of encrypted
-entries are complete; v10+ encrypted indexes are rejected as
-`UnsupportedFeature` (issue #635), and V4-V6 index-encryption
-detection is a known gap.
+**Status:** `partial`. v3-v9 flat index decryption, v10+ path-hash index
+decryption (primary/PHI/FDI regions, with key-required region
+verification — issue #635), entry decryption (uncompressed and
+compressed), and keyless verification of encrypted entries are complete.
+V4-V6 index-encryption detection is a known gap.
 
 **Public surface:**
 - `PakFooter::encryption_key_guid() -> Option<&[u8; 16]>` — Some for
@@ -446,7 +454,7 @@ detection is a known gap.
 
 **Phase plan:**
 - Detection: `docs/plans/phase-1-foundation.md` (shipped as part of pak footer + entry-header parsing).
-- AES decryption + key management: shipped in Phase 5 — index and uncompressed-entry decryption in Phase 5a (#589), the profile-owned key registry and key store in Phase 5b (#590) — extended by #634 with decrypt-then-decompress for zlib/LZ4 compressed entries. Remaining gaps (v10+ encrypted indexes #635, V4–V6 detection) are tracked under Known divergences above.
+- AES decryption + key management: shipped in Phase 5 — index and uncompressed-entry decryption in Phase 5a (#589), the profile-owned key registry and key store in Phase 5b (#590) — extended by #634 with decrypt-then-decompress for zlib/LZ4 compressed entries and by #635 with v10/v11 path-hash index decryption. The remaining gap (V4–V6 detection) is tracked under Known divergences above.
 
 ## References
 

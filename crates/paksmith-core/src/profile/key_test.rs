@@ -18,8 +18,9 @@ pub enum KeyTestOutcome {
     Decrypted,
     /// The key did not decrypt the index (wrong key).
     WrongKey,
-    /// The pak uses a layout this build cannot decrypt (e.g. v10+
-    /// encrypted index) — the key may be correct but cannot be tested.
+    /// The pak uses a layout this build cannot decrypt (e.g. a V9
+    /// frozen index, which opens as `UnsupportedVersion`) — the key
+    /// may be correct but cannot be tested.
     Unsupported,
 }
 
@@ -30,14 +31,15 @@ pub enum KeyTestOutcome {
 /// - Index opened but no hash to check → [`KeyTestOutcome::Decrypted`]
 ///   (intentionally NOT `Verified` — a zeroed hash slot cannot confirm integrity)
 /// - [`PaksmithError::Decryption`] from open → [`KeyTestOutcome::WrongKey`]
-/// - [`PaksmithError::UnsupportedFeature`] from open → [`KeyTestOutcome::Unsupported`]
-/// - Any other error → [`KeyTestOutcome::Unsupported`] (the key is not the problem)
+/// - Any other open error → [`KeyTestOutcome::Unsupported`] (the key is not the
+///   problem — e.g. a V9 frozen index surfaces as `UnsupportedVersion`; there
+///   is no per-variant arm, just the `Decryption`-vs-everything-else split)
 pub fn test_key<P: AsRef<Path>>(pak: P, key: &AesKey) -> KeyTestOutcome {
     let reader = match PakReader::open_with_key(pak, key.clone()) {
         Ok(r) => r,
         Err(PaksmithError::Decryption { .. }) => return KeyTestOutcome::WrongKey,
-        // UnsupportedFeature (e.g. v10+ encrypted index) and any other
-        // open error both map to Unsupported — the key is not the problem.
+        // UnsupportedVersion (e.g. a V9 frozen index) and any other open
+        // error both map to Unsupported — the key is not the problem.
         Err(_) => return KeyTestOutcome::Unsupported,
     };
     match reader.verify_index() {
@@ -139,17 +141,31 @@ mod tests {
         );
     }
 
-    /// A v11 encrypted-index pak triggers `UnsupportedFeature` from
-    /// `PakReader::open_with_key`, which `test_key` maps to `Unsupported`.
-    /// The key value is irrelevant — the pak is never decrypted.
+    /// A v11 (path-hash index) encrypted pak now decrypts with the correct
+    /// key (#635) and its index hash matches → `Verified`. Previously this
+    /// surfaced as `Unsupported` (the v10+ encrypted-index deferral, now
+    /// retired).
     #[test]
-    fn test_key_v11_encrypted_index_returns_unsupported() {
+    fn test_key_v11_encrypted_index_with_correct_key_is_verified() {
         let key = AesKey::from_hex(KEY).unwrap();
         let out = test_key(fixture("real_v11_encrypted_index.pak"), &key);
         assert_eq!(
             out,
-            KeyTestOutcome::Unsupported,
-            "v11 encrypted-index pak must surface as Unsupported (not WrongKey)"
+            KeyTestOutcome::Verified,
+            "v11 encrypted-index pak with the correct key decrypts and its index hash verifies"
+        );
+    }
+
+    /// A WRONG key on a v11 encrypted index fails the decrypt (garbage
+    /// plaintext fails the primary-index parse) → `WrongKey`.
+    #[test]
+    fn test_key_v11_encrypted_index_with_wrong_key_is_wrongkey() {
+        let wrong = AesKey::from_hex(&"00".repeat(32)).unwrap();
+        let out = test_key(fixture("real_v11_encrypted_index.pak"), &wrong);
+        assert_eq!(
+            out,
+            KeyTestOutcome::WrongKey,
+            "wrong key on a v11 encrypted index must map to WrongKey (Decryption)"
         );
     }
 }

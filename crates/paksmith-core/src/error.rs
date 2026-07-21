@@ -1737,6 +1737,23 @@ pub enum IndexRegionKind {
     Phi,
 }
 
+impl IndexRegionKind {
+    /// Human-readable region name for the diagnostic `path` slot of the
+    /// encrypted index-region bounds faults ([`IndexParseFault::
+    /// OffsetPastFileSize`] / [`IndexParseFault::U64ArithmeticOverflow`],
+    /// #635). Distinct from the wire-stable [`fmt::Display`] tokens
+    /// (`"main"`/`"fdi"`/`"phi"`, which operators grep on) — this is a
+    /// prose label for a human reading a fault, never matched on. Single
+    /// home so the three encrypted-index read/verify sites can't drift.
+    pub(crate) fn human_label(self) -> &'static str {
+        match self {
+            Self::Main => "index",
+            Self::Fdi => "full-directory index",
+            Self::Phi => "path-hash index",
+        }
+    }
+}
+
 /// Discriminator for [`IndexParseFault::RegionPastFileSize`]: which
 /// check fired. Symmetric with [`OffsetPastFileSizeKind`] but at
 /// region scope rather than entry scope.
@@ -7049,6 +7066,18 @@ mod tests {
         assert_eq!(HashTarget::from(IndexRegionKind::Main), HashTarget::Index);
         assert_eq!(HashTarget::from(IndexRegionKind::Fdi), HashTarget::Fdi);
         assert_eq!(HashTarget::from(IndexRegionKind::Phi), HashTarget::Phi);
+    }
+
+    /// Pin every variant's [`IndexRegionKind::human_label`] — the prose
+    /// region name that fills the diagnostic `path` slot of the encrypted
+    /// index-region bounds faults (#635). This is the single home for
+    /// those labels; the pin keeps the three read/verify call sites from
+    /// drifting and kills the `&str`-return mutations.
+    #[test]
+    fn index_region_kind_human_labels_are_pinned() {
+        assert_eq!(IndexRegionKind::Main.human_label(), "index");
+        assert_eq!(IndexRegionKind::Fdi.human_label(), "full-directory index");
+        assert_eq!(IndexRegionKind::Phi.human_label(), "path-hash index");
     }
 
     /// Pin every variant of [`IndexRegionKind`] against its

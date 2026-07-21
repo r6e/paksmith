@@ -46,11 +46,15 @@ same four entries: `test.txt`, `directory/nested.txt`, `zeros.bin`, `test.png`.
 They differ only in which layers are encrypted (entry data, index, or both).
 
 `real_v11_encrypted_index.pak` is a v11 (Fnv64BugFix) pak with an encrypted
-index. It is used to verify that paksmith returns an honest `UnsupportedFeature`
-error (not `Decryption`) when attempting to open a v10+ encrypted-index pak —
-the path-hash index layout is not yet supported for index decryption. Its entry
-list is not verified by paksmith tests (the index cannot be decrypted at this
-phase); provenance only is recorded here.
+index. Since #635 paksmith decrypts the v10/v11 path-hash index — all three
+regions (primary, path-hash, and full-directory) are AES-256-ECB encrypted in
+place and 16-aligned on disk, and each stores the SHA-1 of its plaintext (the
+opposite of the per-entry ciphertext convention, so index verification requires
+the key). This fixture anchors the v10+ encrypted-index tests: with the correct
+key paksmith opens it, lists its entries, reads a file, and verifies its index
+hash; a wrong key fails closed as `Decryption`. The v10 half of that coverage
+patches this fixture's footer version u32 (11→10) in-memory — v10/v11 share an
+identical footer and index wire layout, and `fnv64_path` is version-agnostic.
 
 The `_encrypted_compressed` pair (issue #634) carries the same four-entry
 corpus, AES-256-ECB encrypted, behind plaintext indexes (legacy v8b and

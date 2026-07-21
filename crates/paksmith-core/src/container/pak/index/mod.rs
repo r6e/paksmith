@@ -51,6 +51,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use tracing::warn;
 
+use crate::container::pak::crypto::AesKey;
 use crate::container::pak::version::PakVersion;
 use crate::error::{AllocationContext, IndexParseFault, PaksmithError};
 
@@ -400,8 +401,33 @@ impl PakIndex {
         file_size: u64,
         compression_methods: &[Option<CompressionMethod>],
     ) -> crate::Result<Self> {
+        Self::read_positioned_maybe_encrypted(
+            reader,
+            version,
+            index_size,
+            file_size,
+            compression_methods,
+            None,
+        )
+    }
+
+    /// [`Self::read_positioned`] with an optional AES key (#635). When
+    /// `key` is `Some`, the v10+ path-hash parser reads and decrypts each
+    /// index region (primary/PHI/FDI) — the encrypted-v10+ open path. The
+    /// flat (v3-v9) layout ignores `key` here: its encrypted form is
+    /// handled up-front by `decrypt_index_region` (which hands this a
+    /// plaintext `Cursor`), so `key` never reaches the flat branch on the
+    /// decrypt path.
+    pub(in crate::container::pak) fn read_positioned_maybe_encrypted<R: Read + Seek>(
+        reader: &mut R,
+        version: PakVersion,
+        index_size: u64,
+        file_size: u64,
+        compression_methods: &[Option<CompressionMethod>],
+        key: Option<&AesKey>,
+    ) -> crate::Result<Self> {
         if version.has_path_hash_index() {
-            Self::read_v10_plus_from(reader, index_size, file_size, compression_methods)
+            Self::read_v10_plus_from(reader, index_size, file_size, compression_methods, key)
         } else {
             Self::read_flat_from(reader, version, index_size, compression_methods)
         }
