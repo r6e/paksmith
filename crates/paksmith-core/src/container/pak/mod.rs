@@ -3551,7 +3551,22 @@ mod tests {
         let reader = PakReader::open(&fixture).expect("open compressed fixture");
         let path = "Content/Compressed.uasset";
         let entry = reader.index_entry(path).expect("compressed entry present");
-        let payload_start = entry.header().offset() + entry.header().wire_size();
+        // Derive `payload_start` exactly as the production read path does — from
+        // the *in-data* FPakEntry header (`open_entry_into` + `checked_payload_start`),
+        // not the index header's `wire_size()`. Today `matches_payload` (inside
+        // `open_entry_into`) guarantees the two wire sizes are equal whenever the
+        // header parse succeeds, so this is behavior-identical; mirroring
+        // production keeps the boundary test faithful if a future change ever
+        // decouples the in-data `wire_size` derivation from the index header's
+        // (Copilot #691).
+        let payload_start = {
+            let mut hdr_file = std::fs::File::open(&fixture).expect("open fixture for header");
+            let in_data = reader
+                .open_entry_into(&mut hdr_file, entry)
+                .expect("read in-data FPakEntry header");
+            checked_payload_start(entry.header().offset(), in_data.wire_size(), path)
+                .expect("payload start within u64 bounds")
+        };
         let file_size = std::fs::metadata(&fixture).expect("stat fixture").len();
 
         // Pre-v5 (v3, v4): absolute-offset blocks are unimplemented — reject
