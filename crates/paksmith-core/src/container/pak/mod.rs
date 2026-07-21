@@ -1292,9 +1292,11 @@ impl PakReader {
                     // was already EOF-checked inside
                     // `read_decrypted_compressed_payload`, so it can't
                     // overflow here. The `buffer_end` vs `self.file_size`
-                    // ceiling choice has no mutation-killing test yet — that
-                    // needs a synthetic encrypted multi-block pak (real
-                    // ciphertext); tracked as #688.
+                    // ceiling choice is pinned by the integration test
+                    // `read_encrypted_compressed_block_end_between_buffer_and_file_uses_buffer_ceiling`:
+                    // a forged single-block `end` between the two values must
+                    // reject as `EndPastFileSize`, which the wider
+                    // `self.file_size` ceiling would let through.
                     let buffer_end = payload_start + decrypted.len() as u64;
                     dispatch_compressed(
                         &mut rebased,
@@ -1401,10 +1403,13 @@ fn read_decrypted_compressed_payload<R: Read + Seek>(
         });
     }
 
-    // Reject a `compressed_size` claim past EOF BEFORE the alignment
-    // arithmetic: it bounds `comp` by the real file size, which makes
-    // the `div_ceil`/`* 16` below overflow-free and the allocation
-    // file-proportional.
+    // Reject a `compressed_size` claim past EOF before the alignment
+    // arithmetic: a fail-fast on the unaligned claim that keeps the
+    // allocation file-proportional. (Overflow-freedom of the `div_ceil`/
+    // `* 16` below does NOT rest on this check — the 8 GiB cap above
+    // already bounds `comp < 2^63`, and the `checked_mul` guards the
+    // multiply regardless; this is the stricter aligned check's weaker
+    // sibling, kept for the tighter unaligned error attribution.)
     let _ = checked_payload_end(payload_start, comp, file_size, path)?;
     // `comp <= min(file_size, 8 GiB) < 2^63`, so this cannot actually
     // overflow — but use `checked_mul` for a typed fault

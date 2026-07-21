@@ -10,6 +10,7 @@
 use std::io::Write;
 
 use byteorder::{LittleEndian, WriteBytesExt};
+use paksmith_core::AesKey;
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::{
     FOOTER_SIZE_LEGACY, FOOTER_SIZE_V8B_PLUS, FOOTER_SIZE_V9, PAK_MAGIC, PakVersion,
@@ -2356,6 +2357,85 @@ fn read_zlib_rejects_block_past_eof() {
             }
         ),
         "expected BlockBoundsViolation{{EndPastFileSize}}; got {err:?}"
+    );
+}
+
+/// #634 (R6 architect finding): the encrypted+compressed read path passes
+/// `buffer_end = payload_start + decrypted.len()` (the decrypted-buffer
+/// extent) — NOT `self.file_size` — as the block-bounds ceiling into
+/// `validate_block_bounds`. A forged single-block `end` landing strictly
+/// BETWEEN `buffer_end` and the real `file_size` must be rejected as
+/// `BlockBoundsViolation { EndPastFileSize }`.
+///
+/// This discriminates the `buffer_end` -> `self.file_size` mutant: the
+/// wider `file_size` ceiling would ACCEPT the forged block (`end <=
+/// file_size`), letting the read proceed to an `UnexpectedEof` over the
+/// short `RebasedReader` instead of the typed bounds fault. The precedent
+/// `read_zlib_rejects_block_past_eof` forges an end 1 MiB PAST EOF, which
+/// fails under both ceilings — so it does NOT pin this choice; this test
+/// does. v3-v9 inline entries carry explicit `(start, end)` block pairs
+/// with no cross-check against `compressed_size`, so a single-block entry
+/// suffices — no multi-block layout and no valid ciphertext are needed,
+/// since the bounds check fires before any decrypt output is inflated.
+#[test]
+fn read_encrypted_compressed_block_end_between_buffer_and_file_uses_buffer_ceiling() {
+    // Single 16-byte (already AES-aligned) "compressed" payload. Content
+    // is irrelevant: validate_block_bounds rejects the forged block before
+    // the decrypted bytes are ever inflated.
+    let payload = vec![0u8; 16];
+    let compressed_size = payload.len() as u64; // 16, already 16-aligned
+    // In-data entry header size for a single-block v6 entry (mirrors
+    // read_zlib_rejects_block_past_eof): offset(8) + compressed(8) +
+    // uncompressed(8) + method(4) + sha1(20) + block_count(4) + block(16)
+    // + is_encrypted(1) + block_size(4).
+    let header_size: u64 = 8 + 8 + 8 + 4 + 20 + 4 + 16 + 1 + 4;
+    let payload_start = header_size;
+    let buffer_end = payload_start + compressed_size;
+
+    // Forge the block's end 4 bytes past buffer_end — into the index
+    // region that follows the payload, so it stays strictly < file_size.
+    let forged_end = buffer_end + 4;
+    let blocks = [(payload_start, forged_end)];
+
+    let pak_bytes = build_single_entry_pak_with_flags(
+        6, // v6 legacy footer
+        1, // zlib -> compressed encrypted arm
+        [0u8; 20],
+        &blocks,
+        compressed_size as u32, // block_size
+        &payload,
+        None,
+        true, // encrypted
+        None,
+    );
+    let file_size = pak_bytes.len() as u64;
+    // The discriminating window: buffer_end < forged_end < file_size.
+    // Under the correct buffer_end ceiling the block is rejected; under the
+    // file_size mutant it would be accepted.
+    assert!(
+        buffer_end < forged_end && forged_end < file_size,
+        "forged block end {forged_end} must sit strictly between buffer_end \
+         {buffer_end} and file_size {file_size} to discriminate the ceiling mutant"
+    );
+
+    let key = AesKey::new([0x42u8; 32]);
+    let reader = PakReader::from_reader_with_key(std::io::Cursor::new(pak_bytes), key)
+        .expect("open (plaintext index) with key");
+    let err = reader
+        .read_entry("Content/x.uasset")
+        .expect_err("forged block end past the decrypted buffer must be rejected");
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BlockBoundsViolation {
+                    kind: BlockBoundsKind::EndPastFileSize { .. },
+                    ..
+                },
+            }
+        ),
+        "encrypted+compressed forged block end must be EndPastFileSize \
+         (proves the buffer_end ceiling, not file_size); got: {err:?}"
     );
 }
 
