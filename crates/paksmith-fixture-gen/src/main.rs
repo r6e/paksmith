@@ -44,11 +44,12 @@
 //!
 //! # Fixture matrix
 //!
-//! Eight versions (v3, v6, v7, v8a, v8b, v9, v10, v11) × three
+//! Ten versions (v3, v4, v5, v6, v7, v8a, v8b, v9, v10, v11) × three
 //! shape variants (minimal / multi / mixed_paths) + five
 //! zlib-compressed variants (v8a/v8b/v9/v10/v11) + two
-//! LZ4-compressed variants (v8b/v11, #636). Total 31 fixtures, each
-//! well under 1 KiB.
+//! LZ4-compressed variants (v8b/v11, #636). Total 37 fixtures, each
+//! well under 1 KiB. (v4/v5 are uncompressed/unencrypted, added by
+//! issue #637 to make the "v3-v11" claim literal for the flat path.)
 
 use std::fs::File;
 
@@ -236,6 +237,55 @@ fn main() {
         Fixture {
             name: "real_v3_mixed_paths.pak",
             version: Version::V3,
+            mount_point: mount,
+            entries: mixed_path_entries,
+            compression: None,
+        },
+        // v4 — IndexEncryption. Adds the index-encryption capability; these
+        // fixtures are uncompressed + unencrypted, so the flat-entry layout
+        // is identical to v3 and they pin paksmith's v4 version dispatch
+        // (issue #637 legacy-version coverage).
+        Fixture {
+            name: "real_v4_minimal.pak",
+            version: Version::V4,
+            mount_point: mount,
+            entries: minimal_entries,
+            compression: None,
+        },
+        Fixture {
+            name: "real_v4_multi.pak",
+            version: Version::V4,
+            mount_point: mount,
+            entries: multi_entries,
+            compression: None,
+        },
+        Fixture {
+            name: "real_v4_mixed_paths.pak",
+            version: Version::V4,
+            mount_point: mount,
+            entries: mixed_path_entries,
+            compression: None,
+        },
+        // v5 — RelativeChunkOffsets. Compression-block offsets become
+        // relative to the entry record; these fixtures are uncompressed so
+        // they don't exercise that path, but pin v5 version dispatch (#637).
+        Fixture {
+            name: "real_v5_minimal.pak",
+            version: Version::V5,
+            mount_point: mount,
+            entries: minimal_entries,
+            compression: None,
+        },
+        Fixture {
+            name: "real_v5_multi.pak",
+            version: Version::V5,
+            mount_point: mount,
+            entries: multi_entries,
+            compression: None,
+        },
+        Fixture {
+            name: "real_v5_mixed_paths.pak",
+            version: Version::V5,
             mount_point: mount,
             entries: mixed_path_entries,
             compression: None,

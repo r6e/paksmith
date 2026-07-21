@@ -103,6 +103,22 @@ fn anchor_real_v3_minimal_fixture_bytes() {
 }
 
 #[test]
+fn anchor_real_v4_minimal_fixture_bytes() {
+    anchor_fixture_sha1(
+        "real_v4_minimal.pak",
+        "81b64a4b9e4120bdf6f8b8081fd3d0bd2e039263",
+    );
+}
+
+#[test]
+fn anchor_real_v5_minimal_fixture_bytes() {
+    anchor_fixture_sha1(
+        "real_v5_minimal.pak",
+        "b3a0577d544b7293a75cd80529745419f19b5191",
+    );
+}
+
+#[test]
 fn anchor_real_v6_minimal_fixture_bytes() {
     anchor_fixture_sha1(
         "real_v6_minimal.pak",
