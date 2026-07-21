@@ -29,11 +29,16 @@
 //!   `verify_entry` surfaces them as `SkippedNoHash`. Verification is
 //!   opt-in to keep list-only workloads from paying the cost.
 //! - AES-256 decryption (with a key via [`PakReader::open_with_key`]) of
-//!   the v3-v9 index and of encrypted ENTRIES — both uncompressed and
-//!   compressed. Encrypted compressed entries decrypt the 16-aligned
-//!   payload region as one contiguous block before per-block inflation.
-//!   Encrypted entries verify keylessly (the stored SHA1 covers the
-//!   on-disk ciphertext).
+//!   the index and of encrypted ENTRIES. The v3-v9 flat index and the
+//!   v10/v11 path-hash index (all three regions — primary, path-hash, and
+//!   full-directory) are each read as a 16-aligned on-disk region,
+//!   decrypted, and truncated to the logical size. Encrypted entries come
+//!   both uncompressed and compressed; encrypted compressed entries decrypt
+//!   the 16-aligned payload region as one contiguous block before per-block
+//!   inflation. **The hash conventions are opposite:** encrypted entries
+//!   verify keylessly (the stored SHA1 covers the on-disk ciphertext),
+//!   whereas encrypted index regions store the SHA1 of their PLAINTEXT — so
+//!   index verification requires the key (#635).
 //!
 //! It does NOT yet handle:
 //! - Gzip / Oodle / Zstd compression — resolvable (Gzip and Oodle
@@ -665,7 +670,7 @@ impl PakReader {
             // in `decrypt_index_region` applies.
             let buf = {
                 let mut guard = self.locked();
-                decrypt_index_region(&mut *guard, &self.footer, key)?
+                decrypt_index_region(&mut *guard, &self.footer, self.file_size, key)?
             };
             let index_size = self.footer.index_size();
             let index_size_usize =
@@ -842,9 +847,9 @@ impl PakReader {
     /// `region.size()` is already bounded: `verify_region` ran
     /// `check_region_bounds` (`offset + size <= file_size`) before calling
     /// this, and the region was parsed under the `MAX_FDI_BYTES` cap at
-    /// open. An explicit `MAX_INDEX_BYTES` re-check keeps the align-up
-    /// overflow-safe and the allocation bounded even if a future caller
-    /// skips those. Mirrors `decrypt_index_region`'s hygiene.
+    /// open. The 16-aligned on-disk extent is computed overflow-safely by
+    /// [`checked_aligned_payload_len`] (`checked_mul`), which also bounds it
+    /// against `file_size`. Mirrors `decrypt_index_region`'s hygiene.
     fn decrypt_region_plaintext(
         &self,
         region: RegionDescriptor,
@@ -858,17 +863,6 @@ impl PakReader {
             IndexRegionKind::Fdi | IndexRegionKind::Main => WireField::FdiSize,
         };
         let size = region.size();
-        if size > MAX_INDEX_BYTES {
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::BoundsExceeded {
-                    field,
-                    value: size,
-                    limit: MAX_INDEX_BYTES,
-                    unit: BoundsUnit::Bytes,
-                    path: None,
-                },
-            });
-        }
         // Bounds-check the 16-aligned on-disk extent against EOF and get
         // the aligned length through the shared align-then-check helper
         // (one home with the open-path region reads, #635) — so verify
@@ -1740,6 +1734,7 @@ impl ContainerReader for PakReader {
 fn decrypt_index_region<R: Read + Seek>(
     reader: &mut R,
     footer: &PakFooter,
+    file_size: u64,
     key: &AesKey,
 ) -> crate::Result<Zeroizing<Vec<u8>>> {
     let index_size = footer.index_size();
@@ -1761,9 +1756,14 @@ fn decrypt_index_region<R: Read + Seek>(
         });
     }
 
-    // Encrypted regions are 16-aligned on disk. Overflow-safe because
-    // index_size <= MAX_INDEX_BYTES (1 GiB) above, so index_size + 15 < u64::MAX.
-    let aligned = index_size.div_ceil(16) * 16;
+    // Encrypted regions are 16-aligned on disk. `checked_aligned_payload_len`
+    // computes that extent overflow-safely (`checked_mul`, and `index_size <=
+    // MAX_INDEX_BYTES` above keeps it far from the ceiling) AND bounds it
+    // against `file_size` — so a crafted `index_size` whose 16-padding
+    // overshoots EOF surfaces as a typed `OffsetPastFileSize`, not a bare
+    // `Io(UnexpectedEof)` from `read_exact` (matches the v10+ region reads,
+    // #635).
+    let aligned = checked_aligned_payload_len(footer.index_offset(), index_size, file_size, "")?;
     let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
         fault: IndexParseFault::U64ExceedsPlatformUsize {
             field: WireField::IndexSize,
@@ -1847,6 +1847,18 @@ fn read_encrypted_index<R: Read + Seek>(
     // imprecise for the rare real-I/O case (a garbage but in-bounds
     // fdi/phi offset still yields a typed `InvalidIndex`, not `Io`, so
     // wrong-key detection is unaffected).
+    //
+    // Accepted trade-off: a CORRECTLY-keyed v10+ index that decrypts to
+    // structurally valid plaintext but fails a post-parse cross-check (the
+    // issue #131 `PhiFdiInconsistency`, or a non-ASCII path hitting the
+    // `fnv64_path` ASCII-only limitation) is ALSO collapsed into
+    // `Decryption` here — the unencrypted path would surface the specific
+    // fault, the encrypted path reports "looks like a wrong key." This is
+    // deliberate: passing such faults through unmapped would leak that the
+    // key decrypted to a valid-looking index, and a wrong key reaching a
+    // structurally-valid parse is cryptographically negligible, so the
+    // collapse loses nothing security-relevant. The cost is diagnostic
+    // precision on encrypted v10+ opens only.
     let wrong_key_map = |e: PaksmithError| {
         let is_resource_fault = matches!(
             e,
@@ -1886,7 +1898,7 @@ fn read_encrypted_index<R: Read + Seek>(
     // seek-to-`index_offset` is meaningless against an in-memory buffer).
     // `index_size` (not the 16-aligned length) is the real index byte
     // budget; the trailing AES pad bytes are not part of the index.
-    let buf = decrypt_index_region(reader, footer, key)?;
+    let buf = decrypt_index_region(reader, footer, file_size, key)?;
     PakIndex::read_positioned(
         &mut Cursor::new(&buf[..]),
         footer.version(),
@@ -3852,6 +3864,48 @@ mod tests {
             reader.entries().count(),
             4,
             "from_reader_with_key must expose the four fixture entries"
+        );
+    }
+
+    /// A flat (v3-v9) encrypted index whose LOGICAL `index_size` passes the
+    /// footer bound (`index_offset + index_size <= file_size`) but whose
+    /// 16-aligned on-disk extent overshoots EOF must surface a typed
+    /// `OffsetPastFileSize` (via the shared `checked_aligned_payload_len`),
+    /// not a bare `Io(UnexpectedEof)` from `read_exact` — matching the typed
+    /// bound the v10+ region reads already guarantee (#635 uniformity).
+    #[test]
+    fn flat_encrypted_index_aligned_overshoot_is_offset_past_file_size() {
+        let mut bytes = std::fs::read(encrypted_index_fixture()).expect("read fixture bytes");
+        let magic = b"\xe1\x12\x6f\x5a";
+        let footer_start = bytes
+            .windows(4)
+            .rposition(|w| w == magic)
+            .expect("footer magic present");
+        let idx_off_pos = footer_start + 8;
+        let idx_size_pos = footer_start + 16;
+        let index_offset =
+            u64::from_le_bytes(bytes[idx_off_pos..idx_off_pos + 8].try_into().unwrap());
+        let file_size = bytes.len() as u64;
+        // Claim the entire region-through-EOF as the index: index_offset +
+        // index_size == file_size (passes the footer bound), but the encrypted
+        // region is 16-aligned on disk and the v8b+ footer is 221 bytes
+        // (≡ 13 mod 16), so file_size - index_offset ≡ 13 mod 16 → align16
+        // overshoots EOF by 3.
+        let patched = file_size - index_offset;
+        assert_ne!(patched % 16, 0, "test requires a non-16-aligned overshoot");
+        bytes[idx_size_pos..idx_size_pos + 8].copy_from_slice(&patched.to_le_bytes());
+
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let err = PakReader::from_reader_with_key(std::io::Cursor::new(bytes), key)
+            .expect_err("aligned index extent overshoots EOF");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::OffsetPastFileSize { .. }
+                }
+            ),
+            "aligned-overshoot must surface as typed OffsetPastFileSize, got {err:?}"
         );
     }
 
