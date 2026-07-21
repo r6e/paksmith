@@ -55,9 +55,9 @@ docs: update ARCHITECTURE.md with export pipeline
 
 The cross-parser validation tests (which check `paksmith-core`'s pak parser against an independent implementation, [trumank/repak](https://github.com/trumank/repak)) live in the dev-only `paksmith-fixture-gen` crate. That crate is **excluded from the workspace's `default-members`** so plain `cargo build` and `cargo test` from the repo root never have to resolve the `repak` git dependency — which keeps routine local development fast and not coupled to github.com reachability.
 
-The trade-off: bare `cargo test` skips the cross-parser test suite in `paksmith-fixture-gen/tests/cross_validation.rs` (~45 tests as of Phase 1: ~29 `cross_parser_agreement_*` byte-for-byte agreement tests + ~15 `paksmith_reads_repak_*` smoke tests + a few targeted regression pins). **Always run `cargo test --workspace`** before pushing. CI uses `--workspace` for every job, so a missed local run would surface the failure on PR — but it'll cost you a round-trip you didn't need.
+The trade-off: bare `cargo test` skips the cross-parser test suite in `paksmith-fixture-gen/tests/cross_validation.rs` (the `cross_parser_agreement_*` byte-for-byte agreement tests + `paksmith_reads_repak_*` smoke tests + targeted regression pins). **Always run `cargo test --workspace`** before pushing. CI uses `--workspace` for every job, so a missed local run would surface the failure on PR — but it'll cost you a round-trip you didn't need.
 
-The SHA1 byte anchor on `real_v3_minimal.pak` (`crates/paksmith-core/tests/fixture_anchor.rs`) DOES run on default `cargo test`, so accidental fixture corruption is caught even without `--workspace`. But cross-parser disagreements (paksmith vs. repak) only surface with `--workspace`.
+The SHA1 byte anchors (one `_minimal` fixture per version family, in `crates/paksmith-core/tests/fixture_anchor.rs`) DO run on default `cargo test`, so accidental fixture corruption is caught even without `--workspace`. But cross-parser disagreements (paksmith vs. repak) only surface with `--workspace`.
 
 ## Pull Requests
 

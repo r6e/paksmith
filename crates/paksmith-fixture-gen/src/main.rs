@@ -30,9 +30,9 @@
 //!   (`real_v{8a,8b,9,10,11}_compressed.pak`) and issue #636 added
 //!   LZ4-compressed fixtures (`real_v{8b,11}_lz4.pak`). repak CAN emit
 //!   compressed output at any compression-capable version (v3+; compression
-//!   is a v3 wire feature) — v3-v7 via the numeric compression IDs (its
-//!   writer pre-populates the legacy slot table), v8+ via the FName slot
-//!   table (verified against the pinned rev). The
+//!   is a v3 wire feature) — v3-v7 via the numeric compression IDs (repak's
+//!   own test corpus ships `pack_v5_compress.pak` / `pack_v7_compress.pak`),
+//!   v8+ via the FName slot table (exercised by our cross-validation). The
 //!   corpus stays v8+ deliberately: pre-v5 compressed reads use
 //!   absolute-offset blocks paksmith doesn't implement (#637), and v5-v7
 //!   compressed exercises the same entry-relative read path the v8+
@@ -93,13 +93,14 @@ struct Fixture<'a> {
     mount_point: &'static str,
     entries: &'a [Entry<'a>],
     /// Issue #69 (Zlib) / #636 (LZ4): when `Some(method)`, configure
-    /// repak with that compression method in the FName slot table and
-    /// pass `allow_compress: true` per entry. repak only emits
-    /// compressed output for v8+ archives (the FNameBased compression
-    /// slot table appeared in v8); ignored for v3-v7. The fixture's
-    /// payloads must compress well — repak always stores compressed
-    /// output, even when larger than uncompressed, so any non-empty
-    /// compressible input trips the compressed path.
+    /// repak with that compression method (the FName slot table for v8+,
+    /// or the pre-populated numeric slots for v3-v7) and pass
+    /// `allow_compress: true` per entry. This matrix only sets compression
+    /// on v8+ fixtures — repak CAN compress pre-v8 too (see the module doc),
+    /// but the corpus stays v8+ by choice. The fixture's payloads must
+    /// compress well — repak always stores compressed output, even when
+    /// larger than uncompressed, so any non-empty compressible input trips
+    /// the compressed path.
     compression: Option<Compression>,
 }
 
