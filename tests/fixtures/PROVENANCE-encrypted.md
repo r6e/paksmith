@@ -32,7 +32,7 @@ possible. These files are kept as committed binaries.
 
 ## Decryption Key
 
-All four fixtures use the same AES-256 key:
+All six fixtures use the same AES-256 key:
 
 - Base64: `lNJbw660IOC+kU7cnVQ1oeqrXyhk4J6UAZrCBbcnp94=`
 - Hex: `94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de`

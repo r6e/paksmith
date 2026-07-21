@@ -338,22 +338,28 @@ See `docs/security/allocation-caps.md` for the broader policy.
   - **V10+ encrypted indexes** remain `UnsupportedFeature` — the
     path-hash/full-directory index decryption layout is issue #635.
   - **V4–V6 index encryption gap.** Paksmith treats any V4–V6 archive as plaintext — see Wire layout §*Footer fields* for the root cause (`FOOTER_SIZE_LEGACY = 44` probe window excludes the `encrypted` byte). repak reads it; we don't.
-  - **Multi-block encrypted entries unverified against a first-party
-    fixture.** Every vendored encrypted+compressed fixture entry is
-    single-block, so the AES-aligned-per-block-footprint `compressed_size`
-    convention and the multi-block decrypt-then-decompress walk rest on
-    repak's read-side cursor logic (CUE4Parse-corroborated), not on a
-    UnrealPak-authored multi-block archive. Fail-closed
-    (`CompressedSizeMismatch` on a mismatch); tracked as issue #688.
-  - **Encrypted + LZ4 entries unverified against a fixture.** Every
-    vendored encrypted+compressed fixture entry is zlib-compressed, so
-    the encrypted+LZ4 decrypt-then-decompress path (LZ4 over the
-    `RebasedReader`) is exercised only by code inspection — its reader
-    access is `read_compressed_block`, which is `Seek(Start)`-only and
-    thus honours the `RebasedReader` contract. It is reachable by
-    crafted input via the v8+ compression-method slot; a first-party
-    encrypted+LZ4 fixture is blocked on the same synthetic-pak
-    scaffolding as the multi-block case, and is tracked under issue #688.
+  - **Multi-block encrypted entries: self-consistency covered
+    synthetically; first-party fixture deferred.** Paksmith's own
+    decrypt-then-decompress multi-block walk — 2+ blocks read across the
+    AES-aligned inter-block gaps inside the decrypted buffer — is pinned
+    in-source by `reads_encrypted_lz4_multi_block_round_trips` (a
+    byte-exact round-trip). What remains unverified is whether the
+    AES-aligned-per-block-footprint `compressed_size` convention matches a
+    *real UnrealPak-authored* multi-block archive: every vendored fixture
+    entry is single-block, so that convention rests on repak's read-side
+    cursor logic (CUE4Parse-corroborated). Fail-closed
+    (`CompressedSizeMismatch` / `EndPastFileSize` on a mismatch); tracked
+    as issue #688.
+  - **Encrypted + LZ4: exercised synthetically; first-party fixture
+    deferred.** Every vendored encrypted+compressed fixture entry is
+    zlib-compressed, but the encrypted+LZ4 decrypt-then-decompress path
+    (LZ4 over the `RebasedReader`) is exercised end-to-end in-source by
+    `reads_encrypted_lz4_entry_round_trips` (single-block) and
+    `reads_encrypted_lz4_multi_block_round_trips` (multi-block) — each a
+    byte-exact round-trip, confirming `read_compressed_block`'s
+    `Seek(Start)`-only access honours the `RebasedReader` contract. Only a
+    *first-party* UnrealPak-authored encrypted+LZ4 fixture remains
+    outstanding, tracked under issue #688.
 
 ## Paksmith implementation
 
