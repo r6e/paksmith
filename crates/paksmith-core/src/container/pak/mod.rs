@@ -1900,21 +1900,17 @@ fn read_encrypted_index<R: Read + Seek>(
     // opens only.
     let wrong_key_map = |e: PaksmithError| {
         let is_resource_fault = matches!(
-            e,
+            &e,
             PaksmithError::InvalidIndex {
                 fault: IndexParseFault::AllocationFailed { .. }
                     | IndexParseFault::U64ExceedsPlatformUsize { .. },
             }
         );
-        // A genuine non-EOF reader I/O error (media/seek failure) is NOT a
-        // wrong-key signal: the ciphertext reads are bounds-pre-checked, so a
-        // wrong key corrupts only the decrypted CONTENT and surfaces as a
-        // typed `InvalidIndex` or an in-memory Cursor `UnexpectedEof`. Preserve
-        // non-EOF `Io` so the operator sees the real cause (matching the flat
-        // path, whose disk reads sit outside this map). `UnexpectedEof` still
-        // collapses to `Decryption` — it is ambiguous (a wrong key over-reading
-        // the Cursor vs. a file-shrink race against the immutability
-        // assumption), so fail-closed wins.
+        // Preserve a genuine non-EOF reader `Io` (see the "On `Io`" rationale
+        // in this function's doc): it is always a key-independent media/seek
+        // failure, never a wrong-key signal. `UnexpectedEof` still collapses to
+        // `Decryption` (ambiguous — wrong-key Cursor over-read vs. file-shrink
+        // race — so fail-closed wins).
         let is_genuine_io = matches!(
             &e,
             PaksmithError::Io(io) if io.kind() != std::io::ErrorKind::UnexpectedEof
@@ -3888,6 +3884,20 @@ mod tests {
             .join("../../tests/fixtures/real_v8b_encrypted_index.pak")
     }
 
+    /// Absolute offset of the footer's 4-byte magic within `bytes` — the
+    /// anchor for magic-relative footer field offsets (version at `+4`,
+    /// index_offset at `+8`, index_size at `+16`, index_hash at `+24`).
+    /// Sourced from [`version::PAK_MAGIC`] rather than a hand-typed literal,
+    /// and shared by the tests that patch/inspect the footer. The footer
+    /// sits at the physical tail, so the LAST magic occurrence is its.
+    fn footer_magic_pos(bytes: &[u8]) -> usize {
+        let magic = crate::container::pak::version::PAK_MAGIC.to_le_bytes();
+        bytes
+            .windows(4)
+            .rposition(|w| w == magic.as_slice())
+            .expect("footer magic must be present in fixture")
+    }
+
     /// Happy path: with the correct key, the encrypted index decrypts and
     /// parses, exposing the four known plaintext entries. This is the
     /// oracle for the index-decrypt being byte-correct — a wrong decrypt
@@ -3943,11 +3953,7 @@ mod tests {
     #[test]
     fn flat_encrypted_index_aligned_overshoot_is_offset_past_file_size() {
         let mut bytes = std::fs::read(encrypted_index_fixture()).expect("read fixture bytes");
-        let magic = b"\xe1\x12\x6f\x5a";
-        let footer_start = bytes
-            .windows(4)
-            .rposition(|w| w == magic)
-            .expect("footer magic present");
+        let footer_start = footer_magic_pos(&bytes);
         let idx_off_pos = footer_start + 8;
         let idx_size_pos = footer_start + 16;
         let index_offset =
@@ -4059,11 +4065,7 @@ mod tests {
         // index_size(8) + index_hash(20) = field starts at footer_start + 24.
         let fixture_bytes =
             std::fs::read(encrypted_index_fixture()).expect("read encrypted fixture");
-        let magic = b"\xe1\x12\x6f\x5a";
-        let footer_start = fixture_bytes
-            .windows(4)
-            .rposition(|w| w == magic)
-            .expect("footer magic must be present in fixture");
+        let footer_start = footer_magic_pos(&fixture_bytes);
         let hash_start = footer_start + 24;
         let hash_end = hash_start + 20;
         assert!(
@@ -4184,12 +4186,7 @@ mod tests {
         // module do) rather than hardcoding the footer size; the version u32
         // sits immediately after the 4-byte magic. The "reads 11" sanity
         // assert below still guards the offset math either way.
-        let magic = b"\xe1\x12\x6f\x5a";
-        let magic_pos = bytes
-            .windows(4)
-            .rposition(|w| w == magic)
-            .expect("footer magic must be present in fixture");
-        let ver_off = magic_pos + 4;
+        let ver_off = footer_magic_pos(&bytes) + 4;
         assert_eq!(
             u32::from_le_bytes(bytes[ver_off..ver_off + 4].try_into().unwrap()),
             11,
@@ -4250,11 +4247,7 @@ mod tests {
     /// The v11 fixture's primary-index absolute offset, parsed from the
     /// footer (`…magic(4) + version(4) + index_offset(8)…`).
     fn v11_primary_index_offset(bytes: &[u8]) -> u64 {
-        let magic = b"\xe1\x12\x6f\x5a";
-        let magic_pos = bytes
-            .windows(4)
-            .rposition(|w| w == magic)
-            .expect("footer magic present");
+        let magic_pos = footer_magic_pos(bytes);
         u64::from_le_bytes(bytes[magic_pos + 8..magic_pos + 16].try_into().unwrap())
     }
 
