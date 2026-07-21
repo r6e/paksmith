@@ -1857,19 +1857,20 @@ fn read_encrypted_index<R: Read + Seek>(
     // can't distinguish from a corrupt index. Pass through only
     // resource/platform faults that are independent of key correctness.
     //
-    // On `Io`: for the FLAT (v3-v9) path all file I/O happens up front in
-    // `decrypt_index_region` and `read_positioned` parses an in-memory
-    // `Cursor`, so any `Io` this map sees is a Cursor `UnexpectedEof` from
-    // garbage plaintext (wrong key) — correctly mapped. For the V10+ path
-    // the primary-index wrong-key signal is ALSO an in-memory `Cursor`
-    // `UnexpectedEof` (garbage mount-string length), but the parser
-    // additionally reads the FDI/PHI regions from the real file reader, so
-    // a genuine disk `Io` there is indistinguishable from the wrong-key
-    // Cursor `Io` and is likewise mapped to `Decryption`. This is
-    // fail-closed — the open correctly fails; only the error KIND is
-    // imprecise for the rare real-I/O case (a garbage but in-bounds
-    // fdi/phi offset still yields a typed `InvalidIndex`, not `Io`, so
-    // wrong-key detection is unaffected).
+    // On `Io`: wrong-key never produces a non-EOF reader `Io`. For the FLAT
+    // (v3-v9) path all file I/O happens up front in `decrypt_index_region`
+    // (outside this map) and `read_positioned` parses an in-memory `Cursor`,
+    // so the only `Io` this map sees is a Cursor `UnexpectedEof` from garbage
+    // plaintext (wrong key). For the V10+ path the region reads DO go through
+    // the real reader inside this map, but their extents are bounds-pre-checked
+    // — a wrong key corrupts only the decrypted CONTENT, surfacing as a typed
+    // `InvalidIndex` or an in-memory Cursor `UnexpectedEof` (garbage
+    // mount-string length / over-read). So a non-EOF reader `Io` (disk / media
+    // / seek failure) is always a genuine, key-independent error and is
+    // PRESERVED as `Io` (see `wrong_key_map`), giving the operator the real
+    // cause instead of a misleading "wrong key". `UnexpectedEof` stays mapped
+    // to `Decryption` (ambiguous: wrong-key Cursor over-read vs. file-shrink
+    // race) — fail-closed, and wrong-key detection is unaffected.
     //
     // Accepted trade-off: for the v10+ path this collapse also swallows
     // faults that are NOT wrong-key garbage. Two classes:
@@ -1905,7 +1906,20 @@ fn read_encrypted_index<R: Read + Seek>(
                     | IndexParseFault::U64ExceedsPlatformUsize { .. },
             }
         );
-        if is_resource_fault {
+        // A genuine non-EOF reader I/O error (media/seek failure) is NOT a
+        // wrong-key signal: the ciphertext reads are bounds-pre-checked, so a
+        // wrong key corrupts only the decrypted CONTENT and surfaces as a
+        // typed `InvalidIndex` or an in-memory Cursor `UnexpectedEof`. Preserve
+        // non-EOF `Io` so the operator sees the real cause (matching the flat
+        // path, whose disk reads sit outside this map). `UnexpectedEof` still
+        // collapses to `Decryption` — it is ambiguous (a wrong key over-reading
+        // the Cursor vs. a file-shrink race against the immutability
+        // assumption), so fail-closed wins.
+        let is_genuine_io = matches!(
+            &e,
+            PaksmithError::Io(io) if io.kind() != std::io::ErrorKind::UnexpectedEof
+        );
+        if is_resource_fault || is_genuine_io {
             e
         } else {
             debug!(?e, "encrypted index parse failed — likely wrong key");
@@ -4166,8 +4180,16 @@ mod tests {
     #[test]
     fn open_with_key_decrypts_v10_path_hash_index_and_reads() {
         let mut bytes = std::fs::read(encrypted_v11_index_fixture()).expect("read v11 fixture");
-        let footer_size = 16 + 1 + 4 + 4 + 8 + 8 + 20 + 160;
-        let ver_off = bytes.len() - footer_size + 16 + 1 + 4;
+        // Locate the footer via its magic bytes (as the other tests in this
+        // module do) rather than hardcoding the footer size; the version u32
+        // sits immediately after the 4-byte magic. The "reads 11" sanity
+        // assert below still guards the offset math either way.
+        let magic = b"\xe1\x12\x6f\x5a";
+        let magic_pos = bytes
+            .windows(4)
+            .rposition(|w| w == magic)
+            .expect("footer magic must be present in fixture");
+        let ver_off = magic_pos + 4;
         assert_eq!(
             u32::from_le_bytes(bytes[ver_off..ver_off + 4].try_into().unwrap()),
             11,
@@ -4196,6 +4218,89 @@ mod tests {
         assert_eq!(
             reader.verify_index().expect("verify v10 index"),
             VerifyOutcome::Verified,
+        );
+    }
+
+    /// A `Read + Seek` over in-memory bytes that injects a chosen
+    /// [`std::io::Error`] the moment a read STARTS at absolute offset
+    /// `fail_at`. Used to fire a fault during the encrypted index-region
+    /// read — which happens AFTER the footer parse, so it routes through
+    /// `read_encrypted_index`'s `wrong_key_map`.
+    struct FaultAtOffset {
+        inner: std::io::Cursor<Vec<u8>>,
+        fail_at: u64,
+        kind: std::io::ErrorKind,
+    }
+
+    impl std::io::Read for FaultAtOffset {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.inner.position() == self.fail_at {
+                return Err(std::io::Error::new(self.kind, "injected fault"));
+            }
+            self.inner.read(buf)
+        }
+    }
+
+    impl std::io::Seek for FaultAtOffset {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    /// The v11 fixture's primary-index absolute offset, parsed from the
+    /// footer (`…magic(4) + version(4) + index_offset(8)…`).
+    fn v11_primary_index_offset(bytes: &[u8]) -> u64 {
+        let magic = b"\xe1\x12\x6f\x5a";
+        let magic_pos = bytes
+            .windows(4)
+            .rposition(|w| w == magic)
+            .expect("footer magic present");
+        u64::from_le_bytes(bytes[magic_pos + 8..magic_pos + 16].try_into().unwrap())
+    }
+
+    /// #635 diagnostics: a genuine (non-EOF) reader I/O error during the
+    /// encrypted v10+ index-region read must surface as `Io`, NOT collapse
+    /// to `Decryption`. Wrong-key never produces a non-EOF reader Io (the
+    /// ciphertext reads are bounds-pre-checked; a wrong key corrupts only
+    /// the decrypted content), so a media/seek failure is key-independent
+    /// and its real cause must reach the operator — matching the flat path.
+    #[test]
+    fn v10_plus_encrypted_open_preserves_genuine_disk_io() {
+        let bytes = std::fs::read(encrypted_v11_index_fixture()).expect("read v11 fixture");
+        let fail_at = v11_primary_index_offset(&bytes);
+        let reader = FaultAtOffset {
+            inner: std::io::Cursor::new(bytes),
+            fail_at,
+            kind: std::io::ErrorKind::Other,
+        };
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let err = PakReader::from_reader_with_key(reader, key)
+            .expect_err("injected disk Io must fail the open");
+        assert!(
+            matches!(&err, PaksmithError::Io(io) if io.kind() == std::io::ErrorKind::Other),
+            "a genuine non-EOF disk Io during the encrypted index read must surface as Io, not Decryption; got {err:?}"
+        );
+    }
+
+    /// #635 fail-closed: an `UnexpectedEof` during the same read stays
+    /// mapped to `Decryption` — it is ambiguous between a wrong-key Cursor
+    /// over-read and a file-shrink race, so fail-closed wins. Pins the
+    /// `!= UnexpectedEof` half of `wrong_key_map`'s Io discrimination.
+    #[test]
+    fn v10_plus_encrypted_open_maps_eof_to_decryption() {
+        let bytes = std::fs::read(encrypted_v11_index_fixture()).expect("read v11 fixture");
+        let fail_at = v11_primary_index_offset(&bytes);
+        let reader = FaultAtOffset {
+            inner: std::io::Cursor::new(bytes),
+            fail_at,
+            kind: std::io::ErrorKind::UnexpectedEof,
+        };
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let err = PakReader::from_reader_with_key(reader, key)
+            .expect_err("EOF during index read must fail the open");
+        assert!(
+            matches!(err, PaksmithError::Decryption { .. }),
+            "UnexpectedEof during the encrypted index read must map to Decryption (fail-closed); got {err:?}"
         );
     }
 
