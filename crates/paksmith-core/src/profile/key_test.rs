@@ -18,8 +18,9 @@ pub enum KeyTestOutcome {
     Decrypted,
     /// The key did not decrypt the index (wrong key).
     WrongKey,
-    /// The pak uses a layout this build cannot decrypt (e.g. v10+
-    /// encrypted index) — the key may be correct but cannot be tested.
+    /// The pak uses a layout this build cannot decrypt (e.g. a V9
+    /// frozen index, which opens as `UnsupportedVersion`) — the key
+    /// may be correct but cannot be tested.
     Unsupported,
 }
 
