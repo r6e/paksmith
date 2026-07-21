@@ -443,11 +443,14 @@ impl PakReader {
         // the unaligned `uncompressed_size` (`real_v8b_encrypted_entries`
         // `test.txt`: 446, not the 448-aligned footprint), so this
         // open-time bound UNDER-counts the real on-disk extent by up to
-        // 15 bytes. That gap is caught fail-closed at read time — the
-        // `checked_payload_end` on the AES-aligned length inside
-        // `stream_uncompressed_to` / `read_decrypted_compressed_payload`
-        // rejects a truncated tail with `OffsetPastFileSize` rather than
-        // reading past EOF; nothing here relies on this bound being exact
+        // 15 bytes. That gap is caught fail-closed at read AND verify
+        // time — the `checked_payload_end` on the AES-aligned length
+        // inside `stream_uncompressed_to` /
+        // `read_decrypted_compressed_payload`, and
+        // `checked_aligned_payload_end` in `verify_entry`'s encrypted arm
+        // (#689), reject a truncated tail with `OffsetPastFileSize`
+        // rather than reading past EOF or reporting `Verified` for an
+        // unreadable entry; nothing here relies on this bound being exact
         // for the uncompressed class.
         for entry in index.entries() {
             let header = entry.header();
@@ -965,6 +968,13 @@ impl PakReader {
                 checked_payload_start(entry.header().offset(), in_data.wire_size(), path)?;
             let compressed = entry.header().compressed_size();
             let _ = checked_payload_end(payload_start, compressed, self.file_size, path)?;
+            // Also bounds-check the 16-ALIGNED extent (the region a read
+            // must consume) so `Verified` implies the read path's payload
+            // bounds hold — a crafted pak missing only its trailing AES
+            // padding must fail verify, not report Verified and then fail
+            // to read (Copilot review, #689). The hash below still covers
+            // only `compressed` bytes, per the wire SHA-1 convention.
+            let _ = checked_aligned_payload_end(payload_start, compressed, self.file_size, path)?;
             let _ = file.seek(SeekFrom::Start(payload_start))?;
             sha1_of_reader(&mut file, compressed, &mut buf)?
         } else {
@@ -1921,6 +1931,41 @@ fn checked_payload_end(start: u64, size: u64, file_size: u64, path: &str) -> cra
         });
     }
     Ok(end)
+}
+
+/// Bounds-check an ENCRYPTED payload's full on-disk extent: the region a
+/// reader must consume is `size` rounded up to the 16-byte AES alignment,
+/// not `size` itself. Returns the aligned length.
+///
+/// Copilot review on #634 caught the asymmetry this closes: `verify_entry`
+/// bounds-checked (and hashed) only the truncated `compressed_size` range,
+/// while both read paths (`stream_uncompressed_to`'s encrypted arm,
+/// `read_decrypted_compressed_payload`) require the aligned extent — so a
+/// CRAFTED pak whose payload's unaligned end fits inside `file_size` but
+/// whose AES padding overshoots EOF verified as `Verified` yet failed to
+/// read. Only reachable for unaligned `size` (the uncompressed-encrypted
+/// class, or a forged inline `compressed_size`): compressed encrypted
+/// entries store the 16-aligned footprint sum, and real archives always
+/// carry the padding (the index/footer follow it), so this rejects no
+/// legitimate archive. The stored SHA-1 still covers only `size` bytes —
+/// callers hash the truncated range regardless.
+fn checked_aligned_payload_end(
+    start: u64,
+    size: u64,
+    file_size: u64,
+    path: &str,
+) -> crate::Result<u64> {
+    let aligned = size
+        .div_ceil(16)
+        .checked_mul(16)
+        .ok_or_else(|| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ArithmeticOverflow {
+                path: Some(path.to_string()),
+                operation: OverflowSite::PayloadEnd,
+            },
+        })?;
+    let _ = checked_payload_end(start, aligned, file_size, path)?;
+    Ok(aligned)
 }
 
 /// Validate one compression block's `(start, end)` pair against
@@ -4812,6 +4857,71 @@ mod tests {
     fn ensure_compressed_size_at_cap_is_accepted() {
         ensure_compressed_size_within_cap(MAX_UNCOMPRESSED_ENTRY_BYTES, "at_cap.bin")
             .expect("comp == MAX_UNCOMPRESSED_ENTRY_BYTES must pass the cap (strict `>`)");
+    }
+
+    /// `checked_aligned_payload_end` (#689 Copilot finding): an encrypted
+    /// payload whose UNALIGNED `size` fits within `file_size` but whose
+    /// 16-aligned extent overshoots must be rejected — this is the exact
+    /// gap where `verify_entry` used to report `Verified` for a crafted
+    /// pak that `read_entry` then fails to read. Numbers mirror the real
+    /// v8b `test.txt` (446 stored / 448 aligned): with `file_size == 446`
+    /// the truncated hash range fits but the padding is missing.
+    #[test]
+    fn aligned_payload_end_rejects_missing_padding() {
+        let err = checked_aligned_payload_end(0, 446, 446, "test.txt")
+            .expect_err("aligned extent (448) past file_size (446) must be rejected");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::OffsetPastFileSize {
+                        kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                            payload_end: 448,
+                            file_size_max: 446,
+                        },
+                        ..
+                    }
+                }
+            ),
+            "must reject as PayloadEndBounds on the ALIGNED end; got: {err:?}"
+        );
+    }
+
+    /// Boundary sibling: with the padding present (`file_size == 448`) the
+    /// same payload passes, and the returned length is the aligned 448 —
+    /// pinning the `div_ceil(16) * 16` math (a mutant degenerating
+    /// `aligned` to `size` would wrongly pass the rejection test above;
+    /// one inflating it would wrongly fail here).
+    #[test]
+    fn aligned_payload_end_with_padding_present_is_ok() {
+        let aligned = checked_aligned_payload_end(0, 446, 448, "test.txt")
+            .expect("exact aligned fit must be accepted");
+        assert_eq!(aligned, 448, "must return the 16-aligned extent");
+        // Already-aligned size: aligned == size, no padding required.
+        let exact = checked_aligned_payload_end(0, 32, 32, "zeros.bin")
+            .expect("16-aligned size needs no padding slack");
+        assert_eq!(exact, 32);
+    }
+
+    /// Overflow guard: a `size` near `u64::MAX` overflows the align-up
+    /// multiply and must surface as the typed `U64ArithmeticOverflow`,
+    /// not a panic or wraparound.
+    #[test]
+    fn aligned_payload_end_overflow_is_typed() {
+        let err = checked_aligned_payload_end(0, u64::MAX, u64::MAX, "huge.bin")
+            .expect_err("align-up of u64::MAX must overflow");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::U64ArithmeticOverflow {
+                        operation: OverflowSite::PayloadEnd,
+                        ..
+                    }
+                }
+            ),
+            "must be a typed overflow fault; got: {err:?}"
+        );
     }
 
     /// `PakReader`'s `Debug` impl must render the struct name and the `key`

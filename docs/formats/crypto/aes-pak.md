@@ -410,7 +410,12 @@ detection is a known gap.
   and METHOD-AGNOSTICALLY (#634): the stored SHA1 covers the on-disk
   ciphertext and verify never decompresses, so an encrypted entry hashes
   its opaque ciphertext regardless of codec (an encrypted Oodle entry
-  verifies like an encrypted Zlib one). The retired
+  verifies like an encrypted Zlib one). It also bounds-checks the
+  16-ALIGNED payload extent — the region a read must consume — while
+  still hashing only `compressed_size` bytes, so `Verified` implies the
+  read path's payload bounds hold (a crafted pak missing only its
+  trailing AES padding fails verify with `OffsetPastFileSize` instead of
+  verifying-then-failing-to-read; #689 review). The retired
   `VerifyOutcome::SkippedEncrypted` / `entries_skipped_encrypted()`
   counter stays at 0. The unsupported-method `Err(Decompression)` decline
   applies only to PLAINTEXT entries.
