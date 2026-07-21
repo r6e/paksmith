@@ -784,3 +784,81 @@ impl PakIndex {
         Self::from_entries(mount_point, entries, encoded_regions)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::read_region_maybe_decrypt;
+    use crate::error::{AllocationContext, WireField};
+    use crate::seams::PakSeam;
+
+    /// A v10+ index region whose LOGICAL size is not a multiple of 16 is
+    /// stored on disk padded up to the next 16-byte boundary (AES-256-ECB
+    /// operates on whole blocks). `read_region_maybe_decrypt` must read the
+    /// 16-aligned on-disk extent, decrypt it, then TRUNCATE back to the
+    /// logical size so the returned plaintext excludes the AES padding.
+    ///
+    /// The vendored `real_v11_encrypted_index.pak` fixture happens to have
+    /// all three regions already 16-aligned (176/64/112), so its tests
+    /// never discriminate the truncate (it is a no-op there). This pins the
+    /// aligned-read → decrypt → truncate distinction with a REAL gap
+    /// (logical 20, on-disk 32), guarding the #634-R1 masking class: a
+    /// dropped truncate, a `size`-instead-of-aligned read, or returning the
+    /// padded buffer all fail here.
+    #[test]
+    #[cfg(feature = "__test_utils")]
+    fn read_region_maybe_decrypt_truncates_aes_padding_to_logical_size() {
+        use crate::container::pak::crypto::{AesKey, aes256_ecb_encrypt};
+
+        const FIXTURE_KEY: &str =
+            "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+        let key = AesKey::from_hex(FIXTURE_KEY).unwrap();
+        // 20 logical plaintext bytes (not a multiple of 16). On disk:
+        // plaintext + 12 non-zero pad bytes → 32 (align16(20)), AES-256-ECB
+        // encrypted in place. Non-zero pad makes a dropped truncate visibly
+        // wrong (trailing 0xAA plaintext would survive the decrypt).
+        let plaintext: Vec<u8> = (1u8..=20).collect();
+        let mut on_disk = plaintext.clone();
+        on_disk.resize(32, 0xAA);
+        aes256_ecb_encrypt(&key, &mut on_disk).unwrap();
+
+        let mut reader = Cursor::new(on_disk);
+        let out = read_region_maybe_decrypt(
+            &mut reader,
+            20, // logical size
+            32, // file_size — exactly the on-disk region
+            WireField::FdiSize,
+            AllocationContext::V10FdiBytes,
+            PakSeam::V10FdiBytes,
+            Some(&key),
+        )
+        .expect("aligned encrypted region decrypts and truncates");
+
+        assert_eq!(out.len(), 20, "AES padding must be truncated away");
+        assert_eq!(
+            &out[..],
+            &plaintext[..],
+            "decrypted plaintext must be exactly the logical bytes, pad stripped"
+        );
+    }
+
+    /// Without a key the region is plaintext on disk: read exactly `size`
+    /// bytes — no align-up, no decrypt, no truncate.
+    #[test]
+    fn read_region_maybe_decrypt_plaintext_reads_exact_size() {
+        let bytes: Vec<u8> = (0u8..40).collect();
+        let mut reader = Cursor::new(bytes.clone());
+        let out = read_region_maybe_decrypt(
+            &mut reader,
+            20,
+            40,
+            WireField::FdiSize,
+            AllocationContext::V10FdiBytes,
+            PakSeam::V10FdiBytes,
+            None,
+        )
+        .expect("plaintext region reads exactly `size` bytes");
+        assert_eq!(&out[..], &bytes[..20]);
+    }
+}
