@@ -46,18 +46,24 @@
 //! - Gzip / Oodle / Zstd compression — resolvable (Gzip and Oodle
 //!   also via the v3-v7 numeric IDs, Zstd via the v8+ FName table)
 //!   but not wired up downstream (only Zlib and LZ4 decompress).
-//! - Three legacy shapes, deliberately fail-closed and left unsupported
-//!   because none has a test oracle (repak, our writer oracle, can't emit
-//!   any of them) — see issue #637 for the recorded wontfix decision:
+//! - Three legacy shapes are deliberately fail-closed and left unsupported —
+//!   see issue #637 for the recorded decision. Two of the three are an
+//!   effort/value deferral, NOT a capability gap: repak (our writer oracle)
+//!   CAN produce them, but paksmith doesn't parse them yet and they are
+//!   museum-grade rarities:
 //!   - **v1/v2 archives** — the pre-v3 entry record has a different shape
-//!     (pre-v2 per-entry timestamp, no trailing flags + block_size);
-//!     rejected at open rather than silently misparsed.
-//!   - **Pre-v5 absolute-offset compression blocks** — repak rejects
-//!     compression below v8, so no v3/v4 compressed fixture exists to
-//!     anchor the absolute-offset block path; rejected at read time.
+//!     (pre-v2 per-entry timestamp, no trailing flags + block_size) that the
+//!     parser doesn't implement. repak writes v2 (its README marks v2 write
+//!     supported; v1 write is untested). paksmith rejects at open rather
+//!     than silently misparse.
+//!   - **Pre-v5 absolute-offset compression blocks** — pre-v5 stores
+//!     compression-block offsets as absolute file offsets (v5+ made them
+//!     entry-relative), and the read path doesn't implement that. repak CAN
+//!     emit compressed pre-v8 archives, so an oracle exists; paksmith rejects
+//!     at read time (pinned by `read_zlib_rejects_pre_v5_compressed_entry`).
 //!   - **V9 frozen-index format** — the index is UE's compiled-frozen
-//!     in-memory layout (a different serialization); repak never emits
-//!     `frozen = true`, so there is no oracle; rejected at open.
+//!     in-memory layout (a different serialization). This one genuinely has
+//!     no oracle: repak never emits `frozen = true`. Rejected at open.
 //!
 //!   (The reader DOES cover v3-v9 flat and v10/v11 path-hash indexes; v4
 //!   and v5 are fixture-anchored per #637.)
@@ -404,10 +410,11 @@ impl PakReader {
         }
 
         // v1/v2 entry records have a different shape (timestamp field
-        // pre-v2, no trailing flags+block_size). PakEntryHeader::read_from
-        // assumes the v3+ layout. v1/v2 are pre-2015 and museum-grade;
-        // reject explicitly rather than silently misparse. Deliberate
-        // wontfix — see #637 for the recorded decision.
+        // pre-v2, no trailing flags+block_size) that PakEntryHeader::read_from
+        // doesn't implement. repak writes v2 (README-supported), so an oracle
+        // exists — this is a low-value deferral for museum-grade versions, not
+        // a capability gap. Reject explicitly rather than silently misparse;
+        // deliberate wontfix — see #637.
         if footer.version() < PakVersion::CompressionEncryption {
             return Err(PaksmithError::UnsupportedVersion {
                 version: footer.version().wire_version(),
@@ -2382,11 +2389,12 @@ fn stream_zlib_to<R: Read + Seek>(
     let path = entry.filename();
 
     if version < PakVersion::RelativeChunkOffsets {
-        // Pre-v5 paks store absolute file offsets in compression_blocks rather
-        // than offsets relative to the entry record. repak rejects compression
-        // below v8, so no v3/v4 compressed fixture can anchor this path — there
-        // is no oracle. Reject explicitly rather than silently produce garbage;
-        // deliberate wontfix — see #637 for the recorded decision.
+        // Pre-v5 paks store compression-block offsets as absolute file offsets
+        // rather than entry-relative (v5+); this read path doesn't implement
+        // the absolute-offset case. repak CAN emit compressed pre-v8 archives
+        // (verified), so an oracle exists — this is a low-value deferral, not a
+        // capability gap. Reject explicitly rather than silently produce
+        // garbage; deliberate wontfix — see #637.
         return Err(PaksmithError::UnsupportedVersion {
             version: version.wire_version(),
         });

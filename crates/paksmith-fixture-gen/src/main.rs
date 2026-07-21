@@ -25,14 +25,19 @@
 //! # Coverage gaps repak imposes
 //!
 //! repak v0.2.3 only writes a subset of the format:
-//! - **Compression: v8+ only.** Issue #69 added zlib-compressed
-//!   fixtures (`real_v{8a,8b,9,10,11}_compressed.pak`) and issue #636
-//!   added LZ4-compressed fixtures (`real_v{8b,11}_lz4.pak`); v3-v7
-//!   can't carry them because the FName-based compression slot table
-//!   didn't exist before v8 (repak's writer rejects compression on
-//!   those versions). repak ships compressed output reliably on v8+
-//!   when `PakBuilder::compression([...])` declares the method and
-//!   the input compresses non-trivially.
+//! - **Compressed fixtures are v8+ only (a matrix choice, not a repak
+//!   limit).** Issue #69 added zlib-compressed fixtures
+//!   (`real_v{8a,8b,9,10,11}_compressed.pak`) and issue #636 added
+//!   LZ4-compressed fixtures (`real_v{8b,11}_lz4.pak`). repak CAN emit
+//!   compressed output at any version — pre-v8 via the numeric
+//!   compression IDs (its writer pre-populates the legacy slot table),
+//!   v8+ via the FName slot table (verified against the pinned rev). The
+//!   corpus stays v8+ deliberately: pre-v5 compressed reads use
+//!   absolute-offset blocks paksmith doesn't implement (#637), and v5-v7
+//!   compressed exercises the same entry-relative read path the v8+
+//!   fixtures already cover. repak ships compressed v8+ output when
+//!   `PakBuilder::compression([...])` declares the method and the input
+//!   compresses non-trivially.
 //! - **No UTF-16 filenames**: API takes `&str`, encodes as positive-length
 //!   FString (UTF-8 with null terminator). Synthetic generator covers this.
 //! - **Always-real SHA1**: repak computes hashes; we can't simulate the

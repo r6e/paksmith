@@ -45,11 +45,12 @@ fn sha1_hex(bytes: &[u8]) -> String {
 /// flagged that a repak version-specific bug would slip through if it
 /// only affected, say, v8b's compression-method-table encoding —
 /// because v3 is structurally distinct from v8b and the v3 anchor
-/// can't catch v8b drift. Round 2 (this commit) extends anchoring to
-/// one fixture per version family that paksmith claims to support:
-/// v3 (legacy), v6 (DeleteRecords), v7 (EncryptionKeyGuid), v8a/v8b
-/// (FName-based compression at differing slot counts), v9 (FrozenIndex),
-/// v10 (PathHashIndex), v11 (Fnv64BugFix). 8 anchors total.
+/// can't catch v8b drift. Round 2 (issue #31) extended anchoring to
+/// one fixture per supported version family; issue #637 later added
+/// v4/v5. Current coverage: v3 (legacy), v4 (IndexEncryption), v5
+/// (RelativeChunkOffsets), v6 (DeleteRecords), v7 (EncryptionKeyGuid),
+/// v8a/v8b (FName-based compression at differing slot counts), v9
+/// (FrozenIndex), v10 (PathHashIndex), v11 (Fnv64BugFix). Ten anchors.
 ///
 /// All anchors target the `_minimal` variant of each family — smallest
 /// per-version blast radius for legitimate fixture updates. Drift in
