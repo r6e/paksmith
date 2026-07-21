@@ -240,4 +240,24 @@ mod tests {
     fn cross_val_encrypted_both() {
         assert_encrypted_cross_val("real_v8b_encrypted_both.pak");
     }
+
+    /// #634: encrypted + COMPRESSED entries (v8b legacy index). Byte-exact
+    /// cross-validation of the decrypt-then-decompress path against repak —
+    /// the only test that verifies the full plaintext of the genuinely
+    /// zlib-compressed binary entry (`test.png`), not just its length +
+    /// magic bytes (the in-source suite's `reads_encrypted_compressed_*`
+    /// tests). All four entries are AES-encrypted; `test.png`/`zeros.bin`
+    /// are compressed, `test.txt`/`nested.txt` stored uncompressed.
+    #[test]
+    fn cross_val_encrypted_compressed_v8b() {
+        assert_encrypted_cross_val("real_v8b_encrypted_compressed.pak");
+    }
+
+    /// #634: encrypted + COMPRESSED entries on the v10+ ENCODED index
+    /// (v11). Sibling of [`cross_val_encrypted_compressed_v8b`] exercising
+    /// the bit-packed encoded-entry generation end-to-end against repak.
+    #[test]
+    fn cross_val_encrypted_compressed_v11() {
+        assert_encrypted_cross_val("real_v11_encrypted_compressed.pak");
+    }
 }

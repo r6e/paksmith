@@ -116,6 +116,30 @@ pub(crate) fn aes256_ecb_decrypt(key: &AesKey, data: &mut [u8]) -> crate::Result
     Ok(())
 }
 
+/// AES-256-ECB ENCRYPT — the inverse of [`aes256_ecb_decrypt`], for
+/// synthesizing encrypted entry payloads in tests (there is no
+/// production encrypt path; paksmith is read-only). `data.len()` MUST be
+/// a multiple of 16, matching the decrypt contract; returns
+/// [`crate::PaksmithError::Decryption`] on unaligned input rather than
+/// panicking. Gated on `all(test, __test_utils)` — it has only in-source
+/// test users, so it never ships in the library and never appears as a
+/// compiled-but-unused item in a non-test `--all-features` build.
+#[cfg(all(test, feature = "__test_utils"))]
+pub(crate) fn aes256_ecb_encrypt(key: &AesKey, data: &mut [u8]) -> crate::Result<()> {
+    use aes::cipher::BlockCipherEncrypt;
+
+    if !data.len().is_multiple_of(16) {
+        return Err(crate::PaksmithError::Decryption { path: None });
+    }
+    let cipher = Aes256::new(&key.0.into());
+    for block in data.chunks_exact_mut(16) {
+        let block_arr = <&mut aes::Block>::try_from(block)
+            .expect("chunks_exact_mut(16) guarantees 16-byte slices");
+        cipher.encrypt_block(block_arr);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +167,34 @@ mod tests {
         let mut data = CIPHER;
         aes256_ecb_decrypt(&key, &mut data).unwrap();
         assert_eq!(data, PLAIN);
+    }
+
+    /// The test-only encrypt helper must be the exact inverse of decrypt:
+    /// it turns the FIPS-197 plaintext into the known ciphertext, and
+    /// `decrypt(encrypt(x)) == x` round-trips. Pins that the helper
+    /// actually enciphers (a no-op body would leave `PLAIN != CIPHER`).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn encrypt_is_inverse_of_decrypt() {
+        let key = AesKey::new(KEY);
+        let mut data = PLAIN;
+        aes256_ecb_encrypt(&key, &mut data).unwrap();
+        assert_eq!(data, CIPHER, "encrypt must produce the FIPS-197 ciphertext");
+        aes256_ecb_decrypt(&key, &mut data).unwrap();
+        assert_eq!(data, PLAIN, "decrypt(encrypt(x)) must round-trip");
+    }
+
+    /// Encrypt rejects unaligned input with a typed error, not a panic —
+    /// same contract as decrypt (pins the length guard).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn encrypt_unaligned_length_errors_not_panics() {
+        let key = AesKey::new(KEY);
+        let mut data = [0u8; 17];
+        assert!(matches!(
+            aes256_ecb_encrypt(&key, &mut data),
+            Err(crate::PaksmithError::Decryption { .. })
+        ));
     }
 
     #[test]

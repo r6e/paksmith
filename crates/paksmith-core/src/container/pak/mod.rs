@@ -1292,10 +1292,12 @@ impl PakReader {
                     // was already EOF-checked inside
                     // `read_decrypted_compressed_payload`, so it can't
                     // overflow here. The `buffer_end` vs `self.file_size`
-                    // ceiling choice is pinned by the integration test
-                    // `read_encrypted_compressed_block_end_between_buffer_and_file_uses_buffer_ceiling`:
-                    // a forged single-block `end` between the two values must
-                    // reject as `EndPastFileSize`, which the wider
+                    // ceiling choice is pinned by the in-source test
+                    // `read_encrypted_compressed_block_end_between_buffer_and_file_uses_buffer_ceiling`
+                    // (in-source, not the integration crate, so cargo-mutants —
+                    // which runs only default-members — actually credits the
+                    // kill): a forged single-block `end` between the two values
+                    // must reject as `EndPastFileSize`, which the wider
                     // `self.file_size` ceiling would let through.
                     let buffer_end = payload_start + decrypted.len() as u64;
                     dispatch_compressed(
@@ -4124,6 +4126,182 @@ mod tests {
             matches!(err, PaksmithError::Decryption { .. }),
             "must fail closed as Decryption, got: {err:?}"
         );
+    }
+
+    /// v8b flat-index pak with a SINGLE encrypted entry (#634), for
+    /// in-source coverage of the decrypt-then-decompress read path.
+    ///
+    /// Duplicated (minimally) from `paksmith-core-tests`'s
+    /// `build_single_entry_pak_with_flags` / `build_v8b_lz4_pak` ON PURPOSE:
+    /// in-source tests can't reach the integration crate, and cargo-mutants
+    /// runs only default-members (paksmith-core, `cargo test`), so a mutant on
+    /// the encrypted read path (e.g. the `buffer_end` block-bounds ceiling in
+    /// `stream_entry_to`) is killable ONLY by an in-source test. The footer
+    /// carries one compression-name slot (`method_name`, resolved via the
+    /// per-entry 1-based method index 1) and a PLAINTEXT index (footer
+    /// encrypted byte = 0); the per-entry `is_encrypted` flag is set, so
+    /// `from_reader_with_key` reads the index keylessly and `read_entry`
+    /// decrypts the payload with the key. `payload` is the exact on-disk
+    /// (already AES-encrypted, 16-aligned) entry bytes; `blocks` /
+    /// `block_size` / `uncompressed_size` are written verbatim so a test can
+    /// forge them.
+    #[cfg(feature = "__test_utils")]
+    fn build_v8b_encrypted_single_entry(
+        method_name: &str,
+        payload: &[u8],
+        uncompressed_size: u64,
+        blocks: &[(u64, u64)],
+        block_size: u32,
+    ) -> Vec<u8> {
+        use byteorder::{LittleEndian, WriteBytesExt};
+
+        use crate::testing::wire::{write_fstring, write_pak_entry};
+
+        let compressed_size = payload.len() as u64;
+        let sha1 = [0u8; 20];
+        let write_entry = |buf: &mut Vec<u8>| {
+            write_pak_entry(
+                buf,
+                0,
+                compressed_size,
+                uncompressed_size,
+                1, // 1-based index → footer slot 0 = method_name
+                &sha1,
+                blocks,
+                block_size,
+                true, // per-entry encrypted
+            );
+        };
+
+        let mut data = Vec::new();
+        write_entry(&mut data);
+        data.extend_from_slice(payload);
+
+        let mut index = Vec::new();
+        write_fstring(&mut index, "../../../");
+        index.write_u32::<LittleEndian>(1).unwrap();
+        write_fstring(&mut index, "Content/x.uasset");
+        write_entry(&mut index);
+
+        let index_offset = data.len() as u64;
+        let index_size = index.len() as u64;
+        let mut pak = data;
+        pak.extend_from_slice(&index);
+
+        pak.extend_from_slice(&[0u8; 16]); // encryption GUID
+        pak.push(0); // index NOT encrypted (per-entry flag drives entry decryption)
+        pak.write_u32::<LittleEndian>(crate::container::pak::version::PAK_MAGIC)
+            .unwrap();
+        pak.write_u32::<LittleEndian>(8).unwrap(); // v8b
+        pak.write_u64::<LittleEndian>(index_offset).unwrap();
+        pak.write_u64::<LittleEndian>(index_size).unwrap();
+        pak.extend_from_slice(&[0u8; 20]); // index hash (zero = skip)
+        let mut slot0 = [0u8; 32];
+        let nb = method_name.as_bytes();
+        slot0[..nb.len()].copy_from_slice(nb);
+        pak.extend_from_slice(&slot0);
+        pak.extend_from_slice(&[0u8; 32 * 4]); // slots 1..=4
+        pak
+    }
+
+    /// #634 (R6/R7 architect): the encrypted+compressed read path passes
+    /// `buffer_end = payload_start + decrypted.len()` (the decrypted-buffer
+    /// extent) — NOT `self.file_size` — as the block-bounds ceiling into
+    /// `validate_block_bounds`. A forged single-block `end` landing strictly
+    /// BETWEEN `buffer_end` and the real `file_size` must reject as
+    /// `BlockBoundsViolation { EndPastFileSize }`.
+    ///
+    /// IN-SOURCE (not `paksmith-core-tests`) on purpose: cargo-mutants runs
+    /// only default-members, so the `buffer_end -> self.file_size` mutant on
+    /// `stream_entry_to` is killable only here. Verified to kill it — under the
+    /// wider `self.file_size` ceiling the forged block is accepted and the read
+    /// surfaces `Io(UnexpectedEof)` over the short `RebasedReader` instead of
+    /// the typed fault. A single-block entry suffices: the bounds check fires
+    /// before any decrypt output is inflated, so no valid ciphertext is needed
+    /// (16 arbitrary bytes decrypt to unused garbage).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_encrypted_compressed_block_end_between_buffer_and_file_uses_buffer_ceiling() {
+        // 16-byte (AES-aligned) payload; content irrelevant (never inflated).
+        let payload = [0u8; 16];
+        let payload_start = crate::testing::wire::pak_entry_wire_size(1); // one block
+        let buffer_end = payload_start + payload.len() as u64;
+        // Forge the block end 4 bytes past buffer_end — into the index region
+        // that follows the payload, so it stays strictly < file_size.
+        let forged_end = buffer_end + 4;
+        let blocks = [(payload_start, forged_end)];
+
+        let pak = build_v8b_encrypted_single_entry("Zlib", &payload, 16, &blocks, 16);
+        let file_size = pak.len() as u64;
+        assert!(
+            buffer_end < forged_end && forged_end < file_size,
+            "forged end {forged_end} must sit strictly in (buffer_end {buffer_end}, \
+             file_size {file_size}) to discriminate the ceiling mutant"
+        );
+
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::from_reader_with_key(std::io::Cursor::new(pak), key)
+            .expect("open v8b (plaintext index) with key");
+        let err = reader
+            .read_entry("Content/x.uasset")
+            .expect_err("forged block end past the decrypted buffer must be rejected");
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BlockBoundsViolation {
+                        kind: BlockBoundsKind::EndPastFileSize { .. },
+                        ..
+                    }
+                }
+            ),
+            "must be EndPastFileSize (proves the buffer_end ceiling, not file_size); got: {err:?}"
+        );
+    }
+
+    /// #634 (R7 architect finding 2): a single-block encrypted + LZ4 entry
+    /// round-trips through the full decrypt-then-decompress read path. This is
+    /// the only end-to-end coverage of encrypted+LZ4 (every vendored fixture is
+    /// zlib), and LZ4 is in the #634 acceptance criteria. IN-SOURCE because
+    /// `paksmith-core-tests` has no `aes` dev-dep to synthesize the ciphertext.
+    /// No multi-block / #688 wire-convention dependency: a single block's
+    /// `(start, end)` are read verbatim off the wire.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn reads_encrypted_lz4_entry_round_trips() {
+        let plaintext: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+        let lz4 = lz4_flex::block::compress(&plaintext);
+        let lz4_len = lz4.len() as u64;
+
+        // On-disk payload = AES-encrypt(lz4 bytes, zero-padded to 16). For an
+        // encrypted entry `compressed_size` is the 16-aligned footprint, while
+        // the block spans the UNALIGNED lz4 bytes (repak/CUE4Parse: block end =
+        // start + unaligned length; the cursor advances by the aligned length).
+        let mut payload = lz4.clone();
+        payload.resize(lz4.len().next_multiple_of(16), 0);
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        crypto::aes256_ecb_encrypt(&key, &mut payload).expect("encrypt 16-aligned payload");
+
+        let payload_start = crate::testing::wire::pak_entry_wire_size(1);
+        let blocks = [(payload_start, payload_start + lz4_len)];
+        let uncompressed_size = plaintext.len() as u64;
+        let block_size = u32::try_from(plaintext.len()).expect("300 fits u32");
+        let pak = build_v8b_encrypted_single_entry(
+            "LZ4",
+            &payload,
+            uncompressed_size,
+            &blocks,
+            block_size,
+        );
+
+        let reader = PakReader::from_reader_with_key(std::io::Cursor::new(pak), key)
+            .expect("open v8b (plaintext index) with key");
+        let mut out = Vec::new();
+        let written = reader
+            .read_entry_to("Content/x.uasset", &mut out)
+            .expect("encrypted+LZ4 entry must decrypt-then-decompress");
+        assert_eq!(written, plaintext.len() as u64);
+        assert_eq!(out, plaintext, "encrypted+LZ4 decode must be byte-exact");
     }
 
     /// TODO(Task-4) resolution pin (#634): the stored entry SHA-1 covers the
