@@ -3572,21 +3572,30 @@ mod tests {
         }
 
         // v5 (RelativeChunkOffsets): the v8b entry's blocks ARE entry-relative,
-        // so v5 dispatch passes the guard and decompresses — it must NOT hit
-        // the version reject. Kills the `<`→`<=` mutant (which would reject v5).
+        // so v5 dispatch passes the guard and decompresses to the full
+        // uncompressed size. Asserting success (not merely "not rejected")
+        // proves the v5 path actually works, and still kills the `<`→`<=`
+        // mutant — which would reject v5 with `UnsupportedVersion` instead.
         let mut file = std::fs::File::open(&fixture).expect("reopen fixture");
         let mut sink: Vec<u8> = Vec::new();
-        let res = stream_zlib_to(
+        let written = stream_zlib_to(
             &mut file,
             entry,
             file_size,
             payload_start,
             PakVersion::RelativeChunkOffsets,
             &mut sink,
+        )
+        .expect("v5 (entry-relative) must pass the guard and decompress");
+        assert_eq!(
+            written,
+            entry.header().uncompressed_size(),
+            "v5 must decompress the v8b entry to its full uncompressed size"
         );
-        assert!(
-            !matches!(res, Err(PaksmithError::UnsupportedVersion { .. })),
-            "v5 must pass the pre-v5 guard (not UnsupportedVersion), got {res:?}"
+        assert_eq!(
+            u64::try_from(sink.len()).expect("fits u64"),
+            written,
+            "bytes written to the sink must equal the returned count"
         );
     }
 
