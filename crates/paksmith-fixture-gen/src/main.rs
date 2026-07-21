@@ -29,9 +29,10 @@
 //!   limit).** Issue #69 added zlib-compressed fixtures
 //!   (`real_v{8a,8b,9,10,11}_compressed.pak`) and issue #636 added
 //!   LZ4-compressed fixtures (`real_v{8b,11}_lz4.pak`). repak CAN emit
-//!   compressed output at any version — pre-v8 via the numeric
-//!   compression IDs (its writer pre-populates the legacy slot table),
-//!   v8+ via the FName slot table (verified against the pinned rev). The
+//!   compressed output at any compression-capable version (v3+; compression
+//!   is a v3 wire feature) — v3-v7 via the numeric compression IDs (its
+//!   writer pre-populates the legacy slot table), v8+ via the FName slot
+//!   table (verified against the pinned rev). The
 //!   corpus stays v8+ deliberately: pre-v5 compressed reads use
 //!   absolute-offset blocks paksmith doesn't implement (#637), and v5-v7
 //!   compressed exercises the same entry-relative read path the v8+

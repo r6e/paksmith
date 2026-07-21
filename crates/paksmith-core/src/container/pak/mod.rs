@@ -59,8 +59,9 @@
 //!   - **Pre-v5 absolute-offset compression blocks** — pre-v5 stores
 //!     compression-block offsets as absolute file offsets (v5+ made them
 //!     entry-relative), and the read path doesn't implement that. repak CAN
-//!     emit compressed pre-v8 archives, so an oracle exists; paksmith rejects
-//!     at read time (pinned by `read_zlib_rejects_pre_v5_compressed_entry`).
+//!     emit compressed v3/v4 archives (verified — compression is a v3+ wire
+//!     concept), so an oracle exists; paksmith rejects at read time (pinned
+//!     by `read_zlib_rejects_pre_v5_compressed_entry`).
 //!   - **V9 frozen-index format** — the index is UE's compiled-frozen
 //!     in-memory layout (a different serialization). This one genuinely has
 //!     no oracle: repak never emits `frozen = true`. Rejected at open.
@@ -2391,7 +2392,7 @@ fn stream_zlib_to<R: Read + Seek>(
     if version < PakVersion::RelativeChunkOffsets {
         // Pre-v5 paks store compression-block offsets as absolute file offsets
         // rather than entry-relative (v5+); this read path doesn't implement
-        // the absolute-offset case. repak CAN emit compressed pre-v8 archives
+        // the absolute-offset case. repak CAN emit compressed v3/v4 archives
         // (verified), so an oracle exists — this is a low-value deferral, not a
         // capability gap. Reject explicitly rather than silently produce
         // garbage; deliberate wontfix — see #637.
