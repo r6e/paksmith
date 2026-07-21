@@ -30,13 +30,13 @@ pub enum KeyTestOutcome {
 /// - Index opened but no hash to check → [`KeyTestOutcome::Decrypted`]
 ///   (intentionally NOT `Verified` — a zeroed hash slot cannot confirm integrity)
 /// - [`PaksmithError::Decryption`] from open → [`KeyTestOutcome::WrongKey`]
-/// - [`PaksmithError::UnsupportedFeature`] from open → [`KeyTestOutcome::Unsupported`]
+/// - [`PaksmithError::UnsupportedVersion`] from open → [`KeyTestOutcome::Unsupported`]
 /// - Any other error → [`KeyTestOutcome::Unsupported`] (the key is not the problem)
 pub fn test_key<P: AsRef<Path>>(pak: P, key: &AesKey) -> KeyTestOutcome {
     let reader = match PakReader::open_with_key(pak, key.clone()) {
         Ok(r) => r,
         Err(PaksmithError::Decryption { .. }) => return KeyTestOutcome::WrongKey,
-        // UnsupportedFeature (e.g. a V9 frozen index) and any other open
+        // UnsupportedVersion (e.g. a V9 frozen index) and any other open
         // error both map to Unsupported — the key is not the problem.
         Err(_) => return KeyTestOutcome::Unsupported,
     };

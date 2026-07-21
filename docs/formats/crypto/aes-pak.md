@@ -454,7 +454,7 @@ V4-V6 index-encryption detection is a known gap.
 
 **Phase plan:**
 - Detection: `docs/plans/phase-1-foundation.md` (shipped as part of pak footer + entry-header parsing).
-- AES decryption + key management: shipped in Phase 5 — index and uncompressed-entry decryption in Phase 5a (#589), the profile-owned key registry and key store in Phase 5b (#590) — extended by #634 with decrypt-then-decompress for zlib/LZ4 compressed entries. Remaining gaps (v10+ encrypted indexes #635, V4–V6 detection) are tracked under Known divergences above.
+- AES decryption + key management: shipped in Phase 5 — index and uncompressed-entry decryption in Phase 5a (#589), the profile-owned key registry and key store in Phase 5b (#590) — extended by #634 with decrypt-then-decompress for zlib/LZ4 compressed entries and by #635 with v10/v11 path-hash index decryption. The remaining gap (V4–V6 detection) is tracked under Known divergences above.
 
 ## References
 
