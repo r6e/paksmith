@@ -1467,7 +1467,7 @@ fn read_decrypted_compressed_payload<R: Read + Seek>(
     // because `MAX_UNCOMPRESSED_ENTRY_BYTES` is itself 16-aligned (2^33), so
     // `comp <= MAX` implies `aligned <= MAX`. Keep that constant a multiple
     // of 16 if it ever changes.
-    let aligned = checked_aligned_payload_end(payload_start, comp, file_size, path)?;
+    let aligned = checked_aligned_payload_len(payload_start, comp, file_size, path)?;
     let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
         fault: IndexParseFault::U64ExceedsPlatformUsize {
             field: WireField::CompressedSize,
@@ -1832,7 +1832,7 @@ fn stream_uncompressed_to<R: Read + Seek>(
         // actually overflow; the helper's `checked_mul` guards it with a
         // typed fault regardless.
         let payload_start = file.stream_position()?;
-        let aligned = checked_aligned_payload_end(payload_start, size, file_size, path)?;
+        let aligned = checked_aligned_payload_len(payload_start, size, file_size, path)?;
         let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
             fault: IndexParseFault::U64ExceedsPlatformUsize {
                 field: WireField::UncompressedSize,
@@ -1938,18 +1938,23 @@ fn checked_payload_end(start: u64, size: u64, file_size: u64, path: &str) -> cra
 
 /// Align `size` up to the 16-byte AES block size (typed overflow fault)
 /// and bounds-check the ALIGNED extent against `file_size` — the region
-/// an encrypted-payload reader must actually consume. Returns the
-/// aligned length.
+/// an encrypted-payload reader must actually consume.
+///
+/// Returns the aligned LENGTH, NOT an end offset — unlike its sibling
+/// [`checked_payload_end`], which returns `start + size`. Callers size
+/// buffers from the returned value; do not add `start` to it again or
+/// compare it against absolute offsets (#689 Copilot review — the
+/// `_len` suffix is load-bearing).
 ///
 /// One home for the align-then-check arithmetic so the callers cannot
-/// drift (#689 review): `read_decrypted_compressed_payload` (sizing the
-/// decrypt buffer from `compressed_size`) and
-/// [`checked_encrypted_verify_extents`] (which picks the read-required
-/// size field per compression method — see its docs for why the field
-/// differs). Real archives always carry the AES padding (the
-/// index/footer follow it), so an aligned-extent rejection only ever
-/// fires on crafted input.
-fn checked_aligned_payload_end(
+/// drift (#689 review): `read_decrypted_compressed_payload` and
+/// `stream_uncompressed_to`'s encrypted arm (each sizing its decrypt
+/// buffer), and [`checked_encrypted_verify_extents`] (which picks the
+/// read-required size field per compression method — see its docs for
+/// why the field differs). Real archives always carry the AES padding
+/// (the index/footer follow it), so an aligned-extent rejection only
+/// ever fires on crafted input.
+fn checked_aligned_payload_len(
     start: u64,
     size: u64,
     file_size: u64,
@@ -2002,9 +2007,9 @@ fn checked_encrypted_verify_extents(
     path: &str,
 ) -> crate::Result<()> {
     let _ = checked_payload_end(payload_start, compressed, file_size, path)?;
-    let _ = checked_aligned_payload_end(payload_start, compressed, file_size, path)?;
+    let _ = checked_aligned_payload_len(payload_start, compressed, file_size, path)?;
     if is_uncompressed_method {
-        let _ = checked_aligned_payload_end(payload_start, uncompressed, file_size, path)?;
+        let _ = checked_aligned_payload_len(payload_start, uncompressed, file_size, path)?;
     }
     Ok(())
 }
@@ -4989,7 +4994,7 @@ mod tests {
             .expect("comp == MAX_UNCOMPRESSED_ENTRY_BYTES must pass the cap (strict `>`)");
     }
 
-    /// `checked_aligned_payload_end` (#689 Copilot finding): an encrypted
+    /// `checked_aligned_payload_len` (#689 Copilot finding): an encrypted
     /// payload whose UNALIGNED `size` fits within `file_size` but whose
     /// 16-aligned extent overshoots must be rejected — this is the exact
     /// gap where `verify_entry` used to report `Verified` for a crafted
@@ -4997,8 +5002,8 @@ mod tests {
     /// v8b `test.txt` (446 stored / 448 aligned): with `file_size == 446`
     /// the truncated hash range fits but the padding is missing.
     #[test]
-    fn aligned_payload_end_rejects_missing_padding() {
-        let err = checked_aligned_payload_end(0, 446, 446, "test.txt")
+    fn aligned_payload_len_rejects_missing_padding() {
+        let err = checked_aligned_payload_len(0, 446, 446, "test.txt")
             .expect_err("aligned extent (448) past file_size (446) must be rejected");
         assert!(
             matches!(
@@ -5024,12 +5029,12 @@ mod tests {
     /// failing the rejection test above (which catches it); one inflating
     /// `aligned` would wrongly reject the padded input, failing this test.
     #[test]
-    fn aligned_payload_end_with_padding_present_is_ok() {
-        let aligned = checked_aligned_payload_end(0, 446, 448, "test.txt")
+    fn aligned_payload_len_with_padding_present_is_ok() {
+        let aligned = checked_aligned_payload_len(0, 446, 448, "test.txt")
             .expect("exact aligned fit must be accepted");
         assert_eq!(aligned, 448, "must return the 16-aligned extent");
         // Already-aligned size: aligned == size, no padding required.
-        let exact = checked_aligned_payload_end(0, 32, 32, "zeros.bin")
+        let exact = checked_aligned_payload_len(0, 32, 32, "zeros.bin")
             .expect("16-aligned size needs no padding slack");
         assert_eq!(exact, 32);
     }
@@ -5091,8 +5096,8 @@ mod tests {
     /// multiply and must surface as the typed `U64ArithmeticOverflow`,
     /// not a panic or wraparound.
     #[test]
-    fn aligned_payload_end_overflow_is_typed() {
-        let err = checked_aligned_payload_end(0, u64::MAX, u64::MAX, "huge.bin")
+    fn aligned_payload_len_overflow_is_typed() {
+        let err = checked_aligned_payload_len(0, u64::MAX, u64::MAX, "huge.bin")
             .expect_err("align-up of u64::MAX must overflow");
         assert!(
             matches!(
