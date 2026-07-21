@@ -69,7 +69,7 @@ fn sha1_hex(bytes: &[u8]) -> String {
 ///    was touched accidentally — restore from git and stop.
 /// 2. **If a deliberate regeneration happened**, this test catches drift
 ///    but not correctness. Before pasting the new SHA1, verify:
-///    - All 29 `cross_parser_agreement_*` tests still pass against the
+///    - All 35 `cross_parser_agreement_*` tests still pass against the
 ///      regenerated fixtures
 ///      (`cargo test -p paksmith-fixture-gen --test cross_validation`).
 ///    - For v3-v9: the trailing 44-byte legacy footer (or 61-byte v7+

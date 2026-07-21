@@ -3534,6 +3534,61 @@ mod tests {
         );
     }
 
+    /// `stream_zlib_to` rejects pre-v5 (absolute-offset) versions at its
+    /// version guard, and lets v5+ (entry-relative) through. In-source so
+    /// cargo-mutants covers it — the integration-crate
+    /// `read_zlib_rejects_pre_v5_compressed_entry` isn't run under the
+    /// default-members mutant invocation, which let the `<
+    /// RelativeChunkOffsets` boundary drift to `==`/`<=` unnoticed (#637
+    /// review). `stream_zlib_to` takes `version` as a plain arg, so we drive
+    /// the boundary directly against a real (v8b, entry-relative) compressed
+    /// entry by overriding the version.
+    #[test]
+    fn stream_zlib_to_version_boundary_rejects_pre_v5_only() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v8b_compressed.pak");
+        let reader = PakReader::open(&fixture).expect("open compressed fixture");
+        let path = "Content/Compressed.uasset";
+        let entry = reader.index_entry(path).expect("compressed entry present");
+        let payload_start = entry.header().offset() + entry.header().wire_size();
+        let file_size = std::fs::metadata(&fixture).expect("stat fixture").len();
+
+        // Pre-v5 (v3, v4): absolute-offset blocks are unimplemented — reject
+        // with `UnsupportedVersion` before touching the blocks. Kills the
+        // `<`→`==` mutant (which would let v3/v4 fall through).
+        for v in [
+            PakVersion::CompressionEncryption,
+            PakVersion::IndexEncryption,
+        ] {
+            let mut file = std::fs::File::open(&fixture).expect("reopen fixture");
+            let mut sink: Vec<u8> = Vec::new();
+            let err = stream_zlib_to(&mut file, entry, file_size, payload_start, v, &mut sink)
+                .expect_err("pre-v5 zlib must be rejected");
+            assert!(
+                matches!(err, PaksmithError::UnsupportedVersion { version } if version == v.wire_version()),
+                "pre-v5 ({v:?}) must reject as UnsupportedVersion, got {err:?}"
+            );
+        }
+
+        // v5 (RelativeChunkOffsets): the v8b entry's blocks ARE entry-relative,
+        // so v5 dispatch passes the guard and decompresses — it must NOT hit
+        // the version reject. Kills the `<`→`<=` mutant (which would reject v5).
+        let mut file = std::fs::File::open(&fixture).expect("reopen fixture");
+        let mut sink: Vec<u8> = Vec::new();
+        let res = stream_zlib_to(
+            &mut file,
+            entry,
+            file_size,
+            payload_start,
+            PakVersion::RelativeChunkOffsets,
+            &mut sink,
+        );
+        assert!(
+            !matches!(res, Err(PaksmithError::UnsupportedVersion { .. })),
+            "v5 must pass the pre-v5 guard (not UnsupportedVersion), got {res:?}"
+        );
+    }
+
     // ---- LZ4 pak-entry decompression (#636) ----
     //
     // Fixtures are repak-written (`lz4_flex::block::compress` — raw
