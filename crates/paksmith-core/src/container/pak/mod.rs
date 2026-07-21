@@ -46,8 +46,21 @@
 //! - Gzip / Oodle / Zstd compression — resolvable (Gzip and Oodle
 //!   also via the v3-v7 numeric IDs, Zstd via the v8+ FName table)
 //!   but not wired up downstream (only Zlib and LZ4 decompress).
-//! - Pre-v5 absolute-offset compression blocks (rare in real archives).
-//! - V9 frozen-index format (rejected at open).
+//! - Three legacy shapes, deliberately fail-closed and left unsupported
+//!   because none has a test oracle (repak, our writer oracle, can't emit
+//!   any of them) — see issue #637 for the recorded wontfix decision:
+//!   - **v1/v2 archives** — the pre-v3 entry record has a different shape
+//!     (pre-v2 per-entry timestamp, no trailing flags + block_size);
+//!     rejected at open rather than silently misparsed.
+//!   - **Pre-v5 absolute-offset compression blocks** — repak rejects
+//!     compression below v8, so no v3/v4 compressed fixture exists to
+//!     anchor the absolute-offset block path; rejected at read time.
+//!   - **V9 frozen-index format** — the index is UE's compiled-frozen
+//!     in-memory layout (a different serialization); repak never emits
+//!     `frozen = true`, so there is no oracle; rejected at open.
+//!
+//!   (The reader DOES cover v3-v9 flat and v10/v11 path-hash indexes; v4
+//!   and v5 are fixture-anchored per #637.)
 //!
 //! # File-immutability assumption
 //!
@@ -380,10 +393,10 @@ impl PakReader {
         // is in UE's compiled-frozen layout — completely different bytes
         // than the flat-entry parser expects. Silently parsing as if not
         // frozen would produce garbage entries (paths read as gibberish,
-        // offsets pointing nowhere). Repak's writer doesn't currently
-        // emit frozen=true so the cross-parser tests can't catch this;
-        // reject explicitly at open time. See #7 follow-up for proper
-        // frozen-index parsing.
+        // offsets pointing nowhere). Repak's writer never emits
+        // frozen=true, so there is no oracle to build/verify a parser
+        // against; reject explicitly at open time. Deliberate wontfix —
+        // see #637 for the recorded decision and rationale.
         if footer.frozen_index() {
             return Err(PaksmithError::UnsupportedVersion {
                 version: footer.version().wire_version(),
@@ -392,9 +405,9 @@ impl PakReader {
 
         // v1/v2 entry records have a different shape (timestamp field
         // pre-v2, no trailing flags+block_size). PakEntryHeader::read_from
-        // assumes the v3+ layout. We have no fixtures for v1/v2 and
-        // they're rare in the wild, so reject explicitly rather than
-        // silently misparse.
+        // assumes the v3+ layout. v1/v2 are pre-2015 and museum-grade;
+        // reject explicitly rather than silently misparse. Deliberate
+        // wontfix — see #637 for the recorded decision.
         if footer.version() < PakVersion::CompressionEncryption {
             return Err(PaksmithError::UnsupportedVersion {
                 version: footer.version().wire_version(),
@@ -2370,8 +2383,10 @@ fn stream_zlib_to<R: Read + Seek>(
 
     if version < PakVersion::RelativeChunkOffsets {
         // Pre-v5 paks store absolute file offsets in compression_blocks rather
-        // than offsets relative to the entry record. Real-world v3/v4 paks are
-        // rare; reject explicitly rather than silently producing garbage.
+        // than offsets relative to the entry record. repak rejects compression
+        // below v8, so no v3/v4 compressed fixture can anchor this path — there
+        // is no oracle. Reject explicitly rather than silently produce garbage;
+        // deliberate wontfix — see #637 for the recorded decision.
         return Err(PaksmithError::UnsupportedVersion {
             version: version.wire_version(),
         });
