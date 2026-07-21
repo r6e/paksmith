@@ -33,16 +33,83 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
+use zeroize::Zeroizing;
+
 use super::compression::CompressionMethod;
 use super::entry_header::PakEntryHeader;
 use super::fstring::read_fstring;
 use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry, fnv64_path};
+use crate::container::pak::crypto::{self, AesKey};
 use crate::container::pak::version::PakVersion;
 use crate::error::{
     AllocationContext, BoundsUnit, EncodedFault, IndexParseFault, IndexRegionKind, PaksmithError,
     PhiFdiInconsistencyKind, WireField, check_region_bounds, try_reserve_index,
 };
 use crate::seams::PakSeam;
+
+/// Read one v10+ index region (`size` logical bytes) from `reader`'s
+/// current position, decrypting when `key` is present (#635).
+///
+/// Encrypted v10+ index regions — the primary index, the path-hash
+/// index, and the full-directory index — are each AES-256-ECB encrypted
+/// IN PLACE and padded to 16-byte alignment on disk (probed empirically
+/// against `real_v11_encrypted_index.pak`: all three regions' ciphertext
+/// is opaque and the recorded SHA-1s cover the PLAINTEXT truncated to
+/// the logical size — the opposite of the per-entry convention, so index
+/// verification requires the key). With a key this reads the 16-aligned
+/// on-disk extent, decrypts, and truncates the AES padding; without one
+/// it reads exactly `size` bytes (the plaintext layout).
+///
+/// The caller has already capped `size` (`MAX_INDEX_BYTES` /
+/// `MAX_FDI_BYTES`) and bounds-checked the UNALIGNED `size` against
+/// `file_size`. For the encrypted case this additionally bounds the
+/// 16-ALIGNED on-disk extent via [`checked_aligned_payload_len`] — the
+/// shared align-then-check helper — so a crafted region whose unaligned
+/// end fits but whose AES padding overshoots EOF surfaces as a typed
+/// `OffsetPastFileSize`, not a bare `Io(UnexpectedEof)`. The returned
+/// buffer is `Zeroizing` — decrypted index plaintext is scrubbed on
+/// drop, consistent with the flat-index decrypt path's hygiene.
+fn read_region_maybe_decrypt<R: Read + Seek>(
+    reader: &mut R,
+    size: u64,
+    file_size: u64,
+    field: WireField,
+    context: AllocationContext,
+    seam: PakSeam,
+    key: Option<&AesKey>,
+) -> crate::Result<Zeroizing<Vec<u8>>> {
+    let on_disk = if key.is_some() {
+        // The reader is positioned at the region start; bounds-check the
+        // 16-aligned on-disk extent against EOF and get the aligned length.
+        let region_start = reader.stream_position()?;
+        crate::container::pak::checked_aligned_payload_len(region_start, size, file_size, "")?
+    } else {
+        size
+    };
+    let on_disk_usize = usize::try_from(on_disk).map_err(|_| PaksmithError::InvalidIndex {
+        fault: IndexParseFault::U64ExceedsPlatformUsize {
+            field,
+            value: on_disk,
+            path: None,
+        },
+    })?;
+    let size_usize = usize::try_from(size).map_err(|_| PaksmithError::InvalidIndex {
+        fault: IndexParseFault::U64ExceedsPlatformUsize {
+            field,
+            value: size,
+            path: None,
+        },
+    })?;
+    let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+    try_reserve_index(&mut buf, on_disk_usize, context, seam)?;
+    buf.resize(on_disk_usize, 0);
+    reader.read_exact(&mut buf)?;
+    if let Some(key) = key {
+        crypto::aes256_ecb_decrypt(key, &mut buf)?;
+        buf.truncate(size_usize);
+    }
+    Ok(buf)
+}
 
 /// Standalone ceiling on the v10+ FDI region byte size. A real-world
 /// full directory index for a 100k-file pak is typically a few MB;
@@ -213,6 +280,7 @@ impl PakIndex {
         index_size: u64,
         file_size: u64,
         compression_methods: &[Option<CompressionMethod>],
+        key: Option<&AesKey>,
     ) -> crate::Result<Self> {
         // Minimum on-disk shape per file inside the FDI: `FString
         // filename (5 bytes: 4 length + 1 null) + i32 offset (4 bytes)
@@ -245,24 +313,18 @@ impl PakIndex {
         // Slurp the main index region into memory so we can parse it
         // independently of the file reader's cursor (which we'll seek
         // elsewhere for the full directory index and path-hash index).
-        let index_size_usize =
-            usize::try_from(index_size).map_err(|_| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: WireField::IndexSize,
-                    value: index_size,
-                    path: None,
-                },
-            })?;
-        let mut index_bytes = Vec::new();
-        try_reserve_index(
-            &mut index_bytes,
-            index_size_usize,
+        // When `key` is present the region is AES-encrypted on disk —
+        // the helper reads the 16-aligned extent and decrypts (#635).
+        let index_bytes = read_region_maybe_decrypt(
+            reader,
+            index_size,
+            file_size,
+            WireField::IndexSize,
             AllocationContext::V10MainIndexBytes,
             PakSeam::V10MainIndexBytes,
+            key,
         )?;
-        index_bytes.resize(index_size_usize, 0);
-        reader.read_exact(&mut index_bytes)?;
-        let mut idx = Cursor::new(&index_bytes);
+        let mut idx = Cursor::new(&index_bytes[..]);
 
         let mount_point = read_fstring(&mut idx)?;
         let file_count = idx.read_u32::<LittleEndian>()?;
@@ -406,23 +468,15 @@ impl PakIndex {
             });
         }
         let _ = reader.seek(SeekFrom::Start(fdi_offset))?;
-        let fdi_size_usize =
-            usize::try_from(fdi_size).map_err(|_| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: WireField::FdiSize,
-                    value: fdi_size,
-                    path: None,
-                },
-            })?;
-        let mut fdi_bytes: Vec<u8> = Vec::new();
-        try_reserve_index(
-            &mut fdi_bytes,
-            fdi_size_usize,
+        let fdi_bytes = read_region_maybe_decrypt(
+            reader,
+            fdi_size,
+            file_size,
+            WireField::FdiSize,
             AllocationContext::V10FdiBytes,
             PakSeam::V10FdiBytes,
+            key,
         )?;
-        fdi_bytes.resize(fdi_size_usize, 0);
-        reader.read_exact(&mut fdi_bytes)?;
 
         // Issue #131: if the archive declared a PHI region, read its
         // bytes now (immediately after the FDI seek+read so the
@@ -445,24 +499,16 @@ impl PakIndex {
                     },
                 });
             }
-            let phi_size_usize =
-                usize::try_from(phi.size).map_err(|_| PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::U64ExceedsPlatformUsize {
-                        field: WireField::PhiSize,
-                        value: phi.size,
-                        path: None,
-                    },
-                })?;
             let _ = reader.seek(SeekFrom::Start(phi.offset))?;
-            let mut phi_bytes: Vec<u8> = Vec::new();
-            try_reserve_index(
-                &mut phi_bytes,
-                phi_size_usize,
+            let phi_bytes = read_region_maybe_decrypt(
+                reader,
+                phi.size,
+                file_size,
+                WireField::PhiSize,
                 AllocationContext::V10PhiBytes,
                 PakSeam::V10PhiBytes,
+                key,
             )?;
-            phi_bytes.resize(phi_size_usize, 0);
-            reader.read_exact(&mut phi_bytes)?;
             Some(parse_phi_body(&phi_bytes)?)
         } else {
             None

@@ -36,8 +36,8 @@ pub fn test_key<P: AsRef<Path>>(pak: P, key: &AesKey) -> KeyTestOutcome {
     let reader = match PakReader::open_with_key(pak, key.clone()) {
         Ok(r) => r,
         Err(PaksmithError::Decryption { .. }) => return KeyTestOutcome::WrongKey,
-        // UnsupportedFeature (e.g. v10+ encrypted index) and any other
-        // open error both map to Unsupported — the key is not the problem.
+        // UnsupportedFeature (e.g. a V9 frozen index) and any other open
+        // error both map to Unsupported — the key is not the problem.
         Err(_) => return KeyTestOutcome::Unsupported,
     };
     match reader.verify_index() {
@@ -139,17 +139,31 @@ mod tests {
         );
     }
 
-    /// A v11 encrypted-index pak triggers `UnsupportedFeature` from
-    /// `PakReader::open_with_key`, which `test_key` maps to `Unsupported`.
-    /// The key value is irrelevant — the pak is never decrypted.
+    /// A v11 (path-hash index) encrypted pak now decrypts with the correct
+    /// key (#635) and its index hash matches → `Verified`. Previously this
+    /// surfaced as `Unsupported` (the v10+ encrypted-index deferral, now
+    /// retired).
     #[test]
-    fn test_key_v11_encrypted_index_returns_unsupported() {
+    fn test_key_v11_encrypted_index_with_correct_key_is_verified() {
         let key = AesKey::from_hex(KEY).unwrap();
         let out = test_key(fixture("real_v11_encrypted_index.pak"), &key);
         assert_eq!(
             out,
-            KeyTestOutcome::Unsupported,
-            "v11 encrypted-index pak must surface as Unsupported (not WrongKey)"
+            KeyTestOutcome::Verified,
+            "v11 encrypted-index pak with the correct key decrypts and its index hash verifies"
+        );
+    }
+
+    /// A WRONG key on a v11 encrypted index fails the decrypt (garbage
+    /// plaintext fails the primary-index parse) → `WrongKey`.
+    #[test]
+    fn test_key_v11_encrypted_index_with_wrong_key_is_wrongkey() {
+        let wrong = AesKey::from_hex(&"00".repeat(32)).unwrap();
+        let out = test_key(fixture("real_v11_encrypted_index.pak"), &wrong);
+        assert_eq!(
+            out,
+            KeyTestOutcome::WrongKey,
+            "wrong key on a v11 encrypted index must map to WrongKey (Decryption)"
         );
     }
 }

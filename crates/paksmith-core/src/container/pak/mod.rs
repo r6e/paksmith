@@ -36,10 +36,6 @@
 //!   on-disk ciphertext).
 //!
 //! It does NOT yet handle:
-//! - AES decryption of v10+ (path-hash) encrypted indexes — the PHI/FDI
-//!   sub-regions require absolute file-position seeks incompatible with
-//!   Cursor-based decryption; paksmith returns [`crate::PaksmithError::UnsupportedFeature`]
-//!   rather than silently returning garbage or misattributing a key error.
 //! - Gzip / Oodle / Zstd compression — resolvable (Gzip and Oodle
 //!   also via the v3-v7 numeric IDs, Zstd via the v8+ FName table)
 //!   but not wired up downstream (only Zlib and LZ4 decompress).
@@ -798,11 +794,29 @@ impl PakReader {
             );
             return Ok(VerifyOutcome::SkippedNoHash);
         }
-        let mut guard = self.locked();
-        let mut file = BufReader::new(&mut *guard);
-        let _ = file.seek(SeekFrom::Start(region.offset()))?;
-        let mut buf = [0u8; HASH_BUFFER_BYTES];
-        let actual = sha1_of_reader(&mut file, region.size(), &mut buf)?;
+        // Encrypted v10+ indexes (#635): each region (FDI/PHI) is
+        // AES-encrypted in place, and UE records the SHA-1 over the
+        // PLAINTEXT — so decrypt before hashing, exactly as
+        // `verify_main_index_region` does. Hashing the on-disk ciphertext
+        // would false-`HashMismatch` a pristine encrypted archive.
+        let actual = if self.footer.is_encrypted() {
+            // Structurally `Some` — an encrypted pak can't be opened
+            // without a key (see `verify_main_index_region`); the branch
+            // stays defensive rather than returning a wrong outcome.
+            let Some(ref key) = self.key else {
+                return Err(PaksmithError::Decryption { path: None });
+            };
+            let plain = self.decrypt_region_plaintext(region, region_kind, key)?;
+            let mut hasher = Sha1::new();
+            hasher.update(&plain);
+            Sha1Digest::from(<[u8; 20]>::from(hasher.finalize()))
+        } else {
+            let mut guard = self.locked();
+            let mut file = BufReader::new(&mut *guard);
+            let _ = file.seek(SeekFrom::Start(region.offset()))?;
+            let mut buf = [0u8; HASH_BUFFER_BYTES];
+            sha1_of_reader(&mut file, region.size(), &mut buf)?
+        };
         if actual != region.hash() {
             let expected = region.hash().to_string();
             let actual_hex = actual.to_string();
@@ -819,6 +833,74 @@ impl PakReader {
             });
         }
         Ok(VerifyOutcome::Verified)
+    }
+
+    /// Read and AES-256-ECB-decrypt an encrypted v10+ index region
+    /// (FDI/PHI) into a `Zeroizing` plaintext buffer of `region.size()`
+    /// bytes, for verify-time plaintext hashing (#635).
+    ///
+    /// `region.size()` is already bounded: `verify_region` ran
+    /// `check_region_bounds` (`offset + size <= file_size`) before calling
+    /// this, and the region was parsed under the `MAX_FDI_BYTES` cap at
+    /// open. An explicit `MAX_INDEX_BYTES` re-check keeps the align-up
+    /// overflow-safe and the allocation bounded even if a future caller
+    /// skips those. Mirrors `decrypt_index_region`'s hygiene.
+    fn decrypt_region_plaintext(
+        &self,
+        region: RegionDescriptor,
+        region_kind: IndexRegionKind,
+        key: &AesKey,
+    ) -> crate::Result<Zeroizing<Vec<u8>>> {
+        // `verify_region` only reaches here for FDI/PHI; map the region
+        // to its byte-size wire field for typed faults.
+        let field = match region_kind {
+            IndexRegionKind::Phi => WireField::PhiSize,
+            IndexRegionKind::Fdi | IndexRegionKind::Main => WireField::FdiSize,
+        };
+        let size = region.size();
+        if size > MAX_INDEX_BYTES {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BoundsExceeded {
+                    field,
+                    value: size,
+                    limit: MAX_INDEX_BYTES,
+                    unit: BoundsUnit::Bytes,
+                    path: None,
+                },
+            });
+        }
+        // Bounds-check the 16-aligned on-disk extent against EOF and get
+        // the aligned length through the shared align-then-check helper
+        // (one home with the open-path region reads, #635) — so verify
+        // reads exactly the same extent open does.
+        let aligned = checked_aligned_payload_len(region.offset(), size, self.file_size, "")?;
+        let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ExceedsPlatformUsize {
+                field,
+                value: aligned,
+                path: None,
+            },
+        })?;
+        let size_usize = usize::try_from(size).expect("size <= aligned <= usize::MAX proven above");
+        let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+        buf.try_reserve_exact(aligned_usize)
+            .map_err(|source| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::EncryptedIndexBytes,
+                    requested: aligned_usize,
+                    source,
+                    path: None,
+                },
+            })?;
+        buf.resize(aligned_usize, 0);
+        {
+            let mut guard = self.locked();
+            let _ = guard.seek(SeekFrom::Start(region.offset()))?;
+            guard.read_exact(&mut buf)?;
+        }
+        crypto::aes256_ecb_decrypt(key, &mut buf)?;
+        buf.truncate(size_usize);
+        Ok(buf)
     }
 
     /// Verify the SHA1 hash of a single entry's on-disk stored bytes. For
@@ -866,8 +948,9 @@ impl PakReader {
     /// verification never decompresses, so an encrypted entry is hashed
     /// over its contiguous ciphertext regardless of compression method —
     /// an encrypted Oodle/Zstd entry verifies exactly like an encrypted
-    /// Zlib one. (Whole-archive-encrypted paks are rejected at open;
-    /// v10+ encrypted INDEXES are `UnsupportedFeature`.)
+    /// Zlib one. (Encrypted INDEX regions differ — their SHA1 covers the
+    /// PLAINTEXT, so `verify_index` decrypts before hashing; #635.
+    /// Whole-archive-encrypted paks are rejected at open.)
     ///
     /// Returns:
     /// - `Ok(VerifyOutcome::Verified)` on a hash match.
@@ -1712,77 +1795,59 @@ fn decrypt_index_region<R: Read + Seek>(
     Ok(buf)
 }
 
-/// Read, AES-256-ECB-decrypt, and parse an encrypted pak index.
+/// Read, AES-256-ECB-decrypt, and parse an encrypted pak index — both the
+/// flat (v3-v9) and path-hash (v10+) layouts (#635).
 ///
-/// UE encrypts the index region in place and pads it to 16-byte
-/// alignment, so the on-disk encrypted extent is
-/// `align_up(index_size, 16)` bytes starting at `index_offset`. We slurp
-/// that region, decrypt it, and hand the plaintext to
-/// [`PakIndex::read_positioned`] via a `Cursor` (the seek-to-offset that
-/// `read_from` performs is meaningless against an in-memory plaintext
-/// buffer). Only the **flat (v3–v9)** index layout is supported here:
-/// the path-hash (v10+) index uses PHI and FDI sub-regions with absolute
-/// file-position seeks that are incompatible with a `Cursor`-based
-/// decryption approach. v10+ encrypted-index paks are rejected with
-/// [`PaksmithError::UnsupportedFeature`] before reaching the decrypt step.
+/// UE encrypts each index region in place and pads it to 16-byte
+/// alignment. Two shapes:
+/// - **Flat (v3-v9):** one contiguous region at `index_offset`. We slurp
+///   `align_up(index_size, 16)` bytes, decrypt, and parse the plaintext
+///   through a `Cursor` (the parser's seek-to-offset is meaningless
+///   against an in-memory buffer).
+/// - **Path-hash (v10+):** three regions (primary/PHI/FDI) at separate
+///   absolute file offsets. Decryption happens PER region inside
+///   [`PakIndex::read_v10_plus_from`] — each is read from the real file
+///   reader (so the absolute FDI/PHI seeks work) and decrypted in place —
+///   so we seek to the primary index and thread the key through
+///   [`PakIndex::read_positioned_maybe_encrypted`].
 ///
 /// **Fail-closed.** A wrong key produces garbage plaintext that the
-/// index parser's magic/bounds checks reject; that parse error is mapped
-/// to [`PaksmithError::Decryption`] so the caller can't tell a wrong key
-/// from a corrupt index (and neither leaks an opaque parse fault). Only
-/// the post-decrypt parse is wrapped — the seek/`read_exact` I/O stays as
-/// its native [`PaksmithError::Io`].
+/// index parser's magic/bounds checks reject; that error is mapped to
+/// [`PaksmithError::Decryption`] so the caller can't tell a wrong key
+/// from a corrupt index (and neither leaks an opaque parse fault). See
+/// the `wrong_key_map` comment for the version-dependent `Io` handling.
 ///
-/// **No unbounded allocation.** `decrypt_index_region` caps `index_size` at
-/// [`MAX_INDEX_BYTES`] (1 GiB) before the 16-alignment multiply (which
-/// would otherwise overflow near `u64::MAX`), the `usize` conversion, and a
-/// fallible `try_reserve_exact` — every step surfaces a typed error rather
-/// than aborting the process.
+/// **No unbounded allocation.** Every region caps its size at
+/// [`MAX_INDEX_BYTES`] / [`MAX_FDI_BYTES`] before the 16-alignment
+/// multiply (which would otherwise overflow near `u64::MAX`), the `usize`
+/// conversion, and a fallible `try_reserve_exact`.
 fn read_encrypted_index<R: Read + Seek>(
     reader: &mut R,
     footer: &PakFooter,
     file_size: u64,
     key: &AesKey,
 ) -> crate::Result<PakIndex> {
-    // v10+ (path-hash index) uses PHI and FDI sub-regions with absolute
-    // file-position seeks — incompatible with the Cursor-based decryption
-    // below. Reject early with a clear non-Decryption error so the user
-    // doesn't think their key is wrong (deferred, not a wrong-key situation).
-    if footer.version().has_path_hash_index() {
-        return Err(PaksmithError::UnsupportedFeature {
-            context: format!(
-                "encrypted v{} (path-hash index layout) is not yet supported: \
-                 the path-hash and full-directory-index regions use absolute file \
-                 positions incompatible with in-memory decryption; your key may be \
-                 correct",
-                footer.version().wire_version()
-            ),
-        });
-    }
-
     let index_size = footer.index_size();
-    let buf = decrypt_index_region(reader, footer, key)?;
 
-    // Parse the decrypted plaintext. A wrong key → garbage → the parser's
-    // magic/bounds checks fail (including `Io(UnexpectedEof)` from
-    // `read_fstring` when garbage lengths exhaust the `Take` boundary).
-    // Map all of these to a fail-closed `Decryption`.
-    // `index_size` (not the 16-aligned length) is the real index byte
-    // budget; the trailing AES pad bytes are not part of the index.
+    // A parse failure on a decrypted region means garbage plaintext — a
+    // wrong key — so map it to a fail-closed `Decryption` that a caller
+    // can't distinguish from a corrupt index. Pass through only
+    // resource/platform faults that are independent of key correctness.
     //
-    // Pass-through only resource/platform faults (AllocationFailed,
-    // U64ExceedsPlatformUsize) that are independent of key correctness.
-    // All other errors — including Io from the in-memory Cursor reader —
-    // map to Decryption: they arise from garbage plaintext, not I/O
-    // failures on the underlying file (those propagated before map_err).
-    PakIndex::read_positioned(
-        &mut Cursor::new(&buf[..]),
-        footer.version(),
-        index_size,
-        file_size,
-        footer.compression_methods(),
-    )
-    .map_err(|e| {
+    // On `Io`: for the FLAT (v3-v9) path all file I/O happens up front in
+    // `decrypt_index_region` and `read_positioned` parses an in-memory
+    // `Cursor`, so any `Io` this map sees is a Cursor `UnexpectedEof` from
+    // garbage plaintext (wrong key) — correctly mapped. For the V10+ path
+    // the primary-index wrong-key signal is ALSO an in-memory `Cursor`
+    // `UnexpectedEof` (garbage mount-string length), but the parser
+    // additionally reads the FDI/PHI regions from the real file reader, so
+    // a genuine disk `Io` there is indistinguishable from the wrong-key
+    // Cursor `Io` and is likewise mapped to `Decryption`. This is
+    // fail-closed — the open correctly fails; only the error KIND is
+    // imprecise for the rare real-I/O case (a garbage but in-bounds
+    // fdi/phi offset still yields a typed `InvalidIndex`, not `Io`, so
+    // wrong-key detection is unaffected).
+    let wrong_key_map = |e: PaksmithError| {
         let is_resource_fault = matches!(
             e,
             PaksmithError::InvalidIndex {
@@ -1796,7 +1861,40 @@ fn read_encrypted_index<R: Read + Seek>(
             debug!(?e, "encrypted index parse failed — likely wrong key");
             PaksmithError::Decryption { path: None }
         }
-    })
+    };
+
+    if footer.version().has_path_hash_index() {
+        // v10+ (path-hash index): the primary/PHI/FDI regions live at
+        // separate absolute file offsets, so decryption happens per
+        // region inside `read_v10_plus_from` (each region is read via
+        // the real file reader and decrypted in place). Position the
+        // reader at the primary index and thread the key through (#635).
+        let _ = reader.seek(SeekFrom::Start(footer.index_offset()))?;
+        return PakIndex::read_positioned_maybe_encrypted(
+            reader,
+            footer.version(),
+            index_size,
+            file_size,
+            footer.compression_methods(),
+            Some(key),
+        )
+        .map_err(wrong_key_map);
+    }
+
+    // Flat (v3-v9): one contiguous encrypted region — decrypt it up front
+    // and parse the plaintext through a `Cursor` (the parser's
+    // seek-to-`index_offset` is meaningless against an in-memory buffer).
+    // `index_size` (not the 16-aligned length) is the real index byte
+    // budget; the trailing AES pad bytes are not part of the index.
+    let buf = decrypt_index_region(reader, footer, key)?;
+    PakIndex::read_positioned(
+        &mut Cursor::new(&buf[..]),
+        footer.version(),
+        index_size,
+        file_size,
+        footer.compression_methods(),
+    )
+    .map_err(wrong_key_map)
 }
 
 /// Stream the uncompressed payload of `entry` from `file` to `writer`.
@@ -1949,12 +2047,13 @@ fn checked_payload_end(start: u64, size: u64, file_size: u64, path: &str) -> cra
 /// One home for the align-then-check arithmetic so the callers cannot
 /// drift (#689 review): `read_decrypted_compressed_payload` and
 /// `stream_uncompressed_to`'s encrypted arm (each sizing its decrypt
-/// buffer), and [`checked_encrypted_verify_extents`] (which picks the
+/// buffer), `checked_encrypted_verify_extents` (which picks the
 /// read-required size field per compression method — see its docs for
-/// why the field differs). Real archives always carry the AES padding
-/// (the index/footer follow it), so an aligned-extent rejection only
-/// ever fires on crafted input.
-fn checked_aligned_payload_len(
+/// why the field differs), and the encrypted v10+ index-region reads
+/// (`read_region_maybe_decrypt` / `decrypt_region_plaintext`, #635).
+/// Real archives always carry the AES padding (the index/footer follow
+/// it), so an aligned-extent rejection only ever fires on crafted input.
+pub(in crate::container::pak) fn checked_aligned_payload_len(
     start: u64,
     size: u64,
     file_size: u64,
@@ -3873,24 +3972,138 @@ mod tests {
     }
 
     /// v10+ (path-hash index) encrypted paks must produce an honest
-    /// `UnsupportedFeature` error — NOT `Decryption` — so the user knows
-    /// the key is fine but this version is deferred, not that the key is wrong.
+    /// Path of the v11 (path-hash index) encrypted-index fixture.
+    fn encrypted_v11_index_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v11_encrypted_index.pak")
+    }
+
+    /// #635 RED→GREEN oracle: an encrypted v11 (path-hash + full-directory
+    /// index) pak must open with the correct key and expose the four known
+    /// corpus entries. All THREE index regions (primary, PHI, FDI) are
+    /// AES-256-ECB encrypted on the wire (probed empirically: ciphertext is
+    /// garbage, plaintext parses — PHI opens with count 4, FDI with 2
+    /// directories), so this exercises decrypt-then-parse for each region.
+    /// Replaces the retired `UnsupportedFeature` deferral pin.
     #[test]
-    fn open_v11_encrypted_index_is_unsupported_feature_not_decryption() {
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/real_v11_encrypted_index.pak");
+    fn open_with_key_decrypts_v11_path_hash_index_and_lists_entries() {
         let key = AesKey::new(FIXTURE_AES_KEY);
-        let err =
-            PakReader::open_with_key(fixture, key).expect_err("v11 encrypted index must fail");
-        assert!(
-            matches!(err, PaksmithError::UnsupportedFeature { .. }),
-            "v11 encrypted index must fail as UnsupportedFeature (not Decryption), got: {err:?}"
+        let reader = PakReader::open_with_key(encrypted_v11_index_fixture(), key)
+            .expect("v11 encrypted path-hash index must decrypt + parse");
+        let mut paths: Vec<String> = reader.entries().map(|e| e.path().to_string()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "directory/nested.txt".to_string(),
+                "test.png".to_string(),
+                "test.txt".to_string(),
+                "zeros.bin".to_string(),
+            ],
+            "decrypted v11 index must expose the four known fixture entries"
         );
-        // Also confirm the error message is informative (not a wrong-key message).
-        let msg = err.to_string();
+    }
+
+    /// #635: end-to-end read through the decrypted v11 index — the entry
+    /// payloads in this fixture are PLAINTEXT (only the index is
+    /// encrypted), so a correct index decrypt yields the known corpus
+    /// bytes.
+    #[test]
+    fn reads_entry_through_encrypted_v11_path_hash_index() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_v11_index_fixture(), key)
+            .expect("v11 encrypted path-hash index must decrypt + parse");
+        let bytes = reader
+            .read_entry("test.txt")
+            .expect("read through the decrypted v11 index");
+        assert_eq!(bytes, FIXTURE_PLAINTEXT_TEST_TXT);
+    }
+
+    /// #635: `verify_index()` on the encrypted v11 pak must report
+    /// `Verified` for ALL THREE regions. UE records each region's SHA-1
+    /// over the PLAINTEXT (probed: the footer index hash and the PHI/FDI
+    /// hashes all match `sha1(plaintext[..size])`, not the ciphertext) —
+    /// so verification must DECRYPT each region before hashing. A verify
+    /// path that hashed the on-disk ciphertext for FDI/PHI would false-
+    /// mismatch (this is the encrypted-region analogue of the #634 R1
+    /// bug). Keyed open is required (a keyless open can't decrypt).
+    #[test]
+    fn verify_index_on_encrypted_v11_index_is_verified() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_v11_index_fixture(), key)
+            .expect("v11 encrypted path-hash index must decrypt + parse");
+        assert_eq!(
+            reader
+                .verify_index()
+                .expect("verify_index must run on the decrypted v11 index"),
+            VerifyOutcome::Verified,
+            "all three encrypted index regions hash their plaintext; verify must decrypt first"
+        );
+    }
+
+    /// #635 v10 half of the acceptance criteria. No first-party v10
+    /// encrypted-index fixture is vendored, but V10 (`PathHashIndex`) and
+    /// V11 (`Fnv64BugFix`) share the SAME footer and index layout — the
+    /// only wire difference is the FNV path-hash seed handling, and
+    /// paksmith's `fnv64_path` is VERSION-AGNOSTIC (it consumes only the
+    /// stored seed, accepting both UE variants — see index/mod.rs). So
+    /// patching the real v11 fixture's footer version u32 from 11 to 10
+    /// yields a wire-valid v10 encrypted-index pak over otherwise-real
+    /// UnrealPak bytes: it exercises the v10 version-DISPATCH end-to-end
+    /// (open + decrypt all three regions + FDI path recovery + read),
+    /// with the real v11 fixture as the wire-conformance anchor. The
+    /// version u32 sits in the footer after guid(16)+enc(1)+magic(4);
+    /// changing it invalidates no region hash (hashes cover the index
+    /// regions, not the footer).
+    #[test]
+    fn open_with_key_decrypts_v10_path_hash_index_and_reads() {
+        let mut bytes = std::fs::read(encrypted_v11_index_fixture()).expect("read v11 fixture");
+        let footer_size = 16 + 1 + 4 + 4 + 8 + 8 + 20 + 160;
+        let ver_off = bytes.len() - footer_size + 16 + 1 + 4;
+        assert_eq!(
+            u32::from_le_bytes(bytes[ver_off..ver_off + 4].try_into().unwrap()),
+            11,
+            "sanity: patch target must be the version field currently reading 11"
+        );
+        bytes[ver_off..ver_off + 4].copy_from_slice(&10u32.to_le_bytes());
+
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::from_reader_with_key(std::io::Cursor::new(bytes), key)
+            .expect("v10 (path-hash index) encrypted pak must decrypt + parse");
+        let mut paths: Vec<String> = reader.entries().map(|e| e.path().to_string()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "directory/nested.txt".to_string(),
+                "test.png".to_string(),
+                "test.txt".to_string(),
+                "zeros.bin".to_string(),
+            ],
+        );
+        let plaintext = reader
+            .read_entry("test.txt")
+            .expect("read through v10 index");
+        assert_eq!(plaintext, FIXTURE_PLAINTEXT_TEST_TXT);
+        assert_eq!(
+            reader.verify_index().expect("verify v10 index"),
+            VerifyOutcome::Verified,
+        );
+    }
+
+    /// #635 fail-closed: a WRONG key on the v11 encrypted index must
+    /// surface as `Decryption` (garbage plaintext fails the primary-index
+    /// parse), never as `UnsupportedFeature`, a panic, or garbage entries.
+    #[test]
+    fn open_encrypted_v11_index_with_wrong_key_is_decryption() {
+        let mut wrong_bytes = FIXTURE_AES_KEY;
+        wrong_bytes[0] ^= 0xFF;
+        let wrong = AesKey::new(wrong_bytes);
+        let err = PakReader::open_with_key(encrypted_v11_index_fixture(), wrong)
+            .expect_err("wrong key must fail");
         assert!(
-            msg.contains("path-hash") || msg.contains("not yet supported"),
-            "UnsupportedFeature message should mention path-hash or deferred, got: {msg}"
+            matches!(err, PaksmithError::Decryption { .. }),
+            "wrong key on a v11 encrypted index must fail closed as Decryption, got: {err:?}"
         );
     }
 
