@@ -246,8 +246,9 @@ mod tests {
     /// the only test that verifies the full plaintext of the genuinely
     /// zlib-compressed binary entry (`test.png`), not just its length +
     /// magic bytes (the in-source suite's `reads_encrypted_compressed_*`
-    /// tests). All four entries are AES-encrypted; `test.png`/`zeros.bin`
-    /// are compressed, `test.txt`/`nested.txt` stored uncompressed.
+    /// tests). In this v8b fixture all four entries are AES-encrypted AND
+    /// zlib-compressed; the v11 sibling stores `test.txt`/`nested.txt`
+    /// uncompressed instead.
     #[test]
     fn cross_val_encrypted_compressed_v8b() {
         assert_encrypted_cross_val("real_v8b_encrypted_compressed.pak");

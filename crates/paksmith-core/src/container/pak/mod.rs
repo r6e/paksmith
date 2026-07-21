@@ -1442,6 +1442,11 @@ fn read_decrypted_compressed_payload<R: Read + Seek>(
     // `comp <= min(file_size, 8 GiB) < 2^63`, so this cannot actually
     // overflow — but use `checked_mul` for a typed fault
     // rather than an unchecked `* 16` (defense-in-depth, R3 security note).
+    // INVARIANT: the cap (`ensure_compressed_size_within_cap`) is on `comp`,
+    // but the allocation below is on `aligned`; that stays `<= MAX` only
+    // because `MAX_UNCOMPRESSED_ENTRY_BYTES` is itself 16-aligned (2^33), so
+    // `comp <= MAX` implies `aligned <= MAX`. Keep that constant a multiple
+    // of 16 if it ever changes.
     let aligned = comp
         .div_ceil(16)
         .checked_mul(16)
@@ -4353,6 +4358,17 @@ mod tests {
             .map(lz4_flex::block::compress)
             .collect();
         assert_eq!(chunks.len(), 3, "fixture invariant: 2 full + 1 remainder");
+        // Self-assert the discriminating property: at least one block's lz4
+        // length is NOT 16-aligned, so its AES footprint carries real padding
+        // that the next block's aligned start must skip over. Without this, an
+        // all-16-aligned coincidence would make the block table's aligned
+        // advances degenerate to the unaligned ones — masking the inter-block
+        // gap walk (the R1 "16-aligned coincidence" mask class).
+        assert!(
+            chunks.iter().any(|c| c.len() % 16 != 0),
+            "at least one block must be non-16-aligned to exercise the AES padding gap; got {:?}",
+            chunks.iter().map(Vec::len).collect::<Vec<_>>()
+        );
 
         // Lay each block's lz4 bytes at its AES-aligned footprint offset and
         // ECB-encrypt the whole contiguous region.
