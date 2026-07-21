@@ -1862,9 +1862,10 @@ fn read_encrypted_index<R: Read + Seek>(
     //       decrypts to structurally valid plaintext but fails the issue
     //       #131 `PhiFdiInconsistency` check, or a non-ASCII path hitting
     //       the `fnv64_path` ASCII-only limitation;
-    //   (2) pre-decrypt structural bounds faults — `OffsetPastFileSize` /
-    //       `BoundsExceeded` from a region whose 16-aligned extent or
-    //       declared size overshoots EOF / its cap.
+    //   (2) pre-decrypt structural bounds faults, such as
+    //       `OffsetPastFileSize` (aligned extent past EOF),
+    //       `RegionPastFileSize` (unaligned offset+size past EOF), or
+    //       `BoundsExceeded` (declared size over its cap).
     // Both collapse into `Decryption`; the unencrypted path would surface
     // the specific fault, the encrypted path reports "looks like a wrong
     // key." This is deliberate and uniform. The FDI/PHI region offsets and
