@@ -93,19 +93,22 @@ fn read_region_maybe_decrypt<R: Read + Seek>(
             path: None,
         },
     })?;
-    let size_usize = usize::try_from(size).map_err(|_| PaksmithError::InvalidIndex {
-        fault: IndexParseFault::U64ExceedsPlatformUsize {
-            field,
-            value: size,
-            path: None,
-        },
-    })?;
     let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
     try_reserve_index(&mut buf, on_disk_usize, context, seam)?;
     buf.resize(on_disk_usize, 0);
     reader.read_exact(&mut buf)?;
     if let Some(key) = key {
         crypto::aes256_ecb_decrypt(key, &mut buf)?;
+        // Strip the AES padding, keeping only the logical `size` bytes.
+        // (On the keyless branch `on_disk == size`, so no truncation is
+        // needed and this conversion is skipped entirely.)
+        let size_usize = usize::try_from(size).map_err(|_| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ExceedsPlatformUsize {
+                field,
+                value: size,
+                path: None,
+            },
+        })?;
         buf.truncate(size_usize);
     }
     Ok(buf)

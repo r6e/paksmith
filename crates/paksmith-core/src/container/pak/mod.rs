@@ -31,8 +31,10 @@
 //! - AES-256 decryption (with a key via [`PakReader::open_with_key`]) of
 //!   the index and of encrypted ENTRIES. The v3-v9 flat index and the
 //!   v10/v11 path-hash index (all three regions — primary, path-hash, and
-//!   full-directory) are each read as a 16-aligned on-disk region,
-//!   decrypted, and truncated to the logical size. Encrypted entries come
+//!   full-directory) are each read as a 16-aligned on-disk region and
+//!   decrypted, with the AES padding excluded from the logical size (the
+//!   v10+ regions truncate to it; the flat index applies it downstream as
+//!   the parse/hash budget). Encrypted entries come
 //!   both uncompressed and compressed; encrypted compressed entries decrypt
 //!   the 16-aligned payload region as one contiguous block before per-block
 //!   inflation. **The hash conventions are opposite:** encrypted entries
@@ -681,9 +683,7 @@ impl PakReader {
                         path: None,
                     },
                 })?;
-            let mut hasher = Sha1::new();
-            hasher.update(&buf[..index_size_usize]);
-            let actual = Sha1Digest::from(<[u8; 20]>::from(hasher.finalize()));
+            let actual = sha1_of_bytes(&buf[..index_size_usize]);
             if actual != self.footer.index_hash() {
                 let expected = self.footer.index_hash().to_string();
                 let actual_hex = actual.to_string();
@@ -812,9 +812,7 @@ impl PakReader {
                 return Err(PaksmithError::Decryption { path: None });
             };
             let plain = self.decrypt_region_plaintext(region, region_kind, key)?;
-            let mut hasher = Sha1::new();
-            hasher.update(&plain);
-            Sha1Digest::from(<[u8; 20]>::from(hasher.finalize()))
+            sha1_of_bytes(&plain)
         } else {
             let mut guard = self.locked();
             let mut file = BufReader::new(&mut *guard);
@@ -875,7 +873,17 @@ impl PakReader {
                 path: None,
             },
         })?;
-        let size_usize = usize::try_from(size).expect("size <= aligned <= usize::MAX proven above");
+        // `size <= aligned <= usize::MAX` is proven above (the `aligned`
+        // conversion succeeded), so this cannot fail — but keep it fallible
+        // to match `read_region_maybe_decrypt` and the no-panics-in-core
+        // policy rather than `.expect()`.
+        let size_usize = usize::try_from(size).map_err(|_| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ExceedsPlatformUsize {
+                field,
+                value: size,
+                path: None,
+            },
+        })?;
         let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
         buf.try_reserve_exact(aligned_usize)
             .map_err(|source| PaksmithError::InvalidIndex {
@@ -1848,17 +1856,31 @@ fn read_encrypted_index<R: Read + Seek>(
     // fdi/phi offset still yields a typed `InvalidIndex`, not `Io`, so
     // wrong-key detection is unaffected).
     //
-    // Accepted trade-off: a CORRECTLY-keyed v10+ index that decrypts to
-    // structurally valid plaintext but fails a post-parse cross-check (the
-    // issue #131 `PhiFdiInconsistency`, or a non-ASCII path hitting the
-    // `fnv64_path` ASCII-only limitation) is ALSO collapsed into
-    // `Decryption` here — the unencrypted path would surface the specific
-    // fault, the encrypted path reports "looks like a wrong key." This is
-    // deliberate: passing such faults through unmapped would leak that the
-    // key decrypted to a valid-looking index, and a wrong key reaching a
-    // structurally-valid parse is cryptographically negligible, so the
-    // collapse loses nothing security-relevant. The cost is diagnostic
-    // precision on encrypted v10+ opens only.
+    // Accepted trade-off: for the v10+ path this collapse also swallows
+    // faults that are NOT wrong-key garbage. Two classes:
+    //   (1) post-parse cross-check faults — a correctly-keyed index that
+    //       decrypts to structurally valid plaintext but fails the issue
+    //       #131 `PhiFdiInconsistency` check, or a non-ASCII path hitting
+    //       the `fnv64_path` ASCII-only limitation;
+    //   (2) pre-decrypt structural bounds faults — `OffsetPastFileSize` /
+    //       `BoundsExceeded` from a region whose 16-aligned extent or
+    //       declared size overshoots EOF / its cap.
+    // Both collapse into `Decryption`; the unencrypted path would surface
+    // the specific fault, the encrypted path reports "looks like a wrong
+    // key." This is deliberate and uniform. The FDI/PHI region offsets and
+    // sizes come from the DECRYPTED primary index, so a wrong key's garbage
+    // could itself trip class (2) — surfacing the typed fault there would be
+    // a wrong-key oracle, and passing class (1) through would leak that the
+    // key decrypted to a valid-looking index. The PRIMARY region's bounds
+    // fault is key-independent (footer fields), but it is collapsed too so
+    // the v10+ open presents one conservative failure mode. (The flat v3-v9
+    // path keeps its typed bounds faults because they are checked on
+    // plaintext footer fields OUTSIDE this closure — see
+    // `decrypt_index_region` and the `flat_encrypted_index_aligned_overshoot`
+    // test.) A wrong key reaching a structurally-valid parse is
+    // cryptographically negligible, so the collapse loses nothing
+    // security-relevant. The cost is diagnostic precision on encrypted v10+
+    // opens only.
     let wrong_key_map = |e: PaksmithError| {
         let is_resource_fault = matches!(
             e,
@@ -3009,6 +3031,17 @@ fn combine_index_outcomes(
     worst
 }
 
+/// SHA1 digest of a contiguous in-memory byte slice. The single-slice
+/// counterpart to [`sha1_of_reader`] (which streams `len` bytes through a
+/// scratch buffer) — used where the bytes are already resident, e.g. a
+/// decrypted index region in [`PakReader::verify_region`] /
+/// [`PakReader::verify_main_index_region`].
+fn sha1_of_bytes(bytes: &[u8]) -> Sha1Digest {
+    let mut hasher = Sha1::new();
+    hasher.update(bytes);
+    Sha1Digest::from(<[u8; 20]>::from(hasher.finalize()))
+}
+
 /// Read exactly `len` bytes from `reader` and return the SHA1 digest.
 /// `buf` is the caller-owned scratch buffer — fixed-size at
 /// [`HASH_BUFFER_BYTES`] so an empty buffer is structurally
@@ -3871,8 +3904,12 @@ mod tests {
     /// footer bound (`index_offset + index_size <= file_size`) but whose
     /// 16-aligned on-disk extent overshoots EOF must surface a typed
     /// `OffsetPastFileSize` (via the shared `checked_aligned_payload_len`),
-    /// not a bare `Io(UnexpectedEof)` from `read_exact` — matching the typed
-    /// bound the v10+ region reads already guarantee (#635 uniformity).
+    /// not a bare `Io(UnexpectedEof)` from `read_exact`. The v10+ region
+    /// reads run the same `checked_aligned_payload_len` internally, but
+    /// `read_encrypted_index` collapses their faults into `Decryption` at
+    /// the open boundary (see `wrong_key_map`); the flat path surfaces the
+    /// typed fault directly because its check runs on the plaintext footer
+    /// fields, outside that collapse.
     #[test]
     fn flat_encrypted_index_aligned_overshoot_is_offset_past_file_size() {
         let mut bytes = std::fs::read(encrypted_index_fixture()).expect("read fixture bytes");
@@ -4025,7 +4062,6 @@ mod tests {
         );
     }
 
-    /// v10+ (path-hash index) encrypted paks must produce an honest
     /// Path of the v11 (path-hash index) encrypted-index fixture.
     fn encrypted_v11_index_fixture() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
