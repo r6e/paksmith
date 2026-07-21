@@ -22,9 +22,12 @@
 //! to repak itself, both implementations agree on the format — that
 //! independent agreement is the cross-parser anchor #14 calls for.
 //!
-//! # Coverage gaps repak imposes
+//! # What bounds the fixture corpus
 //!
-//! repak v0.2.3 only writes a subset of the format:
+//! The corpus is shaped by two distinct things — repak v0.2.3's writer
+//! (some shapes it genuinely cannot produce) and our own deliberate matrix
+//! choices (shapes repak *can* write but we don't generate). The first
+//! bullet is the latter; the rest are the former:
 //! - **Compressed fixtures are v8+ only (a matrix choice, not a repak
 //!   limit).** Issue #69 added zlib-compressed fixtures
 //!   (`real_v{8a,8b,9,10,11}_compressed.pak`) and issue #636 added
