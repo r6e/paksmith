@@ -775,11 +775,13 @@ fn verify_succeeds_on_valid_fixture_with_full_counts() {
     assert!(stats.is_fully_verified());
 }
 
-/// Encrypted entries return `Ok(SkippedEncrypted)` from verify_entry —
-/// the policy is "we have no key, so we can't verify; report the skip
-/// rather than misclassifying it as tampered."
+/// Encryption is INVISIBLE to verify (#634, Task-4 resolved): the stored
+/// entry SHA-1 covers the on-disk ciphertext, so `verify_entry` no longer
+/// short-circuits encrypted entries. With a zero hash slot (and a zero
+/// index hash) the outcome is the same zero-hash policy a plaintext entry
+/// gets: `SkippedNoHash`, not the retired entry-level `SkippedEncrypted`.
 #[test]
-fn verify_entry_returns_skipped_for_encrypted_entry() {
+fn verify_entry_encrypted_zero_hash_follows_zero_hash_policy() {
     let payload = b"ciphertext-stand-in";
     let pak_bytes = build_single_entry_pak_with_flags(
         6,
@@ -795,7 +797,7 @@ fn verify_entry_returns_skipped_for_encrypted_entry() {
     let reader = PakReader::from_bytes(pak_bytes).unwrap();
     assert_eq!(
         reader.verify_entry("Content/x.uasset").unwrap(),
-        VerifyOutcome::SkippedEncrypted
+        VerifyOutcome::SkippedNoHash
     );
 }
 
@@ -889,13 +891,14 @@ fn verify_entry_rejects_mixed_zero_entry_hash_when_index_has_hash() {
     }
 }
 
-/// Encryption takes priority over the zero-hash-with-archive-integrity
-/// check: an entry that's BOTH encrypted AND has a zero hash slot in an
-/// integrity-claiming archive must report SkippedEncrypted, not
-/// IntegrityStripped. Pins the documented priority so a future refactor
-/// reordering the checks fails loudly.
+/// The zero-hash-with-archive-integrity (strip) check applies to
+/// encrypted entries too (#634): since the stored SHA-1 covers the
+/// ciphertext, encryption is no excuse for a zeroed hash slot in an
+/// integrity-claiming archive — an attacker must not be able to hide a
+/// stripped tag behind the encrypted flag. Pins the post-Task-4 ordering
+/// (the old entry-level SkippedEncrypted short-circuit is retired).
 #[test]
-fn verify_entry_encrypted_takes_priority_over_integrity_strip_check() {
+fn verify_entry_integrity_strip_check_applies_to_encrypted_entries() {
     use sha1::{Digest, Sha1};
 
     let payload = b"ciphertext-stand-in";
@@ -948,11 +951,14 @@ fn verify_entry_encrypted_takes_priority_over_integrity_strip_check() {
     pak.extend_from_slice(&index_hash);
 
     let reader = PakReader::from_bytes(pak).unwrap();
-    // Encryption check fires first; the integrity-strip check never runs.
-    assert_eq!(
-        reader.verify_entry("Content/x.uasset").unwrap(),
-        VerifyOutcome::SkippedEncrypted
-    );
+    // Encryption no longer short-circuits; the strip check fires.
+    let err = reader.verify_entry("Content/x.uasset").unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::IntegrityStripped {
+            target: paksmith_core::error::HashTarget::Entry { path },
+        } => assert_eq!(path, "Content/x.uasset"),
+        other => panic!("expected IntegrityStripped for the encrypted entry, got {other:?}"),
+    }
 }
 
 /// Entries whose stored SHA1 is the all-zero sentinel return
@@ -1058,12 +1064,14 @@ fn verify_entry_zlib_fails_when_compressed_byte_corrupted() {
     }
 }
 
-/// verify() on an archive with an encrypted entry returns Ok and
-/// reports the skip in VerifyStats. This pins the policy that the
-/// continue arm in verify() exists for: don't fail-fast on encrypted
-/// entries, but DO surface them so callers know they weren't checked.
+/// verify() stats after #634: an encrypted entry with a zero hash slot
+/// (in a zero-index-hash archive) counts as `skipped_no_hash`, NOT
+/// `skipped_encrypted` — the entry-level encrypted skip is retired
+/// because the stored SHA-1 covers the ciphertext and verification is
+/// keyless. `entries_skipped_encrypted` remains only as the (now
+/// structurally unreachable from entries) legacy counter.
 #[test]
-fn verify_reports_encrypted_skip_in_stats() {
+fn verify_counts_encrypted_zero_hash_as_skipped_no_hash() {
     let payload = b"ciphertext";
     let pak_bytes = build_single_entry_pak_with_flags(
         6,
@@ -1079,14 +1087,75 @@ fn verify_reports_encrypted_skip_in_stats() {
     let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let stats = reader.verify().unwrap();
     assert_eq!(stats.entries_verified(), 0);
-    assert_eq!(stats.entries_skipped_encrypted(), 1);
-    assert_eq!(stats.entries_skipped_no_hash(), 0);
+    assert_eq!(stats.entries_skipped_encrypted(), 0);
+    assert_eq!(stats.entries_skipped_no_hash(), 1);
     // Index hash slot in this synthetic pak is also zero, so index is
     // also skipped — that's expected behavior, not a bug.
     assert!(stats.index_skipped_no_hash());
     // is_fully_verified must report false: nothing was actually hashed,
     // and either skip class alone disqualifies the archive.
     assert!(!stats.is_fully_verified());
+}
+
+/// Post-#634 policy pin (R2 architect finding): verify of ENCRYPTED
+/// entries is method-agnostic and keyless — it hashes the on-disk
+/// ciphertext without decompressing, so an encrypted Oodle entry (with a
+/// non-zero, deliberately-wrong hash) surfaces `HashMismatch`, NOT the
+/// unsupported-method `Decompression` a PLAINTEXT Oodle entry gets. This
+/// keeps `verify()` gracefully degrading over modern encrypted archives
+/// (Oodle is common in shipped UE builds) instead of fail-fasting, and
+/// documents the deliberate asymmetry: the method gate applies only to
+/// plaintext, since encrypted on-disk bytes are opaque regardless of codec.
+#[test]
+fn verify_entry_encrypted_unsupported_method_hashes_keylessly() {
+    let sha1 = [0x11u8; 20]; // non-zero → clears the SkippedNoHash gate
+    let payload = b"ciphertext-stand-in";
+    // Single block spanning the payload so the entry parses as compressed.
+    let blocks: [(u64, u64); 1] = [(0, payload.len() as u64)];
+
+    // Encrypted Oodle (method 4): the wrong stored hash means the keyless
+    // ciphertext hash mismatches → HashMismatch (proving the method-agnostic
+    // hash path ran, NOT the unsupported-method decline).
+    let encrypted = build_single_entry_pak_with_flags(
+        6,
+        4,
+        sha1,
+        &blocks,
+        payload.len() as u32,
+        payload,
+        None,
+        true,
+        None,
+    );
+    let reader = PakReader::from_bytes(encrypted).unwrap();
+    let err = reader
+        .verify_entry("Content/x.uasset")
+        .expect_err("wrong hash must mismatch");
+    assert!(
+        matches!(err, paksmith_core::PaksmithError::HashMismatch { .. }),
+        "encrypted Oodle entry must hash keylessly and mismatch, got: {err:?}"
+    );
+
+    // Plaintext Oodle: the method gate applies → Decompression (unchanged).
+    let plaintext = build_single_entry_pak_with_flags(
+        6,
+        4,
+        sha1,
+        &blocks,
+        payload.len() as u32,
+        payload,
+        None,
+        false,
+        None,
+    );
+    let reader = PakReader::from_bytes(plaintext).unwrap();
+    let err = reader
+        .verify_entry("Content/x.uasset")
+        .expect_err("plaintext unsupported method must decline");
+    assert!(
+        matches!(err, paksmith_core::PaksmithError::Decompression { .. }),
+        "plaintext Oodle entry must decline with Decompression, got: {err:?}"
+    );
 }
 
 /// `is_fully_verified()` requires `entries_verified > 0` to defend

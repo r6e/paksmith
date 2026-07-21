@@ -28,18 +28,18 @@
 //!   [`PakReader::verify`]. **v10+ encoded entries omit SHA1**, so
 //!   `verify_entry` surfaces them as `SkippedNoHash`. Verification is
 //!   opt-in to keep list-only workloads from paying the cost.
+//! - AES-256 decryption (with a key via [`PakReader::open_with_key`]) of
+//!   the v3-v9 index and of encrypted ENTRIES — both uncompressed and
+//!   compressed. Encrypted compressed entries decrypt the 16-aligned
+//!   payload region as one contiguous block before per-block inflation.
+//!   Encrypted entries verify keylessly (the stored SHA1 covers the
+//!   on-disk ciphertext).
 //!
 //! It does NOT yet handle:
 //! - AES decryption of v10+ (path-hash) encrypted indexes — the PHI/FDI
 //!   sub-regions require absolute file-position seeks incompatible with
 //!   Cursor-based decryption; paksmith returns [`crate::PaksmithError::UnsupportedFeature`]
 //!   rather than silently returning garbage or misattributing a key error.
-//! - AES decryption of entries that are *both* encrypted and compressed —
-//!   UE encrypts the compressed payload, so correct support requires
-//!   decrypting the 16-aligned region before per-block inflation; with no
-//!   oracle fixture for that path yet, paksmith returns
-//!   [`crate::PaksmithError::UnsupportedFeature`] rather than feed ciphertext
-//!   to the inflater. Encrypted *uncompressed* entries decrypt normally.
 //! - Gzip / Oodle / Zstd compression — resolvable (Gzip and Oodle
 //!   also via the v3-v7 numeric IDs, Zstd via the v8+ FName table)
 //!   but not wired up downstream (only Zlib and LZ4 decompress).
@@ -436,13 +436,22 @@ impl PakReader {
         // multi-block, and zero-block entries uniformly through
         // the same single iteration.
         //
-        // For encrypted multi-block entries, `compressed_size` is
-        // the unaligned sum; the actual on-disk extent is up to
-        // `16 * block_count` bytes larger due to AES padding. We
-        // accept that ~1 MiB worst-case under-check at open since
-        // the read-time per-block bound at `stream_zlib_to` still
-        // catches anything beyond the wire claim that would
-        // actually walk past EOF.
+        // For encrypted COMPRESSED entries `compressed_size` is the sum
+        // of the AES-ALIGNED per-block footprints (#634) — i.e. the
+        // actual on-disk extent — so this bound is exact for that class.
+        // For encrypted UNCOMPRESSED entries `compressed_size` mirrors
+        // the unaligned `uncompressed_size` (`real_v8b_encrypted_entries`
+        // `test.txt`: 446, not the 448-aligned footprint), so this
+        // open-time bound UNDER-counts the real on-disk extent by up to
+        // 15 bytes. That gap is caught fail-closed at read AND verify
+        // time — the `checked_payload_end` on the AES-aligned length
+        // inside `stream_uncompressed_to` /
+        // `read_decrypted_compressed_payload`, and
+        // `checked_encrypted_verify_extents` in `verify_entry`'s
+        // encrypted arm (#689), reject a truncated tail with
+        // `OffsetPastFileSize` rather than reading past EOF or reporting
+        // `Verified` for an unreadable entry; nothing here relies on this
+        // bound being exact for the uncompressed class.
         for entry in index.entries() {
             let header = entry.header();
             let offset = header.offset();
@@ -852,20 +861,28 @@ impl PakReader {
     /// packers, treat `IntegrityStripped` as a distinguishable warning
     /// rather than a hard rejection at the call site.
     ///
+    /// AES-encrypted entries verify KEYLESSLY and METHOD-AGNOSTICALLY
+    /// (#634): UE stores the entry SHA1 over the on-disk CIPHERTEXT, and
+    /// verification never decompresses, so an encrypted entry is hashed
+    /// over its contiguous ciphertext regardless of compression method —
+    /// an encrypted Oodle/Zstd entry verifies exactly like an encrypted
+    /// Zlib one. (Whole-archive-encrypted paks are rejected at open;
+    /// v10+ encrypted INDEXES are `UnsupportedFeature`.)
+    ///
     /// Returns:
     /// - `Ok(VerifyOutcome::Verified)` on a hash match.
     /// - `Ok(VerifyOutcome::SkippedNoHash)` when the entry's stored SHA1
-    ///   is all zeros (no integrity claim recorded at write time).
-    /// - `Ok(VerifyOutcome::SkippedEncrypted)` for AES-encrypted entries —
-    ///   verifying ciphertext without the key is not supported.
+    ///   is all zeros (no integrity claim recorded at write time), or the
+    ///   entry is a v10+ encoded record (which omits SHA1 from the wire).
     /// - `Err(EntryNotFound)` for unknown paths.
-    /// - `Err(Decompression)` for unsupported compression methods (Gzip,
-    ///   Oodle, Zstd, UnknownByName, Unknown). Zlib and LZ4 verify
-    ///   normally (the entry SHA1 covers the on-disk compressed bytes,
-    ///   so no decompression happens on the verify path). We refuse to
-    ///   hash arbitrary bytes we can't interpret; doing otherwise risks
-    ///   reporting a misleading `HashMismatch` for a well-formed archive
-    ///   in a method we don't support yet.
+    /// - `Err(Decompression)` for a PLAINTEXT entry in an unsupported
+    ///   compression method (Gzip, Oodle, Zstd, UnknownByName, Unknown).
+    ///   Plaintext Zlib and LZ4 verify normally (the entry SHA1 covers
+    ///   the on-disk compressed bytes, so no decompression happens on the
+    ///   verify path); for unsupported methods we refuse to hash raw
+    ///   compressed bytes we can't interpret. This method gate applies
+    ///   ONLY to plaintext entries — encrypted entries hash opaque
+    ///   ciphertext (see above), so the method never matters for them.
     /// - `Err(InvalidIndex)` for offset/bounds problems uncovered while
     ///   reading.
     /// - `Err(HashMismatch { target: Entry { path }, .. })` when the
@@ -879,21 +896,15 @@ impl PakReader {
                 path: path.to_string(),
             })?;
 
-        // Encryption check first: if the bytes at entry.header().offset() are
-        // ciphertext, hashing them is meaningless. This priority is
-        // intentional — an encrypted-AND-zero-hash entry reports as
-        // SkippedEncrypted, not SkippedNoHash, because encryption is the
-        // stronger reason we can't verify.
-        //
-        // TODO(Task-4): when per-entry decryption is added, verify whether
-        // UE stores the entry SHA1 over plaintext or ciphertext (the index
-        // path confirmed hash-before-encrypt for the index — but that wire
-        // fact must be verified separately for individual entries before
-        // being assumed here). See verify_main_index_region's encrypted branch.
-        if entry.header().is_encrypted() {
-            debug!(path, "entry is encrypted; skipping SHA1 verification");
-            return Ok(VerifyOutcome::SkippedEncrypted);
-        }
+        // Task-4 RESOLVED (#634): UE stores the entry SHA1 over the on-disk
+        // CIPHERTEXT truncated to `compressed_size` — verified empirically
+        // against the UnrealPak-produced vendored fixtures for BOTH entry
+        // classes (uncompressed `test.txt`: the 446-byte `compressed_size`
+        // range matches the stored hash, the 448-byte aligned region does
+        // not; every compressed entry matches its ciphertext range too).
+        // Encrypted entries therefore verify KEYLESSLY through the same
+        // hash arms as plaintext entries: the bytes on disk are exactly
+        // what the hash covers. No `is_encrypted` branch is needed here.
 
         // V10+ encoded entries have NO sha1 field on the wire (the
         // bit-packed `FPakEntry::EncodeTo` format omits it; only the
@@ -941,100 +952,99 @@ impl PakReader {
         // entries don't pay N heap allocations.
         let mut buf = [0u8; HASH_BUFFER_BYTES];
 
-        let actual = match entry.header().compression_method() {
-            CompressionMethod::None => {
-                // Mirror the payload-end bounds check from
-                // `stream_uncompressed_to` so a truncated archive
-                // surfaces as the structured `OffsetPastFileSize`
-                // variant rather than a bare `Io::UnexpectedEof` from
-                // `read_exact` partway through hashing. Uniform
-                // diagnostic across the verify and read paths is the
-                // whole point of the typed variant (issue #48).
-                //
-                // Pre-#85 this used `offset + uncompressed_size`,
-                // missing the in-data header bytes between them. Use
-                // the file cursor (which `open_entry_into` already
-                // advanced past the in-data header) as the payload
-                // start, matching `stream_uncompressed_to`'s
-                // `payload_end = file.stream_position()? + size`
-                // pattern exactly — this is now defense-in-depth
-                // since #85's open-time check rejects the same shape
-                // upstream, but keeping the verify path correct
-                // preserves the documented diagnostic contract for
-                // any future caller that bypasses `PakReader::open`.
-                let payload_end = file
-                    .stream_position()?
-                    .checked_add(entry.header().uncompressed_size())
-                    .ok_or_else(|| PaksmithError::InvalidIndex {
-                        fault: IndexParseFault::U64ArithmeticOverflow {
-                            path: Some(path.to_string()),
-                            operation: OverflowSite::PayloadEnd,
-                        },
-                    })?;
-                if payload_end > self.file_size {
-                    return Err(PaksmithError::InvalidIndex {
-                        fault: IndexParseFault::OffsetPastFileSize {
-                            path: path.to_string(),
-                            kind: OffsetPastFileSizeKind::PayloadEndBounds {
-                                payload_end,
-                                file_size_max: self.file_size,
-                            },
+        let actual = if entry.header().is_encrypted() {
+            // Encrypted entries verify KEYLESSLY and METHOD-AGNOSTICALLY
+            // (#634): UE stores the entry SHA1 over the on-disk CIPHERTEXT
+            // `[payload_start, payload_start + compressed_size)` — including
+            // any intra-block AES padding (v8b `test.png` hashes 7760, not
+            // the 7746 unaligned block sum). `verify` never decompresses, so
+            // the compression method is IRRELEVANT here: an encrypted
+            // Oodle/Zstd entry hashes its ciphertext exactly like an encrypted
+            // Zlib one. Handling every encrypted entry with one contiguous
+            // hash — ahead of the plaintext method match — keeps `verify()`
+            // gracefully degrading over modern encrypted archives instead of
+            // fail-fasting on the first unsupported-method entry.
+            let payload_start =
+                checked_payload_start(entry.header().offset(), in_data.wire_size(), path)?;
+            let compressed = entry.header().compressed_size();
+            // Bounds-check the hashed range AND the method-dependent
+            // 16-ALIGNED extent the read path must consume, so `Verified`
+            // implies the read path's payload bounds hold — a crafted pak
+            // missing only its trailing AES padding (or splitting the
+            // inline compressed/uncompressed fields for a `None`-method
+            // entry) must fail verify, not report Verified and then fail
+            // to read (#689 review). The hash below still covers only
+            // `compressed` bytes, per the wire SHA-1 convention.
+            checked_encrypted_verify_extents(
+                payload_start,
+                compressed,
+                entry.header().uncompressed_size(),
+                matches!(entry.header().compression_method(), CompressionMethod::None),
+                self.file_size,
+                path,
+            )?;
+            let _ = file.seek(SeekFrom::Start(payload_start))?;
+            sha1_of_reader(&mut file, compressed, &mut buf)?
+        } else {
+            match entry.header().compression_method() {
+                CompressionMethod::None => {
+                    // Plaintext uncompressed entry. Bounds-check the payload
+                    // end so a truncated archive surfaces as the structured
+                    // `OffsetPastFileSize` rather than a bare
+                    // `Io::UnexpectedEof` partway through hashing (issue #48).
+                    let _ = checked_payload_end(
+                        file.stream_position()?,
+                        entry.header().uncompressed_size(),
+                        self.file_size,
+                        path,
+                    )?;
+                    sha1_of_reader(&mut file, entry.header().uncompressed_size(), &mut buf)?
+                }
+                CompressionMethod::Zlib | CompressionMethod::Lz4 => {
+                    // Plaintext compressed entry: hash the on-disk compressed
+                    // bytes block-by-block (encrypted entries are hashed
+                    // contiguously above). Blocks are contiguous so this
+                    // equals the `compressed_size` range, but the walk routes
+                    // every block through `validate_block_bounds`
+                    // (start-overlap, end-past-file, out-of-order) — shared
+                    // with the stream_*_to readers so verify and read can't
+                    // diverge on the same archive.
+                    let payload_start =
+                        checked_payload_start(entry.header().offset(), in_data.wire_size(), path)?;
+                    let mut hasher = Sha1::new();
+                    let mut prev_abs_end: Option<u64> = None;
+                    for (i, block) in entry.header().compression_blocks().iter().enumerate() {
+                        let (abs_start, _abs_end) = validate_block_bounds(
+                            block,
+                            i,
+                            entry.header().offset(),
+                            payload_start,
+                            self.file_size,
+                            &mut prev_abs_end,
+                            path,
+                        )?;
+                        let _ = file.seek(SeekFrom::Start(abs_start))?;
+                        feed_hasher(&mut hasher, &mut file, block.len(), &mut buf)?;
+                    }
+                    Sha1Digest::from(<[u8; 20]>::from(hasher.finalize()))
+                }
+                // Plaintext entry in a method we don't decode. Unlike the
+                // encrypted branch above (which hashes opaque ciphertext),
+                // we refuse to hash raw compressed bytes of a method we
+                // can't interpret rather than risk a misleading result.
+                method @ (CompressionMethod::Gzip
+                | CompressionMethod::Oodle
+                | CompressionMethod::Zstd
+                | CompressionMethod::Unknown(_)
+                | CompressionMethod::UnknownByName(_)) => {
+                    return Err(PaksmithError::Decompression {
+                        path: path.to_string(),
+                        offset: entry.header().offset(),
+                        fault: DecompressionFault::UnsupportedMethod {
+                            method: method.clone(),
                         },
                     });
                 }
-                sha1_of_reader(&mut file, entry.header().uncompressed_size(), &mut buf)?
-            }
-            CompressionMethod::Zlib | CompressionMethod::Lz4 => {
-                // Hash the on-disk compressed bytes block-by-block —
-                // method-agnostic: the index hash covers the on-disk
-                // payload, so no decompression happens here and zlib
-                // and LZ4 entries walk the identical path.
-                // All per-block validation (start-overlap, end-past-file,
-                // out-of-order) routes through `validate_block_bounds`
-                // shared with the stream_*_to readers — keeps the verify
-                // and read paths from diverging on the same archive.
-                let payload_start = entry
-                    .header()
-                    .offset()
-                    .checked_add(in_data.wire_size())
-                    .ok_or_else(|| PaksmithError::InvalidIndex {
-                        fault: IndexParseFault::U64ArithmeticOverflow {
-                            path: Some(path.to_string()),
-                            operation: OverflowSite::OffsetPlusHeader,
-                        },
-                    })?;
-                let mut hasher = Sha1::new();
-                let mut prev_abs_end: Option<u64> = None;
-                for (i, block) in entry.header().compression_blocks().iter().enumerate() {
-                    let (abs_start, _abs_end) = validate_block_bounds(
-                        block,
-                        i,
-                        entry.header().offset(),
-                        payload_start,
-                        self.file_size,
-                        &mut prev_abs_end,
-                        path,
-                    )?;
-                    let _ = file.seek(SeekFrom::Start(abs_start))?;
-                    feed_hasher(&mut hasher, &mut file, block.len(), &mut buf)?;
-                }
-                Sha1Digest::from(<[u8; 20]>::from(hasher.finalize()))
-            }
-            // Already rejected at the top of read_entry for known unsupported
-            // methods; here we extend the same policy to verify_entry rather
-            // than silently succeed by hashing whatever bytes are at offset.
-            method @ (CompressionMethod::Gzip
-            | CompressionMethod::Oodle
-            | CompressionMethod::Zstd
-            | CompressionMethod::Unknown(_)
-            | CompressionMethod::UnknownByName(_)) => {
-                return Err(PaksmithError::Decompression {
-                    path: path.to_string(),
-                    offset: entry.header().offset(),
-                    fault: DecompressionFault::UnsupportedMethod {
-                        method: method.clone(),
-                    },
-                });
             }
         };
 
@@ -1064,11 +1074,13 @@ impl PakReader {
     /// `HashMismatch` and returns the error.
     ///
     /// **Skips are reported, not silenced.** Entries that have no recorded
-    /// hash (UE didn't enable integrity at write time) and entries that are
-    /// AES-encrypted (we have no key) are counted in the returned
-    /// [`VerifyStats`]. Callers can inspect the report to decide whether
-    /// `Ok` means "all bytes intact" or "some bytes weren't verifiable" —
-    /// avoiding the silent partial-success failure mode that returning bare
+    /// hash (UE didn't enable integrity at write time, or a v10+ encoded
+    /// record with no SHA1 on the wire) are counted in the returned
+    /// [`VerifyStats`]. (Encrypted entries are NOT skipped as of #634 —
+    /// they verify keylessly against the on-disk ciphertext hash.) Callers
+    /// can inspect the report to decide whether `Ok` means "all bytes
+    /// intact" or "some bytes weren't verifiable" — avoiding the silent
+    /// partial-success failure mode that returning bare
     /// `Result<()>` would create.
     pub fn verify(&self) -> crate::Result<VerifyStats> {
         let mut stats = VerifyStats::default();
@@ -1214,24 +1226,6 @@ impl PakReader {
                 path: Some(path.to_string()),
             });
         }
-        // Encrypted + compressed entries are not yet supported. UE encrypts the
-        // compressed payload, so correct support requires decrypting the 16-aligned
-        // region BEFORE per-block inflation — and no oracle fixture exercises that
-        // path yet. Rather than feed ciphertext into the inflater (which rejects it
-        // with a misleading Decompression error), reject explicitly. The key may be
-        // correct; this is a deferred layout, not a wrong-key situation. Mirrors the
-        // v10+ encrypted-index UnsupportedFeature deferral.
-        if is_encrypted_compressed(
-            entry.header().is_encrypted(),
-            entry.header().compression_method(),
-        ) {
-            return Err(PaksmithError::UnsupportedFeature {
-                context: format!(
-                    "encrypted + compressed entry '{path}' is not yet supported: paksmith \
-                     currently decrypts only uncompressed encrypted entries; your key may be correct"
-                ),
-            });
-        }
         match entry.header().compression_method() {
             CompressionMethod::None | CompressionMethod::Zlib | CompressionMethod::Lz4 => {}
             method @ (CompressionMethod::Gzip
@@ -1266,16 +1260,8 @@ impl PakReader {
         // change to the wire format only needs updating in
         // PakEntryHeader::read_from (which `wire_size` mirrors by
         // construction).
-        let payload_start = entry
-            .header()
-            .offset()
-            .checked_add(in_data.wire_size())
-            .ok_or_else(|| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: Some(path.to_string()),
-                    operation: OverflowSite::OffsetPlusHeader,
-                },
-            })?;
+        let payload_start =
+            checked_payload_start(entry.header().offset(), in_data.wire_size(), path)?;
 
         match entry.header().compression_method() {
             CompressionMethod::None => {
@@ -1288,16 +1274,80 @@ impl PakReader {
                 };
                 stream_uncompressed_to(&mut file, entry, self.file_size, key, writer)
             }
-            CompressionMethod::Zlib => stream_zlib_to(
-                &mut file,
-                entry,
-                self.file_size,
-                payload_start,
-                self.version(),
-                writer,
-            ),
-            CompressionMethod::Lz4 => {
-                stream_lz4_to(&mut file, entry, self.file_size, payload_start, writer)
+            method @ (CompressionMethod::Zlib | CompressionMethod::Lz4) => {
+                // Encrypted + compressed (#634): UE encrypts the 16-aligned
+                // compressed payload as one contiguous AES-256-ECB region, so
+                // it must be decrypted BEFORE per-block inflation. Decrypt
+                // into memory and run the unchanged codec streamers over a
+                // rebased view of the plaintext-compressed bytes; the
+                // `is_encrypted && key.is_none()` case was already rejected
+                // above, so a missing key here is unreachable.
+                if entry.header().is_encrypted() {
+                    let Some(key) = self.key.as_ref() else {
+                        return Err(PaksmithError::Decryption {
+                            path: Some(path.to_string()),
+                        });
+                    };
+                    let decrypted = read_decrypted_compressed_payload(
+                        &mut file,
+                        entry,
+                        self.file_size,
+                        payload_start,
+                        key,
+                    )?;
+                    let mut rebased = RebasedReader::new(&decrypted, payload_start);
+                    // The block streamers validate `abs_end` against the
+                    // ceiling passed here. The backing store is the
+                    // decrypted buffer (`decrypted.len()` bytes at
+                    // `payload_start`), NOT the whole file — so pass the
+                    // buffer's extent as the ceiling. A malformed v3-v9
+                    // inline block pointing past the payload (no
+                    // block-sum cross-check exists for that index form)
+                    // then surfaces as a typed `BlockBoundsViolation`
+                    // (`EndPastFileSize`) from `validate_block_bounds`
+                    // rather than a bare `Io(UnexpectedEof)` from the
+                    // rebased cursor. `payload_start + decrypted.len()` was
+                    // already EOF-checked inside
+                    // `read_decrypted_compressed_payload`, so it cannot
+                    // actually overflow — but use `checked_add` for a typed
+                    // fault anyway, matching this file's defense-in-depth
+                    // arithmetic convention. The `buffer_end` vs
+                    // `self.file_size` ceiling choice is pinned by the
+                    // in-source test
+                    // `read_encrypted_compressed_block_end_between_buffer_and_file_uses_buffer_ceiling`
+                    // (in-source, not the integration crate, so cargo-mutants —
+                    // which runs only default-members — actually credits the
+                    // kill): a forged single-block `end` between the two values
+                    // must reject as `EndPastFileSize`, which the wider
+                    // `self.file_size` ceiling would let through.
+                    let buffer_end = payload_start
+                        .checked_add(decrypted.len() as u64)
+                        .ok_or_else(|| PaksmithError::InvalidIndex {
+                            fault: IndexParseFault::U64ArithmeticOverflow {
+                                path: Some(path.to_string()),
+                                operation: OverflowSite::PayloadEnd,
+                            },
+                        })?;
+                    dispatch_compressed(
+                        &mut rebased,
+                        method,
+                        entry,
+                        buffer_end,
+                        payload_start,
+                        self.version(),
+                        writer,
+                    )
+                } else {
+                    dispatch_compressed(
+                        &mut file,
+                        method,
+                        entry,
+                        self.file_size,
+                        payload_start,
+                        self.version(),
+                        writer,
+                    )
+                }
             }
             // Already rejected at the top of `stream_entry_to`; this
             // arm exists to keep the match exhaustive (per CLAUDE.md
@@ -1319,15 +1369,192 @@ impl PakReader {
     }
 }
 
-/// Returns `true` when an entry is BOTH encrypted AND compressed.
+/// Route a `Zlib | Lz4` entry to its per-block streamer over `reader`.
 ///
-/// Encrypted + compressed entries require decrypting the 16-byte-aligned
-/// payload region BEFORE per-block inflation — a layout that paksmith does
-/// not yet support. Pulled out as a pure predicate so the fail-closed
-/// decision in [`PakReader::stream_entry_to`] is unit-testable without an
-/// (intentionally absent) encrypted+compressed fixture.
-fn is_encrypted_compressed(is_encrypted: bool, method: &CompressionMethod) -> bool {
-    is_encrypted && *method != CompressionMethod::None
+/// `reader` is either the pak file (plaintext entries) or a
+/// [`RebasedReader`] over the decrypted payload (encrypted entries,
+/// #634) — the streamers are generic over `R: Read + Seek`, so the same
+/// dispatch serves both. `method` MUST be `Zlib` or `Lz4` (the caller's
+/// match guarantees it); the `else` branch is `Lz4`.
+fn dispatch_compressed<R: Read + Seek>(
+    reader: &mut R,
+    method: &CompressionMethod,
+    entry: &PakIndexEntry,
+    file_size: u64,
+    payload_start: u64,
+    version: PakVersion,
+    writer: &mut dyn Write,
+) -> crate::Result<u64> {
+    if *method == CompressionMethod::Zlib {
+        stream_zlib_to(reader, entry, file_size, payload_start, version, writer)
+    } else {
+        stream_lz4_to(reader, entry, file_size, payload_start, writer)
+    }
+}
+
+/// Cap a claimed `compressed_size` at `MAX_UNCOMPRESSED_ENTRY_BYTES`
+/// (8 GiB) — the per-entry allocation ceiling (#634).
+///
+/// The same ceiling the open-time sweep enforces on `uncompressed_size`,
+/// the v10+ encoded parser enforces on `compressed_size`
+/// (`entry_header.rs`), and the crypto hardening policy
+/// (`docs/formats/crypto/aes-pak.md`) requires of any AES reader. The
+/// v3-v9 INLINE index applies no parse-time cap on `compressed_size`, so
+/// without this an inline encrypted+compressed entry could drive a
+/// single-shot decrypt buffer bounded only by the file size, not by the
+/// codebase's stated per-entry ceiling.
+///
+/// Extracted from `read_decrypted_compressed_payload` so the boundary is
+/// unit-testable WITHOUT driving the multi-GiB allocation the full read
+/// path would attempt at `comp == MAX` — a `checked_payload_end` mutant
+/// that bypasses the later EOF guard would otherwise let an at-cap test
+/// allocate 8 GiB and time the whole test binary out.
+fn ensure_compressed_size_within_cap(comp: u64, path: &str) -> crate::Result<()> {
+    if comp > MAX_UNCOMPRESSED_ENTRY_BYTES {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded {
+                field: WireField::CompressedSize,
+                value: comp,
+                limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
+                unit: BoundsUnit::Bytes,
+                path: Some(path.to_string()),
+            },
+        });
+    }
+    Ok(())
+}
+
+/// Read and decrypt an encrypted entry's compressed payload (#634).
+///
+/// UE encrypts the compressed payload as ONE contiguous AES-256-ECB
+/// region padded to 16-byte alignment (per the repak/UnrealPak wire
+/// reference), so the whole aligned region is read and decrypted up
+/// front, then truncated to `compressed_size` — the per-block
+/// decompressors then walk the plaintext-compressed bytes through a
+/// [`RebasedReader`]. Mirrors `stream_uncompressed_to`'s encrypted arm:
+/// same `Zeroizing` hygiene, same `AllocationFailed` fault, same
+/// EOF bounds discipline.
+fn read_decrypted_compressed_payload<R: Read + Seek>(
+    file: &mut R,
+    entry: &PakIndexEntry,
+    file_size: u64,
+    payload_start: u64,
+    key: &AesKey,
+) -> crate::Result<Zeroizing<Vec<u8>>> {
+    let path = entry.filename();
+    let comp = entry.header().compressed_size();
+
+    // Cap the per-entry allocation at `MAX_UNCOMPRESSED_ENTRY_BYTES`
+    // (8 GiB) BEFORE reading (see the helper's docs for why the inline
+    // index needs this and why it lives in a testable free function).
+    ensure_compressed_size_within_cap(comp, path)?;
+
+    // Reject a `compressed_size` claim past EOF before the alignment
+    // arithmetic: a fail-fast on the unaligned claim that keeps the
+    // allocation file-proportional. (Overflow-freedom of the `div_ceil`/
+    // `* 16` below does NOT rest on this check — the 8 GiB cap above
+    // already bounds `comp < 2^63`, and the `checked_mul` guards the
+    // multiply regardless; this is the stricter aligned check's weaker
+    // sibling, kept for the tighter unaligned error attribution.)
+    let _ = checked_payload_end(payload_start, comp, file_size, path)?;
+    // Align-up + aligned-extent EOF check via the shared helper (also used
+    // by `verify_entry`'s encrypted arm — one home for this arithmetic so
+    // verify and read cannot drift; #689 review). `comp <= min(file_size,
+    // 8 GiB) < 2^63`, so the align-up cannot actually overflow; the
+    // helper's `checked_mul` guards it with a typed fault regardless.
+    // INVARIANT: the cap (`ensure_compressed_size_within_cap`) is on `comp`,
+    // but the allocation below is on `aligned`; that stays `<= MAX` only
+    // because `MAX_UNCOMPRESSED_ENTRY_BYTES` is itself 16-aligned (2^33), so
+    // `comp <= MAX` implies `aligned <= MAX`. Keep that constant a multiple
+    // of 16 if it ever changes.
+    let aligned = checked_aligned_payload_len(payload_start, comp, file_size, path)?;
+    let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
+        fault: IndexParseFault::U64ExceedsPlatformUsize {
+            field: WireField::CompressedSize,
+            value: aligned,
+            path: Some(path.to_string()),
+        },
+    })?;
+    let comp_usize = usize::try_from(comp).map_err(|_| PaksmithError::InvalidIndex {
+        fault: IndexParseFault::U64ExceedsPlatformUsize {
+            field: WireField::CompressedSize,
+            value: comp,
+            path: Some(path.to_string()),
+        },
+    })?;
+
+    let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+    buf.try_reserve_exact(aligned_usize)
+        .map_err(|source| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::AllocationFailed {
+                context: AllocationContext::EntryPayloadBytes,
+                requested: aligned_usize,
+                source,
+                path: Some(path.to_string()),
+            },
+        })?;
+    buf.resize(aligned_usize, 0);
+    let _ = file.seek(SeekFrom::Start(payload_start))?;
+    file.read_exact(&mut buf)?;
+    crypto::aes256_ecb_decrypt(key, &mut buf)?;
+    buf.truncate(comp_usize);
+    Ok(buf)
+}
+
+/// `Read + Seek` view over a decrypted in-memory payload that answers
+/// ABSOLUTE file offsets (#634): `Seek(Start(abs))` maps to
+/// `abs - base` within the buffer, so the per-block decompressors —
+/// whose block tables carry real file offsets — run unchanged over the
+/// plaintext-compressed bytes. Seeks or reads outside the payload
+/// region surface as `io::Error` (fail-closed; a block table pointing
+/// outside its own entry's payload is malformed for encrypted entries).
+struct RebasedReader<'a> {
+    inner: io::Cursor<&'a [u8]>,
+    base: u64,
+}
+
+impl<'a> RebasedReader<'a> {
+    fn new(payload: &'a [u8], base: u64) -> Self {
+        Self {
+            inner: io::Cursor::new(payload),
+            base,
+        }
+    }
+}
+
+impl Read for RebasedReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Seek for RebasedReader<'_> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        // Only `Start(abs)` is meaningful for a rebasing view: the block
+        // streamers seek exclusively by absolute file offset. `Current`
+        // and `End` would silently diverge from the pak-file reader this
+        // substitutes (`End(0)` = payload end, not file end), so reject
+        // them fail-closed rather than answer a subtly wrong position.
+        let abs = match pos {
+            SeekFrom::Start(abs) => abs,
+            SeekFrom::Current(_) | SeekFrom::End(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "RebasedReader supports only SeekFrom::Start",
+                ));
+            }
+        };
+        let rel = abs.checked_sub(self.base).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek before encrypted payload base",
+            )
+        })?;
+        let rel_pos = self.inner.seek(SeekFrom::Start(rel))?;
+        rel_pos
+            .checked_add(self.base)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rebased position overflow"))
+    }
 }
 
 impl ContainerReader for PakReader {
@@ -1597,9 +1824,15 @@ fn stream_uncompressed_to<R: Read + Seek>(
 
     if let Some(key) = key {
         // Encrypted uncompressed entry: on-disk bytes are 16-aligned.
-        // `size <= MAX_UNCOMPRESSED_ENTRY_BYTES` (8 GiB) is enforced at open
-        // time, so `size + 15` cannot overflow u64.
-        let aligned = size.div_ceil(16) * 16;
+        // Align-up + aligned-extent EOF check via the shared helper (one
+        // home with `read_decrypted_compressed_payload` and
+        // `verify_entry`'s encrypted arm, so the three sites cannot
+        // drift; #689 review). `size <= MAX_UNCOMPRESSED_ENTRY_BYTES`
+        // (8 GiB) is enforced at open time, so the align-up cannot
+        // actually overflow; the helper's `checked_mul` guards it with a
+        // typed fault regardless.
+        let payload_start = file.stream_position()?;
+        let aligned = checked_aligned_payload_len(payload_start, size, file_size, path)?;
         let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
             fault: IndexParseFault::U64ExceedsPlatformUsize {
                 field: WireField::UncompressedSize,
@@ -1607,29 +1840,6 @@ fn stream_uncompressed_to<R: Read + Seek>(
                 path: Some(path.to_string()),
             },
         })?;
-
-        // Bounds-check the aligned read against EOF.
-        let payload_start = file.stream_position()?;
-        let payload_end =
-            payload_start
-                .checked_add(aligned)
-                .ok_or_else(|| PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::U64ArithmeticOverflow {
-                        path: Some(path.to_string()),
-                        operation: OverflowSite::PayloadEnd,
-                    },
-                })?;
-        if payload_end > file_size {
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::OffsetPastFileSize {
-                    path: path.to_string(),
-                    kind: OffsetPastFileSizeKind::PayloadEndBounds {
-                        payload_end,
-                        file_size_max: file_size,
-                    },
-                },
-            });
-        }
 
         // Read the aligned ciphertext into a zeroize-on-drop buffer, decrypt,
         // then write only the `size` real bytes to the caller's writer.
@@ -1661,26 +1871,7 @@ fn stream_uncompressed_to<R: Read + Seek>(
     // For uncompressed entries the payload immediately follows the in-data
     // header, so the reader is already positioned correctly. Bounds-check
     // the payload against EOF before reading.
-    let payload_end =
-        file.stream_position()?
-            .checked_add(size)
-            .ok_or_else(|| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: Some(path.to_string()),
-                    operation: OverflowSite::PayloadEnd,
-                },
-            })?;
-    if payload_end > file_size {
-        return Err(PaksmithError::InvalidIndex {
-            fault: IndexParseFault::OffsetPastFileSize {
-                path: path.to_string(),
-                kind: OffsetPastFileSizeKind::PayloadEndBounds {
-                    payload_end,
-                    file_size_max: file_size,
-                },
-            },
-        });
-    }
+    let _ = checked_payload_end(file.stream_position()?, size, file_size, path)?;
 
     let mut limited = file.by_ref().take(size);
     let written = io::copy(&mut limited, writer)?;
@@ -1698,6 +1889,129 @@ fn stream_uncompressed_to<R: Read + Seek>(
         });
     }
     Ok(written)
+}
+
+/// Compute an entry's payload start (`offset + in-data record size`),
+/// mapping an overflow to the typed `OffsetPlusHeader` fault. The
+/// `checked_payload_end` sibling for the leading-add half of the same
+/// payload-bounds pattern.
+fn checked_payload_start(offset: u64, wire_size: u64, path: &str) -> crate::Result<u64> {
+    offset
+        .checked_add(wire_size)
+        .ok_or_else(|| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ArithmeticOverflow {
+                path: Some(path.to_string()),
+                operation: OverflowSite::OffsetPlusHeader,
+            },
+        })
+}
+
+/// Compute a payload's end offset (`start + size`) and reject it if it
+/// runs past `file_size`, returning typed faults. Shared by every
+/// fixed-length payload read/verify path so a truncated archive surfaces
+/// as `OffsetPastFileSize` (or `U64ArithmeticOverflow` on the add)
+/// instead of a bare `Io(UnexpectedEof)` partway through the read — the
+/// non-block-table sibling of [`validate_block_bounds`], which
+/// consolidates the same check for the block-table case.
+fn checked_payload_end(start: u64, size: u64, file_size: u64, path: &str) -> crate::Result<u64> {
+    let end = start
+        .checked_add(size)
+        .ok_or_else(|| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ArithmeticOverflow {
+                path: Some(path.to_string()),
+                operation: OverflowSite::PayloadEnd,
+            },
+        })?;
+    if end > file_size {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::OffsetPastFileSize {
+                path: path.to_string(),
+                kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                    payload_end: end,
+                    file_size_max: file_size,
+                },
+            },
+        });
+    }
+    Ok(end)
+}
+
+/// Align `size` up to the 16-byte AES block size (typed overflow fault)
+/// and bounds-check the ALIGNED extent against `file_size` — the region
+/// an encrypted-payload reader must actually consume.
+///
+/// Returns the aligned LENGTH, NOT an end offset — unlike its sibling
+/// [`checked_payload_end`], which returns `start + size`. Callers size
+/// buffers from the returned value; do not add `start` to it again or
+/// compare it against absolute offsets (#689 Copilot review — the
+/// `_len` suffix is load-bearing).
+///
+/// One home for the align-then-check arithmetic so the callers cannot
+/// drift (#689 review): `read_decrypted_compressed_payload` and
+/// `stream_uncompressed_to`'s encrypted arm (each sizing its decrypt
+/// buffer), and [`checked_encrypted_verify_extents`] (which picks the
+/// read-required size field per compression method — see its docs for
+/// why the field differs). Real archives always carry the AES padding
+/// (the index/footer follow it), so an aligned-extent rejection only
+/// ever fires on crafted input.
+fn checked_aligned_payload_len(
+    start: u64,
+    size: u64,
+    file_size: u64,
+    path: &str,
+) -> crate::Result<u64> {
+    let aligned = size
+        .div_ceil(16)
+        .checked_mul(16)
+        .ok_or_else(|| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ArithmeticOverflow {
+                path: Some(path.to_string()),
+                operation: OverflowSite::PayloadEnd,
+            },
+        })?;
+    let _ = checked_payload_end(start, aligned, file_size, path)?;
+    Ok(aligned)
+}
+
+/// Bounds-check everything `verify_entry`'s encrypted arm relies on: the
+/// hashed range plus the READ-REQUIRED on-disk extent, so `Verified`
+/// implies the read path's payload bounds hold (#689 review, both
+/// findings).
+///
+/// The read-required extent is METHOD-DEPENDENT, because the two read
+/// paths align different fields:
+/// - `None` (uncompressed): `stream_uncompressed_to`'s encrypted arm
+///   reads `align16(uncompressed_size)` — and on inline v3-v9 entries
+///   `compressed_size`/`uncompressed_size` are independent wire fields
+///   (only the v10+ encoded parser aliases them), so checking the
+///   compressed extent alone leaves a split-fields crafted entry that
+///   verifies but cannot be read.
+/// - `Zlib`/`Lz4`/anything else: `read_decrypted_compressed_payload`
+///   reads `align16(compressed_size)` (unsupported methods decline
+///   before reading, so the compressed extent is the conservative
+///   claim there).
+///
+/// The unaligned `compressed_size` check runs first for tighter error
+/// attribution, mirroring `read_decrypted_compressed_payload`. The
+/// SHA-1 itself still covers only `compressed_size` bytes. A crafted
+/// reverse split (`compressed > uncompressed`) can make verify reject
+/// an entry the read path would accept — fail-closed over-tightening on
+/// forged input; the invariant is one-directional (Verified ⟹ readable
+/// bounds), and no real writer emits unequal fields for `None`.
+fn checked_encrypted_verify_extents(
+    payload_start: u64,
+    compressed: u64,
+    uncompressed: u64,
+    is_uncompressed_method: bool,
+    file_size: u64,
+    path: &str,
+) -> crate::Result<()> {
+    let _ = checked_payload_end(payload_start, compressed, file_size, path)?;
+    let _ = checked_aligned_payload_len(payload_start, compressed, file_size, path)?;
+    if is_uncompressed_method {
+        let _ = checked_aligned_payload_len(payload_start, uncompressed, file_size, path)?;
+    }
+    Ok(())
 }
 
 /// Validate one compression block's `(start, end)` pair against
@@ -2361,9 +2675,14 @@ pub enum VerifyOutcome {
     /// The stored hash slot is all zeros — UE's "no integrity claim
     /// recorded" sentinel. Nothing was hashed.
     SkippedNoHash,
-    /// The entry is AES-encrypted; verifying ciphertext without the key is
-    /// not supported. Only ever returned by [`PakReader::verify_entry`],
-    /// never by [`PakReader::verify_index`].
+    /// RETIRED (#634): has NO producer as of encrypted-entry keyless
+    /// verification — the stored SHA1 covers the on-disk ciphertext, so
+    /// encrypted entries verify by hashing that ciphertext directly
+    /// (method-agnostically, since verify never decompresses) rather than
+    /// skipping. Retained (the enum is `#[non_exhaustive]`, and
+    /// [`VerifyStats::entries_skipped_encrypted`] still reports its count,
+    /// pinned at 0) for API stability. Never produced by
+    /// [`PakReader::verify_index`] either.
     SkippedEncrypted,
 }
 
@@ -2461,8 +2780,9 @@ impl VerifyStats {
         self.entries_skipped_no_hash
     }
 
-    /// Number of entries skipped because they are AES-encrypted (hashing
-    /// ciphertext is meaningless without the key).
+    /// RETIRED counter (#634): always 0 now that encrypted entries verify
+    /// keylessly (the stored SHA1 covers the on-disk ciphertext). Retained
+    /// for API stability; see [`VerifyOutcome::SkippedEncrypted`].
     pub fn entries_skipped_encrypted(&self) -> usize {
         self.entries_skipped_encrypted
     }
@@ -2483,6 +2803,11 @@ impl VerifyStats {
     /// stored hash slot — UE's writer either records integrity for the
     /// whole archive or for none of it, so a partial-skip in a context
     /// you control end-to-end is a tampering signal.
+    ///
+    /// Since #634, per-entry-encrypted entries verify keylessly (they no
+    /// longer count as skips), so a fully-encrypted archive whose stored
+    /// hashes all match now reports `true` here — where it previously
+    /// reported `false` on the retired `SkippedEncrypted` skip.
     ///
     /// Equivalent to manually checking that the index was verified, no
     /// entries were skipped for either reason, and at least one entry was
@@ -3807,43 +4132,567 @@ mod tests {
         );
     }
 
-    // ── is_encrypted_compressed predicate truth table ──────────────────────
-    // These four cases must all be covered to resist `&&`→`||`, `!=`→`==`,
-    // and `-> true` mutants (see project accessor-negative-coverage convention).
+    // ── encrypted + COMPRESSED entries (issue #634) ────────────────────────
 
+    /// UnrealPak-produced fixture whose entries are both zlib-compressed
+    /// AND AES-256-ECB encrypted (plaintext index; same four-entry corpus
+    /// and key as the encrypted-entries fixture). Vendored from repak's
+    /// test suite — see tests/fixtures/PROVENANCE-encrypted.md.
+    fn encrypted_compressed_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v8b_encrypted_compressed.pak")
+    }
+
+    /// v11 (encoded-index) sibling of [`encrypted_compressed_fixture`].
+    fn encrypted_compressed_v11_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v11_encrypted_compressed.pak")
+    }
+
+    /// RED→GREEN oracle for decrypt-then-decompress (#634): `test.txt` in
+    /// the encrypted+compressed fixture must round-trip to the same known
+    /// plaintext as the uncompressed encrypted fixture (same source corpus,
+    /// now behind AES over the zlib-compressed payload).
     #[test]
-    fn is_encrypted_compressed_enc_zlib_true() {
-        // Encrypted + compressed → must be detected (the deferred layout).
-        assert!(
-            is_encrypted_compressed(true, &CompressionMethod::Zlib),
-            "encrypted Zlib entry must be flagged as encrypted+compressed"
+    fn reads_encrypted_compressed_entry_as_plaintext_test_txt() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_compressed_fixture(), key)
+            .expect("open encrypted+compressed fixture");
+        let bytes = reader
+            .read_entry("test.txt")
+            .expect("read_entry must decrypt-then-decompress test.txt");
+        assert_eq!(
+            bytes, FIXTURE_PLAINTEXT_TEST_TXT,
+            "decrypt-then-decompress must recover the known plaintext"
         );
     }
 
+    /// Second text entry, distinct plaintext — guards against a decode that
+    /// happens to work for only one block shape.
     #[test]
-    fn is_encrypted_compressed_enc_none_false() {
-        // Encrypted but uncompressed → currently supported, must NOT be flagged.
-        assert!(
-            !is_encrypted_compressed(true, &CompressionMethod::None),
-            "encrypted uncompressed entry must NOT be flagged as encrypted+compressed"
+    fn reads_encrypted_compressed_entry_nested_txt() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_compressed_fixture(), key)
+            .expect("open encrypted+compressed fixture");
+        let bytes = reader
+            .read_entry("directory/nested.txt")
+            .expect("read_entry must decrypt-then-decompress nested.txt");
+        assert_eq!(bytes, FIXTURE_PLAINTEXT_NESTED_TXT);
+    }
+
+    /// Binary entries: zeros.bin must be exactly 2048 zero bytes; test.png
+    /// must have its full length and the PNG magic.
+    #[test]
+    fn reads_encrypted_compressed_entry_binaries() {
+        const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_compressed_fixture(), key)
+            .expect("open encrypted+compressed fixture");
+
+        let zeros = reader.read_entry("zeros.bin").expect("read zeros.bin");
+        assert_eq!(zeros.len(), FIXTURE_ZEROS_BIN_LEN);
+        assert!(zeros.iter().all(|&b| b == 0), "zeros.bin must be all zero");
+
+        let png = reader.read_entry("test.png").expect("read test.png");
+        assert_eq!(png.len(), FIXTURE_TEST_PNG_LEN);
+        assert_eq!(&png[..8], &PNG_MAGIC);
+    }
+
+    /// The v11 sibling exercises the encoded-index generation end-to-end
+    /// (bit-packed entries, no per-entry SHA1 in the index). `test.png`
+    /// (not `test.txt`) is the target: in the v11 fixture only `test.png`
+    /// and `zeros.bin` are genuinely encrypted+COMPRESSED — `test.txt`
+    /// and `nested.txt` are stored encrypted-uncompressed, so they'd
+    /// exercise the pre-existing uncompressed arm, not the new path.
+    #[test]
+    fn reads_encrypted_compressed_entry_v11() {
+        const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_compressed_v11_fixture(), key)
+            .expect("open v11 encrypted+compressed fixture");
+        let bytes = reader
+            .read_entry("test.png")
+            .expect("read_entry must decrypt-then-decompress on the encoded index");
+        assert_eq!(bytes.len(), FIXTURE_TEST_PNG_LEN);
+        assert_eq!(&bytes[..8], &PNG_MAGIC);
+    }
+
+    /// Pin the encrypted v10+ ENCODED verify outcome (R3 architect
+    /// finding): removing the entry-level `SkippedEncrypted` short-circuit
+    /// means the "no SHA1 on the wire" gate now runs first for encrypted
+    /// encoded entries too, so a v11 encrypted entry reports
+    /// `SkippedNoHash` (its true reason — encoded records omit the SHA1
+    /// field regardless of encryption) rather than the retired
+    /// `SkippedEncrypted`. Keyless open (plaintext index) suffices.
+    #[test]
+    fn verify_encrypted_v11_encoded_entry_is_skipped_no_hash() {
+        let reader = PakReader::open(encrypted_compressed_v11_fixture())
+            .expect("keyless open (plaintext index)");
+        assert_eq!(
+            reader.verify_entry("test.png").expect("verify must run"),
+            VerifyOutcome::SkippedNoHash,
         );
     }
 
+    /// Fail-closed: plaintext index → keyless open succeeds; reading an
+    /// encrypted+compressed entry without a key must be `Decryption`, not
+    /// `UnsupportedFeature` (the layout is supported now) and not garbage.
     #[test]
-    fn is_encrypted_compressed_plain_zlib_false() {
-        // Plaintext compressed → currently supported, must NOT be flagged.
+    fn encrypted_compressed_entry_without_key_returns_decryption_error() {
+        let reader = PakReader::open(encrypted_compressed_fixture())
+            .expect("open with plaintext index and no key must succeed");
+        let err = reader
+            .read_entry("test.txt")
+            .expect_err("reading an encrypted+compressed entry without a key must fail");
         assert!(
-            !is_encrypted_compressed(false, &CompressionMethod::Zlib),
-            "plaintext Zlib entry must NOT be flagged as encrypted+compressed"
+            matches!(err, PaksmithError::Decryption { .. }),
+            "must fail closed as Decryption, got: {err:?}"
         );
     }
 
+    /// v8b flat-index pak with a SINGLE encrypted entry (#634), for
+    /// in-source coverage of the decrypt-then-decompress read path.
+    ///
+    /// Duplicated (minimally) from `paksmith-core-tests`'s
+    /// `build_single_entry_pak_with_flags` / `build_v8b_lz4_pak` ON PURPOSE:
+    /// in-source tests can't reach the integration crate, and cargo-mutants
+    /// runs only default-members (paksmith-core, `cargo test`), so a mutant on
+    /// the encrypted read path (e.g. the `buffer_end` block-bounds ceiling in
+    /// `stream_entry_to`) is killable ONLY by an in-source test. The footer
+    /// carries one compression-name slot (`method_name`, resolved via the
+    /// per-entry 1-based `method_index`; pass 0 for `None`-method entries,
+    /// whose records omit the block table) and a PLAINTEXT index (footer
+    /// encrypted byte = 0); the per-entry `is_encrypted` flag is set, so
+    /// `from_reader_with_key` reads the index keylessly and `read_entry`
+    /// decrypts the payload with the key. `payload` is the exact on-disk
+    /// (already AES-encrypted, 16-aligned) entry bytes; `compressed_size` /
+    /// `uncompressed_size` / `blocks` / `block_size` are written verbatim so
+    /// a test can forge them (real encrypted `None` entries store the
+    /// UNALIGNED size in both fields while the on-disk payload is padded).
+    /// The per-entry SHA-1 is computed over `payload[..compressed_size]` —
+    /// the wire convention — so keyless `verify_entry` works on the result.
+    #[cfg(feature = "__test_utils")]
+    #[allow(clippy::too_many_arguments)]
+    fn build_v8b_encrypted_single_entry(
+        method_index: u32,
+        method_name: &str,
+        payload: &[u8],
+        compressed_size: u64,
+        uncompressed_size: u64,
+        blocks: &[(u64, u64)],
+        block_size: u32,
+    ) -> Vec<u8> {
+        use byteorder::{LittleEndian, WriteBytesExt};
+        use sha1::{Digest, Sha1};
+
+        use crate::testing::wire::{write_fstring, write_pak_entry};
+
+        let hashed = usize::try_from(compressed_size)
+            .ok()
+            .filter(|&n| n <= payload.len())
+            .expect("test builder: compressed_size must be <= payload.len()");
+        let sha1: [u8; 20] = Sha1::digest(&payload[..hashed]).into();
+        let write_entry = |buf: &mut Vec<u8>| {
+            write_pak_entry(
+                buf,
+                0,
+                compressed_size,
+                uncompressed_size,
+                method_index, // 1-based index → footer slot 0 = method_name; 0 = None
+                &sha1,
+                blocks,
+                block_size,
+                true, // per-entry encrypted
+            );
+        };
+
+        let mut data = Vec::new();
+        write_entry(&mut data);
+        data.extend_from_slice(payload);
+
+        let mut index = Vec::new();
+        write_fstring(&mut index, "../../../");
+        index.write_u32::<LittleEndian>(1).unwrap();
+        write_fstring(&mut index, "Content/x.uasset");
+        write_entry(&mut index);
+
+        let index_offset = data.len() as u64;
+        let index_size = index.len() as u64;
+        let mut pak = data;
+        pak.extend_from_slice(&index);
+
+        pak.extend_from_slice(&[0u8; 16]); // encryption GUID
+        pak.push(0); // index NOT encrypted (per-entry flag drives entry decryption)
+        pak.write_u32::<LittleEndian>(crate::container::pak::version::PAK_MAGIC)
+            .unwrap();
+        pak.write_u32::<LittleEndian>(8).unwrap(); // v8b
+        pak.write_u64::<LittleEndian>(index_offset).unwrap();
+        pak.write_u64::<LittleEndian>(index_size).unwrap();
+        pak.extend_from_slice(&[0u8; 20]); // index hash (zero = skip)
+        let mut slot0 = [0u8; 32];
+        let nb = method_name.as_bytes();
+        slot0[..nb.len()].copy_from_slice(nb);
+        pak.extend_from_slice(&slot0);
+        pak.extend_from_slice(&[0u8; 32 * 4]); // slots 1..=4
+        pak
+    }
+
+    /// #634 (R6/R7 architect): the encrypted+compressed read path passes
+    /// `buffer_end = payload_start + decrypted.len()` (the decrypted-buffer
+    /// extent) — NOT `self.file_size` — as the block-bounds ceiling into
+    /// `validate_block_bounds`. A forged single-block `end` landing strictly
+    /// BETWEEN `buffer_end` and the real `file_size` must reject as
+    /// `BlockBoundsViolation { EndPastFileSize }`.
+    ///
+    /// IN-SOURCE (not `paksmith-core-tests`) on purpose: cargo-mutants runs
+    /// only default-members, so the `buffer_end -> self.file_size` mutant on
+    /// `stream_entry_to` is killable only here. Verified to kill it — under the
+    /// wider `self.file_size` ceiling the forged block is accepted and the read
+    /// surfaces `Io(UnexpectedEof)` over the short `RebasedReader` instead of
+    /// the typed fault. A single-block entry suffices: the bounds check fires
+    /// before any decrypt output is inflated, so no valid ciphertext is needed
+    /// (16 arbitrary bytes decrypt to unused garbage).
+    #[cfg(feature = "__test_utils")]
     #[test]
-    fn is_encrypted_compressed_plain_none_false() {
-        // Plaintext uncompressed → trivially supported, must NOT be flagged.
+    fn read_encrypted_compressed_block_end_between_buffer_and_file_uses_buffer_ceiling() {
+        // 16-byte (AES-aligned) payload; content irrelevant (never inflated).
+        let payload = [0u8; 16];
+        let payload_start = crate::testing::wire::pak_entry_wire_size(1); // one block
+        let buffer_end = payload_start + payload.len() as u64;
+        // Forge the block end 4 bytes past buffer_end — into the index region
+        // that follows the payload, so it stays strictly < file_size.
+        let forged_end = buffer_end + 4;
+        let blocks = [(payload_start, forged_end)];
+
+        let pak = build_v8b_encrypted_single_entry(1, "Zlib", &payload, 16, 16, &blocks, 16);
+        let file_size = pak.len() as u64;
         assert!(
-            !is_encrypted_compressed(false, &CompressionMethod::None),
-            "plaintext uncompressed entry must NOT be flagged as encrypted+compressed"
+            buffer_end < forged_end && forged_end < file_size,
+            "forged end {forged_end} must sit strictly in (buffer_end {buffer_end}, \
+             file_size {file_size}) to discriminate the ceiling mutant"
+        );
+
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::from_reader_with_key(std::io::Cursor::new(pak), key)
+            .expect("open v8b (plaintext index) with key");
+        let err = reader
+            .read_entry("Content/x.uasset")
+            .expect_err("forged block end past the decrypted buffer must be rejected");
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BlockBoundsViolation {
+                        kind: BlockBoundsKind::EndPastFileSize { .. },
+                        ..
+                    }
+                }
+            ),
+            "must be EndPastFileSize (proves the buffer_end ceiling, not file_size); got: {err:?}"
+        );
+    }
+
+    /// #634 (R7 architect finding 2): a single-block encrypted + LZ4 entry
+    /// round-trips through the full decrypt-then-decompress read path. This is
+    /// the only end-to-end coverage of encrypted+LZ4 (every vendored fixture is
+    /// zlib), and LZ4 is in the #634 acceptance criteria. IN-SOURCE because
+    /// `paksmith-core-tests` has no `aes` dev-dep to synthesize the ciphertext.
+    /// No multi-block / #688 wire-convention dependency: a single block's
+    /// `(start, end)` are read verbatim off the wire.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn reads_encrypted_lz4_entry_round_trips() {
+        let plaintext: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+        let lz4 = lz4_flex::block::compress(&plaintext);
+        let lz4_len = lz4.len() as u64;
+
+        // On-disk payload = AES-encrypt(lz4 bytes, zero-padded to 16). For an
+        // encrypted entry `compressed_size` is the 16-aligned footprint, while
+        // the block spans the UNALIGNED lz4 bytes (repak/CUE4Parse: block end =
+        // start + unaligned length; the cursor advances by the aligned length).
+        let mut payload = lz4.clone();
+        payload.resize(lz4.len().next_multiple_of(16), 0);
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        crypto::aes256_ecb_encrypt(&key, &mut payload).expect("encrypt 16-aligned payload");
+
+        let payload_start = crate::testing::wire::pak_entry_wire_size(1);
+        let blocks = [(payload_start, payload_start + lz4_len)];
+        let uncompressed_size = plaintext.len() as u64;
+        let block_size = u32::try_from(plaintext.len()).expect("300 fits u32");
+        let pak = build_v8b_encrypted_single_entry(
+            1,
+            "LZ4",
+            &payload,
+            payload.len() as u64,
+            uncompressed_size,
+            &blocks,
+            block_size,
+        );
+
+        let reader = PakReader::from_reader_with_key(std::io::Cursor::new(pak), key)
+            .expect("open v8b (plaintext index) with key");
+        let mut out = Vec::new();
+        let written = reader
+            .read_entry_to("Content/x.uasset", &mut out)
+            .expect("encrypted+LZ4 entry must decrypt-then-decompress");
+        assert_eq!(written, plaintext.len() as u64);
+        assert_eq!(out, plaintext, "encrypted+LZ4 decode must be byte-exact");
+    }
+
+    /// #634 (R8 architect): a MULTI-BLOCK encrypted+compressed entry
+    /// round-trips through decrypt → `RebasedReader` → per-block inflate. The
+    /// single-block LZ4/zlib tests + fixtures never exercise the block loop
+    /// walking 2+ blocks across the AES-aligned inter-block gaps inside the
+    /// decrypted buffer — this pins that self-consistency (SEPARATE from the
+    /// #688 question of whether the aligned-footprint convention matches a
+    /// real UnrealPak multi-block archive, which stays deferred).
+    ///
+    /// Each non-final block decompresses to exactly `compression_block_size`;
+    /// on disk each block's lz4 bytes occupy an AES-aligned footprint, so the
+    /// block table's `(start, end)` spans the UNALIGNED lz4 length while the
+    /// next block starts at the previous block's 16-aligned end.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn reads_encrypted_lz4_multi_block_round_trips() {
+        let block_size = 128u32;
+        // 2 full blocks + a 40-byte remainder → 3 blocks.
+        let plaintext: Vec<u8> = (0..296u32).map(|i| (i % 251) as u8).collect();
+        let chunks: Vec<Vec<u8>> = plaintext
+            .chunks(block_size as usize)
+            .map(lz4_flex::block::compress)
+            .collect();
+        assert_eq!(chunks.len(), 3, "fixture invariant: 2 full + 1 remainder");
+        // Self-assert the discriminating property: at least one block's lz4
+        // length is NOT 16-aligned, so its AES footprint carries real padding
+        // that the next block's aligned start must skip over. Without this, an
+        // all-16-aligned coincidence would make the block table's aligned
+        // advances degenerate to the unaligned ones — masking the inter-block
+        // gap walk (the R1 "16-aligned coincidence" mask class).
+        assert!(
+            chunks.iter().any(|c| c.len() % 16 != 0),
+            "at least one block must be non-16-aligned to exercise the AES padding gap; got {:?}",
+            chunks.iter().map(Vec::len).collect::<Vec<_>>()
+        );
+
+        // Lay each block's lz4 bytes at its AES-aligned footprint offset and
+        // ECB-encrypt the whole contiguous region.
+        let payload_start = crate::testing::wire::pak_entry_wire_size(chunks.len() as u64);
+        let mut payload = Vec::new();
+        let mut blocks: Vec<(u64, u64)> = Vec::new();
+        let mut cursor = payload_start;
+        for c in &chunks {
+            blocks.push((cursor, cursor + c.len() as u64)); // end = UNALIGNED lz4 length
+            payload.extend_from_slice(c);
+            let footprint = c.len().next_multiple_of(16);
+            payload.resize(payload.len() + (footprint - c.len()), 0); // pad to 16
+            cursor += footprint as u64;
+        }
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        crypto::aes256_ecb_encrypt(&key, &mut payload)
+            .expect("encrypt aligned multi-block payload");
+
+        let pak = build_v8b_encrypted_single_entry(
+            1,
+            "LZ4",
+            &payload,
+            payload.len() as u64,
+            plaintext.len() as u64,
+            &blocks,
+            block_size,
+        );
+        let reader = PakReader::from_reader_with_key(std::io::Cursor::new(pak), key)
+            .expect("open v8b (plaintext index) with key");
+        let mut out = Vec::new();
+        let written = reader
+            .read_entry_to("Content/x.uasset", &mut out)
+            .expect("multi-block encrypted+LZ4 must decrypt-then-decompress every block");
+        assert_eq!(written, plaintext.len() as u64);
+        assert_eq!(
+            out, plaintext,
+            "multi-block encrypted decode must be byte-exact across all 3 blocks"
+        );
+    }
+
+    /// #689 R11 (found independently by three reviewers): END-TO-END pin of
+    /// the split-size-fields gap for `None`-method encrypted entries. The
+    /// READ path (`stream_uncompressed_to`) aligns `uncompressed_size`,
+    /// while verify hashes/bounds `compressed_size` — and on inline v3-v9
+    /// entries the two fields are independent wire values. A crafted entry
+    /// whose compressed extents fit but whose `align16(uncompressed_size)`
+    /// overshoots `file_size` (while passing the open-time 8 GiB cap, which
+    /// is decoupled from `file_size`) must FAIL verify — not report
+    /// `Verified` for an entry `read_entry` then rejects. Also the only
+    /// end-to-end coverage of `verify_entry`'s aligned-extent wiring:
+    /// deleting the `checked_encrypted_verify_extents` call makes the split
+    /// pak verify as `Verified` and this test fail.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn verify_encrypted_none_entry_rejects_split_size_fields() {
+        // On-disk payload: 448 bytes (16-aligned); the true unaligned size
+        // is 446 — the shape of every real encrypted uncompressed entry
+        // (`real_v8b_encrypted_entries` test.txt: 446 stored, 448 on disk).
+        let payload: Vec<u8> = (0..448u32).map(|i| (i % 251) as u8).collect();
+
+        // Positive control: equal fields (what every real writer emits)
+        // must verify keylessly — so the rejection below is attributable
+        // to the field split alone, not some other defect in the pak.
+        let pak = build_v8b_encrypted_single_entry(0, "", &payload, 446, 446, &[], 0);
+        let reader = PakReader::from_bytes(pak).expect("keyless open (plaintext index)");
+        assert_eq!(
+            reader
+                .verify_entry("Content/x.uasset")
+                .expect("well-formed encrypted None entry verifies keylessly"),
+            VerifyOutcome::Verified,
+        );
+
+        // Split fields: compressed extents fit (446 hashed / 448 on disk)
+        // but align16(1_000_000) is far past file_size while still under
+        // the open-time 8 GiB uncompressed cap.
+        let pak = build_v8b_encrypted_single_entry(0, "", &payload, 446, 1_000_000, &[], 0);
+        let reader = PakReader::from_bytes(pak).expect("keyless open (plaintext index)");
+        let err = reader
+            .verify_entry("Content/x.uasset")
+            .expect_err("split size fields must fail verify, not report Verified");
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::OffsetPastFileSize {
+                        kind: OffsetPastFileSizeKind::PayloadEndBounds { .. },
+                        ..
+                    }
+                }
+            ),
+            "must reject on the aligned UNCOMPRESSED extent; got: {err:?}"
+        );
+
+        // The read path rejects the same pak the same way — the invariant
+        // verify now guarantees (Verified ⟹ readable payload bounds),
+        // shown from the other side.
+        let pak = build_v8b_encrypted_single_entry(0, "", &payload, 446, 1_000_000, &[], 0);
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::from_reader_with_key(std::io::Cursor::new(pak), key)
+            .expect("open v8b (plaintext index) with key");
+        let read_err = reader
+            .read_entry("Content/x.uasset")
+            .expect_err("read must reject the oversized uncompressed extent");
+        assert!(
+            matches!(
+                &read_err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::OffsetPastFileSize { .. }
+                }
+            ),
+            "read rejects the same bounds; got: {read_err:?}"
+        );
+    }
+
+    /// TODO(Task-4) resolution pin (#634): the stored entry SHA-1 covers the
+    /// on-disk CIPHERTEXT `[payload_start, payload_start + compressed_size)`,
+    /// including the intra-block AES padding. Every entry in the compressed
+    /// fixture must verify keylessly — CRUCIALLY including `test.png`
+    /// (compressed_size 7760 = aligned footprint), `nested.txt` (352), and
+    /// `zeros.bin` (32), whose block sums are SHORTER than `compressed_size`.
+    /// The per-block-walk hash (unaligned block ranges) would mis-hash these
+    /// and only pass `test.txt`, whose 272-byte size is coincidentally
+    /// 16-aligned — the R1 false-`HashMismatch` regression. Iterating all
+    /// four entries makes that degenerate mask impossible.
+    #[test]
+    fn verify_encrypted_compressed_entries_hash_ciphertext_keylessly() {
+        let reader = PakReader::open(encrypted_compressed_fixture())
+            .expect("keyless open (plaintext index)");
+        for path in ["test.txt", "directory/nested.txt", "zeros.bin", "test.png"] {
+            let outcome = reader
+                .verify_entry(path)
+                .unwrap_or_else(|e| panic!("verify_entry({path}) must run keylessly: {e:?}"));
+            assert_eq!(
+                outcome,
+                VerifyOutcome::Verified,
+                "stored SHA1 covers the contiguous ciphertext, so keyless verify of \
+                 {path} must pass (a block-walk hash would false-mismatch the \
+                 non-16-aligned entries)"
+            );
+        }
+    }
+
+    /// #634 (R8 architect): end-to-end pin of the documented semantic change —
+    /// `verify()` reports a fully-per-entry-encrypted archive as FULLY
+    /// verified. Pre-#634 the entry-level encrypted skip forced
+    /// `is_fully_verified()` to `false`; now the stored per-entry SHA-1 covers
+    /// the on-disk ciphertext, so keyless verification of every (encrypted)
+    /// entry plus the matching plaintext index hash suffices. The fixture's
+    /// footer carries a real (non-zero) index hash, so this exercises the
+    /// full `verify()` → `is_fully_verified()` composition, not just the
+    /// per-entry arm.
+    #[test]
+    fn verify_encrypted_compressed_archive_is_fully_verified() {
+        let reader = PakReader::open(encrypted_compressed_fixture())
+            .expect("keyless open (plaintext index)");
+        let stats = reader.verify().expect("verify must run keylessly");
+        assert!(
+            stats.is_fully_verified(),
+            "a pristine fully-encrypted archive with a matching index hash and \
+             all entries hashing keylessly must be fully verified: {stats:?}"
+        );
+    }
+
+    /// Same pin for the UNCOMPRESSED encrypted class, where
+    /// `compressed_size` (446) is not 16-aligned — passing requires hashing
+    /// the TRUNCATED ciphertext, not the aligned read region.
+    #[test]
+    fn verify_encrypted_uncompressed_entry_hashes_truncated_ciphertext() {
+        let reader =
+            PakReader::open(encrypted_entries_fixture()).expect("keyless open (plaintext index)");
+        let outcome = reader
+            .verify_entry("test.txt")
+            .expect("verify_entry must run keylessly on an encrypted entry");
+        assert_eq!(outcome, VerifyOutcome::Verified);
+    }
+
+    /// `RebasedReader` (#634) maps absolute file offsets into the decrypted
+    /// buffer and is the sole seek surface the block streamers drive over an
+    /// encrypted entry. Directly pins its Start-only contract (R2 finding):
+    /// `Start(abs)` rebases to `abs - base`, offsets below base and the
+    /// `Current`/`End` variants fail closed, and an over-read EOFs — so a
+    /// malformed block table never reads outside the payload.
+    #[test]
+    fn rebased_reader_maps_offsets_and_fails_closed() {
+        use std::io::{Read, Seek, SeekFrom};
+        let payload = b"0123456789ABCDEF"; // 16 bytes
+        let base = 1000u64;
+        let mut r = RebasedReader::new(payload, base);
+
+        // Start(base) → buffer offset 0; the returned position is absolute.
+        assert_eq!(r.seek(SeekFrom::Start(base)).unwrap(), base);
+        let mut four = [0u8; 4];
+        r.read_exact(&mut four).unwrap();
+        assert_eq!(&four, b"0123");
+
+        // Start(base + k) → buffer offset k.
+        assert_eq!(r.seek(SeekFrom::Start(base + 10)).unwrap(), base + 10);
+        let mut two = [0u8; 2];
+        r.read_exact(&mut two).unwrap();
+        assert_eq!(&two, b"AB");
+
+        // Below base, and the non-Start variants, all fail closed.
+        for pos in [
+            SeekFrom::Start(base - 1),
+            SeekFrom::Current(0),
+            SeekFrom::End(0),
+        ] {
+            assert_eq!(
+                r.seek(pos).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput,
+                "{pos:?} must be rejected"
+            );
+        }
+
+        // A read past the payload end EOFs rather than reading OOB.
+        let _ = r.seek(SeekFrom::Start(base + 14)).unwrap();
+        let mut over = [0u8; 4];
+        assert_eq!(
+            r.read_exact(&mut over).unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
         );
     }
 
@@ -4082,6 +4931,185 @@ mod tests {
                 }
             ),
             "must reject as PayloadEndBounds; got: {err:?}"
+        );
+    }
+
+    /// `read_decrypted_compressed_payload`'s compressed-size cap (#634): an
+    /// inline encrypted+compressed entry whose `compressed_size` exceeds
+    /// `MAX_UNCOMPRESSED_ENTRY_BYTES` (8 GiB) must be rejected as
+    /// `BoundsExceeded` on `CompressedSize` BEFORE any I/O. The v3-v9 inline
+    /// index applies no parse-time cap on `compressed_size` (unlike the v10+
+    /// encoded parser at `entry_header.rs`), so this free-function check is
+    /// the only enforcement point for inline entries. The cap runs first in
+    /// the body, ahead of every seek/read/decrypt, so an empty in-memory
+    /// `Cursor` suffices — no multi-GiB file is required.
+    ///
+    /// Kills the delete-cap-body mutant: with the check gone, `comp = MAX+1`
+    /// would flow to `checked_payload_end` and surface as `OffsetPastFileSize`
+    /// (the tiny `file_size`), not `BoundsExceeded`, failing this assertion.
+    #[test]
+    fn read_decrypted_compressed_payload_over_cap_is_bounds_exceeded() {
+        use std::io::Cursor;
+
+        // `inline_for_test` sets `compressed_size == uncompressed_size`, so
+        // `MAX + 1` yields a `compressed_size` exactly one byte over the cap.
+        let header = PakEntryHeader::inline_for_test(MAX_UNCOMPRESSED_ENTRY_BYTES + 1, true);
+        let entry = PakIndexEntry::for_test("over_cap.bin".to_string(), header);
+        let key = AesKey::new(FIXTURE_AES_KEY);
+
+        let mut file = Cursor::new(Vec::<u8>::new());
+        let err = read_decrypted_compressed_payload(&mut file, &entry, 100, 0, &key)
+            .expect_err("compressed_size past the 8 GiB cap must be rejected before any read");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::CompressedSize,
+                        ..
+                    }
+                }
+            ),
+            "must reject as BoundsExceeded on CompressedSize; got: {err:?}"
+        );
+    }
+
+    /// Boundary sibling of the over-cap test: a `compressed_size` EXACTLY at
+    /// `MAX_UNCOMPRESSED_ENTRY_BYTES` must PASS the cap (strict `>`).
+    ///
+    /// Tests `ensure_compressed_size_within_cap` DIRECTLY — not through
+    /// `read_decrypted_compressed_payload` — precisely so a
+    /// `checked_payload_end` mutant that bypasses the downstream EOF guard
+    /// can't make this at-cap case allocate the full 8 GiB and time the whole
+    /// mutation run out. The over-cap sibling still exercises the in-path call
+    /// (comp = MAX+1 is rejected before any allocation), so the call site stays
+    /// covered.
+    ///
+    /// Kills the `>`→`>=` mutant on `comp > MAX_UNCOMPRESSED_ENTRY_BYTES`:
+    /// under `>=`, `comp == cap` returns `BoundsExceeded`, which `Ok(())`
+    /// forbids.
+    #[test]
+    fn ensure_compressed_size_at_cap_is_accepted() {
+        ensure_compressed_size_within_cap(MAX_UNCOMPRESSED_ENTRY_BYTES, "at_cap.bin")
+            .expect("comp == MAX_UNCOMPRESSED_ENTRY_BYTES must pass the cap (strict `>`)");
+    }
+
+    /// `checked_aligned_payload_len` (#689 Copilot finding): an encrypted
+    /// payload whose UNALIGNED `size` fits within `file_size` but whose
+    /// 16-aligned extent overshoots must be rejected — this is the exact
+    /// gap where `verify_entry` used to report `Verified` for a crafted
+    /// pak that `read_entry` then fails to read. Numbers mirror the real
+    /// v8b `test.txt` (446 stored / 448 aligned): with `file_size == 446`
+    /// the truncated hash range fits but the padding is missing.
+    #[test]
+    fn aligned_payload_len_rejects_missing_padding() {
+        let err = checked_aligned_payload_len(0, 446, 446, "test.txt")
+            .expect_err("aligned extent (448) past file_size (446) must be rejected");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::OffsetPastFileSize {
+                        kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                            payload_end: 448,
+                            file_size_max: 446,
+                        },
+                        ..
+                    }
+                }
+            ),
+            "must reject as PayloadEndBounds on the ALIGNED end; got: {err:?}"
+        );
+    }
+
+    /// Boundary sibling: with the padding present (`file_size == 448`) the
+    /// same payload passes, and the returned length is the aligned 448 —
+    /// pinning the `div_ceil(16) * 16` math. A mutant degenerating
+    /// `aligned` to `size` would wrongly ACCEPT the truncated input,
+    /// failing the rejection test above (which catches it); one inflating
+    /// `aligned` would wrongly reject the padded input, failing this test.
+    #[test]
+    fn aligned_payload_len_with_padding_present_is_ok() {
+        let aligned = checked_aligned_payload_len(0, 446, 448, "test.txt")
+            .expect("exact aligned fit must be accepted");
+        assert_eq!(aligned, 448, "must return the 16-aligned extent");
+        // Already-aligned size: aligned == size, no padding required.
+        let exact = checked_aligned_payload_len(0, 32, 32, "zeros.bin")
+            .expect("16-aligned size needs no padding slack");
+        assert_eq!(exact, 32);
+    }
+
+    /// #689 R11 security finding: for a `None`-method (uncompressed)
+    /// encrypted entry the READ path aligns `uncompressed_size`, and on
+    /// inline v3-v9 entries the two size fields are independent wire
+    /// values — so verify must bounds-check `align16(uncompressed_size)`
+    /// too, or a split-fields crafted entry (compressed extent fits,
+    /// uncompressed extent overshoots) verifies but cannot be read.
+    /// Numbers mirror the reviewer's exploit: comp = 432 (16-aligned,
+    /// fits in the 448-byte budget), uncomp = 460 (aligns to 464 > 448).
+    #[test]
+    fn encrypted_verify_extents_reject_split_fields_for_uncompressed_method() {
+        let err = checked_encrypted_verify_extents(0, 432, 460, true, 448, "split.bin")
+            .expect_err("uncompressed read extent (464) past file_size (448) must be rejected");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::OffsetPastFileSize {
+                        kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                            payload_end: 464,
+                            file_size_max: 448,
+                        },
+                        ..
+                    }
+                }
+            ),
+            "must reject on the aligned UNCOMPRESSED extent; got: {err:?}"
+        );
+    }
+
+    /// Guard-inversion sibling: for COMPRESSED methods the read path
+    /// consumes `align16(compressed_size)` and never touches
+    /// `uncompressed_size` as an on-disk extent — the same split fields
+    /// must PASS when the method is not `None`. Kills the
+    /// `is_uncompressed_method` guard->true mutant (which would wrongly
+    /// apply the uncompressed check to compressed entries), while the
+    /// rejection test above kills guard->false.
+    #[test]
+    fn encrypted_verify_extents_ignore_uncompressed_field_for_compressed_methods() {
+        checked_encrypted_verify_extents(0, 432, 460, false, 448, "split.bin")
+            .expect("compressed-method extents must ignore the uncompressed field");
+    }
+
+    /// Real-archive shape: equal fields (every genuine `None`-method
+    /// encrypted entry) pass under both method classes with the padding
+    /// present.
+    #[test]
+    fn encrypted_verify_extents_equal_fields_are_ok() {
+        checked_encrypted_verify_extents(0, 446, 446, true, 448, "test.txt")
+            .expect("equal fields with padding present must verify (uncompressed)");
+        checked_encrypted_verify_extents(0, 446, 446, false, 448, "test.txt")
+            .expect("equal fields with padding present must verify (compressed)");
+    }
+
+    /// Overflow guard: a `size` near `u64::MAX` overflows the align-up
+    /// multiply and must surface as the typed `U64ArithmeticOverflow`,
+    /// not a panic or wraparound.
+    #[test]
+    fn aligned_payload_len_overflow_is_typed() {
+        let err = checked_aligned_payload_len(0, u64::MAX, u64::MAX, "huge.bin")
+            .expect_err("align-up of u64::MAX must overflow");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::U64ArithmeticOverflow {
+                        operation: OverflowSite::PayloadEnd,
+                        ..
+                    }
+                }
+            ),
+            "must be a typed overflow fault; got: {err:?}"
         );
     }
 

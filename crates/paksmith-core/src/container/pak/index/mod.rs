@@ -2046,17 +2046,21 @@ mod tests {
     /// advance pads to AES-16-byte alignment, so block N+1's `start`
     /// reflects the aligned (not raw) end of block N. Pinning this
     /// catches a regression that drops the alignment.
+    ///
+    /// `compressed_size` claims the sum of the ALIGNED per-block
+    /// footprints — the UnrealPak convention for encrypted entries,
+    /// verified against `real_v11_encrypted_compressed.pak` (#634).
     #[test]
     fn read_encoded_encrypted_multi_block_aes_aligned() {
         let methods = vec![Some(CompressionMethod::Zlib)];
         // Pick sizes that aren't already 16-byte-aligned to actually
         // exercise the alignment math.
         let block_sizes = [0x101u32, 0x103, 0x10F]; // 257, 259, 271 bytes
-        let total_compressed: u64 = block_sizes.iter().map(|&s| u64::from(s)).sum();
+        let total_aligned: u64 = block_sizes.iter().map(|&s| (u64::from(s) + 15) & !15).sum();
         let bytes = encode_entry_bytes(EncodeArgs {
             offset: 0,
             uncompressed: 0x4000,
-            compressed: total_compressed,
+            compressed: total_aligned,
             compression_slot_1based: 1,
             encrypted: true,
             block_count: 3,
@@ -2081,6 +2085,46 @@ mod tests {
         let block2_start = block1_start + aligned(0x103);
         assert_eq!(header.compression_blocks()[2].start(), block2_start);
         assert_eq!(header.compression_blocks()[2].end(), block2_start + 0x10F);
+    }
+
+    /// The inverse pin (#634): an encrypted encoded entry claiming the
+    /// UNALIGNED per-block sum — the shape the pre-#634 (repak-derived)
+    /// cross-check wrongly expected — must be rejected as
+    /// `CompressedSizeMismatch`. Kills an accumulator mutant that
+    /// reverts the expectation to the unaligned block size.
+    #[test]
+    fn read_encoded_encrypted_unaligned_compressed_claim_rejected() {
+        let methods = vec![Some(CompressionMethod::Zlib)];
+        let block_sizes = [0x101u32, 0x103, 0x10F];
+        let total_unaligned: u64 = block_sizes.iter().map(|&s| u64::from(s)).sum();
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x4000,
+            compressed: total_unaligned,
+            compression_slot_1based: 1,
+            encrypted: true,
+            block_count: 3,
+            block_size: 0x10000,
+            per_block_sizes: &block_sizes,
+        });
+        let mut cursor = Cursor::new(bytes);
+        let err = PakEntryHeader::read_encoded(&mut cursor, &methods)
+            .expect_err("unaligned compressed_size claim on an encrypted entry must be rejected");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::Encoded {
+                        kind: EncodedFault::CompressedSizeMismatch {
+                            claimed: 787,  // 0x101 + 0x103 + 0x10F
+                            computed: 816, // 0x110 × 3 (aligned footprints)
+                            ..
+                        },
+                    },
+                }
+            ),
+            "expected CompressedSizeMismatch {{ claimed: 787, computed: 816 }}, got {err:?}"
+        );
     }
 
     /// V10+ encoded entry: block_size = 0x3f sentinel means "doesn't

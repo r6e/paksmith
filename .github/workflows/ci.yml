@@ -134,10 +134,12 @@ jobs:
           #   + real_v11_encrypted_index.pak,
           #   VENDORED-STATIC — survive the wipe above, not regenerated)
           # + 2 issue-#636 LZ4 (real_v{8b,11}_lz4.pak)
-          # = 40.
+          # + 2 issue-#634 encrypted+compressed
+          #   (real_v{8b,11}_encrypted_compressed.pak, VENDORED-STATIC)
+          # = 42.
           # The pre-run rm + this count assertion together catch zero-write
           # bugs that the diff alone would miss.
-          expected=40
+          expected=42
           actual=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f | wc -l | tr -d ' ')
           # Emit the gate's verdict to the job-summary panel so reviewers
           # can see what was checked without scrolling raw step logs.

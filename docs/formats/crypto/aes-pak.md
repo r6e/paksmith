@@ -2,9 +2,10 @@
 
 > Unreal Engine's pak encryption scheme — AES-256 in ECB mode applied
 > at two granularities (whole index region; per-entry payload).
-> Paksmith detects encryption metadata at every layer but does not
-> decrypt: encrypted archives are rejected at open time, encrypted
-> entries skip integrity verification.
+> Paksmith decrypts the v3-v9 index and encrypted entries (uncompressed
+> and compressed) given a key; encrypted entries verify keylessly (the
+> stored SHA1 covers the on-disk ciphertext). Still rejected:
+> whole-archive-encrypted paks at open, and v10+ encrypted indexes.
 
 ## Overview
 
@@ -38,11 +39,15 @@ ciphertext content is not a format property and is therefore
 outside this doc's scope.
 
 **Paksmith parser status: `partial`.** Detection of every
-encryption metadata surface is complete; decryption is unimplemented.
-paksmith rejects whole-archive-encrypted archives at `from_reader`
-time with `PaksmithError::Decryption`, and skips per-entry-encrypted
-entries during verification (`VerifyOutcome::SkippedEncrypted`). Key
-management is gated by the Phase 5 profile-system work.
+encryption metadata surface is complete. Decryption is implemented for
+the v3-v9 index, for encrypted uncompressed entries, and — as of issue
+#634 — for encrypted COMPRESSED (zlib/LZ4) entries; a key is supplied
+via `PakReader::open_with_key`, the CLI `--aes-key`, or the profile key
+store. paksmith still rejects whole-archive-encrypted archives at
+`from_reader` time (`PaksmithError::Decryption`) and v10+ encrypted
+INDEXES (`UnsupportedFeature`, issue #635). Encrypted ENTRIES verify
+keylessly — the stored SHA1 covers the on-disk ciphertext — so
+verification no longer skips them.
 
 ## Versions
 
@@ -279,7 +284,7 @@ doesn't yet act on it.
 
 ### Implementation hardening (recommended for any parser)
 
-A reader that performs AES decryption (paksmith does not yet) MUST:
+A reader that performs AES decryption (as paksmith now does) MUST:
 
 - **Cap the index-region size** before allocation. paksmith already
   enforces this via `max_index_bytes()` for the plaintext path; the
@@ -304,46 +309,94 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** `(none yet — see issue #347)` — paksmith does not ship
-  encrypted pak fixtures. See the Wire layout's worked-example section
-  for why.
-- **Cross-validation oracle:** repak[^1] (paksmith's primary pak
-  oracle; covers the per-entry-flag and footer-flag detection
-  identically) and CUE4Parse[^2] (for the block-cipher specifics
-  and the `Crypto.json` key-file format).
+- **Fixtures:** six vendored UnrealPak-produced archives (see
+  `tests/fixtures/PROVENANCE-encrypted.md`): the phase-5a quartet
+  (`real_v8b_encrypted_{entries,index,both}.pak`,
+  `real_v11_encrypted_index.pak`) plus the issue-#634 pair
+  (`real_v{8b,11}_encrypted_compressed.pak`) whose entries are
+  AES-encrypted — all four entries zlib-compressed in the v8b fixture,
+  and `test.png`/`zeros.bin` compressed while `test.txt`/`nested.txt`
+  are stored uncompressed in the v11 fixture.
+- **Cross-validation oracle:** repak (paksmith's primary pak oracle):
+  the per-entry-flag and footer-flag detection mirror repak's on-wire
+  encryption-metadata parsing[^1]; the aligned-read + ECB-decrypt entry
+  framing is cross-validated against repak's `entry.rs::read_file` read
+  path[^3] — the git-dep rev that produced the vendored fixtures.
+  CUE4Parse[^2] covers the block-cipher specifics and the `Crypto.json`
+  key-file format.
+- **Fixture-anchored wire facts (#634):**
+  - The stored per-entry SHA-1 covers the on-disk **ciphertext
+    truncated to `compressed_size`** — not the plaintext, and not the
+    16-aligned padded region (uncompressed `test.txt`: the 446-byte
+    range matches, 448 does not). Encrypted entries therefore verify
+    keylessly.
+  - For encrypted entries, `compressed_size` stores the sum of the
+    **AES-aligned per-block footprints** (v11 `test.png`: claimed
+    7760 = aligned footprint; unaligned block sum 7746). Unencrypted
+    entries store the unaligned sum (repak's writer convention).
 - **Known divergences:**
-  - **Decryption unimplemented.** repak and CUE4Parse both decrypt
-    given a key; paksmith rejects. Both projects agree on what bytes
-    constitute the *metadata* on disk.
-  - **No key management.** paksmith has no Crypto.json loader, no
-    config surface for paste-a-hex-key, no profile-system integration.
-    Key support is gated by the Phase 5 profile-system work.
+  - **V10+ encrypted indexes** remain `UnsupportedFeature` — the
+    path-hash/full-directory index decryption layout is issue #635.
   - **V4–V6 index encryption gap.** Paksmith treats any V4–V6 archive as plaintext — see Wire layout §*Footer fields* for the root cause (`FOOTER_SIZE_LEGACY = 44` probe window excludes the `encrypted` byte). repak reads it; we don't.
+  - **Multi-block encrypted entries: self-consistency covered
+    synthetically; first-party fixture deferred.** Paksmith's own
+    decrypt-then-decompress multi-block walk — 2+ blocks read across the
+    AES-aligned inter-block gaps inside the decrypted buffer — is pinned
+    in-source by `reads_encrypted_lz4_multi_block_round_trips` (a
+    byte-exact round-trip). What remains unverified is whether the
+    AES-aligned-per-block-footprint `compressed_size` convention matches a
+    *real UnrealPak-authored* multi-block archive: every vendored fixture
+    entry is single-block, so that convention rests on repak's read-side
+    cursor logic (CUE4Parse-corroborated). Fail-closed
+    (`CompressedSizeMismatch` / `EndPastFileSize` on a mismatch); tracked
+    as issue #688.
+  - **Encrypted + LZ4: exercised synthetically; first-party fixture
+    deferred.** Every vendored encrypted+compressed fixture entry is
+    zlib-compressed, but the encrypted+LZ4 decrypt-then-decompress path
+    (LZ4 over the `RebasedReader`) is exercised end-to-end in-source by
+    `reads_encrypted_lz4_entry_round_trips` (single-block) and
+    `reads_encrypted_lz4_multi_block_round_trips` (multi-block) — each a
+    byte-exact round-trip, confirming `read_compressed_block`'s
+    `Seek(Start)`-only access honours the `RebasedReader` contract. Only a
+    *first-party* UnrealPak-authored encrypted+LZ4 fixture remains
+    outstanding, tracked under issue #688.
 
 ## Paksmith implementation
 
-Paksmith rejects whole-archive-encrypted archives at `from_reader` time
-(footer.is_encrypted() guard at `mod.rs:247`); per-entry-only archives
-open successfully and rejection occurs at extraction time via
-`stream_entry_to` at `mod.rs:1003`. `verify_entry` skips encrypted
-entries silently (`Ok(VerifyOutcome::SkippedEncrypted)` at
-`mod.rs:685`).
+Index decryption (v3-v9), entry decryption for uncompressed entries,
+and — as of issue #634 — decrypt-then-decompress for zlib/LZ4
+compressed entries are all implemented behind `AesKey`
+(`PakReader::open_with_key`, CLI `--aes-key`, profile key store).
+Encrypted compressed payloads are read as one 16-aligned contiguous
+region, AES-256-ECB-decrypted into a `Zeroizing` buffer, truncated to
+`compressed_size`, and fed to the unchanged per-block decompressors
+through a rebasing reader (`RebasedReader` maps the block table's
+absolute file offsets into the decrypted buffer). Reading an
+encrypted entry without a key fails closed as
+`PaksmithError::Decryption`; `verify_entry` hashes encrypted entries
+keylessly (the stored SHA-1 covers the ciphertext — see Verification
+above).
 
 **Parser modules:**
 - `crates/paksmith-core/src/container/pak/footer.rs` — `PakFooter::encryption_key_guid`,
   `PakFooter::is_encrypted`.
 - `crates/paksmith-core/src/container/pak/index/entry_header.rs` —
   per-entry `is_encrypted` field, in both flat-form (V3–V9) and
-  encoded-form (V10+, bit 22) readers.
-- `crates/paksmith-core/src/container/pak/mod.rs:247` —
-  `PakReader::from_reader` rejection point.
-- `crates/paksmith-core/src/container/pak/mod.rs:685` —
-  `verify_entry` skip-encrypted path; emits `VerifyOutcome::SkippedEncrypted`.
+  encoded-form (V10+, bit 22) readers; the encoded-form
+  `compressed_size` cross-check expects the aligned footprint sum for
+  encrypted entries.
+- `crates/paksmith-core/src/container/pak/crypto.rs` —
+  `aes256_ecb_decrypt` (shared by the index and entry paths).
+- `crates/paksmith-core/src/container/pak/mod.rs` —
+  `read_encrypted_index`, `stream_uncompressed_to`'s encrypted arm,
+  `read_decrypted_compressed_payload` + `RebasedReader` (#634), and
+  `verify_entry`'s keyless ciphertext hashing.
 
-**Status:** `partial`. Detection of every encryption metadata surface
-is complete; decryption is unimplemented. Encrypted archives raise
-`PaksmithError::Decryption`; encrypted entries skip verification
-(`VerifyOutcome::SkippedEncrypted`).
+**Status:** `partial`. v3-v9 index decryption, entry decryption
+(uncompressed and compressed), and keyless verification of encrypted
+entries are complete; v10+ encrypted indexes are rejected as
+`UnsupportedFeature` (issue #635), and V4-V6 index-encryption
+detection is a known gap.
 
 **Public surface:**
 - `PakFooter::encryption_key_guid() -> Option<&[u8; 16]>` — Some for
@@ -353,32 +406,50 @@ is complete; decryption is unimplemented. Encrypted archives raise
 - `PakReader::open()` / `from_reader()` returns
   `PaksmithError::Decryption { path: Option<String> }` for any
   `footer.is_encrypted() == true` archive.
-- `PakReader::verify_entry(path)` skips encrypted entries with
-  `VerifyOutcome::SkippedEncrypted` (countered separately in
-  `IntegrityStats::entries_skipped_encrypted()`).
-- `PakReader::stream_entry_to(entry: &PakIndexEntry, writer: &mut dyn Write)` returns
-  `PaksmithError::Decryption { path }` at `mod.rs:1003` when the
-  requested entry's `is_encrypted()` flag is set. This is the runtime
-  extraction path: `from_reader` rejects whole-archive-encrypted at
-  open time; `stream_entry_to` rejects per-entry-encrypted at
-  extraction time.
+- `PakReader::verify_entry(path)` verifies encrypted entries KEYLESSLY
+  and METHOD-AGNOSTICALLY (#634): the stored SHA1 covers the on-disk
+  ciphertext and verify never decompresses, so an encrypted entry hashes
+  its opaque ciphertext regardless of codec (an encrypted Oodle entry
+  verifies like an encrypted Zlib one). It also bounds-checks the
+  16-ALIGNED payload extent the read path must consume — per method,
+  since the read paths align different fields:
+  `align16(uncompressed_size)` for `None` (whose inline v3-v9
+  `compressed_size`/`uncompressed_size` are independent wire fields) and
+  `align16(compressed_size)` otherwise — while still hashing only
+  `compressed_size` bytes. So `Verified` implies the read path's payload
+  bounds hold: a crafted pak missing only its trailing AES padding, or
+  splitting the inline size fields on a `None`-method entry, fails
+  verify with `OffsetPastFileSize` instead of
+  verifying-then-failing-to-read (#689 review). The retired
+  `VerifyOutcome::SkippedEncrypted` / `entries_skipped_encrypted()`
+  counter stays at 0. The unsupported-method `Err(Decompression)` decline
+  applies only to PLAINTEXT entries.
+- `PakReader::read_entry(path)` / `read_entry_to(path, writer)` (the
+  public read API; `stream_entry_to` is the private helper behind them)
+  decrypt-then-decompress an encrypted entry when a key is present
+  (`open_with_key`); without a key they return
+  `PaksmithError::Decryption { path }`. `from_reader` still rejects
+  whole-archive-encrypted archives at open time.
 
 **Error variants:**
 - `PaksmithError::Decryption { path: Option<String> }` — the only
   decryption-related variant today. Path is `Some` when opening by
   path; `None` from `from_reader`.
-- Future: `DecryptionFault::InvalidKey { … }`,
-  `DecryptionFault::KeyNotFound { guid }`,
-  `DecryptionFault::BadKeyLength { … }` etc. when AES decryption
-  lands.
+- Not yet surfaced as typed sub-variants: `InvalidKey`,
+  `KeyNotFound { guid }`, `BadKeyLength`, etc. AES decryption has
+  shipped (see Phase plan below), but every decryption failure today
+  collapses into the single `Decryption` variant above; a finer-grained
+  `DecryptionFault` taxonomy is a possible future refinement, not a
+  pending prerequisite.
 
 **Cap constants:** none specific to encryption.
 
 **Phase plan:**
-- Detection (current): `docs/plans/phase-1-foundation.md` (shipped as part of pak footer + entry-header parsing).
-- AES decryption + key management: not yet in a phase plan. Phase 5 (game profiles) is the natural insertion point — the profile system will own the key registry.
+- Detection: `docs/plans/phase-1-foundation.md` (shipped as part of pak footer + entry-header parsing).
+- AES decryption + key management: shipped in Phase 5 — index and uncompressed-entry decryption in Phase 5a (#589), the profile-owned key registry and key store in Phase 5b (#590) — extended by #634 with decrypt-then-decompress for zlib/LZ4 compressed entries. Remaining gaps (v10+ encrypted indexes #635, V4–V6 detection) are tracked under Known divergences above.
 
 ## References
 
 [^1]: `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` plus `repak/src/lib.rs` — primary oracle for the on-wire encryption metadata. paksmith's detection paths mirror repak's exactly.
 [^2]: `FabianFG/CUE4Parse/CUE4Parse/Encryption/Aes/Aes.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — secondary oracle for the AES-256 ECB block-cipher specifics (confirms ECB mode, no padding, no IV, 16-byte block size). `FabianFG/CUE4Parse/CUE4Parse/Encryption/Aes/FAesKey.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — key-wrapping type; implements the `0x`-prefixed hex-string parser and 32-byte validation cited in the `Crypto.json` §Key field encoding. NIST FIPS 197 is the upstream reference for AES itself; not cited inline as it is external to UE.
+[^3]: `trumank/repak/repak/src/entry.rs@e215472c51db69328b1ce77be2db24d24c1d646b::read_file` — oracle for the read-side decrypt-then-decompress entry framing (aligned ciphertext read, ECB-decrypt, truncate to `compressed_size`, per-block inflate). This is the git-dep rev pinned in `crates/paksmith-fixture-gen/Cargo.toml` and the source commit recorded in `tests/fixtures/PROVENANCE-encrypted.md`; the vendored encrypted+compressed fixtures were produced against it.
