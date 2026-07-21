@@ -582,7 +582,7 @@ known-good reference parser.**
 | 39 | 8 | `cooked_ue5_iostore_encrypted.{utoc,ucas}` | 5.0+ (any UE5) | `RunUAT … -iostore -encryptini -signpak=…` | `*.utoc`/`*.ucas` | needs cook | UE install |
 | 40 | 9 | (reuses Phase 3 mesh + texture fixtures) | — | — | viewport reads Phase 3 outputs | — | reuses rows 30–33 | — |
 
-44 rows total (40 numbered plus four `19b`–`19d` sub-rows for UE
+43 rows total (40 numbered plus three `19b`–`19d` sub-rows for UE
 5.5–5.8). The bulk sits in Phases 1–3 where the wire-format surface
 is largest. Rows tagged **awaiting paksmith support** anticipate
 future raises of [`FIRST_UNSUPPORTED_UE5_VERSION`][src-asset-summary]
