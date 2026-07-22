@@ -868,10 +868,11 @@ pub struct AssetContext {
     /// `FSoftObjectPath` form, where the leading slot is an `i32` index
     /// into the summary's `SoftObjectPaths` list instead of an inline
     /// path. CUE4Parse reads the index only when
-    /// `!PKG_FilterEditorOnly && soft_object_paths_count > 0`; paksmith
-    /// precomputes that condition here (`PackageSummary::
-    /// soft_object_paths_indexed`). For any well-formed asset this is
-    /// `false`: `count > 0` requires UE5 >= 1008 (so
+    /// `!PKG_FilterEditorOnly && SoftObjectPaths.Length > 0`; paksmith
+    /// precomputes an equivalent guard (`PackageSummary::
+    /// soft_object_paths_indexed`), comparing the wire count `!= 0` so a
+    /// crafted negative count also fails closed. For any well-formed
+    /// asset this is `false`: a non-zero `count` requires UE5 >= 1008 (so
     /// `file_version_ue4 == 522`), and an asset lacking
     /// `PKG_FilterEditorOnly` at `file_version_ue4 >= 520` is already
     /// rejected as `UncookedAsset` at the summary boundary. So `true`

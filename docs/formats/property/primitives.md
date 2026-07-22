@@ -47,8 +47,9 @@ Paksmith decodes the UE5 ≥ 1007 `FTopLevelAssetPath` form inline
 summary's `SoftObjectPaths` list — is fail-closed with
 `AssetParseFault::UnsupportedSoftObjectPathLayout { ue5_version }`
 rather than mis-decoded. That form is gated by
-`!PKG_FilterEditorOnly && soft_object_paths_count > 0` and is
-unreachable for any well-formed cooked asset (uncooked assets are
+`!PKG_FilterEditorOnly && soft_object_paths_count != 0` (comparing
+`!= 0`, not `> 0`, so a crafted negative count also fails closed) and
+is unreachable for any well-formed cooked asset (uncooked assets are
 rejected at the summary boundary), so it only fires for a
 version-inconsistent crafted asset.
 

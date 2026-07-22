@@ -2700,8 +2700,10 @@ pub enum AssetParseFault {
     /// the inline `FTopLevelAssetPath` form (>= 1007) but not the
     /// index-list indirection, so it fails closed here rather than
     /// mis-decode the index as an FName. This form is guarded by
-    /// `!PKG_FilterEditorOnly && soft_object_paths_count > 0` (the
-    /// CUE4Parse condition); it is unreachable for any well-formed asset
+    /// `!PKG_FilterEditorOnly && soft_object_paths_count != 0` (paksmith's
+    /// hardening of the CUE4Parse `SoftObjectPaths.Length > 0` condition,
+    /// so a crafted negative count also fails closed); it is unreachable
+    /// for any well-formed asset
     /// (an uncooked asset at `file_version_ue4 >= 520` is already rejected
     /// as [`UncookedAsset`](AssetParseFault::UncookedAsset)), so this only
     /// fires for a version-inconsistent crafted asset (UE5 >= 1008 with

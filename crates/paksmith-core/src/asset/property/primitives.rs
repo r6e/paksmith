@@ -266,7 +266,7 @@ pub(super) fn read_soft_path_payload<R: Read>(
     // Index-serialized form (UE5 >= 1008): the leading slot is an `i32`
     // index into the summary's `SoftObjectPaths` list, which paksmith
     // does not parse. `soft_object_paths_indexed` (precomputed from the
-    // summary as `!PKG_FilterEditorOnly && count > 0`) is only ever true
+    // summary as `!PKG_FilterEditorOnly && count != 0`) is only ever true
     // for a version-inconsistent crafted asset — a well-formed UE5 asset
     // has `file_version_ue4 == 522`, and an uncooked asset at
     // `file_version_ue4 >= 520` is already rejected as `UncookedAsset` at

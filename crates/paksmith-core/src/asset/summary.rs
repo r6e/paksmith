@@ -232,10 +232,18 @@ impl PackageSummary {
     /// inline (UE5 >= 1008). Consumed by `read_soft_path_payload` via
     /// [`AssetContext::soft_object_paths_indexed`](crate::asset::AssetContext),
     /// which documents why this is `false` for every well-formed asset. #638.
+    ///
+    /// The count is compared `!= 0` rather than `> 0`: it is a raw wire
+    /// `i32` (not validated non-negative at parse — it drives no
+    /// allocation or bounds, unlike the other summary counts). A crafted
+    /// asset could set it negative while emitting the index-serialized
+    /// payload; treating any non-zero count as the index form keeps the
+    /// read fail-closed instead of mis-decoding the `i32` index as an
+    /// FName. `None` (< 1008) and `Some(0)` (empty list) both read inline.
     #[must_use]
     pub(crate) fn soft_object_paths_indexed(&self) -> bool {
         (self.package_flags & PKG_FILTER_EDITOR_ONLY) == 0
-            && self.soft_object_paths_count.unwrap_or(0) > 0
+            && self.soft_object_paths_count.unwrap_or(0) != 0
     }
 
     /// Read the summary from byte 0 of `reader`.
@@ -1206,30 +1214,12 @@ mod tests {
         assert!(json.contains(r#""file_version_ue4":522"#), "got: {json}");
     }
 
-    /// Hand-craft a minimum-viable UE4 cooked `FPackageFileSummary`
-    /// byte stream at the requested `file_version_ue4`, mirroring
-    /// CUE4Parse's `FPackageFileSummary.cs` wire order. This is a
-    /// **parallel writer** to paksmith's `write_to` — every byte is
-    /// emitted by this helper directly, NOT through `PackageSummary`'s
-    /// own serializer. The hand-crafted bytes are the load-bearing
-    /// reference; if paksmith's reader is buggy at one of the gates
-    /// being exercised, the assertion comparing structural fields
-    /// will fail.
-    ///
-    /// Gates exercised:
-    /// - `VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS = 507`
-    /// - `VER_UE4_ADDED_SEARCHABLE_NAMES = 510`
-    ///
-    /// Other gates relevant to a cooked legacy=-7 asset (SoftPackage,
-    /// GatherableTextData, EngineVersionObject, etc.) all fire at
-    /// versions well below 504 (paksmith's floor) — see the matching
-    /// commit message for the verification trace against CUE4Parse's
-    /// `EUnrealEngineObjectUE4Version` enum.
-    ///
     /// `soft_object_paths_indexed()` = `!PKG_FilterEditorOnly &&
-    /// soft_object_paths_count > 0` — the CUE4Parse index-form guard.
+    /// soft_object_paths_count != 0` — paksmith's sign-hardened form of
+    /// the CUE4Parse `SoftObjectPaths.Length > 0` index-form guard.
     /// Cooked (flag set) is always inline; only a not-filter-editor
-    /// package with a populated list reports the index form. #638.
+    /// package with a non-empty (or crafted-negative) list reports the
+    /// index form. #638.
     #[test]
     fn soft_object_paths_indexed_guard() {
         let base = minimal_ue4_27_summary();
@@ -1257,11 +1247,40 @@ mod tests {
         let empty_list = PackageSummary {
             package_flags: 0,
             soft_object_paths_count: Some(0),
-            ..base
+            ..base.clone()
         };
         assert!(!empty_list.soft_object_paths_indexed());
+        // A negative (crafted/corrupt) count is still a non-zero list
+        // declaration: treat it as the index form so the soft-path read
+        // fails closed rather than mis-decoding the i32 index as an FName.
+        let negative_list = PackageSummary {
+            package_flags: 0,
+            soft_object_paths_count: Some(-1),
+            ..base
+        };
+        assert!(negative_list.soft_object_paths_indexed());
     }
 
+    /// Hand-craft a minimum-viable UE4 cooked `FPackageFileSummary`
+    /// byte stream at the requested `file_version_ue4`, mirroring
+    /// CUE4Parse's `FPackageFileSummary.cs` wire order. This is a
+    /// **parallel writer** to paksmith's `write_to` — every byte is
+    /// emitted by this helper directly, NOT through `PackageSummary`'s
+    /// own serializer. The hand-crafted bytes are the load-bearing
+    /// reference; if paksmith's reader is buggy at one of the gates
+    /// being exercised, the assertion comparing structural fields
+    /// will fail.
+    ///
+    /// Gates exercised:
+    /// - `VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS = 507`
+    /// - `VER_UE4_ADDED_SEARCHABLE_NAMES = 510`
+    ///
+    /// Other gates relevant to a cooked legacy=-7 asset (SoftPackage,
+    /// GatherableTextData, EngineVersionObject, etc.) all fire at
+    /// versions well below 504 (paksmith's floor) — see the matching
+    /// commit message for the verification trace against CUE4Parse's
+    /// `EUnrealEngineObjectUE4Version` enum.
+    ///
     /// All zero counts (custom-versions, generations, additional-
     /// packages-to-cook, chunk-ids) keep the buffer minimal.
     /// `PKG_FilterEditorOnly` is set so the editor-only branches
