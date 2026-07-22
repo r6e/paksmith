@@ -30,10 +30,11 @@ documented exhaustively.
 (`crates/paksmith-core/src/asset/mappings.rs`) and the unversioned
 bitstream decoder
 (`crates/paksmith-core/src/asset/property/unversioned.rs`) are both
-implemented and exercised by integration tests. Known gaps: Delegate,
-Interface, and FieldPath property types trigger
-`UnversionedTypeNotSupported` and stop the property walk; Oodle
-`.usmap` compression is unsupported.
+implemented and exercised by integration tests. Known gaps: the
+less-common property types still mapped to `Unknown` in the type table
+below — delegates, interfaces, field paths, and weak/lazy/asset-object
+references — trigger `UnversionedTypeNotSupported` and stop the property
+walk; Oodle `.usmap` compression is unsupported.
 
 When a caller supplies no `.usmap` and the asset has
 `PKG_UnversionedProperties` set, the parser returns

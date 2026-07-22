@@ -249,9 +249,9 @@ impl UnversionedHeader {
 /// `class_name`.
 ///
 /// **Partial-tree contract.** If decoding hits
-/// [`AssetParseFault::UnversionedTypeNotSupported`] at any depth
-/// (Delegate / Interface / FieldPath are not yet supported; Map / Set
-/// are decoded as of #639), the recursion unwinds back to this
+/// [`AssetParseFault::UnversionedTypeNotSupported`] at any depth (a
+/// property type paksmith doesn't yet decode in the unversioned path),
+/// the recursion unwinds back to this
 /// function, which logs at `warn` and returns the partial
 /// `Vec<Property>` collected
 /// so far. Subsequent properties — whose offsets depend on the
@@ -350,9 +350,9 @@ pub(crate) fn read_unversioned_properties(
             // frames lets the outermost decoder break cleanly *for the
             // whole export* the moment any nested decode aborts.
             //
-            // Both `UnversionedTypeNotSupported` (Delegate/Interface/...)
-            // and `UnversionedSchemaMissing` (nested struct whose schema
-            // isn't in the .usmap) trigger the same partial-tree stop:
+            // Both `UnversionedTypeNotSupported` (an unsupported property
+            // type) and `UnversionedSchemaMissing` (nested struct whose
+            // schema isn't in the .usmap) trigger the same partial-tree stop:
             // each represents "cannot safely advance the cursor".
             Err(e) if is_partial_tree_stop(&e) && depth == 0 => {
                 warn!(
@@ -1115,8 +1115,8 @@ mod tests {
         );
     }
 
-    /// Builds a single-property `.usmap` schema of the given type and
-    /// returns `(usmap, ctx)` for a `read_unversioned_properties` call.
+    /// Builds a single-property `.usmap` [`Usmap`] whose one property has
+    /// the given type, for a `read_unversioned_properties` call.
     fn single_prop_usmap(prop_type: MappedPropertyType) -> Usmap {
         let schema = ClassSchema {
             name: "C".to_string(),
