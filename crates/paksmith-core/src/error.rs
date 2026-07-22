@@ -2686,15 +2686,28 @@ pub enum AssetParseFault {
         /// The cap (`MAX_COLLECTION_ELEMENTS = 65_536`).
         limit: usize,
     },
-    /// A `TextProperty` element inside an Array/Map/Set used an FText
-    /// history type that cannot be decoded without per-element size info.
+    /// A `TextProperty` in a size-less context (an Array/Map/Set
+    /// element, an unversioned property, or an `FText` NESTED inside a
+    /// `NamedFormat`/`OrderedFormat` pattern or argument — #641) used an
+    /// FText history type that cannot be decoded without per-element
+    /// size info.
     ///
-    /// In element context `tag_size` is 0; for `FTextHistory::Unknown` this
-    /// would skip 0 bytes and silently corrupt the reader cursor. Returning
-    /// this error prevents that.
+    /// In those contexts `tag_size` is 0; for `FTextHistory::Unknown`
+    /// this would skip 0 bytes and silently corrupt the reader cursor.
+    /// Returning this error prevents that.
     TextHistoryUnsupportedInElement {
         /// The unknown history-type discriminant byte (i8) the reader hit.
         history_type: i8,
+    },
+    /// An `FFormatArgumentValue` inside a `NamedFormat`/`OrderedFormat`
+    /// FText history carried an `EFormatArgumentType` paksmith doesn't
+    /// decode: `Gender (5)` — which no community reference implements
+    /// (CUE4Parse throws; UAssetAPI has no arm) — or an unknown byte.
+    /// Fail-closed: the payload width is unknowable, so continuing
+    /// would desync the reader. #641.
+    TextFormatArgUnsupported {
+        /// The `EFormatArgumentType` discriminant byte (i8) the reader hit.
+        arg_type: i8,
     },
     /// An `FSoftObjectPath` uses the UE5 >= 1008 index-serialized form —
     /// its leading slot is an `i32` index into the summary's
@@ -3411,7 +3424,13 @@ impl fmt::Display for AssetParseFault {
             }
             Self::TextHistoryUnsupportedInElement { history_type } => write!(
                 f,
-                "text history type {history_type} is not supported in collection elements"
+                "text history type {history_type} is not supported in this \
+                 context (no tag size available to skip it)"
+            ),
+            Self::TextFormatArgUnsupported { arg_type } => write!(
+                f,
+                "FText format-argument type {arg_type} is not supported \
+                 (Gender and unknown argument types fail closed)"
             ),
             Self::UnsupportedSoftObjectPathLayout { ue5_version } => write!(
                 f,
@@ -4547,6 +4566,9 @@ pub enum CollectionKind {
     MapNumToRemove,
     /// `SetProperty` body's `num_to_remove` prefix exceeded the cap.
     SetNumToRemove,
+    /// A `NamedFormat`/`OrderedFormat` FText history's format-argument
+    /// count exceeded the cap (#641).
+    TextFormatArguments,
 }
 
 impl fmt::Display for CollectionKind {
@@ -4557,6 +4579,7 @@ impl fmt::Display for CollectionKind {
             Self::Set => "set",
             Self::MapNumToRemove => "map_num_to_remove",
             Self::SetNumToRemove => "set_num_to_remove",
+            Self::TextFormatArguments => "text_format_arguments",
         };
         f.write_str(s)
     }
@@ -7865,6 +7888,7 @@ mod tests {
             (CollectionKind::Set, "set"),
             (CollectionKind::MapNumToRemove, "map_num_to_remove"),
             (CollectionKind::SetNumToRemove, "set_num_to_remove"),
+            (CollectionKind::TextFormatArguments, "text_format_arguments"),
         ];
         for (kind, expected) in cases {
             assert_eq!(kind.to_string(), *expected);
@@ -7947,7 +7971,18 @@ mod tests {
         let s = AssetParseFault::TextHistoryUnsupportedInElement { history_type: 3 }.to_string();
         assert_eq!(
             s,
-            "text history type 3 is not supported in collection elements"
+            "text history type 3 is not supported in this context \
+             (no tag size available to skip it)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_text_format_arg_unsupported() {
+        let s = AssetParseFault::TextFormatArgUnsupported { arg_type: 5 }.to_string();
+        assert_eq!(
+            s,
+            "FText format-argument type 5 is not supported \
+             (Gender and unknown argument types fail closed)"
         );
     }
 

@@ -62,6 +62,7 @@ fn read_element_value<R: Read + Seek>(
     reader: &mut R,
     ctx: &AssetContext,
     asset_path: &str,
+    depth: usize,
 ) -> crate::Result<Option<PropertyValue>> {
     // Arm order mirrors `read_primitive_value`'s frequency-first
     // layout (issue #371): Int / Float / Bool / Str / Name / Object
@@ -132,7 +133,7 @@ fn read_element_value<R: Read + Seek>(
         "TextProperty" => {
             // tag_size=0: None/Base histories are self-delimiting so this is safe.
             // Unknown history would skip 0 bytes; detect it and error instead.
-            let text = read_ftext(reader, ctx, asset_path, 0)?;
+            let text = read_ftext(reader, ctx, asset_path, 0, depth)?;
             if let FTextHistory::Unknown { history_type, .. } = text.history {
                 return Err(PaksmithError::AssetParse {
                     asset_path: asset_path.to_string(),
@@ -310,6 +311,7 @@ fn read_array_value<R: Read + Seek>(
             reader,
             ctx,
             asset_path,
+            depth,
         )?
         .expect("inner_type was validated above by is_handled_element_type");
         elements.push(elem);
@@ -353,8 +355,8 @@ fn read_array_value<R: Read + Seek>(
 ///   correct recovery
 /// - `UnversionedTypeNotSupported`, `UnversionedSchemaMissing` —
 ///   mapping-driven decode hit a gap inside the element body
-/// - `TextHistoryUnsupportedInElement`, `UnsupportedSoftObjectPathLayout`
-///   — wire-shape inside the element
+/// - `TextHistoryUnsupportedInElement`, `TextFormatArgUnsupported`,
+///   `UnsupportedSoftObjectPathLayout` — wire-shape inside the element
 ///
 /// Propagated (security caps, system failures, header-level faults
 /// that did NOT originate inside the element body):
@@ -388,6 +390,7 @@ fn is_recoverable_struct_element_error(e: &PaksmithError) -> bool {
             | AssetParseFault::UnversionedTypeNotSupported { .. }
             | AssetParseFault::UnversionedSchemaMissing { .. }
             | AssetParseFault::TextHistoryUnsupportedInElement { .. }
+            | AssetParseFault::TextFormatArgUnsupported { .. }
             | AssetParseFault::UnsupportedSoftObjectPathLayout { .. }
     )
 }
@@ -611,7 +614,7 @@ fn read_map_set_slot<R: Read + Seek>(
         )
     } else {
         Ok(
-            read_element_value(type_name, field, reader, ctx, asset_path)?
+            read_element_value(type_name, field, reader, ctx, asset_path, depth)?
                 .expect("primitive type validated by is_handled_element_type at the dispatch site"),
         )
     }
@@ -1101,6 +1104,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1117,6 +1121,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1133,6 +1138,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1149,6 +1155,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1165,6 +1172,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1181,6 +1189,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1197,6 +1206,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1213,6 +1223,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1232,6 +1243,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1251,6 +1263,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1270,6 +1283,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1286,6 +1300,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap();
         assert!(v.is_none());
@@ -1301,6 +1316,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1321,6 +1337,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1343,6 +1360,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap();
         assert!(v.is_none());
@@ -1358,6 +1376,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1374,6 +1393,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1390,6 +1410,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1406,6 +1427,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1423,6 +1445,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap_err();
         assert!(
@@ -2001,6 +2024,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -2012,6 +2036,41 @@ mod tests {
                 },
                 ..
             })
+        ));
+    }
+
+    /// A `StringTableEntry (11)` FText decodes as a collection element —
+    /// previously ANY non-None/Base history in element context was a
+    /// hard `TextHistoryUnsupportedInElement` error. The decode is
+    /// self-delimiting, so no `tag_size` is needed. #641.
+    #[test]
+    fn element_text_string_table_entry_decodes() {
+        use crate::asset::property::text::FText;
+        let ctx = make_ctx(&["None", "/Game/Text/ST_UI"]);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
+        bytes.push(11u8); // StringTableEntry
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // FName index 1
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // FName number
+        bytes.extend_from_slice(&4i32.to_le_bytes()); // key FString "KEY\0"
+        bytes.extend_from_slice(b"KEY\0");
+        let mut r = Cursor::new(bytes);
+        let v = read_element_value(
+            "TextProperty",
+            AssetWireField::ArrayElementBody,
+            &mut r,
+            &ctx,
+            "x.uasset",
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            v,
+            PropertyValue::Text(FText {
+                history: FTextHistory::StringTableEntry { ref table_id, ref key },
+                ..
+            }) if table_id == "/Game/Text/ST_UI" && key == "KEY"
         ));
     }
 
@@ -2032,6 +2091,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap_err();
         assert!(
@@ -2064,6 +2124,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -2092,6 +2153,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -2126,6 +2188,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -2148,6 +2211,7 @@ mod tests {
             &mut r,
             &ctx,
             "x.uasset",
+            0,
         )
         .unwrap()
         .unwrap();
@@ -2541,6 +2605,7 @@ mod tests {
                 class_name: "Foo".to_string(),
             }),
             parse(AssetParseFault::TextHistoryUnsupportedInElement { history_type: 1 }),
+            parse(AssetParseFault::TextFormatArgUnsupported { arg_type: 5 }),
             parse(AssetParseFault::UnsupportedSoftObjectPathLayout { ue5_version: 100 }),
         ];
         for e in &recoverable {
@@ -3141,6 +3206,7 @@ mod tests {
                 &mut cur,
                 &ctx,
                 "test.uasset",
+                0,
             );
             assert!(
                 !matches!(result, Ok(None)),
@@ -3162,6 +3228,7 @@ mod tests {
                 &mut cur,
                 &ctx,
                 "test.uasset",
+                0,
             );
             assert!(
                 matches!(result, Ok(None)),

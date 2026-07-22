@@ -37,7 +37,7 @@ proptest! {
         let tag = make_tag("IntProperty", 4);
         let ctx = make_ctx(&["None"]);
         let buf = v.to_le_bytes();
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         prop_assert_eq!(val, PropertyValue::Int(v));
@@ -48,7 +48,7 @@ proptest! {
         let tag = make_tag("Int64Property", 8);
         let ctx = make_ctx(&["None"]);
         let buf = v.to_le_bytes();
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         prop_assert_eq!(val, PropertyValue::Int64(v));
@@ -59,7 +59,7 @@ proptest! {
         let tag = make_tag("UInt32Property", 4);
         let ctx = make_ctx(&["None"]);
         let buf = v.to_le_bytes();
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         prop_assert_eq!(val, PropertyValue::UInt32(v));
@@ -75,7 +75,7 @@ proptest! {
         let tag = make_tag("FloatProperty", 4);
         let ctx = make_ctx(&["None"]);
         let buf = v.to_le_bytes();
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         if let PropertyValue::Float(got) = val {
@@ -90,7 +90,7 @@ proptest! {
         let mut tag = make_tag("BoolProperty", 0);
         tag.bool_val = v;
         let ctx = make_ctx(&["None"]);
-        let val = read_primitive_value(&tag, &mut Cursor::new(&[][..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&[][..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         prop_assert_eq!(val, PropertyValue::Bool(v));

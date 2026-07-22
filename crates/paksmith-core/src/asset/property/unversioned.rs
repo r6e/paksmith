@@ -378,6 +378,10 @@ fn is_partial_tree_stop(e: &PaksmithError) -> bool {
             fault: AssetParseFault::UnversionedTypeNotSupported { .. }
                 | AssetParseFault::UnversionedSchemaMissing { .. }
                 | AssetParseFault::TextHistoryUnsupportedInElement { .. }
+                // An unsupported FText format-argument type (Gender /
+                // unknown) has an unknowable payload width — same
+                // cannot-advance-cursor class. #641.
+                | AssetParseFault::TextFormatArgUnsupported { .. }
                 // The index-serialized FSoftObjectPath form (a crafted,
                 // version-inconsistent asset — see
                 // `read_soft_path_payload`) cannot advance the cursor
@@ -443,7 +447,7 @@ fn read_unversioned_value(
             // but `FTextHistory::Unknown` cannot be decoded without a size
             // hint and would silently swallow subsequent bytes. Reject
             // explicitly so the partial-tree contract surfaces the issue.
-            let text = read_ftext(cur, ctx, asset_path, 0)?;
+            let text = read_ftext(cur, ctx, asset_path, 0, depth)?;
             if let FTextHistory::Unknown { history_type, .. } = text.history {
                 return Err(PaksmithError::AssetParse {
                     asset_path: asset_path.to_string(),
@@ -1435,6 +1439,53 @@ mod tests {
         let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0)
             .expect("partial-tree stop returns Ok");
         assert!(props.is_empty(), "unknown struct must partial-tree-stop");
+    }
+
+    /// Unversioned `MT::Text` with a `StringTableEntry (11)` history
+    /// decodes — previously any non-None/Base history in the unversioned
+    /// path hard-stopped via `TextHistoryUnsupportedInElement`. Also the
+    /// first test coverage of the `MT::Text` arm at all. #641.
+    #[test]
+    fn unversioned_text_string_table_entry_decodes() {
+        use crate::asset::property::text::FTextHistory;
+        let usmap = single_prop_usmap(MappedPropertyType::Text);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes()); // 1 serialized property
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // FText flags
+        bytes.push(11u8); // StringTableEntry
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // FName index 1
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // FName number
+        bytes.extend_from_slice(&4i32.to_le_bytes()); // key "KEY\0"
+        bytes.extend_from_slice(b"KEY\0");
+        let ctx = make_ctx(&["None", "/Game/Text/ST_UI"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0).unwrap();
+        assert_eq!(props.len(), 1);
+        match &props[0].value {
+            PropertyValue::Text(t) => assert!(matches!(
+                t.history,
+                FTextHistory::StringTableEntry { ref table_id, ref key }
+                    if table_id == "/Game/Text/ST_UI" && key == "KEY"
+            )),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    /// An unversioned `MT::Text` with a still-undecoded history type
+    /// (e.g. AsDate = 7) keeps the partial-tree-stop contract. #641.
+    #[test]
+    fn unversioned_text_unknown_history_partial_tree_stops() {
+        let usmap = single_prop_usmap(MappedPropertyType::Text);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // FText flags
+        bytes.push(7u8); // AsDate — undecoded
+        bytes.extend_from_slice(&[0u8; 16]);
+        let ctx = make_ctx(&["None"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0)
+            .expect("partial-tree stop returns Ok");
+        assert!(props.is_empty());
     }
 
     /// Each recursive `read_unversioned_value(depth + 1)` in the

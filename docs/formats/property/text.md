@@ -15,27 +15,29 @@ runtime localization tables: namespace, key, and the raw source
 string that serves as a fallback if localization data is missing.
 
 The wire shape is a `u32 flags` field followed by an `i8 history_type`
-discriminant, followed by a history-specific body. Paksmith handles
-the two most common variants — `None` (culture-invariant string) and
-`Base` (the canonical namespace/key/source triple). The 12 deferred
-variants (see §*ETextHistoryType reference*) are stored as
+discriminant, followed by a history-specific body. Paksmith decodes
+five variants — `None` (culture-invariant string), `Base` (the
+canonical namespace/key/source triple), and, as of
+[#641](https://github.com/r6e/paksmith/issues/641), `NamedFormat`,
+`OrderedFormat`, and `StringTableEntry`. The remaining variants (see
+§*ETextHistoryType reference*) are stored as
 `FTextHistory::Unknown { history_type, skipped_bytes }` — the wire is
 consumed so downstream fields stay aligned, but the value isn't
 decoded.
 
 **Document status: complete.** Wire format documented in full
 against CUE4Parse[^1] with worked examples below for the two most
-common history variants (`None` empty and `Base` namespace+key+source).
-The 12 deferred history variants are catalogued by discriminant value;
-their body layouts are documented in CUE4Parse for implementers who
-need them.
+common history variants (`None` empty and `Base` namespace+key+source)
+and field tables for the #641 trio. The remaining deferred history
+variants are catalogued by discriminant value; their body layouts are
+documented in CUE4Parse for implementers who need them.
 
-**Paksmith parser status: `partial`.** `None` and `Base` cover the
-vast majority of cooked content; the unhandled variants appear
-mostly for UI text with runtime formatting (player names
-interpolated into dialog, dates rendered for the user's locale,
-etc.). Phase 3+ work may specialize the format variants as part of
-UI / dialog asset support.
+**Paksmith parser status: `partial`.** `None`, `Base`,
+`NamedFormat`, `OrderedFormat`, and `StringTableEntry` cover the vast
+majority of cooked content, including string-table-referenced UI text
+and runtime-formatted patterns; the still-unhandled variants are
+mostly locale rendering (dates, numbers, currency) and the
+editor-side `ArgumentFormat`/`TextGenerator` forms.
 
 ## Versions
 
@@ -77,6 +79,33 @@ range.
 
 `PropertyValue::Text(FText { flags, history: FTextHistory::Base { namespace, key, source_string } })`.
 
+### `history_type == 1` (`NamedFormat`) / `== 2` (`OrderedFormat`)
+
+| field | size | type | semantics |
+|-------|------|------|-----------|
+| `source_fmt` | variable | `FText` | The format pattern — a **full recursive FText** (flags + history type + body). |
+| `count` | 4 | `i32` LE | Argument count. Paksmith rejects negative or > 65,536 (`CollectionElementCountExceeded`); CUE4Parse has no cap. |
+| per argument (`NamedFormat` only) | variable | `FString` | The placeholder name. |
+| per argument | 1 | `i8` | `EFormatArgumentType`: `Int (0)` → i64, `UInt (1)` → u64, `Float (2)` → f32, `Double (3)` → f64, `Text (4)` → recursive `FText`. `Gender (5)` and unknown bytes are fail-closed (`TextFormatArgUnsupported`) — no community reference implements a Gender payload. |
+| per argument | variable | typed | The payload per the type byte. |
+
+In this (non-`ArgumentFormat`) context the type byte is always present
+and `Int` is always i64 — the `isArgumentData` version gates in
+CUE4Parse apply only to the undecoded `ArgumentFormat (3)` history.
+Recursion (the pattern and `Text`-typed arguments) is bounded by
+`MAX_PROPERTY_DEPTH = 128`; a nested FText with an undecoded history
+type is fail-closed (`TextHistoryUnsupportedInElement`) because nested
+contexts carry no size to skip with.
+
+### `history_type == 11` (`StringTableEntry`)
+
+| field | size | type | semantics |
+|-------|------|------|-----------|
+| `table_id` | 8 | `FName` | `i32` name-table index + `i32` number; resolved against the asset's name table. |
+| `key` | variable | `FString` | The entry key within the string table. |
+
+No version gates.
+
 ### Other `history_type` values
 
 After reading `flags` and `history_type`, the parser computes `remaining
@@ -85,28 +114,30 @@ exactly that many opaque bytes. The body surfaces as
 `FTextHistory::Unknown { history_type, skipped_bytes }`. Unknown variants
 don't declare their own body size — the enclosing tag's `size` field
 bounds the skip, and `saturating_sub` prevents a malformed `tag_size`
-from driving an oversized allocation.
+from driving an oversized allocation. (CUE4Parse instead aliases unknown
+history types to `None` — a mis-decode paksmith deliberately does not
+copy.)
 
 For the full discriminant-to-name mapping, see §*ETextHistoryType reference* below.
 
 ### ETextHistoryType reference
 
-| Value | Name |
-|-------|------|
-| -1 | `None` |
-| 0 | `Base` |
-| 1 | `NamedFormat` |
-| 2 | `OrderedFormat` |
-| 3 | `ArgumentFormat` |
-| 4 | `AsNumber` |
-| 5 | `AsPercent` |
-| 6 | `AsCurrency` |
-| 7 | `AsDate` |
-| 8 | `AsTime` |
-| 9 | `AsDateTime` |
-| 10 | `Transform` |
-| 11 | `StringTableEntry` |
-| 12 | `TextGenerator` |
+| Value | Name | Paksmith |
+|-------|------|----------|
+| -1 | `None` | decoded |
+| 0 | `Base` | decoded |
+| 1 | `NamedFormat` | decoded (#641) |
+| 2 | `OrderedFormat` | decoded (#641) |
+| 3 | `ArgumentFormat` | `Unknown` skip |
+| 4 | `AsNumber` | `Unknown` skip |
+| 5 | `AsPercent` | `Unknown` skip |
+| 6 | `AsCurrency` | `Unknown` skip |
+| 7 | `AsDate` | `Unknown` skip |
+| 8 | `AsTime` | `Unknown` skip |
+| 9 | `AsDateTime` | `Unknown` skip |
+| 10 | `Transform` | `Unknown` skip |
+| 11 | `StringTableEntry` | decoded (#641) |
+| 12 | `TextGenerator` | `Unknown` skip |
 
 ### Worked example — `None` history with empty culture-invariant (9 bytes)
 
@@ -150,7 +181,7 @@ the runtime falls back to `source_string`.
 
 ## Variants
 
-Variation is whole-history-typed: the discriminant byte selects which of the 14 history shapes to decode. Paksmith decodes `None` and `Base` in full; the other 12 are deferred to `FTextHistory::Unknown` with raw bytes preserved (see Wire layout §*Other history_type values* for the `saturating_sub` mechanism).
+Variation is whole-history-typed: the discriminant byte selects which of the 14 history shapes to decode. Paksmith decodes `None`, `Base`, `NamedFormat`, `OrderedFormat`, and `StringTableEntry` in full; the other 9 are deferred to `FTextHistory::Unknown` with the byte count preserved (see Wire layout §*Other history_type values* for the `saturating_sub` mechanism). A decodable `NamedFormat`/`OrderedFormat` whose NESTED content is undecodable (an `Unknown`-typed pattern/argument FText, or a `Gender` argument) also degrades to `Unknown` in the direct tag-sized context, and fails closed in size-less contexts.
 
 ### Empty culture-invariant string
 
@@ -220,39 +251,56 @@ that don't carry localization context.
   Any conformant parser fed these byte sequences MUST decode them
   as the FText values shown in the Worked examples above.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^2].
-  Both handle the full history-type catalog. Paksmith's
-  None+Base coverage round-trips against both; the
-  Unknown-history fallback is a paksmith-specific limitation.
+  Both handle more of the history-type catalog. Paksmith's decoded
+  variants round-trip against both; the Unknown-history fallback for
+  the remaining types is a paksmith-specific limitation.
 - **Known divergences:**
-  - **History-variant coverage.** Paksmith decodes `None` and `Base`
-    typed; the other 12 variants surface as `Unknown { history_type, skipped_bytes }`.
-    CUE4Parse and unreal_asset specialize the format variants.
-    Practical impact: gameplay text (`Base`) and editor defaults
-    (`None`) decode; runtime-formatted UI text doesn't.
+  - **History-variant coverage.** Paksmith decodes `None`, `Base`,
+    `NamedFormat`, `OrderedFormat`, and `StringTableEntry` typed
+    ([#641](https://github.com/r6e/paksmith/issues/641)); the other 9
+    variants surface as `Unknown { history_type, skipped_bytes }`.
+    CUE4Parse and unreal_asset specialize more of the format variants.
+    Practical impact: gameplay text, string-table references, and
+    runtime-formatted patterns decode; locale rendering (dates,
+    numbers, currency) doesn't.
+  - **Unknown-history handling.** CUE4Parse aliases unrecognized
+    history types to `None` (and still conditionally reads a bool) —
+    a mis-decode paksmith deliberately does not copy (skip-to-tag-end
+    `Unknown` instead).
 
 ## Paksmith implementation
 
 **Parser module:** `crates/paksmith-core/src/asset/property/text.rs`.
 
-**Status:** `partial`. `FTextHistory::None` and `Base` decode typed;
-other variants → `FTextHistory::Unknown`.
+**Status:** `partial`. `FTextHistory::None`, `Base`, `NamedFormat`,
+`OrderedFormat`, and `StringTableEntry` decode typed; other variants →
+`FTextHistory::Unknown`.
 
 **Public surface:**
 - `pub struct FText { pub flags: u32, pub history: FTextHistory }`.
 - `pub enum FTextHistory` (`#[non_exhaustive]`) — `None`, `Base`,
-  `Unknown`.
-- `pub fn read_ftext<R: Read + Seek>(reader, ctx, asset_path, tag_size) -> Result<FText>`.
+  `NamedFormat`, `OrderedFormat`, `StringTableEntry`, `Unknown`.
+- `pub struct FTextNamedArg { pub name: String, pub value: FTextFormatArg }`.
+- `pub enum FTextFormatArg` (`#[non_exhaustive]`) — `Int` / `UInt` /
+  `Float` / `Double` / `Text`.
+- `pub fn read_ftext<R: Read + Seek>(reader, ctx, asset_path, tag_size, depth) -> Result<FText>`.
 
 **Error variants:**
 - `AssetParseFault::UnexpectedEof { field }` — short read on any binary field.
 - `AssetParseFault::FStringMalformed { kind }` — malformed FString inside any text-body field.
+- `AssetParseFault::PropertyDepthExceeded { depth, limit }` — recursive FText nesting past `MAX_PROPERTY_DEPTH` (128).
+- `AssetParseFault::CollectionElementCountExceeded { collection: TextFormatArguments, .. }` — negative or over-cap format-argument count.
+- `AssetParseFault::TextFormatArgUnsupported { arg_type }` — `Gender (5)` or unknown argument type (recovered to `Unknown` in the direct context; fail-closed in size-less contexts).
+- `AssetParseFault::TextHistoryUnsupportedInElement { history_type }` — undecoded history in a size-less context (element / unversioned / nested FText).
 - `AssetParseFault::U64ExceedsPlatformUsize { field: FTextField, value }` — `tag_size` residual doesn't fit `usize` (only reachable on 32-bit targets with a pathological tag).
 - `PaksmithError::Io` — `stream_position()` or skip-sink I/O failure.
 
 **Phase plan:**
 - None + Base: `docs/plans/phase-2b-tagged-properties.md` (Task 5).
-- Other history variants: deferred, no phase plan yet. Likely
-  Phase 3+ alongside UI / dialog asset handlers.
+- NamedFormat / OrderedFormat / StringTableEntry:
+  [#641](https://github.com/r6e/paksmith/issues/641).
+- Remaining history variants (locale rendering, `ArgumentFormat`,
+  `Transform`, `TextGenerator`): deferred, no phase plan yet.
 
 ## References
 
