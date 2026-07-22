@@ -3558,7 +3558,7 @@ mod tests {
         // header parse succeeds, so this is behavior-identical; mirroring
         // production keeps the boundary test faithful if a future change ever
         // decouples the in-data `wire_size` derivation from the index header's
-        // (Copilot #691).
+        // (PR #691).
         let payload_start = {
             let mut hdr_file = std::fs::File::open(&fixture).expect("open fixture for header");
             let in_data = reader
