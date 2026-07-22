@@ -22,17 +22,26 @@
 //! to repak itself, both implementations agree on the format — that
 //! independent agreement is the cross-parser anchor #14 calls for.
 //!
-//! # Coverage gaps repak imposes
+//! # What bounds the fixture corpus
 //!
-//! repak v0.2.3 only writes a subset of the format:
-//! - **Compression: v8+ only.** Issue #69 added zlib-compressed
-//!   fixtures (`real_v{8a,8b,9,10,11}_compressed.pak`) and issue #636
-//!   added LZ4-compressed fixtures (`real_v{8b,11}_lz4.pak`); v3-v7
-//!   can't carry them because the FName-based compression slot table
-//!   didn't exist before v8 (repak's writer rejects compression on
-//!   those versions). repak ships compressed output reliably on v8+
-//!   when `PakBuilder::compression([...])` declares the method and
-//!   the input compresses non-trivially.
+//! The corpus is shaped by two distinct things — repak v0.2.3's writer
+//! (some shapes it genuinely cannot produce) and our own deliberate matrix
+//! choices (shapes repak *can* write but we don't generate). The first
+//! bullet is the latter; the rest are the former:
+//! - **Compressed fixtures are v8+ only (a matrix choice, not a repak
+//!   limit).** Issue #69 added zlib-compressed fixtures
+//!   (`real_v{8a,8b,9,10,11}_compressed.pak`) and issue #636 added
+//!   LZ4-compressed fixtures (`real_v{8b,11}_lz4.pak`). repak CAN emit
+//!   compressed output at any compression-capable version (v3+; compression
+//!   is a v3 wire feature) — v3-v7 via the numeric compression IDs (repak's
+//!   own test corpus ships `pack_v5_compress.pak` / `pack_v7_compress.pak`),
+//!   v8+ via the FName slot table (exercised by our cross-validation). The
+//!   corpus stays v8+ deliberately: pre-v5 compressed reads use
+//!   absolute-offset blocks paksmith doesn't implement (#637), and v5-v7
+//!   compressed exercises the same entry-relative read path the v8+
+//!   fixtures already cover. repak ships compressed v8+ output when
+//!   `PakBuilder::compression([...])` declares the method and the input
+//!   compresses non-trivially.
 //! - **No UTF-16 filenames**: API takes `&str`, encodes as positive-length
 //!   FString (UTF-8 with null terminator). Synthetic generator covers this.
 //! - **Always-real SHA1**: repak computes hashes; we can't simulate the
@@ -44,11 +53,12 @@
 //!
 //! # Fixture matrix
 //!
-//! Eight versions (v3, v6, v7, v8a, v8b, v9, v10, v11) × three
+//! Ten versions (v3, v4, v5, v6, v7, v8a, v8b, v9, v10, v11) × three
 //! shape variants (minimal / multi / mixed_paths) + five
 //! zlib-compressed variants (v8a/v8b/v9/v10/v11) + two
-//! LZ4-compressed variants (v8b/v11, #636). Total 31 fixtures, each
-//! well under 1 KiB.
+//! LZ4-compressed variants (v8b/v11, #636). Total 37 fixtures, each
+//! well under 1 KiB. (v4/v5 are uncompressed/unencrypted, added by
+//! issue #637 to make the "v3-v11" claim literal for the flat path.)
 
 use std::fs::File;
 
@@ -86,13 +96,14 @@ struct Fixture<'a> {
     mount_point: &'static str,
     entries: &'a [Entry<'a>],
     /// Issue #69 (Zlib) / #636 (LZ4): when `Some(method)`, configure
-    /// repak with that compression method in the FName slot table and
-    /// pass `allow_compress: true` per entry. repak only emits
-    /// compressed output for v8+ archives (the FNameBased compression
-    /// slot table appeared in v8); ignored for v3-v7. The fixture's
-    /// payloads must compress well — repak always stores compressed
-    /// output, even when larger than uncompressed, so any non-empty
-    /// compressible input trips the compressed path.
+    /// repak with that compression method (the FName slot table for v8+,
+    /// or the pre-populated numeric slots for v3-v7) and pass
+    /// `allow_compress: true` per entry. This matrix only sets compression
+    /// on v8+ fixtures — repak CAN compress pre-v8 too (see the module doc),
+    /// but the corpus stays v8+ by choice. The fixture's payloads must
+    /// compress well — repak always stores compressed output, even when
+    /// larger than uncompressed, so any non-empty compressible input trips
+    /// the compressed path.
     compression: Option<Compression>,
 }
 
@@ -236,6 +247,55 @@ fn main() {
         Fixture {
             name: "real_v3_mixed_paths.pak",
             version: Version::V3,
+            mount_point: mount,
+            entries: mixed_path_entries,
+            compression: None,
+        },
+        // v4 — IndexEncryption. Adds the index-encryption capability; these
+        // fixtures are uncompressed + unencrypted, so the flat-entry layout
+        // is identical to v3 and they pin paksmith's v4 version dispatch
+        // (issue #637 legacy-version coverage).
+        Fixture {
+            name: "real_v4_minimal.pak",
+            version: Version::V4,
+            mount_point: mount,
+            entries: minimal_entries,
+            compression: None,
+        },
+        Fixture {
+            name: "real_v4_multi.pak",
+            version: Version::V4,
+            mount_point: mount,
+            entries: multi_entries,
+            compression: None,
+        },
+        Fixture {
+            name: "real_v4_mixed_paths.pak",
+            version: Version::V4,
+            mount_point: mount,
+            entries: mixed_path_entries,
+            compression: None,
+        },
+        // v5 — RelativeChunkOffsets. Compression-block offsets become
+        // relative to the entry record; these fixtures are uncompressed so
+        // they don't exercise that path, but pin v5 version dispatch (#637).
+        Fixture {
+            name: "real_v5_minimal.pak",
+            version: Version::V5,
+            mount_point: mount,
+            entries: minimal_entries,
+            compression: None,
+        },
+        Fixture {
+            name: "real_v5_multi.pak",
+            version: Version::V5,
+            mount_point: mount,
+            entries: multi_entries,
+            compression: None,
+        },
+        Fixture {
+            name: "real_v5_mixed_paths.pak",
+            version: Version::V5,
             mount_point: mount,
             entries: mixed_path_entries,
             compression: None,

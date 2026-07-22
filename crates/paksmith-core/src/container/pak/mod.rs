@@ -46,8 +46,28 @@
 //! - Gzip / Oodle / Zstd compression — resolvable (Gzip and Oodle
 //!   also via the v3-v7 numeric IDs, Zstd via the v8+ FName table)
 //!   but not wired up downstream (only Zlib and LZ4 decompress).
-//! - Pre-v5 absolute-offset compression blocks (rare in real archives).
-//! - V9 frozen-index format (rejected at open).
+//! - Three legacy shapes are deliberately fail-closed and left unsupported —
+//!   see issue #637 for the recorded decision. Two of the three are an
+//!   effort/value deferral, NOT a capability gap: repak (our writer oracle)
+//!   CAN produce them, but paksmith doesn't parse them yet and they are
+//!   museum-grade rarities:
+//!   - **v1/v2 archives** — the pre-v3 entry record has a different shape
+//!     (pre-v2 per-entry timestamp, no trailing flags + block_size) that the
+//!     parser doesn't implement. repak writes v2 (its README marks v2 write
+//!     supported; v1 write is untested). paksmith rejects at open rather
+//!     than silently misparse.
+//!   - **Pre-v5 absolute-offset compression blocks** — pre-v5 stores
+//!     compression-block offsets as absolute file offsets (v5+ made them
+//!     entry-relative), and the read path doesn't implement that. repak CAN
+//!     emit a compressed v4 archive (verified by probe; v3 shares the same
+//!     pre-v8 compression path), so an oracle exists; paksmith rejects at
+//!     read time (pinned by `read_zlib_rejects_pre_v5_compressed_entry`).
+//!   - **V9 frozen-index format** — the index is UE's compiled-frozen
+//!     in-memory layout (a different serialization). This one genuinely has
+//!     no oracle: repak never emits `frozen = true`. Rejected at open.
+//!
+//!   (The reader DOES cover v3-v9 flat and v10/v11 path-hash indexes; v4
+//!   and v5 are fixture-anchored per #637.)
 //!
 //! # File-immutability assumption
 //!
@@ -380,10 +400,10 @@ impl PakReader {
         // is in UE's compiled-frozen layout — completely different bytes
         // than the flat-entry parser expects. Silently parsing as if not
         // frozen would produce garbage entries (paths read as gibberish,
-        // offsets pointing nowhere). Repak's writer doesn't currently
-        // emit frozen=true so the cross-parser tests can't catch this;
-        // reject explicitly at open time. See #7 follow-up for proper
-        // frozen-index parsing.
+        // offsets pointing nowhere). Repak's writer never emits
+        // frozen=true, so there is no oracle to build/verify a parser
+        // against; reject explicitly at open time. Deliberate wontfix —
+        // see #637 for the recorded decision and rationale.
         if footer.frozen_index() {
             return Err(PaksmithError::UnsupportedVersion {
                 version: footer.version().wire_version(),
@@ -391,10 +411,11 @@ impl PakReader {
         }
 
         // v1/v2 entry records have a different shape (timestamp field
-        // pre-v2, no trailing flags+block_size). PakEntryHeader::read_from
-        // assumes the v3+ layout. We have no fixtures for v1/v2 and
-        // they're rare in the wild, so reject explicitly rather than
-        // silently misparse.
+        // pre-v2, no trailing flags+block_size) that PakEntryHeader::read_from
+        // doesn't implement. repak writes v2 (README-supported), so an oracle
+        // exists — this is a low-value deferral for museum-grade versions, not
+        // a capability gap. Reject explicitly rather than silently misparse;
+        // deliberate wontfix — see #637.
         if footer.version() < PakVersion::CompressionEncryption {
             return Err(PaksmithError::UnsupportedVersion {
                 version: footer.version().wire_version(),
@@ -2369,9 +2390,12 @@ fn stream_zlib_to<R: Read + Seek>(
     let path = entry.filename();
 
     if version < PakVersion::RelativeChunkOffsets {
-        // Pre-v5 paks store absolute file offsets in compression_blocks rather
-        // than offsets relative to the entry record. Real-world v3/v4 paks are
-        // rare; reject explicitly rather than silently producing garbage.
+        // Pre-v5 paks store compression-block offsets as absolute file offsets
+        // rather than entry-relative (v5+); this read path doesn't implement
+        // the absolute-offset case. repak CAN emit a compressed v4 archive
+        // (verified by probe; v3 shares the same pre-v8 path), so an oracle
+        // exists — this is a low-value deferral, not a capability gap. Reject
+        // explicitly rather than silently produce garbage; wontfix — see #637.
         return Err(PaksmithError::UnsupportedVersion {
             version: version.wire_version(),
         });
@@ -3508,6 +3532,85 @@ mod tests {
             usize::try_from(written).expect("test fixture fits in usize"),
             buf.len(),
             "returned u64 must equal bytes actually written to the writer"
+        );
+    }
+
+    /// `stream_zlib_to` rejects pre-v5 (absolute-offset) versions at its
+    /// version guard, and lets v5+ (entry-relative) through. In-source so
+    /// cargo-mutants covers it — the integration-crate
+    /// `read_zlib_rejects_pre_v5_compressed_entry` isn't run under the
+    /// default-members mutant invocation, which let the `<
+    /// RelativeChunkOffsets` boundary drift to `==`/`<=` unnoticed (#637
+    /// review). `stream_zlib_to` takes `version` as a plain arg, so we drive
+    /// the boundary directly against a real (v8b, entry-relative) compressed
+    /// entry by overriding the version.
+    #[test]
+    fn stream_zlib_to_version_boundary_rejects_pre_v5_only() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v8b_compressed.pak");
+        let reader = PakReader::open(&fixture).expect("open compressed fixture");
+        let path = "Content/Compressed.uasset";
+        let entry = reader.index_entry(path).expect("compressed entry present");
+        // Derive `payload_start` exactly as the production read path does — from
+        // the *in-data* FPakEntry header (`open_entry_into` + `checked_payload_start`),
+        // not the index header's `wire_size()`. Today `matches_payload` (inside
+        // `open_entry_into`) guarantees the two wire sizes are equal whenever the
+        // header parse succeeds, so this is behavior-identical; mirroring
+        // production keeps the boundary test faithful if a future change ever
+        // decouples the in-data `wire_size` derivation from the index header's
+        // (PR #691).
+        let payload_start = {
+            let mut hdr_file = std::fs::File::open(&fixture).expect("open fixture for header");
+            let in_data = reader
+                .open_entry_into(&mut hdr_file, entry)
+                .expect("read in-data FPakEntry header");
+            checked_payload_start(entry.header().offset(), in_data.wire_size(), path)
+                .expect("payload start within u64 bounds")
+        };
+        let file_size = std::fs::metadata(&fixture).expect("stat fixture").len();
+
+        // Pre-v5 (v3, v4): absolute-offset blocks are unimplemented — reject
+        // with `UnsupportedVersion` before touching the blocks. Kills the
+        // `<`→`==` mutant (which would let v3/v4 fall through).
+        for v in [
+            PakVersion::CompressionEncryption,
+            PakVersion::IndexEncryption,
+        ] {
+            let mut file = std::fs::File::open(&fixture).expect("reopen fixture");
+            let mut sink: Vec<u8> = Vec::new();
+            let err = stream_zlib_to(&mut file, entry, file_size, payload_start, v, &mut sink)
+                .expect_err("pre-v5 zlib must be rejected");
+            assert!(
+                matches!(err, PaksmithError::UnsupportedVersion { version } if version == v.wire_version()),
+                "pre-v5 ({v:?}) must reject as UnsupportedVersion, got {err:?}"
+            );
+        }
+
+        // v5 (RelativeChunkOffsets): the v8b entry's blocks ARE entry-relative,
+        // so v5 dispatch passes the guard and decompresses to the full
+        // uncompressed size. Asserting success (not merely "not rejected")
+        // proves the v5 path actually works, and still kills the `<`→`<=`
+        // mutant — which would reject v5 with `UnsupportedVersion` instead.
+        let mut file = std::fs::File::open(&fixture).expect("reopen fixture");
+        let mut sink: Vec<u8> = Vec::new();
+        let written = stream_zlib_to(
+            &mut file,
+            entry,
+            file_size,
+            payload_start,
+            PakVersion::RelativeChunkOffsets,
+            &mut sink,
+        )
+        .expect("v5 (entry-relative) must pass the guard and decompress");
+        assert_eq!(
+            written,
+            entry.header().uncompressed_size(),
+            "v5 must decompress the v8b entry to its full uncompressed size"
+        );
+        assert_eq!(
+            u64::try_from(sink.len()).expect("fits u64"),
+            written,
+            "bytes written to the sink must equal the returned count"
         );
     }
 

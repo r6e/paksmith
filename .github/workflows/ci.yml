@@ -123,8 +123,9 @@ jobs:
           # `__test_utils` gates the wire helpers consumed by the example.
           cargo run --quiet -p paksmith-core --example generate_fixtures --features __test_utils
           cargo run --quiet -p paksmith-fixture-gen
-          # Expected: 1 synthetic (minimal_v6.pak) + 24 repak ground-truth
-          # (real_v{3,6,7,8a,8b,9,10,11}_{minimal,multi,mixed_paths}.pak)
+          # Expected: 1 synthetic (minimal_v6.pak) + 30 repak ground-truth
+          # (real_v{3,4,5,6,7,8a,8b,9,10,11}_{minimal,multi,mixed_paths}.pak;
+          # v4/v5 added by issue #637)
           # + 3 issue-#69 compressed (real_v{8a,8b,9}_compressed.pak)
           # + 2 issue-#90 v10+ compressed (real_v{10,11}_compressed.pak)
           # + 1 phase-2a uasset wrapper (real_v8b_uasset.pak, Task 13)
@@ -136,10 +137,10 @@ jobs:
           # + 2 issue-#636 LZ4 (real_v{8b,11}_lz4.pak)
           # + 2 issue-#634 encrypted+compressed
           #   (real_v{8b,11}_encrypted_compressed.pak, VENDORED-STATIC)
-          # = 42.
+          # = 48.
           # The pre-run rm + this count assertion together catch zero-write
           # bugs that the diff alone would miss.
-          expected=42
+          expected=48
           actual=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f | wc -l | tr -d ' ')
           # Emit the gate's verdict to the job-summary panel so reviewers
           # can see what was checked without scrolling raw step logs.

@@ -45,11 +45,12 @@ fn sha1_hex(bytes: &[u8]) -> String {
 /// flagged that a repak version-specific bug would slip through if it
 /// only affected, say, v8b's compression-method-table encoding —
 /// because v3 is structurally distinct from v8b and the v3 anchor
-/// can't catch v8b drift. Round 2 (this commit) extends anchoring to
-/// one fixture per version family that paksmith claims to support:
-/// v3 (legacy), v6 (DeleteRecords), v7 (EncryptionKeyGuid), v8a/v8b
-/// (FName-based compression at differing slot counts), v9 (FrozenIndex),
-/// v10 (PathHashIndex), v11 (Fnv64BugFix). 8 anchors total.
+/// can't catch v8b drift. Round 2 (issue #31) extended anchoring to
+/// one fixture per supported version family; issue #637 later added
+/// v4/v5. Current coverage: v3 (legacy), v4 (IndexEncryption), v5
+/// (RelativeChunkOffsets), v6 (DeleteRecords), v7 (EncryptionKeyGuid),
+/// v8a/v8b (FName-based compression at differing slot counts), v9
+/// (FrozenIndex), v10 (PathHashIndex), v11 (Fnv64BugFix). Ten anchors.
 ///
 /// All anchors target the `_minimal` variant of each family — smallest
 /// per-version blast radius for legitimate fixture updates. Drift in
@@ -68,7 +69,7 @@ fn sha1_hex(bytes: &[u8]) -> String {
 ///    was touched accidentally — restore from git and stop.
 /// 2. **If a deliberate regeneration happened**, this test catches drift
 ///    but not correctness. Before pasting the new SHA1, verify:
-///    - All 29 `cross_parser_agreement_*` tests still pass against the
+///    - All 35 `cross_parser_agreement_*` tests still pass against the
 ///      regenerated fixtures
 ///      (`cargo test -p paksmith-fixture-gen --test cross_validation`).
 ///    - For v3-v9: the trailing 44-byte legacy footer (or 61-byte v7+
@@ -99,6 +100,22 @@ fn anchor_real_v3_minimal_fixture_bytes() {
     anchor_fixture_sha1(
         "real_v3_minimal.pak",
         "8a039eeddfc2035077edc2af35b01f81dcfd31e9",
+    );
+}
+
+#[test]
+fn anchor_real_v4_minimal_fixture_bytes() {
+    anchor_fixture_sha1(
+        "real_v4_minimal.pak",
+        "81b64a4b9e4120bdf6f8b8081fd3d0bd2e039263",
+    );
+}
+
+#[test]
+fn anchor_real_v5_minimal_fixture_bytes() {
+    anchor_fixture_sha1(
+        "real_v5_minimal.pak",
+        "b3a0577d544b7293a75cd80529745419f19b5191",
     );
 }
 
