@@ -309,8 +309,9 @@ pub(super) fn read_soft_path_payload<R: Read>(
         return Err(PaksmithError::UnsupportedFeature {
             context: format!(
                 "FSoftObjectPath pre-514 single-FString layout at \
-                 file_version_ue4={} ({asset_path}); paksmith decodes UE4 \
-                 {VER_UE4_ADDED_SOFT_OBJECT_PATH}+ (ADDED_SOFT_OBJECT_PATH) only",
+                 file_version_ue4={} ({asset_path}); soft paths require \
+                 file_version_ue4 >= {VER_UE4_ADDED_SOFT_OBJECT_PATH} \
+                 (ADDED_SOFT_OBJECT_PATH)",
                 ctx.version.file_version_ue4
             ),
         });
