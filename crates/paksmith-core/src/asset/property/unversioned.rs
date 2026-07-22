@@ -962,6 +962,40 @@ mod tests {
         assert!(props.is_empty());
     }
 
+    /// A fault NOT on the `is_partial_tree_stop` allowlist (here a
+    /// truncated `Int` value → a read error) must PROPAGATE as `Err`, not
+    /// be swallowed as a partial-tree stop. Pins `is_partial_tree_stop`
+    /// against collapsing to always-`true`. #638.
+    #[test]
+    fn unversioned_non_recoverable_error_propagates() {
+        let schema = ClassSchema {
+            name: "N".to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: Arc::from("V"),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("N".to_string(), schema);
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes()); // one serialized property
+        bytes.extend_from_slice(&[0u8, 0u8]); // only 2 of the Int32's 4 bytes → EOF
+
+        let ctx = make_ctx(&["None"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let result = read_unversioned_properties(&mut cur, "N", &usmap, &ctx, "test", 0);
+        assert!(
+            result.is_err(),
+            "a non-allowlisted fault must propagate, not partial-tree-stop"
+        );
+    }
+
     #[test]
     fn read_unversioned_properties_decodes_inherited_class_with_overlapping_indices() {
         // Bug pinned: a `.usmap` with `Child : Parent` where both

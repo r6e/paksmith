@@ -225,18 +225,13 @@ pub struct PackageSummary {
 }
 
 impl PackageSummary {
-    /// True when this package's `FSoftObjectPath` properties serialize
-    /// their leading slot as an `i32` index into the summary's
-    /// `SoftObjectPaths` list rather than inline — the UE5 >= 1008 form
-    /// CUE4Parse reads under `!PKG_FilterEditorOnly &&
-    /// SoftObjectPaths.Length > 0`. paksmith does not parse that list, so
-    /// the property reader fails closed on this form (see
-    /// [`AssetContext::soft_object_paths_indexed`](crate::asset::AssetContext)).
-    /// For any well-formed asset this is `false`: `count > 0` requires
-    /// UE5 >= 1008 (`file_version_ue4 == 522`), and an asset lacking
-    /// `PKG_FilterEditorOnly` at `file_version_ue4 >= 520` is already
-    /// rejected as `UncookedAsset` before this is consulted. So `true`
-    /// arises only for a version-inconsistent crafted asset. #638.
+    /// The CUE4Parse index-form guard `!PKG_FilterEditorOnly &&
+    /// SoftObjectPaths.Length > 0`: `true` when this package's
+    /// `FSoftObjectPath` properties serialize their leading slot as an
+    /// `i32` index into the summary's `SoftObjectPaths` list rather than
+    /// inline (UE5 >= 1008). Consumed by `read_soft_path_payload` via
+    /// [`AssetContext::soft_object_paths_indexed`](crate::asset::AssetContext),
+    /// which documents why this is `false` for every well-formed asset. #638.
     #[must_use]
     pub(crate) fn soft_object_paths_indexed(&self) -> bool {
         (self.package_flags & PKG_FILTER_EDITOR_ONLY) == 0

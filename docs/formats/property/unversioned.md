@@ -134,7 +134,7 @@ or deprecated properties that occupy schema slots but are absent from
 | 9 (`StructProperty`) | `Struct` | nested `FUnversionedHeader` + bodies for the struct's schema |
 | 10 (`StrProperty`) | `Str` | [`FString`](../primitive/fstring.md) (4-byte length prefix + UTF-8/UTF-16 bytes) |
 | 11 (`TextProperty`) | `Text` | `FText` (see [`text.md`](text.md)) |
-| 17 (`SoftObjectProperty`) | `SoftObjectPath` | [`FName`](../primitive/fname.md) (8 bytes) + [`FString`](../primitive/fstring.md) |
+| 17 (`SoftObjectProperty`) | `SoftObjectPath` | [`FName`](../primitive/fname.md) (8 bytes) + [`FString`](../primitive/fstring.md), or `FTopLevelAssetPath` (2 FNames, 16 bytes) + `FString` at UE5 ≥ 1007 (see [`primitives.md`](primitives.md)) |
 | 18 (`UInt64Property`) | `UInt64` | 8 bytes LE |
 | 19 (`UInt32Property`) | `UInt32` | 4 bytes LE |
 | 20 (`UInt16Property`) | `UInt16` | 2 bytes LE |

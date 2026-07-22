@@ -303,8 +303,17 @@ pub(super) fn read_soft_path_payload<R: Read>(
             format!("{package}.{asset}")
         }
     } else {
-        super::read_fname_pair(reader, ctx, asset_path, AssetWireField::SoftObjectAssetPath)?
-            .to_string()
+        // UE4 / UE5 < 1007: a single `FName AssetPathName`. Apply the
+        // same `AssetPathName.IsNone → ""` rule `FSoftObjectPath::ToString`
+        // uses uniformly, so a null reference decodes to "" here exactly
+        // as the >= 1007 None-package case does — the two branches agree.
+        let name =
+            super::read_fname_pair(reader, ctx, asset_path, AssetWireField::SoftObjectAssetPath)?;
+        if name.as_ref() == "None" {
+            String::new()
+        } else {
+            name.to_string()
+        }
     };
     // FString `SubPathString`. On very recent engine builds this slot is
     // an `FUtf8String` (gated on a custom FFortniteMainBranchObjectVersion,
@@ -1290,6 +1299,31 @@ mod tests {
             val,
             PropertyValue::SoftClassPath {
                 asset_path: "/Game/BP/HeroClass.HeroClass_C".to_string(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
+    /// A null single-FName soft path (`< 1007`, FName index 0 = `None`)
+    /// yields an empty `asset_path`, matching `FSoftObjectPath::ToString`'s
+    /// uniform `AssetPathName.IsNone → ""` rule — the same result the
+    /// >= 1007 None-package case produces, so the two branches agree.
+    #[test]
+    fn soft_object_property_pre_1007_none_maps_to_empty() {
+        let tag = make_tag("SoftObjectProperty", 13);
+        let ctx = make_ctx(&["None"]);
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&0i32.to_le_bytes()); // FName index 0 = None
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes()); // empty sub_path
+        buf.push(b'\0');
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            val,
+            PropertyValue::SoftObjectPath {
+                asset_path: String::new(),
                 sub_path: String::new(),
             }
         );
