@@ -151,6 +151,15 @@ impl FVector4 {
         verify_at_end(reader, expected_end, "FVector4", asset_path)?;
         Ok(Self { x, y, z, w })
     }
+
+    /// Wire byte size of an `FVector4` under `ctx`'s LWC width:
+    /// 16 (UE4 f32×4) or 32 (UE5 LWC f64×4). Sibling of
+    /// [`FVector::wire_size`]; used by the unversioned typed-struct
+    /// dispatch to bound the natural-width read (#640).
+    #[must_use]
+    pub(crate) fn wire_size(ctx: &AssetContext) -> u64 {
+        4 * crate::asset::structs::lwc_component_width(ctx)
+    }
 }
 
 /// Registry-compatible decoder shim. The function pointer stored
@@ -217,6 +226,15 @@ mod tests {
         assert_eq!(
             FVector2D::wire_size(&make_ctx_with_version(510, Some(1004))),
             16
+        );
+    }
+
+    #[test]
+    fn fvector4_wire_size_matches_lwc_width() {
+        assert_eq!(FVector4::wire_size(&make_ctx_with_version(510, None)), 16);
+        assert_eq!(
+            FVector4::wire_size(&make_ctx_with_version(510, Some(1004))),
+            32
         );
     }
 

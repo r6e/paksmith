@@ -64,6 +64,15 @@ impl FBox {
         verify_at_end(reader, expected_end, "FBox", asset_path)?;
         Ok(Self { min, max, is_valid })
     }
+
+    /// Wire byte size of an `FBox` under `ctx`'s LWC width: two
+    /// nested `FVector`s plus the `is_valid` u8 — 25 (UE4) or 49
+    /// (UE5 LWC). Used by the unversioned typed-struct dispatch to
+    /// bound the natural-width read (#640).
+    #[must_use]
+    pub(crate) fn wire_size(ctx: &AssetContext) -> u64 {
+        2 * FVector::wire_size(ctx) + 1
+    }
 }
 
 /// Axis-aligned 2D bounding box (UV-space): `min` + `max` corners +
@@ -104,6 +113,15 @@ impl FBox2D {
         verify_at_end(reader, expected_end, "FBox2D", asset_path)?;
         Ok(Self { min, max, is_valid })
     }
+
+    /// Wire byte size of an `FBox2D` under `ctx`'s LWC width: two
+    /// nested `FVector2D`s plus the `is_valid` u8 — 17 (UE4) or 33
+    /// (UE5 LWC). Used by the unversioned typed-struct dispatch to
+    /// bound the natural-width read (#640).
+    #[must_use]
+    pub(crate) fn wire_size(ctx: &AssetContext) -> u64 {
+        2 * FVector2D::wire_size(ctx) + 1
+    }
 }
 
 /// Registry-compatible decoder shim for [`FBox`].
@@ -136,6 +154,17 @@ mod tests {
     use crate::asset::structs::test_utils::{f32_bytes, f64_bytes};
     use crate::error::{AssetParseFault, AssetWireField};
     use std::io::Cursor;
+
+    #[test]
+    fn box_wire_sizes_match_lwc_width() {
+        // FBox = 2 × FVector + is_valid u8; FBox2D = 2 × FVector2D + u8.
+        let ue4 = make_ctx_with_version(510, None);
+        let lwc = make_ctx_with_version(510, Some(1004));
+        assert_eq!(FBox::wire_size(&ue4), 25);
+        assert_eq!(FBox::wire_size(&lwc), 49);
+        assert_eq!(FBox2D::wire_size(&ue4), 17);
+        assert_eq!(FBox2D::wire_size(&lwc), 33);
+    }
 
     /// Build a UE4 `FBox` wire payload: min f32×3, max f32×3, u8.
     fn fbox_ue4_bytes(min: [f32; 3], max: [f32; 3], is_valid: u8) -> Vec<u8> {

@@ -179,20 +179,43 @@ pub(crate) type DecoderFn = fn(
     &str,
 ) -> crate::Result<TypedStructValue>;
 
-/// Look up the typed-struct decoder for `struct_name`. Returns
-/// `None` if the struct isn't in the registry (caller falls back
-/// to Phase 2g's tagged-property iteration).
+/// Function-pointer signature for a typed struct's wire-size
+/// computation: the exact byte count its decoder consumes under
+/// `ctx`'s version (LWC width for the vector family; fixed for
+/// `FColor` / `FLinearColor`). Paired with [`DecoderFn`] in
+/// [`RegisteredStruct`] so the unversioned dispatch — which has no
+/// per-property `tag.size` — can compute the decoder's
+/// `expected_end` as `position + wire_size(ctx)` (#640).
+pub(crate) type WireSizeFn = fn(&crate::asset::AssetContext) -> u64;
+
+/// One registry entry: the decoder plus its version-deterministic
+/// wire size. Keeping both in a single entry (rather than a parallel
+/// name → size table) makes decoder/size drift structurally
+/// impossible — a registered struct always carries both. #640.
+#[derive(Clone, Copy)]
+pub(crate) struct RegisteredStruct {
+    /// The custom-binary decoder (verifies against `expected_end`).
+    pub(crate) decoder: DecoderFn,
+    /// The exact byte count `decoder` consumes under a given `ctx`.
+    pub(crate) wire_size: WireSizeFn,
+}
+
+/// Look up the typed-struct registry entry for `struct_name`.
+/// Returns `None` if the struct isn't in the registry (caller falls
+/// back to Phase 2g's tagged-property iteration — or, on the
+/// unversioned path, to the usmap property-list recursion).
 ///
 /// The lookup key is the wire-format struct name from
 /// `FPropertyTag::struct_name`, which omits the leading `F` (e.g.
 /// `"Vector"`, NOT `"FVector"`).
 ///
-/// `pub(crate)` because the registry is an implementation detail
-/// of the property dispatcher in `containers.rs::read_struct_property`;
-/// downstream sub-phases (3g/3h) call the per-struct `read_f*`
-/// decoders directly, not through the registry.
+/// `pub(crate)` because the registry is an implementation detail of
+/// the property dispatchers (`containers.rs::read_struct_property`
+/// and the unversioned `MT::Struct` arm); downstream sub-phases
+/// (3g/3h) call the per-struct `read_f*` decoders directly, not
+/// through the registry.
 #[must_use]
-pub(crate) fn lookup(struct_name: &str) -> Option<DecoderFn> {
+pub(crate) fn lookup(struct_name: &str) -> Option<RegisteredStruct> {
     registry().get(struct_name).copied()
 }
 
@@ -396,27 +419,46 @@ pub(super) mod test_utils {
     }
 }
 
-fn registry() -> &'static std::collections::HashMap<&'static str, DecoderFn> {
-    static TABLE: std::sync::OnceLock<std::collections::HashMap<&'static str, DecoderFn>> =
+fn registry() -> &'static std::collections::HashMap<&'static str, RegisteredStruct> {
+    static TABLE: std::sync::OnceLock<std::collections::HashMap<&'static str, RegisteredStruct>> =
         std::sync::OnceLock::new();
     TABLE.get_or_init(|| {
-        let mut table: std::collections::HashMap<&'static str, DecoderFn> =
+        let mut table: std::collections::HashMap<&'static str, RegisteredStruct> =
             std::collections::HashMap::new();
+        let mut reg = |name: &'static str, decoder: DecoderFn, wire_size: WireSizeFn| {
+            let _ = table.insert(name, RegisteredStruct { decoder, wire_size });
+        };
         // Phase 3c Task 2:
-        let _ = table.insert("Vector", vector::read_fvector);
+        reg("Vector", vector::read_fvector, vector::FVector::wire_size);
         // Phase 3c Task 3:
-        let _ = table.insert("Vector2D", vector::read_fvector2d);
-        let _ = table.insert("Vector4", vector::read_fvector4);
+        reg(
+            "Vector2D",
+            vector::read_fvector2d,
+            vector::FVector2D::wire_size,
+        );
+        reg(
+            "Vector4",
+            vector::read_fvector4,
+            vector::FVector4::wire_size,
+        );
         // Phase 3c Task 4:
-        let _ = table.insert("Rotator", rotator::read_frotator);
+        reg(
+            "Rotator",
+            rotator::read_frotator,
+            rotator::FRotator::wire_size,
+        );
         // Phase 3c Task 5:
-        let _ = table.insert("Quat", quat::read_fquat);
+        reg("Quat", quat::read_fquat, quat::FQuat::wire_size);
         // Phase 3c Task 6:
-        let _ = table.insert("Color", color::read_fcolor);
-        let _ = table.insert("LinearColor", color::read_flinearcolor);
+        reg("Color", color::read_fcolor, color::FColor::wire_size);
+        reg(
+            "LinearColor",
+            color::read_flinearcolor,
+            color::FLinearColor::wire_size,
+        );
         // Phase 3c Task 7:
-        let _ = table.insert("Box", box_::read_fbox);
-        let _ = table.insert("Box2D", box_::read_fbox2d);
+        reg("Box", box_::read_fbox, box_::FBox::wire_size);
+        reg("Box2D", box_::read_fbox2d, box_::FBox2D::wire_size);
         // Phase 3c Task 8: `FTransform` ships as a direct building
         // block but registers NOTHING here — `"Transform"` is
         // tagged-serialized and must fall through to Phase 2g. Full

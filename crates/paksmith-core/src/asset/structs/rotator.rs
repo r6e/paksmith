@@ -51,6 +51,14 @@ impl FRotator {
         verify_at_end(reader, expected_end, "FRotator", asset_path)?;
         Ok(Self { pitch, yaw, roll })
     }
+
+    /// Wire byte size of an `FRotator` under `ctx`'s LWC width:
+    /// 12 (UE4 f32×3) or 24 (UE5 LWC f64×3). Used by the unversioned
+    /// typed-struct dispatch to bound the natural-width read (#640).
+    #[must_use]
+    pub(crate) fn wire_size(ctx: &AssetContext) -> u64 {
+        3 * crate::asset::structs::lwc_component_width(ctx)
+    }
 }
 
 /// Registry-compatible decoder shim. The function pointer stored
@@ -74,6 +82,15 @@ mod tests {
     use crate::asset::structs::test_utils::{f32_bytes, f64_bytes};
     use crate::error::{AssetParseFault, AssetWireField};
     use std::io::Cursor;
+
+    #[test]
+    fn frotator_wire_size_matches_lwc_width() {
+        assert_eq!(FRotator::wire_size(&make_ctx_with_version(510, None)), 12);
+        assert_eq!(
+            FRotator::wire_size(&make_ctx_with_version(510, Some(1004))),
+            24
+        );
+    }
 
     #[test]
     fn ue4_rotator_decodes_12_bytes() {
