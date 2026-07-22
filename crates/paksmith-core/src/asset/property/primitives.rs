@@ -395,6 +395,7 @@ pub fn read_primitive_value<R: Read + Seek>(
     reader: &mut R,
     ctx: &AssetContext,
     asset_path: &str,
+    depth: usize,
 ) -> crate::Result<Option<PropertyValue>> {
     // Arm order: high-frequency property types first (Int / Float /
     // Bool / Str / Name / Object) so the branch-predicted
@@ -483,7 +484,7 @@ pub fn read_primitive_value<R: Read + Seek>(
                 clippy::cast_sign_loss,
                 reason = "tag.size has been rejected if < 0 by read_tag; safe widening"
             )]
-            let text = read_ftext(reader, ctx, asset_path, tag.size as u64)?;
+            let text = read_ftext(reader, ctx, asset_path, tag.size as u64, depth)?;
             PropertyValue::Text(text)
         }
 
@@ -775,7 +776,7 @@ mod tests {
     fn bool_true() {
         let tag = make_bool_tag(true);
         let ctx = make_ctx(&["None"]);
-        let val = read_primitive_value(&tag, &mut Cursor::new(&[][..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&[][..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::Bool(true));
@@ -785,7 +786,7 @@ mod tests {
     fn bool_false() {
         let tag = make_bool_tag(false);
         let ctx = make_ctx(&["None"]);
-        let val = read_primitive_value(&tag, &mut Cursor::new(&[][..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&[][..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::Bool(false));
@@ -796,7 +797,7 @@ mod tests {
         let tag = make_tag("ByteProperty", 1);
         let ctx = make_ctx(&["None"]);
         let buf = [42u8];
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::Byte(42));
@@ -809,7 +810,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes());
         buf.extend_from_slice(&0i32.to_le_bytes());
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -826,7 +827,7 @@ mod tests {
         let tag = make_tag("Int8Property", 1);
         let ctx = make_ctx(&["None"]);
         let buf = [0xFEu8];
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::Int8(-2i8));
@@ -837,7 +838,7 @@ mod tests {
         let tag = make_tag("Int16Property", 2);
         let ctx = make_ctx(&["None"]);
         let buf = (-1000i16).to_le_bytes();
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::Int16(-1000));
@@ -848,7 +849,7 @@ mod tests {
         let tag = make_tag("IntProperty", 4);
         let ctx = make_ctx(&["None"]);
         let buf = 42i32.to_le_bytes();
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::Int(42));
@@ -859,7 +860,7 @@ mod tests {
         let tag = make_tag("Int64Property", 8);
         let ctx = make_ctx(&["None"]);
         let buf = i64::MAX.to_le_bytes();
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::Int64(i64::MAX));
@@ -870,7 +871,7 @@ mod tests {
         let tag = make_tag("UInt16Property", 2);
         let ctx = make_ctx(&["None"]);
         let buf = 60_000u16.to_le_bytes();
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::UInt16(60_000));
@@ -881,7 +882,7 @@ mod tests {
         let tag = make_tag("UInt32Property", 4);
         let ctx = make_ctx(&["None"]);
         let buf = 0xDEAD_BEEFu32.to_le_bytes();
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::UInt32(0xDEAD_BEEF));
@@ -892,7 +893,7 @@ mod tests {
         let tag = make_tag("UInt64Property", 8);
         let ctx = make_ctx(&["None"]);
         let buf = u64::MAX.to_le_bytes();
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::UInt64(u64::MAX));
@@ -903,7 +904,7 @@ mod tests {
         let tag = make_tag("FloatProperty", 4);
         let ctx = make_ctx(&["None"]);
         let buf = 1500.0f32.to_le_bytes();
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::Float(1500.0));
@@ -914,7 +915,7 @@ mod tests {
         let tag = make_tag("DoubleProperty", 8);
         let ctx = make_ctx(&["None"]);
         let buf = 12345.6789f64.to_le_bytes();
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::Double(12345.6789));
@@ -927,7 +928,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&6i32.to_le_bytes());
         buf.extend_from_slice(b"Hello\0");
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::Str("Hello".to_string()));
@@ -940,7 +941,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes());
         buf.extend_from_slice(&0i32.to_le_bytes());
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(val, PropertyValue::Name(Arc::from("MyName")));
@@ -953,7 +954,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes());
         buf.extend_from_slice(&0i32.to_le_bytes());
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -969,7 +970,7 @@ mod tests {
     fn unknown_type_returns_none() {
         let tag = make_tag("ArrayProperty", 42);
         let ctx = make_ctx(&["None"]);
-        let val = read_primitive_value(&tag, &mut Cursor::new(&[][..]), &ctx, "x").unwrap();
+        let val = read_primitive_value(&tag, &mut Cursor::new(&[][..]), &ctx, "x", 0).unwrap();
         assert!(val.is_none());
     }
 
@@ -1091,6 +1092,36 @@ mod tests {
         );
     }
 
+    /// `TextProperty` dispatches through `read_primitive_value` to
+    /// `read_ftext` and yields a decoded `PropertyValue::Text` — pins the
+    /// match arm itself (a deleted arm would fall through to `Ok(None)`
+    /// and lossy-skip every TextProperty). #641.
+    #[test]
+    fn text_property_value_decodes_base_history() {
+        use crate::asset::property::text::FTextHistory;
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        buf.push(0u8); // Base
+        for s in ["NS", "K", "Hi"] {
+            let bytes = s.as_bytes();
+            buf.extend_from_slice(&i32::try_from(bytes.len() + 1).unwrap().to_le_bytes());
+            buf.extend_from_slice(bytes);
+            buf.push(0u8);
+        }
+        let tag = make_tag("TextProperty", i32::try_from(buf.len()).unwrap());
+        let ctx = make_ctx(&["None"]);
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0)
+            .unwrap()
+            .unwrap();
+        match val {
+            PropertyValue::Text(t) => assert!(matches!(
+                t.history,
+                FTextHistory::Base { ref source_string, .. } if source_string == "Hi"
+            )),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
     #[test]
     fn soft_object_property_value() {
         let tag = make_tag("SoftObjectProperty", 13);
@@ -1101,7 +1132,7 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&1i32.to_le_bytes());
         buf.push(b'\0');
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1123,7 +1154,7 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&1i32.to_le_bytes());
         buf.push(b'\0');
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1139,7 +1170,7 @@ mod tests {
     fn object_property_null_index() {
         let tag = make_tag("ObjectProperty", 4);
         let ctx = make_ctx(&["None"]);
-        let val = read_primitive_value(&tag, &mut Cursor::new(&0i32.to_le_bytes()), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&0i32.to_le_bytes()), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1156,9 +1187,10 @@ mod tests {
         let tag = make_tag("ObjectProperty", 4);
         let ctx = make_ctx_with_import("/Game/Mesh.Mesh");
         // wire i32 -1 -> Import(0); the helper populates imports[0].object_name = 3 ("/Game/Mesh.Mesh").
-        let val = read_primitive_value(&tag, &mut Cursor::new(&(-1i32).to_le_bytes()), &ctx, "x")
-            .unwrap()
-            .unwrap();
+        let val =
+            read_primitive_value(&tag, &mut Cursor::new(&(-1i32).to_le_bytes()), &ctx, "x", 0)
+                .unwrap()
+                .unwrap();
         assert_eq!(
             val,
             PropertyValue::Object {
@@ -1173,7 +1205,7 @@ mod tests {
         let tag = make_tag("ObjectProperty", 4);
         let ctx = make_test_ctx_with_export("Hero");
         // wire i32 1 -> Export(0); the helper populates exports[0].object_name = 1 ("Hero").
-        let val = read_primitive_value(&tag, &mut Cursor::new(&1i32.to_le_bytes()), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&1i32.to_le_bytes()), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1202,7 +1234,7 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes()); // AssetName number
         buf.extend_from_slice(&1i32.to_le_bytes()); // sub_path FString len (empty)
         buf.push(b'\0');
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1230,7 +1262,7 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&1i32.to_le_bytes()); // empty sub_path
         buf.push(b'\0');
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1258,7 +1290,7 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&1i32.to_le_bytes()); // empty sub_path
         buf.push(b'\0');
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1285,7 +1317,7 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&4i32.to_le_bytes()); // sub_path len = 4 ("sub\0")
         buf.extend_from_slice(b"sub\0");
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1310,7 +1342,7 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&1i32.to_le_bytes());
         buf.push(b'\0');
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1337,7 +1369,7 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&1i32.to_le_bytes());
         buf.push(b'\0');
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1363,7 +1395,7 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&1i32.to_le_bytes()); // empty sub_path
         buf.push(b'\0');
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1387,7 +1419,7 @@ mod tests {
         ctx.version.file_version_ue5 = Some(1008);
         ctx.soft_object_paths_indexed = true;
         let buf = vec![0u8; 16];
-        let err = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x").unwrap_err();
+        let err = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0).unwrap_err();
         assert!(matches!(
             err,
             crate::PaksmithError::AssetParse {
@@ -1410,7 +1442,7 @@ mod tests {
         let mut ctx = make_ctx(&["None", "/Game/Data/Hero.Hero"]);
         ctx.version.file_version_ue4 = 510; // below ADDED_SOFT_OBJECT_PATH (514)
         let buf = vec![0u8; 13];
-        let err = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x").unwrap_err();
+        let err = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0).unwrap_err();
         assert!(
             matches!(err, crate::PaksmithError::UnsupportedFeature { .. }),
             "expected UnsupportedFeature for pre-514 soft path, got {err:?}"
@@ -1429,7 +1461,7 @@ mod tests {
         ctx.version.file_version_ue4 = 510; // below 514 ...
         ctx.version.file_version_ue5 = Some(1007); // ... but a UE5 version is set (crafted)
         let buf = vec![0u8; 13];
-        let err = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x").unwrap_err();
+        let err = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0).unwrap_err();
         assert!(
             matches!(err, crate::PaksmithError::UnsupportedFeature { .. }),
             "pre-514 guard must fire regardless of file_version_ue5, got {err:?}"
@@ -1449,7 +1481,7 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&1i32.to_le_bytes()); // empty sub_path
         buf.push(b'\0');
-        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0)
             .unwrap()
             .unwrap();
         assert_eq!(

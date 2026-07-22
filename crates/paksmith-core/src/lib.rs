@@ -87,7 +87,7 @@ pub type Result<T> = std::result::Result<T, PaksmithError>;
 // consumers — serde rejects unknown tag discriminants by default.
 // Pin against specific paksmith versions if you rely on bidirectional
 // JSON round-trips of stored content.
-pub use asset::property::text::{FText, FTextHistory};
+pub use asset::property::text::{FText, FTextFormatArg, FTextHistory, FTextNamedArg};
 pub use asset::property::{MapEntry, Property, PropertyValue};
 pub use asset::structs::TypedStructValue;
 pub use asset::{

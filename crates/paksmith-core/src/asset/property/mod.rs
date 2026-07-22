@@ -239,7 +239,7 @@ pub fn read_properties<R: Read + Seek>(
         }
 
         let value = if let Some(v) =
-            primitives::read_primitive_value(&tag, reader, ctx, asset_path)?
+            primitives::read_primitive_value(&tag, reader, ctx, asset_path, depth)?
         {
             v
         } else if let Some(v) =
