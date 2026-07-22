@@ -2878,9 +2878,13 @@ pub enum AssetParseFault {
     /// is a deprecated, inert flag with no codec to decode. Oodle
     /// ships in Phase 8 via the runtime-SDK loader.
     UnsupportedBulkCompression {
-        /// Compression method name ("Oodle", "LZO", "BitWindow",
-        /// etc.). `&'static str` rather than an enum because the
-        /// set is small and fixed at these three.
+        /// Compression method name — one of the fixed `&'static str`
+        /// labels the two producer sites emit: `"LZO"` / `"BitWindow"`
+        /// (the resolver's fail-closed rejection) and `"None"` /
+        /// `"Oodle"` / `"Gzip"` / `"LZ4"` (the v2 `FCompressedChunkInfo`
+        /// framing's inline format byte in `decompress_zlib`).
+        /// `&'static str` rather than an enum because every label is
+        /// compile-time known and used only for `Display`.
         method: &'static str,
     },
     /// Failure decoding a compressed bulk-data payload (chunked
