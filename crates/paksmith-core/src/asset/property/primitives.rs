@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use crate::asset::AssetContext;
 use crate::asset::package_index::PackageIndex;
 use crate::asset::read_asset_fstring;
-use crate::asset::version::VER_UE5_FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES;
+use crate::asset::version::{
+    VER_UE4_ADDED_SOFT_OBJECT_PATH, VER_UE5_FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES,
+};
 use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
 
 use super::tag::PropertyTag;
@@ -237,20 +239,28 @@ pub enum PropertyValue {
 /// into the right `PropertyValue` variant.
 ///
 /// Wire shape by version (`asset_path` slot + `FString sub_path`):
-/// - UE4 / UE5 < 1007: a single `FName` (`FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES`).
-/// - UE5 >= 1007: an `FTopLevelAssetPath` — `FName PackageName` +
-///   `FName AssetName`, reconstructed to the same `Package.Asset` string
-///   the pre-1007 single-FName form produced (see the join below).
+/// - UE4 >= 514 / UE5 < 1007: a single `FName`.
+/// - UE5 >= 1007 (`FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES`): an
+///   `FTopLevelAssetPath` — `FName PackageName` + `FName AssetName`,
+///   reconstructed to the same `Package.Asset` string the pre-1007
+///   single-FName form produced (see the join below).
 ///
-/// The UE5 >= 1008 index-serialized form (leading `i32` index into the
-/// summary's `SoftObjectPaths` list) is fail-closed via
-/// `ctx.soft_object_paths_indexed` — it is unreachable for any
-/// well-formed asset (see [`AssetContext::soft_object_paths_indexed`]).
+/// Two layouts are fail-closed (paksmith rejects rather than mis-decode):
+/// - **UE4 < 514** (`ADDED_SOFT_OBJECT_PATH`): the payload is a single
+///   `FString` (CUE4Parse splits it on the last `.`), a lossy,
+///   version-inconsistent decomposition with no in-scope oracle fixture —
+///   [`PaksmithError::UnsupportedFeature`]. #694.
+/// - **UE5 >= 1008 index form** (leading `i32` index into the summary's
+///   `SoftObjectPaths` list) — via `ctx.soft_object_paths_indexed`,
+///   unreachable for any well-formed asset (see
+///   [`AssetContext::soft_object_paths_indexed`]).
 ///
 /// `pub(super)` so `containers.rs` can reuse this for element reads.
 ///
 /// # Errors
 ///
+/// - [`PaksmithError::UnsupportedFeature`] for the UE4 < 514 single-FString
+///   layout.
 /// - [`AssetParseFault::UnsupportedSoftObjectPathLayout`] when the asset
 ///   uses the index-serialized form (`ctx.soft_object_paths_indexed`).
 /// - Any error surfaced by [`super::read_fname_pair`] for either FName.
@@ -258,6 +268,7 @@ pub enum PropertyValue {
 ///   `sub_path` FString.
 ///
 /// [`AssetContext::soft_object_paths_indexed`]: crate::asset::AssetContext
+/// [`PaksmithError::UnsupportedFeature`]: crate::PaksmithError::UnsupportedFeature
 pub(super) fn read_soft_path_payload<R: Read>(
     reader: &mut R,
     ctx: &AssetContext,
@@ -278,6 +289,31 @@ pub(super) fn read_soft_path_payload<R: Read>(
             fault: AssetParseFault::UnsupportedSoftObjectPathLayout {
                 ue5_version: ctx.version.file_version_ue5.unwrap_or_default(),
             },
+        });
+    }
+
+    // UE4 < 514 (`ADDED_SOFT_OBJECT_PATH`): the pre-514 `FSoftObjectPath`
+    // is a single `FString` (CUE4Parse splits it on the last `.` into
+    // asset-path / sub-path), not the `FName + FString` shape below. That
+    // split is a lossy, version-inconsistent decomposition (the same
+    // reference decodes to a different `asset_path` than the 514+ form)
+    // and no in-scope fixture anchors it, so paksmith fails closed rather
+    // than mis-read the single FString as an FName. `file_version_ue4` is
+    // gated ALONE (not `&& ue5.is_none()`): a well-formed asset never has
+    // `ue4 < 514` — real UE4 packages with a soft path are >= 514, and UE5
+    // packages carry `ue4 == 522` — so this fires only for a genuine
+    // pre-514 UE4 asset or a version-inconsistent crafted one (e.g.
+    // `ue4=510` with `ue5=Some(_)`, which the summary reads as independent
+    // fields), both of which must fail closed rather than mis-decode. #694.
+    if ctx.version.file_version_ue4 < VER_UE4_ADDED_SOFT_OBJECT_PATH {
+        return Err(PaksmithError::UnsupportedFeature {
+            context: format!(
+                "FSoftObjectPath pre-514 single-FString layout at \
+                 file_version_ue4={} ({asset_path}); soft paths require \
+                 file_version_ue4 >= {VER_UE4_ADDED_SOFT_OBJECT_PATH} \
+                 (ADDED_SOFT_OBJECT_PATH)",
+                ctx.version.file_version_ue4
+            ),
         });
     }
 
@@ -303,7 +339,8 @@ pub(super) fn read_soft_path_payload<R: Read>(
             format!("{package}.{asset}")
         }
     } else {
-        // UE4 / UE5 < 1007: a single `FName AssetPathName`. Apply the
+        // UE4 >= 514 / UE5 < 1007: a single `FName AssetPathName` (the
+        // pre-514 single-FString layout is fail-closed above). Apply the
         // same `AssetPathName.IsNone → ""` rule `FSoftObjectPath::ToString`
         // uses uniformly, so a null reference decodes to "" here exactly
         // as the >= 1007 None-package case does — the two branches agree.
@@ -1057,7 +1094,8 @@ mod tests {
     #[test]
     fn soft_object_property_value() {
         let tag = make_tag("SoftObjectProperty", 13);
-        let ctx = make_ctx(&["None", "/Game/Data/Hero.Hero"]);
+        let mut ctx = make_ctx(&["None", "/Game/Data/Hero.Hero"]);
+        ctx.version.file_version_ue4 = 522; // UE4.27, >= ADDED_SOFT_OBJECT_PATH
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes());
         buf.extend_from_slice(&0i32.to_le_bytes());
@@ -1078,7 +1116,8 @@ mod tests {
     #[test]
     fn soft_class_property_value() {
         let tag = make_tag("SoftClassProperty", 13);
-        let ctx = make_ctx(&["None", "/Game/BP/HeroClass.HeroClass_C"]);
+        let mut ctx = make_ctx(&["None", "/Game/BP/HeroClass.HeroClass_C"]);
+        ctx.version.file_version_ue4 = 522; // UE4.27, >= ADDED_SOFT_OBJECT_PATH
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes());
         buf.extend_from_slice(&0i32.to_le_bytes());
@@ -1154,6 +1193,7 @@ mod tests {
     fn soft_object_property_ue5_1007_toplevel_asset_path() {
         let tag = make_tag("SoftObjectProperty", 21);
         let mut ctx = make_ctx(&["None", "/Game/Data/Hero", "Hero"]);
+        ctx.version.file_version_ue4 = 522; // UE5 packages carry ue4 == 522
         ctx.version.file_version_ue5 = Some(1007);
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes()); // PackageName index
@@ -1181,6 +1221,7 @@ mod tests {
     fn soft_object_property_ue5_1007_empty_asset_name() {
         let tag = make_tag("SoftObjectProperty", 21);
         let mut ctx = make_ctx(&["None", "/Game/Data/Hero"]);
+        ctx.version.file_version_ue4 = 522; // UE5 packages carry ue4 == 522
         ctx.version.file_version_ue5 = Some(1007);
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes()); // PackageName index 1
@@ -1208,6 +1249,7 @@ mod tests {
     fn soft_object_property_ue5_1007_none_package_name() {
         let tag = make_tag("SoftObjectProperty", 21);
         let mut ctx = make_ctx(&["None", "Hero"]);
+        ctx.version.file_version_ue4 = 522; // UE5 packages carry ue4 == 522
         ctx.version.file_version_ue5 = Some(1007);
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(&0i32.to_le_bytes()); // PackageName index 0 = None
@@ -1234,6 +1276,7 @@ mod tests {
     fn soft_object_property_ue5_1007_nonempty_subpath() {
         let tag = make_tag("SoftObjectProperty", 24);
         let mut ctx = make_ctx(&["None", "/Game/Data/Hero", "Hero"]);
+        ctx.version.file_version_ue4 = 522; // UE5 packages carry ue4 == 522
         ctx.version.file_version_ue5 = Some(1007);
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes());
@@ -1260,6 +1303,7 @@ mod tests {
     fn soft_object_property_ue5_1006_boundary_single_fname() {
         let tag = make_tag("SoftObjectProperty", 13);
         let mut ctx = make_ctx(&["None", "/Game/Data/Hero.Hero"]);
+        ctx.version.file_version_ue4 = 522; // UE5 packages carry ue4 == 522
         ctx.version.file_version_ue5 = Some(1006);
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes());
@@ -1284,6 +1328,7 @@ mod tests {
     fn soft_class_property_ue5_1007() {
         let tag = make_tag("SoftClassProperty", 21);
         let mut ctx = make_ctx(&["None", "/Game/BP/HeroClass", "HeroClass_C"]);
+        ctx.version.file_version_ue4 = 522; // UE5 packages carry ue4 == 522
         ctx.version.file_version_ue5 = Some(1007);
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes());
@@ -1311,7 +1356,8 @@ mod tests {
     #[test]
     fn soft_object_property_pre_1007_none_maps_to_empty() {
         let tag = make_tag("SoftObjectProperty", 13);
-        let ctx = make_ctx(&["None"]);
+        let mut ctx = make_ctx(&["None"]);
+        ctx.version.file_version_ue4 = 522; // UE4.27, >= ADDED_SOFT_OBJECT_PATH
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(&0i32.to_le_bytes()); // FName index 0 = None
         buf.extend_from_slice(&0i32.to_le_bytes());
@@ -1351,5 +1397,67 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// UE4 < 514 (`ADDED_SOFT_OBJECT_PATH`): `FSoftObjectPath` is a single
+    /// `FString` that CUE4Parse splits on the last `.` — a lossy,
+    /// version-inconsistent decomposition with no in-scope oracle fixture.
+    /// paksmith fails closed with `UnsupportedFeature` rather than
+    /// mis-reading the single FString as FName + FString. #694.
+    #[test]
+    fn soft_object_property_pre_514_unsupported() {
+        let tag = make_tag("SoftObjectProperty", 13);
+        let mut ctx = make_ctx(&["None", "/Game/Data/Hero.Hero"]);
+        ctx.version.file_version_ue4 = 510; // below ADDED_SOFT_OBJECT_PATH (514)
+        let buf = vec![0u8; 13];
+        let err = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x").unwrap_err();
+        assert!(
+            matches!(err, crate::PaksmithError::UnsupportedFeature { .. }),
+            "expected UnsupportedFeature for pre-514 soft path, got {err:?}"
+        );
+    }
+
+    /// The pre-514 guard is gated on `file_version_ue4` ALONE, not
+    /// `&& ue5.is_none()`: a version-inconsistent crafted asset (`ue4 < 514`
+    /// with a UE5 version set — the summary reads the two as independent
+    /// fields) must STILL fail closed, not fall through to the single-FName
+    /// read and mis-decode the pre-514 single-FString wire shape. #694.
+    #[test]
+    fn soft_object_property_pre_514_version_inconsistent_rejected() {
+        let tag = make_tag("SoftObjectProperty", 13);
+        let mut ctx = make_ctx(&["None", "/Game/Data/Hero.Hero"]);
+        ctx.version.file_version_ue4 = 510; // below 514 ...
+        ctx.version.file_version_ue5 = Some(1007); // ... but a UE5 version is set (crafted)
+        let buf = vec![0u8; 13];
+        let err = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x").unwrap_err();
+        assert!(
+            matches!(err, crate::PaksmithError::UnsupportedFeature { .. }),
+            "pre-514 guard must fire regardless of file_version_ue5, got {err:?}"
+        );
+    }
+
+    /// Boundary: at exactly UE4 514 (`ADDED_SOFT_OBJECT_PATH`) the
+    /// single-`FName` form applies — NOT the pre-514 fail-close. Pins the
+    /// guard's `< 514` against a `<= 514` off-by-one. #694.
+    #[test]
+    fn soft_object_property_ue4_514_boundary_reads_single_fname() {
+        let tag = make_tag("SoftObjectProperty", 13);
+        let mut ctx = make_ctx(&["None", "/Game/Data/Hero.Hero"]);
+        ctx.version.file_version_ue4 = 514; // exactly ADDED_SOFT_OBJECT_PATH
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&1i32.to_le_bytes()); // FName index 1
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes()); // empty sub_path
+        buf.push(b'\0');
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            val,
+            PropertyValue::SoftObjectPath {
+                asset_path: "/Game/Data/Hero.Hero".to_string(),
+                sub_path: String::new(),
+            }
+        );
     }
 }

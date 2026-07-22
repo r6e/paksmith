@@ -910,6 +910,7 @@ mod tests {
         bytes.push(0u8);
 
         let mut ctx = make_ctx(&["None", "/Game/Hero", "Hero"]);
+        ctx.version.file_version_ue4 = 522; // UE5 packages carry ue4 == 522
         ctx.version.file_version_ue5 = Some(1007);
         let mut cur = Cursor::new(bytes.as_slice());
         let props = read_unversioned_properties(&mut cur, "Ref", &usmap, &ctx, "test", 0)

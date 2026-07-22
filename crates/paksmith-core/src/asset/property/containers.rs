@@ -2042,7 +2042,8 @@ mod tests {
 
     #[test]
     fn element_soft_object_path() {
-        let ctx = make_ctx(&["None", "/Game/Hero.Hero"]);
+        let mut ctx = make_ctx(&["None", "/Game/Hero.Hero"]);
+        ctx.version.file_version_ue4 = 522; // UE4.27, >= ADDED_SOFT_OBJECT_PATH
         let mut bytes: Vec<u8> = Vec::new();
         // FName asset_path: index=1, number=0
         bytes.extend_from_slice(&1i32.to_le_bytes());
@@ -2071,7 +2072,8 @@ mod tests {
 
     #[test]
     fn element_soft_class_path() {
-        let ctx = make_ctx(&["None", "/Game/BP/Hero.Hero_C"]);
+        let mut ctx = make_ctx(&["None", "/Game/BP/Hero.Hero_C"]);
+        ctx.version.file_version_ue4 = 522; // UE4.27, >= ADDED_SOFT_OBJECT_PATH
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&1i32.to_le_bytes());
         bytes.extend_from_slice(&0i32.to_le_bytes());
@@ -2102,6 +2104,7 @@ mod tests {
     #[test]
     fn element_soft_object_path_ue5_1007() {
         let mut ctx = make_ctx(&["None", "/Game/Hero", "Hero"]);
+        ctx.version.file_version_ue4 = 522; // UE5 packages carry ue4 == 522
         ctx.version.file_version_ue5 = Some(1007);
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&1i32.to_le_bytes()); // PackageName index 1
