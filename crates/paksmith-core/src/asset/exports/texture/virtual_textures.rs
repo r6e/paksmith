@@ -1153,7 +1153,7 @@ fn read_chunks(
             });
         }
         // BulkData → into the export's bulk records; remember the index.
-        let bulk = FByteBulkData::read_from(cur, asset_path)?;
+        let bulk = FByteBulkData::read_from_ctx(cur, ctx, asset_path)?;
         let bulk_record_index = bulk_records.len();
         bulk_records.push(bulk);
         chunks.push(VirtualTextureDataChunk {

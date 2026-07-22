@@ -67,6 +67,15 @@ reader (`FByteBulkData::read_from` in
 shape including flag validation, `Size64Bit` field widening,
 `BadDataVersion` 2-byte tail discard, and
 `DuplicateNonOptionalPayload` block skip, with caps enforced inline.
+The `Package.DataResourceMap` short-circuit is implemented as of
+[#642](https://github.com/r6e/paksmith/issues/642)
+(`FByteBulkData::read_from_ctx`): when the package's
+`FObjectDataResource` table is non-empty, each record is a single
+`i32` index and the entry supplies flags/count/size/offset (offsets
+absolute — no `BulkDataStartOffset` fix-up; out-of-range indices
+fail closed rather than CUE4Parse's rewind-and-reparse heuristic;
+non-zero `cooked_index` numbered sidecars fail closed). The
+`IoPackage.BulkDataMap` analog remains deferred to Phase 8 (IoStore).
 The `BulkDataResolver` (same module) materializes payload bytes across
 all four tiers (inline / uexp-resident / `.ubulk` / `.uptnl`) —
 applying the offset fix-up, the per-package byte budget, and the

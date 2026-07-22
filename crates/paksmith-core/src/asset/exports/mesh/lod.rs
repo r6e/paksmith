@@ -166,7 +166,7 @@ fn read_non_inlined_lod(
         });
     };
 
-    let bulk = crate::asset::bulk_data::FByteBulkData::read_from(cur, asset_path)?;
+    let bulk = crate::asset::bulk_data::FByteBulkData::read_from_ctx(cur, ctx, asset_path)?;
     if bulk.element_count > 0 {
         let payload = resolver.resolve(&bulk, asset_path)?;
         let mut buf_cur = Cursor::new(payload.bytes.as_slice());

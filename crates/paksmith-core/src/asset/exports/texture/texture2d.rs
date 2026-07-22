@@ -443,7 +443,7 @@ fn read_mip_records(
         // `.uasset` / `.uexp` / `.ubulk` and resolve lazily via
         // `Package::resolve_bulk_for_export`.
         if serialize_mip_data {
-            records.push(FByteBulkData::read_from(cur, asset_path)?);
+            records.push(FByteBulkData::read_from_ctx(cur, ctx, asset_path)?);
         }
 
         // Per-mip dimensions, each capped at `MAX_TEXTURE_DIMENSION` (a

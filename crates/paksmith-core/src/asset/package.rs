@@ -173,6 +173,11 @@ pub struct Package {
     /// a `Package` across event-loop ticks cannot multiply the
     /// 16 GiB budget by the clone count.
     pub(crate) resolver: Arc<BulkDataResolver>,
+    /// The parsed UE 5.2+ `FObjectDataResource` table; empty for
+    /// pre-5.2 / absent / empty tables. Shared into every
+    /// [`AssetContext`] this package hands out (`context()`), switching
+    /// bulk reads to the indexed form when non-empty (#642).
+    pub(crate) data_resources: Arc<[crate::asset::data_resource::FObjectDataResource]>,
 }
 
 impl Serialize for Package {
@@ -408,43 +413,6 @@ fn check_uexp_size(uexp_len: usize, asset_path: &str) -> crate::Result<()> {
     Ok(())
 }
 
-/// Number of entries in the package's object data-resource map, or `None` when
-/// no *populated* map is present.
-///
-/// At `DataResourceOffset` (UE 5.2+) UE serializes a `u32` version then a
-/// length-prefixed `TArray<FObjectDataResource>` (`i32` count + entries).
-/// Verified against CUE4Parse `Package.cs` (`SeekAbsolute(DataResourceOffset)`
-/// → `Read<uint>()` version → `ReadArray(...)`) + `FObjectDataResource.cs`. A
-/// map is recognized only when `version ∈ (Invalid, Latest]`, mirroring the
-/// oracle; `Some(count)` is returned only for `count > 0` (an empty map is
-/// serialized as `version` + `count = 0` and resolves bulk data inline as
-/// usual). Returns `None` for a non-positive offset, an out-of-range or
-/// truncated header, an unrecognized version, or an empty map.
-///
-/// Forward-compat caveat: a hypothetical future `version > Latest` is treated as
-/// "no map" and falls through to the inline parse — matching CUE4Parse, which
-/// gates its array read on the same `<= Latest` check. If such a format ever
-/// ships with a populated map it would need explicit support; the conservative
-/// alternative (fail-loud on any unrecognized version) would instead reject the
-/// far more common future *empty* map, which CUE4Parse accepts.
-fn data_resource_map_entry_count(bytes: &[u8], offset: i32) -> Option<u32> {
-    // `EObjectDataResourceVersion::Latest` (= `AddedCookedIndex`). Versions
-    // outside `(Invalid = 0, Latest = 2]` are ignored, matching CUE4Parse.
-    const LATEST_DATA_RESOURCE_VERSION: u32 = 2;
-
-    let offset = usize::try_from(offset).ok()?;
-    if offset == 0 {
-        return None;
-    }
-    let header = bytes.get(offset..offset.checked_add(8)?)?;
-    let version = u32::from_le_bytes(header[0..4].try_into().ok()?);
-    if version == 0 || version > LATEST_DATA_RESOURCE_VERSION {
-        return None;
-    }
-    let count = i32::from_le_bytes(header[4..8].try_into().ok()?);
-    u32::try_from(count).ok().filter(|&c| c > 0)
-}
-
 /// Build a `BulkDataResolver` companion-loader closure that reads
 /// `companion_path` out of a `.pak` archive via the shared
 /// `Arc<PakReader>` handle. `EntryNotFound` from the pak layer maps
@@ -610,28 +578,22 @@ impl Package {
         let mut cursor = Cursor::new(bytes);
         let summary = PackageSummary::read_from(&mut cursor, asset_path)?;
 
-        // Phase 3 audit (B3): a UE 5.2+ package with a *populated* object
-        // data-resource map resolves every `FByteBulkData` header through an
-        // `FObjectDataResource` index, not the inline layout the typed readers
-        // parse. Reading inline over a resource-index stream silently misparses
-        // the first bulk field — so fail loud rather than emit garbage. An empty
-        // map (the default cook) returns `None` here and parses normally.
-        //
-        // Unlike a per-export typed-reader failure (which degrades that one
-        // export to a property bag and lets siblings survive), this aborts the
-        // WHOLE package: the map governs bulk resolution package-wide, so every
-        // bulk-bearing export would misparse — there is no safe partial parse.
-        // Reads `bytes` directly so `cursor`'s position (re-seeked per table
-        // below) is untouched.
-        if let Some(entry_count) = summary
-            .data_resource_offset
-            .and_then(|offset| data_resource_map_entry_count(bytes, offset))
-        {
-            return Err(PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::DataResourceMapUnsupported { entry_count },
+        // UE 5.2+ object data-resource table (#642). When populated, it
+        // governs bulk resolution package-wide: every `FByteBulkData`
+        // field in export data serializes as a single `i32` index into
+        // this table instead of the classic inline header (see
+        // `FByteBulkData::read_from_ctx`). Parse it up front and thread
+        // it through `AssetContext` so the typed readers switch modes.
+        // Empty/absent/unknown-version tables yield an empty vec —
+        // classic parsing, matching CUE4Parse. Reads `bytes` directly so
+        // `cursor`'s position (re-seeked per table below) is untouched.
+        let data_resources: Arc<[crate::asset::data_resource::FObjectDataResource]> =
+            Arc::from(match summary.data_resource_offset {
+                Some(offset) => crate::asset::data_resource::parse_data_resource_table(
+                    bytes, offset, asset_path,
+                )?,
+                None => Vec::new(),
             });
-        }
 
         // `Arc`-wrap the tables immediately at parse time (#369).
         // The same Arc is then shared between `Package` and the
@@ -765,6 +727,7 @@ impl Package {
             mappings: mappings.map(|m| Arc::new(m.clone())),
             bulk_resolver: Some(Arc::clone(&resolver)),
             soft_object_paths_indexed: summary.soft_object_paths_indexed(),
+            data_resources: Arc::clone(&data_resources),
         };
 
         // Phase 2f: dispatch the unversioned (schema-driven) property
@@ -856,6 +819,7 @@ impl Package {
             mappings: ctx.mappings.clone(),
             bulk_data: HashMap::new(),
             resolver,
+            data_resources,
         };
 
         // 3e-3b: store the per-export bulk records surfaced by the typed
@@ -1159,6 +1123,7 @@ impl Package {
             mappings: self.mappings.clone(),
             bulk_resolver: Some(Arc::clone(&self.resolver)),
             soft_object_paths_indexed: self.summary.soft_object_paths_indexed(),
+            data_resources: Arc::clone(&self.data_resources),
         }
     }
 }
@@ -1425,68 +1390,13 @@ mod tests {
         build_minimal_with_texture2d,
     };
 
-    /// Build a synthetic data-resource section: 4 lead-in bytes (so the
-    /// non-zero offset is exercised), then `u32 version` + `i32 count`.
-    fn data_resource_bytes(version: u32, count: i32) -> Vec<u8> {
-        let mut v = vec![0u8; 4];
-        v.extend_from_slice(&version.to_le_bytes());
-        v.extend_from_slice(&count.to_le_bytes());
-        v
-    }
-
+    /// End-to-end (#642): `Package::read_from` on a UE5.2+ package whose
+    /// `DataResourceOffset` points at a POPULATED table now PARSES the
+    /// table (previously fail-loud `DataResourceMapUnsupported`) and
+    /// threads it into the context. This is the acceptance fixture: a
+    /// non-empty data-resource map on a real package parse.
     #[test]
-    fn data_resource_map_populated_returns_entry_count() {
-        // version 1 (Initial), count 3 → populated map.
-        let bytes = data_resource_bytes(1, 3);
-        assert_eq!(data_resource_map_entry_count(&bytes, 4), Some(3));
-        // version 2 (AddedCookedIndex, == Latest) is also recognized.
-        let bytes = data_resource_bytes(2, 1);
-        assert_eq!(data_resource_map_entry_count(&bytes, 4), Some(1));
-    }
-
-    #[test]
-    fn data_resource_map_empty_or_unrecognized_returns_none() {
-        // Empty map (count 0) parses normally → None, no loud fail.
-        assert_eq!(
-            data_resource_map_entry_count(&data_resource_bytes(1, 0), 4),
-            None
-        );
-        // version 0 (Invalid) is ignored even with a positive count.
-        assert_eq!(
-            data_resource_map_entry_count(&data_resource_bytes(0, 3), 4),
-            None
-        );
-        // version above Latest (future/garbage) is ignored, matching CUE4Parse.
-        assert_eq!(
-            data_resource_map_entry_count(&data_resource_bytes(3, 3), 4),
-            None
-        );
-        // Negative count (corruption) does not produce a positive entry count.
-        assert_eq!(
-            data_resource_map_entry_count(&data_resource_bytes(1, -1), 4),
-            None
-        );
-    }
-
-    #[test]
-    fn data_resource_map_offset_edge_cases_return_none() {
-        let bytes = data_resource_bytes(1, 3);
-        // Non-positive offset → no map (CUE4Parse gates on `> 0`).
-        assert_eq!(data_resource_map_entry_count(&bytes, 0), None);
-        assert_eq!(data_resource_map_entry_count(&bytes, -1), None);
-        // Offset past the buffer → None (not a panic).
-        assert_eq!(data_resource_map_entry_count(&bytes, 9_999), None);
-        // Truncated header (only 6 of the needed 8 bytes after the offset) → None.
-        assert_eq!(data_resource_map_entry_count(&bytes[..10], 4), None);
-    }
-
-    /// End-to-end: `Package::read_from` on a UE5.2+ package whose
-    /// `DataResourceOffset` points at a POPULATED map (version 1, count > 0) must
-    /// fail loud with `DataResourceMapUnsupported` rather than misparse bulk data.
-    /// This drives the guard wiring in `read_from_inner`, which the helper-only
-    /// tests above do not (a removed `return Err` survives without this).
-    #[test]
-    fn read_from_rejects_populated_data_resource_map() {
+    fn read_from_parses_populated_data_resource_map() {
         let pkg = build_minimal_ue5_1010();
         let mut bytes = pkg.bytes.clone();
         // `data_resource_offset` is the final i32 of the summary (write order ends
@@ -1498,43 +1408,41 @@ mod tests {
             &0i32.to_le_bytes(),
             "builder writes an empty (offset 0) data-resource map by default"
         );
-        // Append a populated section [version=1 (Initial)][count=2] and point the
-        // summary's offset at it.
+        // Append a populated section [version=1][count=2] + two 44-byte
+        // entries, and point the summary's offset at it.
         let section_pos = i32::try_from(bytes.len()).expect("section offset fits i32");
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.extend_from_slice(&2i32.to_le_bytes());
+        for (offset, legacy_flags) in [(0x100i64, 0x0100u32), (0x200, 0x0001)] {
+            bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
+            bytes.extend_from_slice(&offset.to_le_bytes()); // serial_offset
+            bytes.extend_from_slice(&(-1i64).to_le_bytes()); // duplicate
+            bytes.extend_from_slice(&64i64.to_le_bytes()); // serial_size
+            bytes.extend_from_slice(&64i64.to_le_bytes()); // raw_size
+            bytes.extend_from_slice(&1i32.to_le_bytes()); // outer_index
+            bytes.extend_from_slice(&legacy_flags.to_le_bytes());
+        }
         bytes[dro_pos..dro_pos + 4].copy_from_slice(&section_pos.to_le_bytes());
 
-        let err = Package::read_from(&bytes, None, None, "dr.uasset").unwrap_err();
-        assert!(
-            matches!(
-                err,
-                PaksmithError::AssetParse {
-                    fault: AssetParseFault::DataResourceMapUnsupported { entry_count: 2 },
-                    ..
-                }
-            ),
-            "populated data-resource map must fail loud, got {err:?}"
-        );
+        let parsed = Package::read_from(&bytes, None, None, "dr.uasset")
+            .expect("populated data-resource map must parse (#642)");
+        assert_eq!(parsed.data_resources.len(), 2);
+        assert_eq!(parsed.data_resources[0].serial_offset, 0x100);
+        assert_eq!(parsed.data_resources[0].legacy_bulk_data_flags, 0x0100);
+        assert_eq!(parsed.data_resources[1].serial_offset, 0x200);
+        // The context hands the same table to typed readers.
+        assert_eq!(parsed.context().data_resources.len(), 2);
     }
 
     /// End-to-end: a UE5.2+ package with an EMPTY data-resource map
-    /// (`DataResourceOffset = 0`, the default cook) must NOT trip the guard.
-    /// Pins the `count > 0` / version gate against an always-fail mutant.
+    /// (`DataResourceOffset = 0`, the default cook) parses with an
+    /// empty table — classic inline bulk headers.
     #[test]
     fn read_from_accepts_empty_data_resource_map() {
         let pkg = build_minimal_ue5_1010();
-        let result = Package::read_from(&pkg.bytes, None, None, "dr.uasset");
-        assert!(
-            !matches!(
-                result,
-                Err(PaksmithError::AssetParse {
-                    fault: AssetParseFault::DataResourceMapUnsupported { .. },
-                    ..
-                })
-            ),
-            "empty data-resource map (offset 0) must not trigger the guard, got {result:?}"
-        );
+        let parsed = Package::read_from(&pkg.bytes, None, None, "dr.uasset")
+            .expect("empty data-resource map parses");
+        assert!(parsed.data_resources.is_empty());
     }
 
     /// Pins the typed-dispatch fall-through: a typed reader that errors
