@@ -225,6 +225,24 @@ pub struct PackageSummary {
 }
 
 impl PackageSummary {
+    /// True when this package's `FSoftObjectPath` properties serialize
+    /// their leading slot as an `i32` index into the summary's
+    /// `SoftObjectPaths` list rather than inline — the UE5 >= 1008 form
+    /// CUE4Parse reads under `!PKG_FilterEditorOnly &&
+    /// SoftObjectPaths.Length > 0`. paksmith does not parse that list, so
+    /// the property reader fails closed on this form (see
+    /// [`AssetContext::soft_object_paths_indexed`](crate::asset::AssetContext)).
+    /// For any well-formed asset this is `false`: `count > 0` requires
+    /// UE5 >= 1008 (`file_version_ue4 == 522`), and an asset lacking
+    /// `PKG_FilterEditorOnly` at `file_version_ue4 >= 520` is already
+    /// rejected as `UncookedAsset` before this is consulted. So `true`
+    /// arises only for a version-inconsistent crafted asset. #638.
+    #[must_use]
+    pub(crate) fn soft_object_paths_indexed(&self) -> bool {
+        (self.package_flags & PKG_FILTER_EDITOR_ONLY) == 0
+            && self.soft_object_paths_count.unwrap_or(0) > 0
+    }
+
     /// Read the summary from byte 0 of `reader`.
     ///
     /// # Errors
@@ -1213,6 +1231,42 @@ mod tests {
     /// commit message for the verification trace against CUE4Parse's
     /// `EUnrealEngineObjectUE4Version` enum.
     ///
+    /// `soft_object_paths_indexed()` = `!PKG_FilterEditorOnly &&
+    /// soft_object_paths_count > 0` — the CUE4Parse index-form guard.
+    /// Cooked (flag set) is always inline; only a not-filter-editor
+    /// package with a populated list reports the index form. #638.
+    #[test]
+    fn soft_object_paths_indexed_guard() {
+        let base = minimal_ue4_27_summary();
+        // Cooked (PKG_FilterEditorOnly set) even with a populated list → inline.
+        let cooked_with_list = PackageSummary {
+            package_flags: 0x8000_0000,
+            soft_object_paths_count: Some(3),
+            ..base.clone()
+        };
+        assert!(!cooked_with_list.soft_object_paths_indexed());
+        // Not-filter-editor + populated list → the index form.
+        let indexed = PackageSummary {
+            package_flags: 0,
+            soft_object_paths_count: Some(3),
+            ..base.clone()
+        };
+        assert!(indexed.soft_object_paths_indexed());
+        // Not-filter-editor but no list (None or 0) → inline.
+        let absent_list = PackageSummary {
+            package_flags: 0,
+            soft_object_paths_count: None,
+            ..base.clone()
+        };
+        assert!(!absent_list.soft_object_paths_indexed());
+        let empty_list = PackageSummary {
+            package_flags: 0,
+            soft_object_paths_count: Some(0),
+            ..base
+        };
+        assert!(!empty_list.soft_object_paths_indexed());
+    }
+
     /// All zero counts (custom-versions, generations, additional-
     /// packages-to-cook, chunk-ids) keep the buffer minimal.
     /// `PKG_FilterEditorOnly` is set so the editor-only branches

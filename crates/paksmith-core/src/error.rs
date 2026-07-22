@@ -2694,15 +2694,19 @@ pub enum AssetParseFault {
         /// The unknown history-type discriminant byte (i8) the reader hit.
         history_type: i8,
     },
-    /// The asset's `FileVersionUE5` is at or above
-    /// `FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES = 1007`, where
-    /// `FSoftObjectPath` switches its `asset_path_name` slot from `FName`
-    /// to `FTopLevelAssetPath` (`FName package + FName asset`). Phase 2d
-    /// only decodes the UE4-shape (single FName + FString sub_path);
-    /// reading a 1007+ archive without this guard would mis-align the
-    /// reader cursor and silently corrupt every subsequent property.
-    /// Phase 2a accepts UE5 ∈ [1000, 1010], so this guard is meaningful
-    /// — it carves out 1007..=1010 inside the accepted summary range.
+    /// An `FSoftObjectPath` uses the UE5 >= 1008 index-serialized form —
+    /// its leading slot is an `i32` index into the summary's
+    /// `SoftObjectPaths` list rather than an inline path. paksmith decodes
+    /// the inline `FTopLevelAssetPath` form (>= 1007) but not the
+    /// index-list indirection, so it fails closed here rather than
+    /// mis-decode the index as an FName. This form is guarded by
+    /// `!PKG_FilterEditorOnly && soft_object_paths_count > 0` (the
+    /// CUE4Parse condition); it is unreachable for any well-formed asset
+    /// (an uncooked asset at `file_version_ue4 >= 520` is already rejected
+    /// as [`UncookedAsset`](AssetParseFault::UncookedAsset)), so this only
+    /// fires for a version-inconsistent crafted asset (UE5 >= 1008 with
+    /// `file_version_ue4 < 520`). See
+    /// `AssetContext::soft_object_paths_indexed`. #638.
     UnsupportedSoftObjectPathLayout {
         /// The `FileVersionUE5` value as read from the asset summary.
         ue5_version: i32,
@@ -3407,9 +3411,10 @@ impl fmt::Display for AssetParseFault {
             ),
             Self::UnsupportedSoftObjectPathLayout { ue5_version } => write!(
                 f,
-                "unsupported FSoftObjectPath wire layout at UE5 version {ue5_version} \
-                 (FTopLevelAssetPath replaces FName at >= 1007; Phase 2d only \
-                 decodes UE5 <= 1006)"
+                "unsupported index-serialized FSoftObjectPath at UE5 version \
+                 {ue5_version}: the leading slot is an i32 index into the \
+                 summary's SoftObjectPaths list (paksmith decodes the inline \
+                 FTopLevelAssetPath form, not the index-list indirection)"
             ),
             Self::MissingCompanionFile { kind } => {
                 write!(f, "missing required .{kind} companion file")
@@ -8024,12 +8029,13 @@ mod tests {
 
     #[test]
     fn asset_parse_display_unsupported_soft_object_path_layout() {
-        let s = AssetParseFault::UnsupportedSoftObjectPathLayout { ue5_version: 1007 }.to_string();
+        let s = AssetParseFault::UnsupportedSoftObjectPathLayout { ue5_version: 1008 }.to_string();
         assert_eq!(
             s,
-            "unsupported FSoftObjectPath wire layout at UE5 version 1007 \
-             (FTopLevelAssetPath replaces FName at >= 1007; Phase 2d only \
-             decodes UE5 <= 1006)"
+            "unsupported index-serialized FSoftObjectPath at UE5 version 1008: \
+             the leading slot is an i32 index into the summary's SoftObjectPaths \
+             list (paksmith decodes the inline FTopLevelAssetPath form, not the \
+             index-list indirection)"
         );
     }
 
