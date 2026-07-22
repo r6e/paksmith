@@ -1259,6 +1259,10 @@ mod tests {
     /// cap so one further level trips it, isolating each `+ 1` (kills the
     /// `+ 1 -> * 1` mutants on the recursion increments). #639.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one table of per-arm depth-increment cases with explicit wire bytes; splitting scatters the shared `read_at`/`too_deep` closures across duplicated fixtures"
+    )]
     fn unversioned_collection_arms_increment_depth() {
         use crate::asset::property::bag::MAX_PROPERTY_DEPTH;
         let read_at = |prop_type: MappedPropertyType, wire: &[u8], depth: usize| {
