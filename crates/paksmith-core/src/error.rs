@@ -2872,18 +2872,21 @@ pub enum AssetParseFault {
         bits: u32,
     },
     /// `FByteBulkData` requested a compression method paksmith
-    /// doesn't support in Phase 3. LZO + BitWindow are Phase 3
-    /// follow-ups (when a real-world fixture surfaces); Oodle ships
-    /// in Phase 8 via the runtime-SDK loader.
+    /// doesn't decode. LZO + BitWindow are fail-closed by design
+    /// (#559): LZO is a UE3-era codec, out of paksmith's UE4.13+
+    /// cooked-asset scope and with no in-scope oracle, and BitWindow
+    /// is a deprecated, inert flag with no codec to decode. Oodle
+    /// ships in Phase 8 via the runtime-SDK loader.
     UnsupportedBulkCompression {
         /// Compression method name ("Oodle", "LZO", "BitWindow",
         /// etc.). `&'static str` rather than an enum because the
-        /// set is open-ended across Phase 3 follow-ups.
+        /// set is small and fixed at these three.
         method: &'static str,
     },
     /// Failure decoding a compressed bulk-data payload (chunked
-    /// `FCompressedChunkInfo` framing + zlib in Phase 3b; LZO /
-    /// BitWindow / Oodle in future phases). Covers structural
+    /// `FCompressedChunkInfo` framing + zlib in Phase 3b; LZO,
+    /// BitWindow, and Oodle are not decoded — see
+    /// `UnsupportedBulkCompression`). Covers structural
     /// framing violations (truncated or invalid headers, bad tags,
     /// negative sizes, chunk-table sum mismatches, trailing bytes)
     /// AND codec-level stream failures — including a chunk that
