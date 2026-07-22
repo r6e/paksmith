@@ -74,6 +74,14 @@ impl FColor {
         verify_at_end(reader, expected_end, "FColor", asset_path)?;
         Ok(Self { r, g, b, a })
     }
+
+    /// Wire byte size of an `FColor`: fixed 4 bytes (4 × u8, NOT
+    /// LWC-widened). Used by the unversioned typed-struct dispatch to
+    /// bound the natural-width read (#640).
+    #[must_use]
+    pub(crate) fn wire_size(_ctx: &AssetContext) -> u64 {
+        4
+    }
 }
 
 /// Linear-space color, 4 × f32 in wire order `R, G, B, A`. Used by
@@ -125,6 +133,14 @@ impl FLinearColor {
         verify_at_end(reader, expected_end, "FLinearColor", asset_path)?;
         Ok(Self { r, g, b, a })
     }
+
+    /// Wire byte size of an `FLinearColor`: fixed 16 bytes (4 × f32,
+    /// NOT LWC-widened). Used by the unversioned typed-struct dispatch
+    /// to bound the natural-width read (#640).
+    #[must_use]
+    pub(crate) fn wire_size(_ctx: &AssetContext) -> u64 {
+        16
+    }
 }
 
 /// Registry-compatible decoder shim for [`FColor`].
@@ -157,6 +173,19 @@ mod tests {
     use crate::asset::structs::test_utils::f32_bytes;
     use crate::error::AssetParseFault;
     use std::io::Cursor;
+
+    #[test]
+    fn color_wire_sizes_are_fixed() {
+        // FColor (4 × u8) and FLinearColor (4 × f32) are NOT
+        // LWC-widened: identical at UE4 and UE5 LWC.
+        for ctx in [
+            make_ctx_with_version(510, None),
+            make_ctx_with_version(510, Some(1004)),
+        ] {
+            assert_eq!(FColor::wire_size(&ctx), 4);
+            assert_eq!(FLinearColor::wire_size(&ctx), 16);
+        }
+    }
 
     #[test]
     fn fcolor_bgra_wire_swizzles_to_rgba_struct() {

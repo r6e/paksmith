@@ -509,6 +509,12 @@ fn read_array_of_struct<R: Read + Seek>(
 /// tagged path — a deliberate Phase 3c limitation: 3g/3h read binary
 /// struct arrays (e.g. vertex buffers) directly via
 /// `crate::asset::structs::*`, not through `PropertyValue`.
+///
+/// The *unversioned* path is the opposite (#640): its single
+/// `MT::Struct` arm serves scalar AND collection-element reads, and
+/// computes a per-element `expected_end` from the registry's
+/// `wire_size` — so unversioned `Array<registered-struct>` elements DO
+/// typed-decode, without the whole-array-boundary hazard above.
 fn read_struct_property<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
@@ -517,8 +523,8 @@ fn read_struct_property<R: Read + Seek>(
     expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
-    if let Some(decoder) = crate::asset::structs::lookup(&tag.struct_name) {
-        let typed = decoder(reader, ctx, expected_end, asset_path)?;
+    if let Some(entry) = crate::asset::structs::lookup(&tag.struct_name) {
+        let typed = (entry.decoder)(reader, ctx, expected_end, asset_path)?;
         return Ok(Some(PropertyValue::TypedStruct(Box::new(typed))));
     }
     read_struct_value(

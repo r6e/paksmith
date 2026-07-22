@@ -132,7 +132,7 @@ or deprecated properties that occupy schema slots but are absent from
 | 5 (`NameProperty`) | `Name` | 8 bytes ([`FName`](../primitive/fname.md): `i32` index + `i32` number) |
 | 7 (`DoubleProperty`) | `Double` | 8 bytes LE |
 | 8 (`ArrayProperty`) | `Array` | `i32` element count LE + `count` element bodies |
-| 9 (`StructProperty`) | `Struct` | nested `FUnversionedHeader` + bodies for the struct's schema |
+| 9 (`StructProperty`) | `TypedStruct` / `Struct` | registered engine structs (`Vector`, `Vector2D`, `Vector4`, `Rotator`, `Quat`, `Color`, `LinearColor`, `Box`, `Box2D`) are the same custom-binary blob as the tagged path, read at natural (version-deterministic, LWC-gated) width; all other struct names are a nested `FUnversionedHeader` + bodies for the struct's `.usmap` schema |
 | 10 (`StrProperty`) | `Str` | [`FString`](../primitive/fstring.md) (4-byte length prefix + UTF-8/UTF-16 bytes) |
 | 11 (`TextProperty`) | `Text` | `FText` (see [`text.md`](text.md)) |
 | 17 (`SoftObjectProperty`) | `SoftObjectPath` | [`FName`](../primitive/fname.md) (8 bytes) + [`FString`](../primitive/fstring.md), or `FTopLevelAssetPath` (2 FNames, 16 bytes) + `FString` at UE5 ≥ 1007 (see [`primitives.md`](primitives.md)) |

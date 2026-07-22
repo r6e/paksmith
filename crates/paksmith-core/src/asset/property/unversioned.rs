@@ -496,20 +496,32 @@ fn read_unversioned_value(
             }
         }
         MT::Struct { struct_name } => {
-            // NOTE: the unversioned (`.usmap`) path always produces a
-            // tagged `PropertyValue::Struct`, even when `struct_name`
-            // is a registered typed decoder ("Vector", "Box", …). This
-            // is asymmetric with the *tagged* path, which (Phase 3c
-            // Task 10) dispatches those names to
-            // `PropertyValue::TypedStruct` via
-            // `containers::read_struct_property`. Wiring the typed
-            // registry into the unversioned path is deliberately out of
-            // Task 10's scope: it needs its own wire-format
-            // verification (whether a `.usmap`-mapped registered struct
-            // serializes as a custom-binary blob or a mapped property
-            // list) and a distinct bounding model (the unversioned
-            // reader has no per-property `tag.size` / `expected_end` to
-            // feed the decoders' `verify_at_end`). Phase 3c follow-up.
+            // Registered engine structs ("Vector", "Box", …) serialize
+            // as the SAME custom-binary blob in unversioned mode as in
+            // the tagged path — CUE4Parse's `FScriptStruct` dispatches
+            // on struct name only, with no tagged/unversioned branch —
+            // so try the typed registry first (#640). The unversioned
+            // reader has no per-property `tag.size`; the decoder's
+            // `expected_end` is computed from the registry's
+            // version-deterministic `wire_size` (the natural width),
+            // matching the 3g/3h mesh-parser pattern. This single arm
+            // also serves Array/Set/Map elements, so container elements
+            // typed-decode with a PER-ELEMENT boundary — sidestepping
+            // the tagged path's whole-array `expected_end` hazard
+            // (`containers::read_struct_property` doc).
+            if let Some(entry) = crate::asset::structs::lookup(struct_name) {
+                // Plain add, matching the 3g/3h callers (`FBox::read_from`,
+                // `render_data.rs`): `position()` is bounded by the
+                // in-memory slice length and `wire_size` is <= 49, so the
+                // u64 add cannot overflow.
+                let expected_end = cur.position() + (entry.wire_size)(ctx);
+                let typed = (entry.decoder)(cur, ctx, expected_end, asset_path)?;
+                return Ok(PropertyValue::TypedStruct(Box::new(typed)));
+            }
+            // Unregistered struct: recurse the usmap property-list
+            // schema (CUE4Parse's `FStructFallback` equivalent). A
+            // missing schema fires `UnversionedSchemaMissing` →
+            // partial-tree stop.
             let nested =
                 read_unversioned_properties(cur, struct_name, usmap, ctx, asset_path, depth + 1)?;
             PropertyValue::Struct {
@@ -1251,6 +1263,178 @@ mod tests {
             ),
             "expected CollectionElementCountExceeded(Set), got {err:?}"
         );
+    }
+
+    /// A registered engine struct ("Vector") in the unversioned path
+    /// decodes as the custom-binary blob via the typed-struct registry —
+    /// NOT as a usmap property-list recursion (which would fire
+    /// `UnversionedSchemaMissing` and truncate the export). Pre-LWC:
+    /// 3 × f32. #640.
+    #[test]
+    fn unversioned_typed_struct_vector_decodes() {
+        let usmap = single_prop_usmap(MappedPropertyType::Struct {
+            struct_name: Arc::from("Vector"),
+        });
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes()); // 1 serialized property
+        for c in [1.0f32, 2.0, 3.0] {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        let ctx = make_ctx(&["None"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0).unwrap();
+        assert_eq!(
+            props.len(),
+            1,
+            "typed struct must decode, not partial-tree-stop"
+        );
+        match &props[0].value {
+            PropertyValue::TypedStruct(inner) => match inner.as_ref() {
+                crate::asset::structs::TypedStructValue::Vector(v) => {
+                    assert_eq!((v.x, v.y, v.z), (1.0, 2.0, 3.0));
+                }
+                other => panic!("expected Vector, got {other:?}"),
+            },
+            other => panic!("expected TypedStruct, got {other:?}"),
+        }
+    }
+
+    /// Same struct at UE5 LWC (>= 1004): 3 × f64 on the wire. Pins the
+    /// width gate is ctx-driven. #640.
+    #[test]
+    fn unversioned_typed_struct_vector_lwc_decodes() {
+        let usmap = single_prop_usmap(MappedPropertyType::Struct {
+            struct_name: Arc::from("Vector"),
+        });
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes());
+        for c in [4.5f64, -1.25, 0.5] {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        let mut ctx = make_ctx(&["None"]);
+        ctx.version.file_version_ue4 = 522;
+        ctx.version.file_version_ue5 = Some(1004); // LARGE_WORLD_COORDINATES
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0).unwrap();
+        assert_eq!(props.len(), 1);
+        match &props[0].value {
+            PropertyValue::TypedStruct(inner) => match inner.as_ref() {
+                crate::asset::structs::TypedStructValue::Vector(v) => {
+                    assert_eq!((v.x, v.y, v.z), (4.5, -1.25, 0.5));
+                }
+                other => panic!("expected Vector, got {other:?}"),
+            },
+            other => panic!("expected TypedStruct, got {other:?}"),
+        }
+    }
+
+    /// Unversioned `Struct{"Color"}`: fixed 4-byte BGRA wire, swizzled
+    /// to RGBA — same custom-binary decode as the tagged path. #640.
+    #[test]
+    fn unversioned_typed_struct_color_decodes() {
+        let usmap = single_prop_usmap(MappedPropertyType::Struct {
+            struct_name: Arc::from("Color"),
+        });
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes());
+        bytes.extend_from_slice(&[0x10, 0x20, 0x30, 0xFF]); // wire BGRA
+        let ctx = make_ctx(&["None"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0).unwrap();
+        assert_eq!(props.len(), 1);
+        match &props[0].value {
+            PropertyValue::TypedStruct(inner) => match inner.as_ref() {
+                crate::asset::structs::TypedStructValue::Color(c) => {
+                    assert_eq!((c.r, c.g, c.b, c.a), (0x30, 0x20, 0x10, 0xFF));
+                }
+                other => panic!("expected Color, got {other:?}"),
+            },
+            other => panic!("expected TypedStruct, got {other:?}"),
+        }
+    }
+
+    /// Unversioned `Struct{"Quat"}` (pre-LWC): 4 × f32, x/y/z/w wire
+    /// order. #640.
+    #[test]
+    fn unversioned_typed_struct_quat_decodes() {
+        let usmap = single_prop_usmap(MappedPropertyType::Struct {
+            struct_name: Arc::from("Quat"),
+        });
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes());
+        for c in [0.0f32, 0.0, 0.0, 1.0] {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        let ctx = make_ctx(&["None"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0).unwrap();
+        assert_eq!(props.len(), 1);
+        match &props[0].value {
+            PropertyValue::TypedStruct(inner) => match inner.as_ref() {
+                crate::asset::structs::TypedStructValue::Quat(q) => {
+                    assert_eq!((q.x, q.y, q.z, q.w), (0.0, 0.0, 0.0, 1.0));
+                }
+                other => panic!("expected Quat, got {other:?}"),
+            },
+            other => panic!("expected TypedStruct, got {other:?}"),
+        }
+    }
+
+    /// `Array<Struct{Vector}>`: elements route through the same
+    /// `MT::Struct` choke point, so each element typed-decodes with a
+    /// per-element boundary (no whole-array `expected_end` hazard). #640.
+    #[test]
+    fn unversioned_array_of_typed_struct_decodes() {
+        let usmap = single_prop_usmap(MappedPropertyType::Array {
+            inner: Box::new(MappedPropertyType::Struct {
+                struct_name: Arc::from("Vector"),
+            }),
+        });
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes());
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // count = 2
+        for c in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0] {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        let ctx = make_ctx(&["None"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0).unwrap();
+        assert_eq!(props.len(), 1);
+        match &props[0].value {
+            PropertyValue::Array { elements, .. } => {
+                assert_eq!(elements.len(), 2);
+                for (elem, expect) in elements.iter().zip([(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)]) {
+                    match elem {
+                        PropertyValue::TypedStruct(inner) => match inner.as_ref() {
+                            crate::asset::structs::TypedStructValue::Vector(v) => {
+                                assert_eq!((v.x, v.y, v.z), expect);
+                            }
+                            other => panic!("expected Vector, got {other:?}"),
+                        },
+                        other => panic!("expected TypedStruct element, got {other:?}"),
+                    }
+                }
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    /// An UNREGISTERED struct name with no usmap schema still takes the
+    /// existing recursion → `UnversionedSchemaMissing` → partial-tree
+    /// stop. The typed dispatch must not change that contract. #640.
+    #[test]
+    fn unversioned_unknown_struct_still_partial_tree_stops() {
+        let usmap = single_prop_usmap(MappedPropertyType::Struct {
+            struct_name: Arc::from("Mystery"),
+        });
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 8]); // never decoded
+        let ctx = make_ctx(&["None"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0)
+            .expect("partial-tree stop returns Ok");
+        assert!(props.is_empty(), "unknown struct must partial-tree-stop");
     }
 
     /// Each recursive `read_unversioned_value(depth + 1)` in the
