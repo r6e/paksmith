@@ -30,10 +30,11 @@ documented exhaustively.
 (`crates/paksmith-core/src/asset/mappings.rs`) and the unversioned
 bitstream decoder
 (`crates/paksmith-core/src/asset/property/unversioned.rs`) are both
-implemented and exercised by integration tests. Known gaps: Map,
-Set, Delegate, Interface, and FieldPath property types trigger
-`UnversionedTypeNotSupported` and stop the property walk; Oodle
-`.usmap` compression is unsupported.
+implemented and exercised by integration tests. Known gaps: the
+less-common property types still mapped to `Unknown` in the type table
+below — delegates, interfaces, field paths, and weak/lazy/asset-object
+references — trigger `UnversionedTypeNotSupported` and stop the property
+walk; Oodle `.usmap` compression is unsupported.
 
 When a caller supplies no `.usmap` and the asset has
 `PKG_UnversionedProperties` set, the parser returns
@@ -141,8 +142,10 @@ or deprecated properties that occupy schema slots but are absent from
 | 21 (`Int64Property`) | `Int64` | 8 bytes LE |
 | 22 (`Int16Property`) | `Int16` | 2 bytes LE |
 | 23 (`Int8Property`) | `Int8` | 1 byte |
+| 24 (`MapProperty`) | `Map` | schema encodes key type then value type; body = `i32` num_keys_to_remove + that many removed key bodies + `i32` count + `count` × (key body, value body) |
+| 25 (`SetProperty`) | `Set` | schema encodes one element type; body = `i32` num_to_remove + that many removed element bodies + `i32` count + `count` element bodies |
 | 26 (`EnumProperty`) | `Enum` | 1 byte (`u8` ordinal; resolved via `.usmap` enum table) |
-| 6, 12–16, 24–25, 27 | `Unknown(byte)` | not decoded — triggers `UnversionedTypeNotSupported` |
+| 6, 12–16, 27 | `Unknown(byte)` | not decoded — triggers `UnversionedTypeNotSupported` |
 
 ### Worked example — minimal export body (1-fragment, no zeros, 2 properties)
 
@@ -314,7 +317,7 @@ tests can read the live value without duplicating the literal.
   as the property maps described in the Worked example.
 - **Cross-validation oracle:** CUE4Parse[^1] (primary) and `unreal_asset`[^2].
 - **Known divergences:**
-  - Map (`24`), Set (`25`), Delegate (`6`), Interface (`12`/`13`), MulticastDelegate (same), WeakObject (`14`), LazyObject (`15`), AssetObject (`16`), and FieldPath (`27`) are decoded as `Unknown(byte)`, triggering `UnversionedTypeNotSupported`. The decoder stops the property walk at the first unsupported slot and returns the partial tree collected up to that point.
+  - Delegate (`6`), Interface (`12`/`13`), MulticastDelegate (same), WeakObject (`14`), LazyObject (`15`), AssetObject (`16`), and FieldPath (`27`) are decoded as `Unknown(byte)`, triggering `UnversionedTypeNotSupported`. The decoder stops the property walk at the first unsupported slot and returns the partial tree collected up to that point. (Map `24` and Set `25` are decoded as of #639.)
 
 ## Paksmith implementation
 

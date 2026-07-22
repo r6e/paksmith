@@ -60,8 +60,9 @@ pub fn build_minimal_usmap_bytes() -> Vec<u8> {
 /// surrounding wire-format assembly. Examples:
 /// - `3u8` (FloatProperty) — the canonical happy path; see
 ///   [`build_minimal_usmap_bytes`].
-/// - `24u8` (MapProperty, unsupported) — exercises the
-///   partial-tree-stop contract.
+/// - `27u8` (FieldPathProperty, unsupported leaf) — exercises the
+///   partial-tree-stop contract. (Byte 24/25 are Map/Set, decoded as
+///   of #639, and are NOT single-byte leaves — they read inner types.)
 ///
 /// For EnumProperty (which needs an enum table entry + inner type
 /// byte), see [`build_hero_usmap_with_enum_speed`] — the wire shape

@@ -307,6 +307,21 @@ pub enum MappedPropertyType {
         /// The element type.
         inner: Box<MappedPropertyType>,
     },
+    /// `SetProperty` — variable-length set with a single element type.
+    /// Wire shape mirrors `Array` plus a leading `num_to_remove` prefix.
+    Set {
+        /// The element type.
+        inner: Box<MappedPropertyType>,
+    },
+    /// `MapProperty` — key→value map. The `.usmap` schema encodes the
+    /// key type first, then the value type (CUE4Parse `EPropertyType`
+    /// `MapProperty` = byte 24, two recursive inner types).
+    Map {
+        /// The key type.
+        key: Box<MappedPropertyType>,
+        /// The value type.
+        value: Box<MappedPropertyType>,
+    },
     /// Unrecognised or unsupported type byte. Carries the raw byte for
     /// diagnostics so downstream readers can emit
     /// `UnversionedTypeNotSupported { type_byte }` rather than silently
@@ -1370,7 +1385,28 @@ fn read_mapped_type(
         21 => MappedPropertyType::Int64,  // Int64Property
         22 => MappedPropertyType::Int16,  // Int16Property
         23 => MappedPropertyType::Int8,   // Int8Property
-        24 | 25 => MappedPropertyType::Unknown(type_byte), // Map/Set
+        24 => {
+            // MapProperty — key inner type then value inner type. Both
+            // recurse with incremented depth (nesting cap, #443). Reading
+            // the two inners is load-bearing: mapping this byte to Unknown
+            // WITHOUT consuming them desyncs the schema table for every
+            // subsequent property (there is no per-property size to
+            // resync on). #639.
+            let key = read_mapped_type(cur, names, depth + 1)?;
+            let value = read_mapped_type(cur, names, depth + 1)?;
+            MappedPropertyType::Map {
+                key: Box::new(key),
+                value: Box::new(value),
+            }
+        }
+        25 => {
+            // SetProperty — single element inner type (same recursive
+            // shape as ArrayProperty). #639.
+            let inner = read_mapped_type(cur, names, depth + 1)?;
+            MappedPropertyType::Set {
+                inner: Box::new(inner),
+            }
+        }
         26 => {
             // EnumProperty: inner type byte then enum name
             let _inner_byte = cur.read_u8()?; // always ByteProperty (0) in practice
@@ -2108,6 +2144,159 @@ mod tests {
             }
             other => panic!("expected ArrayNestingTooDeep, got {other:?}"),
         }
+    }
+
+    /// A `.usmap` schema whose FIRST property is a `Map<Int32,Int32>`
+    /// (type bytes `24, 2, 2`) followed by a plain `IntProperty` (`2`).
+    /// `read_mapped_type` MUST consume the Map's two inner type bytes, or
+    /// the second property desyncs and mis-parses (there is no per-property
+    /// size to resync on). This is the real-`.usmap`-byte-parse coverage
+    /// that the pre-#639 `24|25 => Unknown` (no inner consume) lacked. #639.
+    #[test]
+    fn parse_usmap_map_property_consumes_inners_no_desync() {
+        let mut data: Vec<u8> = Vec::new();
+        // Name table: 0="Hero", 1="None", 2="M", 3="H".
+        data.extend_from_slice(&4u32.to_le_bytes());
+        for (len, name) in [(4u8, "Hero"), (4u8, "None"), (1u8, "M"), (1u8, "H")] {
+            data.push(len);
+            data.extend_from_slice(name.as_bytes());
+        }
+        data.extend_from_slice(&0u32.to_le_bytes()); // empty enum table
+        data.extend_from_slice(&1u32.to_le_bytes()); // 1 schema
+        data.extend_from_slice(&0i32.to_le_bytes()); // name = "Hero"
+        data.extend_from_slice(&1i32.to_le_bytes()); // super = "None"
+        data.extend_from_slice(&2u16.to_le_bytes()); // prop_count = 2
+        data.extend_from_slice(&2u16.to_le_bytes()); // serial_count = 2
+        // Prop 0: schema_index=0, array_size=1, name="M", type=Map<Int32,Int32>.
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(1u8);
+        data.extend_from_slice(&2i32.to_le_bytes());
+        data.extend_from_slice(&[24u8, 2u8, 2u8]); // MapProperty, Int32 key, Int32 value
+        // Prop 1: schema_index=1, array_size=1, name="H", type=IntProperty.
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.push(1u8);
+        data.extend_from_slice(&3i32.to_le_bytes());
+        data.push(2u8); // IntProperty
+
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+
+        let parsed = Usmap::from_bytes(&usmap).expect("usmap parse");
+        let hero = parsed.schemas.get("Hero").expect("Hero schema");
+        let m = hero
+            .properties
+            .iter()
+            .find(|p| p.name.as_ref() == "M")
+            .expect("M prop");
+        assert!(
+            matches!(&m.prop_type, MappedPropertyType::Map { key, value }
+                if matches!(**key, MappedPropertyType::Int32)
+                    && matches!(**value, MappedPropertyType::Int32)),
+            "M must be Map<Int32,Int32>, got {:?}",
+            m.prop_type
+        );
+        // The desync-catcher: H is only correct if the Map's inners were consumed.
+        let h = hero
+            .properties
+            .iter()
+            .find(|p| p.name.as_ref() == "H")
+            .expect("H prop — a desync would lose or corrupt this");
+        assert!(
+            matches!(h.prop_type, MappedPropertyType::Int32),
+            "H must be Int32 (desync would mis-type it), got {:?}",
+            h.prop_type
+        );
+    }
+
+    /// Same as above but the first property is a `Set<Int32>` (`25, 2`):
+    /// its single inner type byte must be consumed. #639.
+    #[test]
+    fn parse_usmap_set_property_consumes_inner_no_desync() {
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(&4u32.to_le_bytes());
+        for (len, name) in [(4u8, "Hero"), (4u8, "None"), (1u8, "S"), (1u8, "H")] {
+            data.push(len);
+            data.extend_from_slice(name.as_bytes());
+        }
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&0i32.to_le_bytes());
+        data.extend_from_slice(&1i32.to_le_bytes());
+        data.extend_from_slice(&2u16.to_le_bytes());
+        data.extend_from_slice(&2u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(1u8);
+        data.extend_from_slice(&2i32.to_le_bytes());
+        data.extend_from_slice(&[25u8, 2u8]); // SetProperty, Int32 element
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.push(1u8);
+        data.extend_from_slice(&3i32.to_le_bytes());
+        data.push(2u8); // IntProperty
+
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+
+        let parsed = Usmap::from_bytes(&usmap).expect("usmap parse");
+        let hero = parsed.schemas.get("Hero").expect("Hero schema");
+        let s = hero
+            .properties
+            .iter()
+            .find(|p| p.name.as_ref() == "S")
+            .expect("S prop");
+        assert!(
+            matches!(&s.prop_type, MappedPropertyType::Set { inner }
+                if matches!(**inner, MappedPropertyType::Int32)),
+            "S must be Set<Int32>, got {:?}",
+            s.prop_type
+        );
+        let h = hero
+            .properties
+            .iter()
+            .find(|p| p.name.as_ref() == "H")
+            .expect("H prop — a desync would lose or corrupt this");
+        assert!(matches!(h.prop_type, MappedPropertyType::Int32));
+    }
+
+    /// Each of `read_mapped_type`'s recursive inner reads (Map key, Map
+    /// value, Set element) must pass `depth + 1`, or a deeply-nested
+    /// container escapes `MAX_USMAP_ARRAY_NESTING_DEPTH`. Called at the
+    /// cap so a single further level trips it — isolating each `+ 1`
+    /// increment (kills the `+ 1 -> * 1` mutants). #639.
+    #[test]
+    fn read_mapped_type_container_increments_depth() {
+        let cap = MAX_USMAP_ARRAY_NESTING_DEPTH;
+        let names: Vec<String> = Vec::new();
+        let is_too_deep = |bytes: &[u8], depth: usize| -> bool {
+            let mut cur = Cursor::new(bytes);
+            matches!(
+                read_mapped_type(&mut cur, &names, depth),
+                Err(crate::PaksmithError::MappingsParse {
+                    fault: MappingsParseFault::ArrayNestingTooDeep { .. },
+                })
+            )
+        };
+        // Set element: `Set<Int32>` at depth = cap → element read at cap+1.
+        assert!(
+            is_too_deep(&[25u8, 2u8], cap),
+            "Set inner must increment depth"
+        );
+        // Map key: `Map<Array<Int32>, Int32>` at depth cap-1 → the key's
+        // Array recurses one past the cap only if the Map key read added 1.
+        assert!(
+            is_too_deep(&[24u8, 8u8, 2u8, 2u8], cap - 1),
+            "Map key must increment depth"
+        );
+        // Map value: `Map<Int32, Array<Int32>>` at depth cap-1 → same via value.
+        assert!(
+            is_too_deep(&[24u8, 2u8, 8u8, 2u8], cap - 1),
+            "Map value must increment depth"
+        );
     }
 
     #[test]
