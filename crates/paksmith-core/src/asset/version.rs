@@ -283,6 +283,15 @@ pub(crate) const VER_UE5_REMOVE_OBJECT_EXPORT_PACKAGE_GUID: i32 = 1005;
 /// UE 5.0+: `is_inherited_instance` (i32 bool) added to `FObjectExport`.
 pub(crate) const VER_UE5_TRACK_OBJECT_EXPORT_IS_INHERITED: i32 = 1006;
 
+/// UE 5.1+ (`FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES`): the leading
+/// slot of `FSoftObjectPath` changes from a single `FName AssetPathName`
+/// to an `FTopLevelAssetPath` (`FName PackageName` + `FName AssetName`),
+/// followed by the unchanged `FString SubPathString`. Source: CUE4Parse
+/// `EUnrealEngineObjectUE5Version::FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES`
+/// (`ObjectVersion.cs`) and `FSoftObjectPath.cs` (the
+/// `Ar.Ver >= FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES` branch).
+pub(crate) const VER_UE5_FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES: i32 = 1007;
+
 /// UE 5.0+: `SoftObjectPath` list added to the summary
 /// (`soft_object_paths_count` + `soft_object_paths_offset`).
 pub(crate) const VER_UE5_ADD_SOFTOBJECTPATH_LIST: i32 = 1008;

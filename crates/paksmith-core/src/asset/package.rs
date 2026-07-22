@@ -764,6 +764,7 @@ impl Package {
             custom_versions: Arc::new(summary.custom_versions.clone()),
             mappings: mappings.map(|m| Arc::new(m.clone())),
             bulk_resolver: Some(Arc::clone(&resolver)),
+            soft_object_paths_indexed: summary.soft_object_paths_indexed(),
         };
 
         // Phase 2f: dispatch the unversioned (schema-driven) property
@@ -1157,6 +1158,7 @@ impl Package {
             custom_versions: Arc::new(self.summary.custom_versions.clone()),
             mappings: self.mappings.clone(),
             bulk_resolver: Some(Arc::clone(&self.resolver)),
+            soft_object_paths_indexed: self.summary.soft_object_paths_indexed(),
         }
     }
 }

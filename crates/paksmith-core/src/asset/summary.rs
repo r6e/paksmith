@@ -225,6 +225,27 @@ pub struct PackageSummary {
 }
 
 impl PackageSummary {
+    /// The CUE4Parse index-form guard `!PKG_FilterEditorOnly &&
+    /// SoftObjectPaths.Length > 0`: `true` when this package's
+    /// `FSoftObjectPath` properties serialize their leading slot as an
+    /// `i32` index into the summary's `SoftObjectPaths` list rather than
+    /// inline (UE5 >= 1008). Consumed by `read_soft_path_payload` via
+    /// [`AssetContext::soft_object_paths_indexed`](crate::asset::AssetContext),
+    /// which documents why this is `false` for every well-formed asset. #638.
+    ///
+    /// The count is compared `!= 0` rather than `> 0`: it is a raw wire
+    /// `i32` (not validated non-negative at parse — it drives no
+    /// allocation or bounds, unlike the other summary counts). A crafted
+    /// asset could set it negative while emitting the index-serialized
+    /// payload; treating any non-zero count as the index form keeps the
+    /// read fail-closed instead of mis-decoding the `i32` index as an
+    /// FName. `None` (< 1008) and `Some(0)` (empty list) both read inline.
+    #[must_use]
+    pub(crate) fn soft_object_paths_indexed(&self) -> bool {
+        (self.package_flags & PKG_FILTER_EDITOR_ONLY) == 0
+            && self.soft_object_paths_count.unwrap_or(0) != 0
+    }
+
     /// Read the summary from byte 0 of `reader`.
     ///
     /// # Errors
@@ -1191,6 +1212,53 @@ mod tests {
             "got: {json}"
         );
         assert!(json.contains(r#""file_version_ue4":522"#), "got: {json}");
+    }
+
+    /// `soft_object_paths_indexed()` = `!PKG_FilterEditorOnly &&
+    /// soft_object_paths_count != 0` — paksmith's sign-hardened form of
+    /// the CUE4Parse `SoftObjectPaths.Length > 0` index-form guard.
+    /// Cooked (flag set) is always inline; only a not-filter-editor
+    /// package with a non-empty (or crafted-negative) list reports the
+    /// index form. #638.
+    #[test]
+    fn soft_object_paths_indexed_guard() {
+        let base = minimal_ue4_27_summary();
+        // Cooked (PKG_FilterEditorOnly set) even with a populated list → inline.
+        let cooked_with_list = PackageSummary {
+            package_flags: 0x8000_0000,
+            soft_object_paths_count: Some(3),
+            ..base.clone()
+        };
+        assert!(!cooked_with_list.soft_object_paths_indexed());
+        // Not-filter-editor + populated list → the index form.
+        let indexed = PackageSummary {
+            package_flags: 0,
+            soft_object_paths_count: Some(3),
+            ..base.clone()
+        };
+        assert!(indexed.soft_object_paths_indexed());
+        // Not-filter-editor but no list (None or 0) → inline.
+        let absent_list = PackageSummary {
+            package_flags: 0,
+            soft_object_paths_count: None,
+            ..base.clone()
+        };
+        assert!(!absent_list.soft_object_paths_indexed());
+        let empty_list = PackageSummary {
+            package_flags: 0,
+            soft_object_paths_count: Some(0),
+            ..base.clone()
+        };
+        assert!(!empty_list.soft_object_paths_indexed());
+        // A negative (crafted/corrupt) count is still a non-zero list
+        // declaration: treat it as the index form so the soft-path read
+        // fails closed rather than mis-decoding the i32 index as an FName.
+        let negative_list = PackageSummary {
+            package_flags: 0,
+            soft_object_paths_count: Some(-1),
+            ..base
+        };
+        assert!(negative_list.soft_object_paths_indexed());
     }
 
     /// Hand-craft a minimum-viable UE4 cooked `FPackageFileSummary`

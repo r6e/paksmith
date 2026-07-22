@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::asset::AssetContext;
 use crate::asset::package_index::PackageIndex;
 use crate::asset::read_asset_fstring;
+use crate::asset::version::VER_UE5_FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES;
 use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
 
 use super::tag::PropertyTag;
@@ -235,45 +236,97 @@ pub enum PropertyValue {
 /// Returns `(asset_path, sub_path)` so the caller can wrap the pair
 /// into the right `PropertyValue` variant.
 ///
-/// Phase 2d only handles the UE4 / UE5 < 1007 wire shape. UE5 ≥ 1007
-/// switches the first slot to `FTopLevelAssetPath` (2 FNames) and UE5
-/// ≥ 1008 changes the entire payload to an `i32` index into the
-/// summary's `SoftObjectPaths` list; both require summary-side support
-/// deferred to Phase 2g, so this function returns
-/// `UnsupportedSoftObjectPathLayout` at UE5 ≥ 1007 rather than
-/// mis-decoding silently.
+/// Wire shape by version (`asset_path` slot + `FString sub_path`):
+/// - UE4 / UE5 < 1007: a single `FName` (`FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES`).
+/// - UE5 >= 1007: an `FTopLevelAssetPath` — `FName PackageName` +
+///   `FName AssetName`, reconstructed to the same `Package.Asset` string
+///   the pre-1007 single-FName form produced (see the join below).
+///
+/// The UE5 >= 1008 index-serialized form (leading `i32` index into the
+/// summary's `SoftObjectPaths` list) is fail-closed via
+/// `ctx.soft_object_paths_indexed` — it is unreachable for any
+/// well-formed asset (see [`AssetContext::soft_object_paths_indexed`]).
 ///
 /// `pub(super)` so `containers.rs` can reuse this for element reads.
 ///
 /// # Errors
 ///
-/// - [`AssetParseFault::UnsupportedSoftObjectPathLayout`] when the
-///   asset declares `file_version_ue5 >= 1007`.
-/// - Any error surfaced by [`super::read_fname_pair`] for the
-///   `asset_path` FName.
+/// - [`AssetParseFault::UnsupportedSoftObjectPathLayout`] when the asset
+///   uses the index-serialized form (`ctx.soft_object_paths_indexed`).
+/// - Any error surfaced by [`super::read_fname_pair`] for either FName.
 /// - [`crate::error::AssetParseFault::FStringMalformed`] for a malformed
 ///   `sub_path` FString.
+///
+/// [`AssetContext::soft_object_paths_indexed`]: crate::asset::AssetContext
 pub(super) fn read_soft_path_payload<R: Read>(
     reader: &mut R,
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<(String, String)> {
-    if let Some(v) = ctx.version.file_version_ue5
-        && v >= 1007
-    {
+    // Index-serialized form (UE5 >= 1008): the leading slot is an `i32`
+    // index into the summary's `SoftObjectPaths` list, which paksmith
+    // does not parse. `soft_object_paths_indexed` (precomputed from the
+    // summary as `!PKG_FilterEditorOnly && count != 0`) is only ever true
+    // for a version-inconsistent crafted asset — a well-formed UE5 asset
+    // has `file_version_ue4 == 522`, and an uncooked asset at
+    // `file_version_ue4 >= 520` is already rejected as `UncookedAsset` at
+    // the summary boundary. Fail closed rather than mis-decode the index
+    // as an FName. See `AssetContext::soft_object_paths_indexed`. #638.
+    if ctx.soft_object_paths_indexed {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
-            fault: AssetParseFault::UnsupportedSoftObjectPathLayout { ue5_version: v },
+            fault: AssetParseFault::UnsupportedSoftObjectPathLayout {
+                ue5_version: ctx.version.file_version_ue5.unwrap_or_default(),
+            },
         });
     }
-    let obj_path =
-        super::read_fname_pair(reader, ctx, asset_path, AssetWireField::SoftObjectAssetPath)?;
+
+    let obj_path = if ctx
+        .version
+        .ue5_at_least(VER_UE5_FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES)
+    {
+        // UE5 >= 1007: `FTopLevelAssetPath` (PackageName FName +
+        // AssetName FName). Reconstruct `FTopLevelAssetPath::ToString`:
+        // empty when PackageName is `None`; otherwise PackageName, with
+        // `.AssetName` appended only when AssetName is not `None` (no
+        // trailing dot). This reproduces the exact `asset_path` string
+        // the pre-1007 single-FName form emitted (e.g. `/Game/Foo.Foo`).
+        let package =
+            super::read_fname_pair(reader, ctx, asset_path, AssetWireField::SoftObjectAssetPath)?;
+        let asset =
+            super::read_fname_pair(reader, ctx, asset_path, AssetWireField::SoftObjectAssetPath)?;
+        if package.as_ref() == "None" {
+            String::new()
+        } else if asset.as_ref() == "None" {
+            package.to_string()
+        } else {
+            format!("{package}.{asset}")
+        }
+    } else {
+        // UE4 / UE5 < 1007: a single `FName AssetPathName`. Apply the
+        // same `AssetPathName.IsNone → ""` rule `FSoftObjectPath::ToString`
+        // uses uniformly, so a null reference decodes to "" here exactly
+        // as the >= 1007 None-package case does — the two branches agree.
+        let name =
+            super::read_fname_pair(reader, ctx, asset_path, AssetWireField::SoftObjectAssetPath)?;
+        if name.as_ref() == "None" {
+            String::new()
+        } else {
+            name.to_string()
+        }
+    };
+    // FString `SubPathString`. On very recent engine builds this slot is
+    // an `FUtf8String` (gated on a custom FFortniteMainBranchObjectVersion,
+    // not the UE5 object version); an empty sub_path — the common cooked
+    // case — is byte-identical in both encodings, so the FString read is
+    // correct for the vast majority of content. Non-empty UTF-8 sub_paths
+    // on those builds are unhandled (#638 limitation).
     let sub = crate::asset::read_asset_fstring(reader, asset_path)?;
     // SoftObjectPath / SoftClassPath still store `asset_path: String`
     // (out of #365's scope — those variants weren't on the issue's
     // explicit field list). One allocation per soft-path read; cold
     // relative to the per-property hot path.
-    Ok((obj_path.to_string(), sub))
+    Ok((obj_path, sub))
 }
 
 /// Read a primitive property value for `tag`, consuming exactly
@@ -617,6 +670,7 @@ mod tests {
             ),
             mappings: None,
             bulk_resolver: None,
+            soft_object_paths_indexed: false,
         }
     }
 
@@ -1092,18 +1146,207 @@ mod tests {
         );
     }
 
+    /// UE5 >= 1007 (`FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES`): the
+    /// first slot is an `FTopLevelAssetPath` (PackageName FName +
+    /// AssetName FName), joined `Package.Asset` per
+    /// `FTopLevelAssetPath::ToString`, then the FString sub_path.
     #[test]
-    fn soft_object_property_ue5_post_1007_rejected() {
-        let tag = make_tag("SoftObjectProperty", 16);
-        let mut ctx = make_ctx(&["None", "/Game/Data/Hero.Hero"]);
+    fn soft_object_property_ue5_1007_toplevel_asset_path() {
+        let tag = make_tag("SoftObjectProperty", 21);
+        let mut ctx = make_ctx(&["None", "/Game/Data/Hero", "Hero"]);
         ctx.version.file_version_ue5 = Some(1007);
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&1i32.to_le_bytes()); // PackageName index
+        buf.extend_from_slice(&0i32.to_le_bytes()); // PackageName number
+        buf.extend_from_slice(&2i32.to_le_bytes()); // AssetName index
+        buf.extend_from_slice(&0i32.to_le_bytes()); // AssetName number
+        buf.extend_from_slice(&1i32.to_le_bytes()); // sub_path FString len (empty)
+        buf.push(b'\0');
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            val,
+            PropertyValue::SoftObjectPath {
+                asset_path: "/Game/Data/Hero.Hero".to_string(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
+    /// AssetName resolves to `None` → `asset_path` is PackageName alone,
+    /// with NO trailing dot (`FTopLevelAssetPath::ToString` appends the
+    /// dot only together with a non-`None` AssetName).
+    #[test]
+    fn soft_object_property_ue5_1007_empty_asset_name() {
+        let tag = make_tag("SoftObjectProperty", 21);
+        let mut ctx = make_ctx(&["None", "/Game/Data/Hero"]);
+        ctx.version.file_version_ue5 = Some(1007);
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&1i32.to_le_bytes()); // PackageName index 1
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes()); // AssetName index 0 = None
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes()); // empty sub_path
+        buf.push(b'\0');
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            val,
+            PropertyValue::SoftObjectPath {
+                asset_path: "/Game/Data/Hero".to_string(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
+    /// PackageName resolves to `None` → the entire `asset_path` is empty
+    /// (`FTopLevelAssetPath::ToString` early-returns `""` when
+    /// `PackageName.IsNone`), even though both FNames are consumed.
+    #[test]
+    fn soft_object_property_ue5_1007_none_package_name() {
+        let tag = make_tag("SoftObjectProperty", 21);
+        let mut ctx = make_ctx(&["None", "Hero"]);
+        ctx.version.file_version_ue5 = Some(1007);
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&0i32.to_le_bytes()); // PackageName index 0 = None
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes()); // AssetName index 1 = "Hero"
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes()); // empty sub_path
+        buf.push(b'\0');
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            val,
+            PropertyValue::SoftObjectPath {
+                asset_path: String::new(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
+    /// A non-empty `sub_path` FString is preserved alongside the joined
+    /// FTopLevelAssetPath.
+    #[test]
+    fn soft_object_property_ue5_1007_nonempty_subpath() {
+        let tag = make_tag("SoftObjectProperty", 24);
+        let mut ctx = make_ctx(&["None", "/Game/Data/Hero", "Hero"]);
+        ctx.version.file_version_ue5 = Some(1007);
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&2i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&4i32.to_le_bytes()); // sub_path len = 4 ("sub\0")
+        buf.extend_from_slice(b"sub\0");
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            val,
+            PropertyValue::SoftObjectPath {
+                asset_path: "/Game/Data/Hero.Hero".to_string(),
+                sub_path: "sub".to_string(),
+            }
+        );
+    }
+
+    /// Boundary: at UE5 1006 (below the change) the leading slot is still
+    /// a single FName + FString, not an FTopLevelAssetPath.
+    #[test]
+    fn soft_object_property_ue5_1006_boundary_single_fname() {
+        let tag = make_tag("SoftObjectProperty", 13);
+        let mut ctx = make_ctx(&["None", "/Game/Data/Hero.Hero"]);
+        ctx.version.file_version_ue5 = Some(1006);
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.push(b'\0');
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            val,
+            PropertyValue::SoftObjectPath {
+                asset_path: "/Game/Data/Hero.Hero".to_string(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
+    /// `SoftClassProperty` shares the FTopLevelAssetPath wire format at
+    /// >= 1007.
+    #[test]
+    fn soft_class_property_ue5_1007() {
+        let tag = make_tag("SoftClassProperty", 21);
+        let mut ctx = make_ctx(&["None", "/Game/BP/HeroClass", "HeroClass_C"]);
+        ctx.version.file_version_ue5 = Some(1007);
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&2i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.push(b'\0');
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            val,
+            PropertyValue::SoftClassPath {
+                asset_path: "/Game/BP/HeroClass.HeroClass_C".to_string(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
+    /// A null single-FName soft path (`< 1007`, FName index 0 = `None`)
+    /// yields an empty `asset_path`, matching `FSoftObjectPath::ToString`'s
+    /// uniform `AssetPathName.IsNone → ""` rule — the same result the
+    /// >= 1007 None-package case produces, so the two branches agree.
+    #[test]
+    fn soft_object_property_pre_1007_none_maps_to_empty() {
+        let tag = make_tag("SoftObjectProperty", 13);
+        let ctx = make_ctx(&["None"]);
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&0i32.to_le_bytes()); // FName index 0 = None
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes()); // empty sub_path
+        buf.push(b'\0');
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            val,
+            PropertyValue::SoftObjectPath {
+                asset_path: String::new(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
+    /// The version-inconsistent index-serialized form
+    /// (`soft_object_paths_indexed == true`, only reachable for a crafted
+    /// asset — see `AssetContext::soft_object_paths_indexed`) fails closed
+    /// with `UnsupportedSoftObjectPathLayout` rather than mis-decoding the
+    /// `i32` index as an FName.
+    #[test]
+    fn soft_object_property_index_form_rejected() {
+        let tag = make_tag("SoftObjectProperty", 16);
+        let mut ctx = make_ctx(&["None", "/Game/Data/Hero"]);
+        ctx.version.file_version_ue5 = Some(1008);
+        ctx.soft_object_paths_indexed = true;
         let buf = vec![0u8; 16];
         let err = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x").unwrap_err();
         assert!(matches!(
             err,
             crate::PaksmithError::AssetParse {
                 fault: crate::error::AssetParseFault::UnsupportedSoftObjectPathLayout {
-                    ue5_version: 1007
+                    ue5_version: 1008
                 },
                 ..
             }

@@ -2096,6 +2096,39 @@ mod tests {
         );
     }
 
+    /// Container-element soft paths route through `read_soft_path_payload`,
+    /// so the UE5 >= 1007 `FTopLevelAssetPath` layout (2 FNames) applies to
+    /// elements too. #638.
+    #[test]
+    fn element_soft_object_path_ue5_1007() {
+        let mut ctx = make_ctx(&["None", "/Game/Hero", "Hero"]);
+        ctx.version.file_version_ue5 = Some(1007);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // PackageName index 1
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // AssetName index 2
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // empty sub_path
+        bytes.push(0u8);
+        let mut r = Cursor::new(bytes);
+        let v = read_element_value(
+            "SoftObjectProperty",
+            AssetWireField::ArrayElementBody,
+            &mut r,
+            &ctx,
+            "x.uasset",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::SoftObjectPath {
+                asset_path: "/Game/Hero.Hero".to_string(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
     #[test]
     fn element_object_property_import() {
         let ctx = make_ctx_with_import("/Game/Mesh.Mesh");

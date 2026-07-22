@@ -376,7 +376,14 @@ fn is_partial_tree_stop(e: &PaksmithError) -> bool {
         PaksmithError::AssetParse {
             fault: AssetParseFault::UnversionedTypeNotSupported { .. }
                 | AssetParseFault::UnversionedSchemaMissing { .. }
-                | AssetParseFault::TextHistoryUnsupportedInElement { .. },
+                | AssetParseFault::TextHistoryUnsupportedInElement { .. }
+                // The index-serialized FSoftObjectPath form (a crafted,
+                // version-inconsistent asset — see
+                // `read_soft_path_payload`) cannot advance the cursor
+                // safely, so it stops the export's tree rather than
+                // failing the whole package. Mirrors the containers-side
+                // `is_recoverable_struct_element_error` allowlist. #638.
+                | AssetParseFault::UnsupportedSoftObjectPathLayout { .. },
             ..
         }
     )
@@ -478,7 +485,9 @@ fn read_unversioned_value(
             PropertyValue::Object { kind, name }
         }
         MT::SoftObject => {
-            // FSoftObjectPath wire format = FName + FString (per CUE4Parse).
+            // FSoftObjectPath: single FName + FString (UE4 / UE5 < 1007) or
+            // FTopLevelAssetPath (2 FNames) + FString (UE5 >= 1007). The
+            // version branch lives in `read_soft_path_payload`. #638.
             let (asset_path_str, sub_path) = read_soft_path_payload(cur, ctx, asset_path)?;
             PropertyValue::SoftObjectPath {
                 asset_path: asset_path_str,
@@ -868,6 +877,123 @@ mod tests {
             .find(|p| p.name.as_ref() == "Color")
             .expect("Color");
         assert!(matches!(color.value, PropertyValue::Int(99)));
+    }
+
+    /// The unversioned (schema-driven) `MT::SoftObject` arm delegates to
+    /// `read_soft_path_payload`, so a UE5 >= 1007 package decodes the
+    /// `FTopLevelAssetPath` layout (2 FNames) through the unversioned path
+    /// too — not just the tagged path. #638.
+    #[test]
+    fn unversioned_soft_object_ue5_1007_toplevel_asset_path() {
+        let schema = ClassSchema {
+            name: "Ref".to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: Arc::from("Path"),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: MappedPropertyType::SoftObject,
+            }],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("Ref".to_string(), schema);
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes()); // skip=0, val=1, is_last=1
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // PackageName index 1
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // AssetName index 2
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // empty sub_path
+        bytes.push(0u8);
+
+        let mut ctx = make_ctx(&["None", "/Game/Hero", "Hero"]);
+        ctx.version.file_version_ue5 = Some(1007);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "Ref", &usmap, &ctx, "test", 0)
+            .expect("read_unversioned_properties");
+        assert_eq!(props.len(), 1);
+        assert_eq!(
+            props[0].value,
+            PropertyValue::SoftObjectPath {
+                asset_path: "/Game/Hero.Hero".to_string(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
+    /// A version-inconsistent index-serialized soft path
+    /// (`soft_object_paths_indexed == true`) in an unversioned package
+    /// must degrade to a partial-tree stop (drop the rest of the export
+    /// and return `Ok`) rather than fail the whole package — i.e.
+    /// `UnsupportedSoftObjectPathLayout` is in `is_partial_tree_stop`,
+    /// matching the containers-side recoverable-error allowlist. #638.
+    #[test]
+    fn unversioned_index_form_soft_object_degrades_to_partial_tree_stop() {
+        let schema = ClassSchema {
+            name: "Ref".to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: Arc::from("Path"),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: MappedPropertyType::SoftObject,
+            }],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("Ref".to_string(), schema);
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes()); // one serialized property
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // never reached (fails first)
+
+        let mut ctx = make_ctx(&["None"]);
+        ctx.version.file_version_ue5 = Some(1008);
+        ctx.soft_object_paths_indexed = true;
+        let mut cur = Cursor::new(bytes.as_slice());
+        // Ok, not Err: the fault is recoverable, so the reader stops
+        // cleanly at depth 0 and returns the (empty) prefix.
+        let props = read_unversioned_properties(&mut cur, "Ref", &usmap, &ctx, "test", 0)
+            .expect("partial-tree stop returns Ok, not Err");
+        assert!(props.is_empty());
+    }
+
+    /// A fault NOT on the `is_partial_tree_stop` allowlist (here a
+    /// truncated `Int` value → a read error) must PROPAGATE as `Err`, not
+    /// be swallowed as a partial-tree stop. Pins `is_partial_tree_stop`
+    /// against collapsing to always-`true`. #638.
+    #[test]
+    fn unversioned_non_recoverable_error_propagates() {
+        let schema = ClassSchema {
+            name: "N".to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: Arc::from("V"),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("N".to_string(), schema);
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes()); // one serialized property
+        bytes.extend_from_slice(&[0u8, 0u8]); // only 2 of the Int32's 4 bytes → EOF
+
+        let ctx = make_ctx(&["None"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let result = read_unversioned_properties(&mut cur, "N", &usmap, &ctx, "test", 0);
+        assert!(
+            result.is_err(),
+            "a non-allowlisted fault must propagate, not partial-tree-stop"
+        );
     }
 
     #[test]

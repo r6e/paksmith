@@ -24,9 +24,10 @@ tag-extras), integer family (`Int8` / `Int16` / `Int` / `Int64` +
 `Double`), string types (`StrProperty` FString-bodied + `NameProperty`
 FName-bodied), enum dispatch (`EnumProperty` + `ByteProperty` with
 `tag.enum_name` set), `ObjectProperty` `FPackageIndex`-keyed,
-soft-reference types (`SoftObjectProperty` / `SoftClassProperty`),
-and the `Unknown { type_name, skipped_bytes }` fallback. UE5 ≥ 1007
-SoftObject wire-shape changes are explicitly rejected — see
+soft-reference types (`SoftObjectProperty` / `SoftClassProperty`,
+including the UE5 ≥ 1007 `FTopLevelAssetPath` layout), and the
+`Unknown { type_name, skipped_bytes }` fallback. The UE5 ≥ 1008
+index-serialized SoftObject form is fail-closed — see
 §*Known divergences*.
 
 **Paksmith parser status: `complete`.** Phase 2b / 2d deliverable;
@@ -40,10 +41,17 @@ ships as `paksmith-core/src/asset/property/primitives.rs`.
 | `FileVersionUE5 ≥ 1007` | `SoftObjectProperty` / `SoftClassProperty` wire shape changes (`FTopLevelAssetPath` replaces the leading FName). | Same[^1] |
 | `FileVersionUE5 ≥ 1008` | `SoftObjectProperty` becomes an `i32` index into the summary's `SoftObjectPaths` list. | Same[^1] |
 
-Paksmith rejects UE5 ≥ 1007 SoftObject reads with
+Paksmith decodes the UE5 ≥ 1007 `FTopLevelAssetPath` form inline
+(PackageName FName + AssetName FName, joined `Package.Asset`). The UE5
+≥ 1008 index-serialized encoding — a leading `i32` index into the
+summary's `SoftObjectPaths` list — is fail-closed with
 `AssetParseFault::UnsupportedSoftObjectPathLayout { ue5_version }`
-rather than mis-decoding; the UE5 1008+ index encoding requires
-summary-side support deferred to Phase 2g.
+rather than mis-decoded. That form is gated by
+`!PKG_FilterEditorOnly && soft_object_paths_count != 0` (comparing
+`!= 0`, not `> 0`, so a crafted negative count also fails closed) and
+is unreachable for any well-formed cooked asset (uncooked assets are
+rejected at the summary boundary), so it only fires for a
+version-inconsistent crafted asset.
 
 ## Wire layout
 
@@ -108,8 +116,14 @@ form) from the import or export table's `object_name` slot. Empty for
 
 ### Soft references
 
-Wire body: `FName asset_path` (8 bytes) + `FString sub_path`. Paksmith
-rejects UE5 ≥ 1007 because the leading slot changes shape.
+Wire body (UE4 / UE5 < 1007): `FName asset_path` (8 bytes) + `FString
+sub_path`. At UE5 ≥ 1007 the leading slot is an `FTopLevelAssetPath`
+(PackageName FName + AssetName FName, 16 bytes), which paksmith joins to
+the same `Package.Asset` string the single-FName form produced, per
+`FTopLevelAssetPath::ToString`: empty **only** when PackageName is
+`None`; PackageName alone (no trailing dot) when AssetName is `None`;
+otherwise `Package.Asset`. The UE5 ≥ 1008 index-serialized form is
+fail-closed (see the *Versions* note above).
 
 | `Type` (FName) | `PropertyValue` variant |
 |----------------|--------------------------|
@@ -144,7 +158,7 @@ Wire layout above; the table cells call out the variants inline
 
 - Per-type body widths fixed by the Wire layout tables: `Int8` 1 byte, `Int16` / `UInt16` 2 bytes, `IntProperty` / `UInt32Property` 4 bytes, `Int64` / `UInt64` 8 bytes, `FloatProperty` 4 bytes, `DoubleProperty` 8 bytes, `BoolProperty` 0 bytes (value in tag-extras), `NameProperty` 8 bytes (`FName`), `ObjectProperty` 4 bytes (`FPackageIndex`).
 - **`StrProperty` body**: `FString` per [`../primitive/fstring.md`](../primitive/fstring.md); bounded by `FSTRING_MAX_LEN = 65,536`.
-- **`SoftObjectProperty` / `SoftClassProperty` body**: `FName asset_path` + `FString sub_path`; UE5 ≥ 1007 wire-shape change rejected at parse time.
+- **`SoftObjectProperty` / `SoftClassProperty` body**: `FName asset_path` + `FString sub_path` (UE4 / UE5 < 1007), or `FTopLevelAssetPath` (2 FNames) + `FString sub_path` (UE5 ≥ 1007); the UE5 ≥ 1008 index-serialized form is fail-closed at parse time.
 
 ### Implementation hardening (recommended for any parser)
 
@@ -168,9 +182,11 @@ Wire layout above; the table cells call out the variants inline
 - **Hex anchor commands:** `(none yet — see [#347](https://github.com/r6e/paksmith/issues/347))`.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^5].
 - **Known divergences:**
-  - **UE5 1007+ SoftObjectPath rejection.** Paksmith rejects the
-    wire-shape change; CUE4Parse and unreal_asset handle it. Phase 2g
-    will unblock.
+  - **UE5 1008+ index-serialized SoftObjectPath.** Paksmith decodes the
+    ≥ 1007 inline `FTopLevelAssetPath` form but fail-closes the ≥ 1008
+    `i32`-index-into-summary-list form (it does not parse that list);
+    CUE4Parse reads the index. Unreachable for well-formed cooked
+    assets — see the *Versions* note ([#638](https://github.com/r6e/paksmith/issues/638)).
   - **`PackageIndex::ImportIndexUnderflow`** rejection on `i32::MIN`
     — see [`../primitive/fpackage-index.md`](../primitive/fpackage-index.md).
 

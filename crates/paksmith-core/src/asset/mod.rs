@@ -864,6 +864,25 @@ pub struct AssetContext {
     /// to [`crate::error::PaksmithError::UnsupportedFeature`]). `Arc`-shared
     /// with `Package::resolver`, so cloning a context stays refcount-cheap.
     pub(crate) bulk_resolver: Option<Arc<bulk_data::BulkDataResolver>>,
+    /// Fail-closed guard for the UE5 >= 1008 index-serialized
+    /// `FSoftObjectPath` form, where the leading slot is an `i32` index
+    /// into the summary's `SoftObjectPaths` list instead of an inline
+    /// path. CUE4Parse reads the index only when
+    /// `!PKG_FilterEditorOnly && SoftObjectPaths.Length > 0`; paksmith
+    /// precomputes an equivalent guard (`PackageSummary::
+    /// soft_object_paths_indexed`), comparing the wire count `!= 0` so a
+    /// crafted negative count also fails closed. For any well-formed
+    /// asset this is `false`: a non-zero `count` requires UE5 >= 1008 (so
+    /// `file_version_ue4 == 522`), and an asset lacking
+    /// `PKG_FilterEditorOnly` at `file_version_ue4 >= 520` is already
+    /// rejected as `UncookedAsset` at the summary boundary. So `true`
+    /// only arises for a version-inconsistent crafted asset (UE5 >= 1008
+    /// with `file_version_ue4 < 520`); paksmith does not parse the
+    /// summary list, so it fails the read closed rather than mis-decode
+    /// the `i32` index as an FName. Defaults `false` from
+    /// [`AssetContext::new`]; set from the summary only on the
+    /// `Package::read_from*` path. #638.
+    pub(crate) soft_object_paths_indexed: bool,
 }
 
 impl AssetContext {
@@ -887,6 +906,10 @@ impl AssetContext {
             custom_versions,
             mappings,
             bulk_resolver: None,
+            // Default: inline soft-path reads. Only the real
+            // `Package::read_from*` path (which has the summary in scope)
+            // sets this from the editor-index guard. #638.
+            soft_object_paths_indexed: false,
         }
     }
 }
