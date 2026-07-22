@@ -375,18 +375,27 @@ impl BulkDataFlags {
         (self.0 & FLAG_SERIALIZE_COMPRESSED_ZLIB) != 0
     }
 
-    /// `BULKDATA_CompressedLZO` (bit 4). LZO compression is rare in
-    /// cooked content; the resolver rejects with
-    /// `UnsupportedBulkCompression`. Phase 3 follow-up: surface a
-    /// fixture and add an LZO decoder.
+    /// `BULKDATA_CompressedLZO` (bit 4). An LZO1X-compressed payload
+    /// in an `FCompressedChunkInfo`-style chunked framing (UE3 used a
+    /// narrower u32-width chunk record than paksmith's UE4 i64 form;
+    /// no in-scope fixture pins the exact UE3 shape) — and only
+    /// UE3-era cooked content emits it, out of paksmith's UE4.13+
+    /// cooked-asset scope. No in-scope cooker or cross-validation
+    /// oracle produces it (repak cannot write it; CUE4Parse reads UE4
+    /// non-ZLIB bulk as raw; only UEViewer decodes the UE3 LZO path),
+    /// so the resolver fail-closes with `UnsupportedBulkCompression`.
+    /// Investigated and resolved as fail-closed in #559.
     #[must_use]
     pub fn is_lzo_compressed(self) -> bool {
         (self.0 & FLAG_COMPRESSED_LZO) != 0
     }
 
-    /// `BULKDATA_SerializeCompressedBitWindow` (bit 9). Custom
-    /// bit-window compression. The resolver rejects with
-    /// `UnsupportedBulkCompression`.
+    /// `BULKDATA_SerializeCompressedBitWindow` (bit 9). A deprecated,
+    /// inert UE flag — not a distinct codec. No community reference
+    /// (CUE4Parse, UEViewer) decodes it; UE4/UE5 read a BitWindow-
+    /// flagged payload as raw. There is nothing to decode, so the
+    /// resolver fail-closes with `UnsupportedBulkCompression`.
+    /// Investigated and resolved as fail-closed in #559.
     #[must_use]
     pub fn is_bitwindow_compressed(self) -> bool {
         (self.0 & FLAG_SERIALIZE_COMPRESSED_BITWINDOW) != 0
@@ -851,7 +860,7 @@ pub(crate) fn make_zero_record() -> FByteBulkData {
 /// `resolve()` enforces, in order:
 ///
 /// 1. Unsupported compression rejection (`LZO` / `BitWindow` fire
-///    `UnsupportedBulkCompression`).
+///    `UnsupportedBulkCompression` — fail-closed, #559).
 /// 2. Offset fix-up: `OffsetInFile + bulk_data_start_offset` checked
 ///    via `checked_add`; fires `BulkDataOffsetFixupOverflow` on
 ///    overflow OR negative result.
@@ -1046,7 +1055,13 @@ impl BulkDataResolver {
         reason = "sequential dispatch + cap chain + side-effect-free budget reservation; splitting hurts the line-by-line auditability of the cap chain that the security panel reviewed"
     )]
     pub fn resolve(&self, record: &FByteBulkData, asset_path: &str) -> crate::Result<BulkData> {
-        // 1. Unsupported compression rejection.
+        // 1. Unsupported compression rejection (fail-closed, #559).
+        // LZO is a real LZO1X codec, but only UE3-era content emits it
+        // (out of paksmith's UE4.13+ cooked-asset scope) and no
+        // in-scope oracle produces it; BitWindow is a deprecated,
+        // inert flag with no codec to decode. Both fail-closed with an
+        // explicit fault rather than silently raw-reading a
+        // possibly-garbage payload. See the flag-accessor docs and #559.
         if record.flags.is_lzo_compressed() {
             return Err(crate::PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),

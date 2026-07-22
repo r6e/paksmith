@@ -165,8 +165,11 @@ Phase 3c typed engine-struct decoders. Each plan doc under
 `docs/plans/phase-3{a..h}-*.md` is now the frozen historical
 reference for its sub-phase. Named follow-ups remain tracked as their
 own issues: virtual-texture page-table export, Nanite-specific export
-(#560), LZO/BitWindow bulk decode (#559), proprietary audio codecs
-(Phase 8), and `UAnimSequence` animations (#575).
+(#560), proprietary audio codecs (Phase 8), and `UAnimSequence`
+animations (#575). LZO/BitWindow bulk compression was investigated
+under #559 and resolved fail-closed (LZO is a UE3-era codec, out of
+paksmith's UE4.13+ cooked-asset scope, with no in-scope oracle;
+BitWindow is a deprecated, inert non-codec).
 
 - **3a** — `FormatHandler` trait + `HandlerRegistry` + class-name
   dispatch table + `Asset` `#[non_exhaustive]` + `Generic`

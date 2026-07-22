@@ -97,12 +97,12 @@ the flags identify.
 | `BULKDATA_SerializeCompressedZLIB` | `0x0002` | Payload zlib-compressed; decompress before use. `BULKDATA_SerializeCompressed` is an alias for this flag. |
 | `BULKDATA_ForceSingleElementSerialization` | `0x0004` | Element-by-element serialization (rare for textures). |
 | `BULKDATA_SingleUse` | `0x0008` | Discard after first read. |
-| `BULKDATA_CompressedLZO` | `0x0010` | Payload LZO-compressed (rare in cooked content). |
+| `BULKDATA_CompressedLZO` | `0x0010` | Payload LZO1X-compressed (UE3-era only; paksmith fail-closes — see [bulk-data.md](../asset/bulk-data.md#lzo-and-bitwindow-fail-closed)). |
 | `BULKDATA_Unused` | `0x0020` | Legacy. |
 | `BULKDATA_ForceInlinePayload` | `0x0040` | Inline regardless of streaming settings. |
 | `BULKDATA_ForceStreamPayload` | `0x0080` | Force streaming (use `.ubulk`). |
 | `BULKDATA_PayloadInSeperateFile` [sic] | `0x0100` | Payload is in a separate file (`.ubulk`). ("Seperate" preserves the UE engine enum spelling exactly.) |
-| `BULKDATA_SerializeCompressedBitWindow` | `0x0200` | Uses a custom bit window for compression. |
+| `BULKDATA_SerializeCompressedBitWindow` | `0x0200` | Deprecated/inert flag — not a distinct codec; paksmith fail-closes (see [bulk-data.md](../asset/bulk-data.md#lzo-and-bitwindow-fail-closed)). |
 | `BULKDATA_Force_NOT_InlinePayload` | `0x0400` | Prevent inlining even when other flags would allow it. |
 | `BULKDATA_OptionalPayload` | `0x0800` | Payload may not be present at all (`.uptnl` companion). |
 | `BULKDATA_MemoryMappedPayload` | `0x1000` | Memory-mapped on supported platforms. |

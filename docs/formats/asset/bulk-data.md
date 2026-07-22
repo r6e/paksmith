@@ -120,12 +120,12 @@ Total fixed-header size on paksmith's accepted UE range (no
 | 1 | `BULKDATA_SerializeCompressedZLIB` | `0x0002` | Payload zlib-compressed; decompress before use. `BULKDATA_SerializeCompressed` is an alias for this flag. |
 | 2 | `BULKDATA_ForceSingleElementSerialization` | `0x0004` | Element-by-element serialization (rare for byte bulk data). |
 | 3 | `BULKDATA_SingleUse` | `0x0008` | Discard after first read. |
-| 4 | `BULKDATA_CompressedLZO` | `0x0010` | Payload LZO-compressed (rare in cooked content). |
+| 4 | `BULKDATA_CompressedLZO` | `0x0010` | Payload LZO1X-compressed in an `FCompressedChunkInfo`-style framing. UE3-era only; paksmith fail-closes (see [LZO and BitWindow](#lzo-and-bitwindow-fail-closed) below). |
 | 5 | `BULKDATA_Unused` | `0x0020` | Legacy; readers skip records with this flag set. |
 | 6 | `BULKDATA_ForceInlinePayload` | `0x0040` | Inline regardless of streaming settings. |
 | 7 | `BULKDATA_ForceStreamPayload` | `0x0080` | Force streaming (use `.ubulk`). |
 | 8 | `BULKDATA_PayloadInSeperateFile` | `0x0100` | Payload is in `.ubulk`. ("Seperate" preserves the UE engine enum spelling exactly.) |
-| 9 | `BULKDATA_SerializeCompressedBitWindow` | `0x0200` | Uses a custom bit window for compression. |
+| 9 | `BULKDATA_SerializeCompressedBitWindow` | `0x0200` | Deprecated/inert flag — not a distinct codec; UE4/UE5 read a flagged payload as raw. paksmith fail-closes (see [LZO and BitWindow](#lzo-and-bitwindow-fail-closed) below). |
 | 10 | `BULKDATA_Force_NOT_InlinePayload` | `0x0400` | Prevent inlining even when other flags would allow it. |
 | 11 | `BULKDATA_OptionalPayload` | `0x0800` | Payload may not be present at all. When combined with `BULKDATA_PayloadInSeperateFile`, routes to `.uptnl`. |
 | 12 | `BULKDATA_MemoryMappedPayload` | `0x1000` | Memory-mapped on supported platforms. |
@@ -157,6 +157,38 @@ never sets reserved bits and any record with them set is a
 crafted-input / wire-corruption signal. If a future UE build
 re-activates bit 31 (or any other reserved bit), paksmith's
 `VALID_FLAG_MASK` constant + bit catalog get updated in one PR.
+
+### LZO and BitWindow (fail-closed)
+
+paksmith decodes only `BULKDATA_SerializeCompressedZLIB` bulk
+compression. The other two compression flags are intentionally
+**fail-closed** — the resolver returns
+`UnsupportedBulkCompression { method: "LZO" | "BitWindow" }` rather
+than decoding or silently raw-reading.
+[#559](https://github.com/r6e/paksmith/issues/559) investigated both
+and confirmed this is the honest state:
+
+- **`BULKDATA_CompressedLZO`** is a genuine codec — LZO1X raw blocks
+  in an `FCompressedChunkInfo`-style chunked framing (per-chunk
+  compressed/uncompressed sizes come from the chunk table). Note the
+  framing *width* differs from paksmith's zlib path: UE3 used a
+  narrower `u32`-field chunk record, not the UE4 `i64` form (see
+  *Payload decompression* below), and paksmith has no in-scope UE3
+  fixture to pin the exact shape. And **only UE3-era cooked content
+  emits it**, out of paksmith's UE4.13+ cooked-asset scope. No
+  in-scope tool produces a
+  cross-validation oracle: `trumank/repak` cannot write LZO bulk data,
+  CUE4Parse reads UE4 non-ZLIB bulk payloads as raw (it never decodes
+  LZO), and only UEViewer decodes the UE3 LZO path (via
+  `lzo1x_decompress_safe`).[^3] A pure-Rust MIT decoder (`lzokay`)
+  exists should an in-scope fixture ever surface, but until one does,
+  decoding blind would ship an unvalidated codec — so LZO stays
+  fail-closed.
+- **`BULKDATA_SerializeCompressedBitWindow`** is **not a distinct
+  codec**. It is a deprecated, inert UE flag ("platform-specific bit
+  window", documented deprecated in UE5.x); no community reference
+  decodes it, and UE4/UE5 read a BitWindow-flagged payload as raw.[^3]
+  There is nothing to implement, so it stays fail-closed.
 
 ### Tier dispatch (file lookup)
 
@@ -487,9 +519,13 @@ decompression + per-package byte budget), and the
 export readers (texture mips: 3e; static mesh: 3g; skeletal mesh: 3h;
 audio: 3f) consume the resolved bytes. The chunked zlib framing under
 *Payload decompression* shipped with
-[#644](https://github.com/r6e/paksmith/issues/644); the remaining
-compression follow-ups are LZO/BitWindow
-([#559](https://github.com/r6e/paksmith/issues/559)).
+[#644](https://github.com/r6e/paksmith/issues/644). LZO and BitWindow
+bulk compression are intentionally **fail-closed** rather than decoded
+— [#559](https://github.com/r6e/paksmith/issues/559) investigated both
+and resolved them so (LZO is a UE3-era codec out of paksmith's UE4.13+
+cooked-asset scope, with no in-scope oracle; BitWindow is a
+deprecated, inert flag with no codec to decode). See
+[LZO and BitWindow](#lzo-and-bitwindow-fail-closed) above.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 + the per-task
 plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
@@ -499,3 +535,5 @@ plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FByteBulkDataHeader.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` (primary oracle for the header constructor) and `EBulkDataFlags.cs` in the same directory (full flag catalog). `FByteBulkData.cs` in the same directory covers the wrapping payload-read logic (zlib decompression, bulk-archive resolution); the per-record header layout above is sourced from `FByteBulkDataHeader.cs`.
 
 [^2]: Chunked-framing layout (primary oracle): `FabianFG/CUE4Parse/CUE4Parse/UE4/Readers/FArchive.cs` (`SerializeCompressedNew`) and `CUE4Parse/Compression/Compression.cs` (`LOADING_COMPRESSION_CHUNK_SIZE`). Independent cross-anchors: `Brabb3l/Remnant-2-Save-Parser` `src/sav.rs` (`ARCHIVE_V2_HEADER_TAG`, Rust) and `t1nky/revision-go` `remnant/save_file.go` (tag constants + chunk size, Go).
+
+[^3]: LZO/BitWindow bulk handling across community references: `gildor2/UEViewer` `Unreal/UnCoreCompression.cpp` decodes UE3 LZO bulk via `lzo1x_decompress_safe` (`DetectCompressionMethod` notes "LZO was used only with UE3 games") and has no BitWindow branch; `FabianFG/CUE4Parse` `CUE4Parse/UE4/Assets/Objects/TBulkData.cs` decodes only `BULKDATA_SerializeCompressedZLIB` and reads every other flag as a raw payload; `trumank/repak` is a pak-container library and does not parse bulk records (its `Compression` enum has no LZO). BitWindow is documented deprecated ("platform-specific bit window") in `adrianstephens/orbiscrude` `shared/filetypes/container/unreal_types.cpp`. Pure-Rust LZO1X decoder for a future in-scope fixture: the MIT-licensed `lzokay` crate.
