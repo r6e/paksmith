@@ -158,6 +158,18 @@ pub(crate) const VER_UE4_64BIT_EXPORTMAP_SERIALSIZES: i32 = 511;
 /// gate applies in both places.
 pub(crate) const VER_UE4_ADDED_SEARCHABLE_NAMES: i32 = 510;
 
+/// `ADDED_SOFT_OBJECT_PATH` (`file_version_ue4` 514): `FSoftObjectPath`
+/// gains its split `FName AssetPathName` + `FString SubPathString`
+/// fields. BELOW this
+/// version the payload is a single `FString` that CUE4Parse splits on the
+/// last `.` into (asset path, sub-path). paksmith decodes the 514+ shape
+/// only; the pre-514 single-`FString` layout is unsupported (see
+/// `read_soft_path_payload`) — its split produces a lossy, version-
+/// inconsistent decomposition and no in-scope fixture anchors it (#694).
+/// Source: CUE4Parse `EUnrealEngineObjectUE4Version::ADDED_SOFT_OBJECT_PATH`
+/// (`ObjectVersion.cs`) and `FSoftObjectPath.cs`.
+pub(crate) const VER_UE4_ADDED_SOFT_OBJECT_PATH: i32 = 514;
+
 /// UE 4.x: `LocalizationId` FString added to the package summary
 /// (editor-only — present only when `PKG_FilterEditorOnly` is NOT set).
 pub(crate) const VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID: i32 = 516;

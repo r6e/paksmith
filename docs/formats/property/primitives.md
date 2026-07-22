@@ -38,6 +38,7 @@ ships as `paksmith-core/src/asset/property/primitives.rs`.
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | `FileVersionUE4 ≥ 504` | All primitive shapes stable. | `CUE4Parse/UE4/Assets/Objects/Properties/*.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
+| `FileVersionUE4 < 514` (`ADDED_SOFT_OBJECT_PATH`) | `SoftObjectProperty` / `SoftClassProperty` is a single `FString` (split on the last `.`), not `FName` + `FString`. | Same[^1] |
 | `FileVersionUE5 ≥ 1007` | `SoftObjectProperty` / `SoftClassProperty` wire shape changes (`FTopLevelAssetPath` replaces the leading FName). | Same[^1] |
 | `FileVersionUE5 ≥ 1008` | `SoftObjectProperty` becomes an `i32` index into the summary's `SoftObjectPaths` list. | Same[^1] |
 
@@ -116,14 +117,20 @@ form) from the import or export table's `object_name` slot. Empty for
 
 ### Soft references
 
-Wire body (UE4 / UE5 < 1007): `FName asset_path` (8 bytes) + `FString
-sub_path`. At UE5 ≥ 1007 the leading slot is an `FTopLevelAssetPath`
-(PackageName FName + AssetName FName, 16 bytes), which paksmith joins to
-the same `Package.Asset` string the single-FName form produced, per
-`FTopLevelAssetPath::ToString`: empty **only** when PackageName is
-`None`; PackageName alone (no trailing dot) when AssetName is `None`;
-otherwise `Package.Asset`. The UE5 ≥ 1008 index-serialized form is
-fail-closed (see the *Versions* note above).
+Wire body (UE4 ≥ 514 / UE5 < 1007): `FName asset_path` (8 bytes) +
+`FString sub_path`. At UE5 ≥ 1007 the leading slot is an
+`FTopLevelAssetPath` (PackageName FName + AssetName FName, 16 bytes),
+which paksmith joins to the same `Package.Asset` string the single-FName
+form produced, per `FTopLevelAssetPath::ToString`: empty **only** when
+PackageName is `None`; PackageName alone (no trailing dot) when AssetName
+is `None`; otherwise `Package.Asset`.
+
+Two layouts are **fail-closed** (paksmith rejects rather than mis-decode):
+the UE4 < 514 (`ADDED_SOFT_OBJECT_PATH`) single-`FString` form — a lossy,
+version-inconsistent decomposition (CUE4Parse splits it on the last `.`)
+with no in-scope oracle fixture, surfaced as `UnsupportedFeature`
+([#694](https://github.com/r6e/paksmith/issues/694)) — and the UE5 ≥ 1008
+index-serialized form (see the *Versions* note above).
 
 | `Type` (FName) | `PropertyValue` variant |
 |----------------|--------------------------|
@@ -158,7 +165,7 @@ Wire layout above; the table cells call out the variants inline
 
 - Per-type body widths fixed by the Wire layout tables: `Int8` 1 byte, `Int16` / `UInt16` 2 bytes, `IntProperty` / `UInt32Property` 4 bytes, `Int64` / `UInt64` 8 bytes, `FloatProperty` 4 bytes, `DoubleProperty` 8 bytes, `BoolProperty` 0 bytes (value in tag-extras), `NameProperty` 8 bytes (`FName`), `ObjectProperty` 4 bytes (`FPackageIndex`).
 - **`StrProperty` body**: `FString` per [`../primitive/fstring.md`](../primitive/fstring.md); bounded by `FSTRING_MAX_LEN = 65,536`.
-- **`SoftObjectProperty` / `SoftClassProperty` body**: `FName asset_path` + `FString sub_path` (UE4 / UE5 < 1007), or `FTopLevelAssetPath` (2 FNames) + `FString sub_path` (UE5 ≥ 1007); the UE5 ≥ 1008 index-serialized form is fail-closed at parse time.
+- **`SoftObjectProperty` / `SoftClassProperty` body**: `FName asset_path` + `FString sub_path` (UE4 ≥ 514 / UE5 < 1007), or `FTopLevelAssetPath` (2 FNames) + `FString sub_path` (UE5 ≥ 1007); the UE4 < 514 single-`FString` form and the UE5 ≥ 1008 index-serialized form are both fail-closed at parse time.
 
 ### Implementation hardening (recommended for any parser)
 
