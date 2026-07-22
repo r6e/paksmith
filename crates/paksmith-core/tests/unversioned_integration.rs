@@ -150,13 +150,14 @@ mod tests {
     /// failed slot's tail.
     ///
     /// Uses a Hero schema whose first slot is `Health: IntProperty`
-    /// (decodes) and second slot is `Speed: MapProperty` (unsupported
-    /// byte). The asset bytes are the canonical Phase 2f payload —
-    /// fragment + Health=100 + Speed=600.0f32 — but the decoder will
-    /// never read past Health.
+    /// (decodes) and second slot is `Speed: FieldPathProperty` (byte 27,
+    /// still unsupported and a leaf type). The asset bytes are the
+    /// canonical Phase 2f payload — fragment + Health=100 + Speed=600.0f32
+    /// — but the decoder will never read past Health. (Byte 24 was
+    /// MapProperty pre-#639; now that Map/Set decode, 27 is the sentinel.)
     #[test]
     fn partial_tree_stops_on_unsupported_type_byte() {
-        let usmap = Usmap::from_bytes(&build_hero_usmap_bytes(24u8)).expect("Usmap parse");
+        let usmap = Usmap::from_bytes(&build_hero_usmap_bytes(27u8)).expect("Usmap parse");
         let asset_bytes = build_minimal_unversioned_uasset_bytes();
         let pkg = Package::read_from(&asset_bytes, None, Some(&usmap), "test/Hero.uasset")
             .expect("Package::read_from should return partial tree, not Err");

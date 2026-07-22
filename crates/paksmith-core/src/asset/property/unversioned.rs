@@ -27,7 +27,7 @@ use crate::asset::AssetContext;
 use crate::asset::package_index::PackageIndex;
 use crate::asset::property::bag::MAX_PROPERTY_DEPTH;
 use crate::asset::property::primitives::{
-    PropertyValue, read_soft_path_payload, resolve_package_index,
+    MapEntry, PropertyValue, read_soft_path_payload, resolve_package_index,
 };
 use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::property::{MAX_COLLECTION_ELEMENTS, Property, read_fname_pair};
@@ -250,9 +250,10 @@ impl UnversionedHeader {
 ///
 /// **Partial-tree contract.** If decoding hits
 /// [`AssetParseFault::UnversionedTypeNotSupported`] at any depth
-/// (Map / Set / Delegate / Interface / FieldPath are not yet
-/// supported), the recursion unwinds back to this function, which
-/// logs at `warn` and returns the partial `Vec<Property>` collected
+/// (Delegate / Interface / FieldPath are not yet supported; Map / Set
+/// are decoded as of #639), the recursion unwinds back to this
+/// function, which logs at `warn` and returns the partial
+/// `Vec<Property>` collected
 /// so far. Subsequent properties — whose offsets depend on the
 /// failed read's byte count — are NOT decoded; the alternative is
 /// silent misparse.
@@ -349,7 +350,7 @@ pub(crate) fn read_unversioned_properties(
             // frames lets the outermost decoder break cleanly *for the
             // whole export* the moment any nested decode aborts.
             //
-            // Both `UnversionedTypeNotSupported` (Map/Set/Delegate/...)
+            // Both `UnversionedTypeNotSupported` (Delegate/Interface/...)
             // and `UnversionedSchemaMissing` (nested struct whose schema
             // isn't in the .usmap) trigger the same partial-tree stop:
             // each represents "cannot safely advance the cursor".
@@ -518,22 +519,12 @@ fn read_unversioned_value(
             }
         }
         MT::Array { inner } => {
-            let count_i32 = cur
-                .read_i32::<LE>()
-                .map_err(|_| truncated_at(asset_path, AssetWireField::ArrayElementCount))?;
-            let count = usize::try_from(count_i32)
-                .ok()
-                .filter(|&n| n <= MAX_COLLECTION_ELEMENTS);
-            let Some(count) = count else {
-                return Err(PaksmithError::AssetParse {
-                    asset_path: asset_path.to_string(),
-                    fault: AssetParseFault::CollectionElementCountExceeded {
-                        collection: CollectionKind::Array,
-                        count: count_i32,
-                        limit: MAX_COLLECTION_ELEMENTS,
-                    },
-                });
-            };
+            let count = read_collection_count(
+                cur,
+                asset_path,
+                AssetWireField::ArrayElementCount,
+                CollectionKind::Array,
+            )?;
             let mut elements: Vec<PropertyValue> = Vec::new();
             try_reserve_asset(
                 &mut elements,
@@ -541,14 +532,7 @@ fn read_unversioned_value(
                 asset_path,
                 AssetSeam::CollectionElements,
             )?;
-            let synthetic = MappedProperty {
-                // Shared empty Arc — refcount bump rather than a
-                // fresh allocation per Array<T> decode.
-                name: Arc::clone(&crate::asset::property::tag::EMPTY_ARC_STR),
-                schema_index: 0,
-                array_index: 0,
-                prop_type: (**inner).clone(),
-            };
+            let synthetic = synthetic_element(inner);
             // depth + 1 so MAX_PROPERTY_DEPTH is enforced for nested
             // `Array<Array<...>>` chains; without the increment the
             // recursion can grow unbounded along the array axis.
@@ -565,10 +549,98 @@ fn read_unversioned_value(
             PropertyValue::Array {
                 // Interned wire-name Arc — refcount bump per call
                 // instead of a fresh allocation. The cache covers
-                // all 20 `mapped_type_wire_name` literals (#365 R1
+                // all `mapped_type_wire_name` literals (#365 R1
                 // perf panel finding).
                 inner_type: intern_wire_name(mapped_type_wire_name(inner)),
                 elements,
+            }
+        }
+        MT::Set { inner } => {
+            // Wire (identical tagged/unversioned): i32 num_to_remove +
+            // that many removed element bodies + i32 count + count element
+            // bodies. Element bodies carry no per-element tag — decode each
+            // via a synthetic `MappedProperty` + `read_unversioned_value`,
+            // like `Array`. #639.
+            let synthetic = synthetic_element(inner);
+            let removed = read_collection_count(
+                cur,
+                asset_path,
+                AssetWireField::SetNumToRemove,
+                CollectionKind::SetNumToRemove,
+            )?;
+            for _ in 0..removed {
+                let _ = read_unversioned_value(cur, &synthetic, usmap, ctx, asset_path, depth + 1)?;
+            }
+            let count = read_collection_count(
+                cur,
+                asset_path,
+                AssetWireField::SetElementCount,
+                CollectionKind::Set,
+            )?;
+            let mut elements: Vec<PropertyValue> = Vec::new();
+            try_reserve_asset(
+                &mut elements,
+                count,
+                asset_path,
+                AssetSeam::CollectionElements,
+            )?;
+            for _ in 0..count {
+                elements.push(read_unversioned_value(
+                    cur,
+                    &synthetic,
+                    usmap,
+                    ctx,
+                    asset_path,
+                    depth + 1,
+                )?);
+            }
+            PropertyValue::Set {
+                inner_type: intern_wire_name(mapped_type_wire_name(inner)),
+                elements,
+            }
+        }
+        MT::Map { key, value } => {
+            // Wire (identical tagged/unversioned): i32 num_keys_to_remove
+            // + that many removed KEY bodies + i32 count + count ×
+            // (key body, value body). No per-element tags. #639.
+            let key_synth = synthetic_element(key);
+            let value_synth = synthetic_element(value);
+            let removed = read_collection_count(
+                cur,
+                asset_path,
+                AssetWireField::MapNumToRemove,
+                CollectionKind::MapNumToRemove,
+            )?;
+            for _ in 0..removed {
+                let _ = read_unversioned_value(cur, &key_synth, usmap, ctx, asset_path, depth + 1)?;
+            }
+            let count = read_collection_count(
+                cur,
+                asset_path,
+                AssetWireField::MapEntryCount,
+                CollectionKind::Map,
+            )?;
+            let mut entries: Vec<MapEntry> = Vec::new();
+            try_reserve_asset(
+                &mut entries,
+                count,
+                asset_path,
+                AssetSeam::CollectionElements,
+            )?;
+            for _ in 0..count {
+                let key_val =
+                    read_unversioned_value(cur, &key_synth, usmap, ctx, asset_path, depth + 1)?;
+                let value_val =
+                    read_unversioned_value(cur, &value_synth, usmap, ctx, asset_path, depth + 1)?;
+                entries.push(MapEntry {
+                    key: key_val,
+                    value: value_val,
+                });
+            }
+            PropertyValue::Map {
+                key_type: intern_wire_name(mapped_type_wire_name(key)),
+                value_type: intern_wire_name(mapped_type_wire_name(value)),
+                entries,
             }
         }
         MT::Unknown(byte) => {
@@ -581,6 +653,48 @@ fn read_unversioned_value(
             });
         }
     })
+}
+
+/// Build the synthetic, tag-less [`MappedProperty`] used to decode one
+/// collection element / map key / map value body. Collection element
+/// bodies carry no per-element `FPropertyTag`, so the type comes from the
+/// `.usmap` schema inner type; the name/index are irrelevant. Shared by
+/// the `Array` / `Set` / `Map` arms (#639).
+fn synthetic_element(inner: &MappedPropertyType) -> MappedProperty {
+    MappedProperty {
+        // Shared empty Arc — refcount bump, not a fresh allocation.
+        name: Arc::clone(&crate::asset::property::tag::EMPTY_ARC_STR),
+        schema_index: 0,
+        array_index: 0,
+        prop_type: inner.clone(),
+    }
+}
+
+/// Read an `i32` collection count (element count or removal count) and
+/// validate it against [`MAX_COLLECTION_ELEMENTS`], returning the
+/// validated `usize`. A negative or over-cap count fires
+/// [`AssetParseFault::CollectionElementCountExceeded`]. Shared by the
+/// `Array` / `Set` / `Map` unversioned decode arms (#639).
+fn read_collection_count(
+    cur: &mut Cursor<&[u8]>,
+    asset_path: &str,
+    count_field: AssetWireField,
+    kind: CollectionKind,
+) -> crate::Result<usize> {
+    let count_i32 = cur
+        .read_i32::<LE>()
+        .map_err(|_| truncated_at(asset_path, count_field))?;
+    usize::try_from(count_i32)
+        .ok()
+        .filter(|&n| n <= MAX_COLLECTION_ELEMENTS)
+        .ok_or_else(|| PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::CollectionElementCountExceeded {
+                collection: kind,
+                count: count_i32,
+                limit: MAX_COLLECTION_ELEMENTS,
+            },
+        })
 }
 
 /// Map a [`MappedPropertyType`] back to its UE wire-format type name
@@ -613,6 +727,8 @@ fn mapped_type_wire_name(t: &MappedPropertyType) -> &'static str {
         MappedPropertyType::Object => "ObjectProperty",
         MappedPropertyType::SoftObject => "SoftObjectProperty",
         MappedPropertyType::Array { .. } => "ArrayProperty",
+        MappedPropertyType::Set { .. } => "SetProperty",
+        MappedPropertyType::Map { .. } => "MapProperty",
         MappedPropertyType::Unknown(_) => "Unknown",
     }
 }
@@ -627,8 +743,8 @@ fn mapped_type_wire_name(t: &MappedPropertyType) -> &'static str {
 ///
 /// Unknown names (defensive fallback) allocate one fresh `Arc<str>`
 /// per call — no insert back into the cache. The only caller is
-/// [`mapped_type_wire_name`], which returns from a fixed 20-entry
-/// set all present in the cache; the fallback path is therefore
+/// [`mapped_type_wire_name`], whose fixed set of wire-name literals are
+/// all present in the cache below; the fallback path is therefore
 /// unreachable in practice.
 fn intern_wire_name(name: &'static str) -> Arc<str> {
     static CACHE: LazyLock<HashMap<&'static str, Arc<str>>> = LazyLock::new(|| {
@@ -652,6 +768,8 @@ fn intern_wire_name(name: &'static str) -> Arc<str> {
             "ObjectProperty",
             "SoftObjectProperty",
             "ArrayProperty",
+            "SetProperty",
+            "MapProperty",
             "Unknown",
         ]
         .into_iter()
@@ -675,7 +793,7 @@ mod tests {
     use std::io::Cursor;
 
     use crate::asset::mappings::ClassSchema;
-    use crate::asset::property::primitives::PropertyValue;
+    use crate::asset::property::primitives::{MapEntry, PropertyValue};
     use crate::asset::property::test_utils::make_ctx;
 
     fn two_prop_header_bytes() -> Vec<u8> {
@@ -994,6 +1112,264 @@ mod tests {
         assert!(
             result.is_err(),
             "a non-allowlisted fault must propagate, not partial-tree-stop"
+        );
+    }
+
+    /// Builds a single-property `.usmap` schema of the given type and
+    /// returns `(usmap, ctx)` for a `read_unversioned_properties` call.
+    fn single_prop_usmap(prop_type: MappedPropertyType) -> Usmap {
+        let schema = ClassSchema {
+            name: "C".to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: Arc::from("P"),
+                schema_index: 0,
+                array_index: 0,
+                prop_type,
+            }],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("C".to_string(), schema);
+        Usmap::from_parts(schemas, HashMap::new()).expect("from_parts")
+    }
+
+    /// Unversioned `Set<Int32>` decode: `i32 num_to_remove` (0) + `i32
+    /// count` (2) + 2 `i32` elements → `PropertyValue::Set`. #639.
+    #[test]
+    fn unversioned_set_of_int_decodes() {
+        let usmap = single_prop_usmap(MappedPropertyType::Set {
+            inner: Box::new(MappedPropertyType::Int32),
+        });
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes()); // 1 serialized property
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_to_remove = 0
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // count = 2
+        bytes.extend_from_slice(&10i32.to_le_bytes());
+        bytes.extend_from_slice(&20i32.to_le_bytes());
+        let ctx = make_ctx(&["None"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0).unwrap();
+        assert_eq!(props.len(), 1);
+        assert_eq!(
+            props[0].value,
+            PropertyValue::Set {
+                inner_type: Arc::from("IntProperty"),
+                elements: vec![PropertyValue::Int(10), PropertyValue::Int(20)],
+            }
+        );
+    }
+
+    /// Unversioned `Map<Int32,Int32>` decode: `i32 num_keys_to_remove`
+    /// (0), then `i32 count` (1), then (key `i32`, value `i32`) →
+    /// `PropertyValue::Map`. #639.
+    #[test]
+    fn unversioned_map_int_to_int_decodes() {
+        let usmap = single_prop_usmap(MappedPropertyType::Map {
+            key: Box::new(MappedPropertyType::Int32),
+            value: Box::new(MappedPropertyType::Int32),
+        });
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_keys_to_remove = 0
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // count = 1
+        bytes.extend_from_slice(&5i32.to_le_bytes()); // key
+        bytes.extend_from_slice(&50i32.to_le_bytes()); // value
+        let ctx = make_ctx(&["None"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0).unwrap();
+        assert_eq!(props.len(), 1);
+        assert_eq!(
+            props[0].value,
+            PropertyValue::Map {
+                key_type: Arc::from("IntProperty"),
+                value_type: Arc::from("IntProperty"),
+                entries: vec![MapEntry {
+                    key: PropertyValue::Int(5),
+                    value: PropertyValue::Int(50),
+                }],
+            }
+        );
+    }
+
+    /// A non-zero `num_keys_to_remove` reads & discards that many KEY
+    /// bodies before the added entries — the removed key must NOT appear
+    /// in the decoded entries. #639.
+    #[test]
+    fn unversioned_map_num_keys_to_remove_consumes_keys() {
+        let usmap = single_prop_usmap(MappedPropertyType::Map {
+            key: Box::new(MappedPropertyType::Int32),
+            value: Box::new(MappedPropertyType::Int32),
+        });
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // num_keys_to_remove = 1
+        bytes.extend_from_slice(&99i32.to_le_bytes()); // removed key (discarded)
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // count = 1
+        bytes.extend_from_slice(&5i32.to_le_bytes()); // key
+        bytes.extend_from_slice(&50i32.to_le_bytes()); // value
+        let ctx = make_ctx(&["None"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0).unwrap();
+        assert_eq!(
+            props[0].value,
+            PropertyValue::Map {
+                key_type: Arc::from("IntProperty"),
+                value_type: Arc::from("IntProperty"),
+                entries: vec![MapEntry {
+                    key: PropertyValue::Int(5),
+                    value: PropertyValue::Int(50),
+                }],
+            }
+        );
+    }
+
+    /// A negative/over-cap collection count fails closed with
+    /// `CollectionElementCountExceeded`. Pins `read_collection_count`. #639.
+    #[test]
+    fn unversioned_set_negative_count_rejected() {
+        let usmap = single_prop_usmap(MappedPropertyType::Set {
+            inner: Box::new(MappedPropertyType::Int32),
+        });
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_to_remove = 0
+        bytes.extend_from_slice(&(-1i32).to_le_bytes()); // count = -1
+        let ctx = make_ctx(&["None"]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::CollectionElementCountExceeded {
+                        collection: CollectionKind::Set,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected CollectionElementCountExceeded(Set), got {err:?}"
+        );
+    }
+
+    /// Each recursive `read_unversioned_value(depth + 1)` in the
+    /// Array/Set/Map arms MUST increment depth, or a nested container
+    /// escapes `MAX_PROPERTY_DEPTH` (stack-overflow risk). Called near the
+    /// cap so one further level trips it, isolating each `+ 1` (kills the
+    /// `+ 1 -> * 1` mutants on the recursion increments). #639.
+    #[test]
+    fn unversioned_collection_arms_increment_depth() {
+        use crate::asset::property::bag::MAX_PROPERTY_DEPTH;
+        let read_at = |prop_type: MappedPropertyType, wire: &[u8], depth: usize| {
+            let prop = MappedProperty {
+                name: Arc::from("P"),
+                schema_index: 0,
+                array_index: 0,
+                prop_type,
+            };
+            let usmap = Usmap::default();
+            let ctx = make_ctx(&["None"]);
+            let mut cur = Cursor::new(wire);
+            read_unversioned_value(&mut cur, &prop, &usmap, &ctx, "t", depth)
+        };
+        let too_deep = |r: crate::Result<PropertyValue>| {
+            matches!(
+                r,
+                Err(PaksmithError::AssetParse {
+                    fault: AssetParseFault::PropertyDepthExceeded { .. },
+                    ..
+                })
+            )
+        };
+        let cap = MAX_PROPERTY_DEPTH;
+        let int = || MappedPropertyType::Int32;
+        // Array element read at depth + 1 (at `cap`, the element trips it).
+        assert!(
+            too_deep(read_at(
+                MappedPropertyType::Array {
+                    inner: Box::new(int())
+                },
+                &[1, 0, 0, 0, 0, 0, 0, 0], // count=1, element i32
+                cap,
+            )),
+            "Array element must increment depth"
+        );
+        // Set element read at depth + 1.
+        assert!(
+            too_deep(read_at(
+                MappedPropertyType::Set {
+                    inner: Box::new(int())
+                },
+                &[0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0], // num_remove=0, count=1, element
+                cap,
+            )),
+            "Set element must increment depth"
+        );
+        // Set removed-element read at depth + 1.
+        assert!(
+            too_deep(read_at(
+                MappedPropertyType::Set {
+                    inner: Box::new(int())
+                },
+                &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], // num_remove=1, removed i32, count=0
+                cap,
+            )),
+            "Set removed element must increment depth"
+        );
+        // Map removed-key read at depth + 1.
+        assert!(
+            too_deep(read_at(
+                MappedPropertyType::Map {
+                    key: Box::new(int()),
+                    value: Box::new(int())
+                },
+                &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], // num_remove=1, removed key i32, count=0
+                cap,
+            )),
+            "Map removed key must increment depth"
+        );
+        // Map entry-key read at depth + 1: Map<Array<Int>, Int> at cap-1, so
+        // the key's `+1` is what pushes the key's Array element over the cap.
+        assert!(
+            too_deep(read_at(
+                MappedPropertyType::Map {
+                    key: Box::new(MappedPropertyType::Array {
+                        inner: Box::new(int())
+                    }),
+                    value: Box::new(int()),
+                },
+                &[
+                    0, 0, 0, 0, // num_remove=0
+                    1, 0, 0, 0, // count=1
+                    1, 0, 0, 0, // key Array count=1
+                    0, 0, 0, 0, // key Array element i32
+                    0, 0, 0, 0, // value i32
+                ],
+                cap - 1,
+            )),
+            "Map entry key must increment depth"
+        );
+        // Map entry-value read at depth + 1: Map<Int, Array<Int>> at cap-1,
+        // so the value's `+1` is what pushes the value's Array element over.
+        assert!(
+            too_deep(read_at(
+                MappedPropertyType::Map {
+                    key: Box::new(int()),
+                    value: Box::new(MappedPropertyType::Array {
+                        inner: Box::new(int())
+                    }),
+                },
+                &[
+                    0, 0, 0, 0, // num_remove=0
+                    1, 0, 0, 0, // count=1
+                    0, 0, 0, 0, // key i32
+                    1, 0, 0, 0, // value Array count=1
+                    0, 0, 0, 0, // value Array element i32
+                ],
+                cap - 1,
+            )),
+            "Map entry value must increment depth"
         );
     }
 

@@ -2585,8 +2585,9 @@ pub enum AssetParseFault {
     /// silently mis-decoding the property stream.
     UnversionedWithoutMappings,
     /// An unversioned property's schema-declared type byte is one
-    /// paksmith doesn't yet decode (Map / Set / Delegate / Interface /
-    /// FieldPath). Phase 2f stops the property walk and returns the
+    /// paksmith doesn't yet decode (Delegate / Interface / FieldPath;
+    /// Map / Set are decoded as of #639). The decoder stops the
+    /// property walk and returns the
     /// partial tree rather than mis-decoding subsequent properties
     /// whose offsets depend on the failed read's byte count.
     UnversionedTypeNotSupported {
@@ -3361,7 +3362,7 @@ impl fmt::Display for AssetParseFault {
             } => write!(
                 f,
                 "unversioned property `{property_name}` has unsupported type byte {type_byte} \
-                 (Map/Set/Delegate/Interface/FieldPath not yet supported in unversioned mode)"
+                 (Delegate/Interface/FieldPath not yet supported in unversioned mode)"
             ),
             Self::UnversionedSchemaMissing { class_name } => write!(
                 f,
@@ -7959,7 +7960,7 @@ mod tests {
         assert_eq!(
             s,
             "unversioned property `DamageMap` has unsupported type byte 14 \
-             (Map/Set/Delegate/Interface/FieldPath not yet supported in unversioned mode)"
+             (Delegate/Interface/FieldPath not yet supported in unversioned mode)"
         );
     }
 
