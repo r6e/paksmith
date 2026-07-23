@@ -876,6 +876,25 @@ mod tests {
         assert_eq!(tag.struct_name(), "Vector");
         assert_eq!(tag.struct_guid, [0u8; 16]);
 
+        // EnumProperty(1) -> EMyEnum(1) -> Mod(0): param0 = enum name.
+        // Also covers ByteProperty (same arm).
+        for outer in ["EnumProperty", "ByteProperty"] {
+            let names = &["None", "E", outer, "EMyEnum", "Mod"];
+            let ctx = ue5_1012_ctx(names);
+            let mut buf = Vec::new();
+            write_fname(&mut buf, 1, 0);
+            write_node(&mut buf, 2, 1);
+            write_node(&mut buf, 3, 1);
+            write_node(&mut buf, 4, 0);
+            buf.extend_from_slice(&1i32.to_le_bytes());
+            buf.push(0x00);
+            let tag = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x")
+                .unwrap()
+                .unwrap();
+            assert_eq!(tag.type_name(), outer);
+            assert_eq!(tag.enum_name(), "EMyEnum", "{outer}");
+        }
+
         // MapProperty(2) -> IntProperty(0), StrProperty(0)
         let names = &["None", "M", "MapProperty", "IntProperty", "StrProperty"];
         let ctx = ue5_1012_ctx(names);
