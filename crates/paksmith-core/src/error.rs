@@ -2400,19 +2400,18 @@ pub enum AssetParseFault {
         /// The Phase 2a floor.
         minimum: i32,
     },
-    /// `FileVersionUE5` is above the Phase 2a ceiling (1010).
-    /// At UE5 version 1011 (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`),
-    /// UE adds a byte to `FPropertyTag` that Phase 2b's tagged-
-    /// property reader cannot decode. The export-table reader itself
-    /// is shape-stable at 1011 (per-export `package_guid` was already
-    /// removed at 1005; summary-level FGuid migrates to FIoHash at
-    /// 1016, well above the ceiling). The variant exists so Task 9
-    /// (`PackageSummary`) can reject out-of-range assets at the
-    /// summary boundary before downstream readers misparse.
+    /// `FileVersionUE5` is at/above
+    /// [`FIRST_UNSUPPORTED_UE5_VERSION`](crate::asset::summary::FIRST_UNSUPPORTED_UE5_VERSION)
+    /// (1014 as of #643 — UE 5.0-5.5 accepted). At 1014
+    /// (`METADATA_SERIALIZATION_OFFSET`) the summary gains a field the
+    /// reader does not consume; 1015/1016 add further summary-shape
+    /// breaks (cell tables; FGuid → FIoHash). The variant exists so
+    /// `PackageSummary` rejects out-of-range assets at the summary
+    /// boundary before downstream readers misparse.
     UnsupportedFileVersionUE5 {
         /// The UE5 version read from the asset.
         version: i32,
-        /// The Phase 2a ceiling (exclusive — first unsupported value).
+        /// The ceiling (exclusive — first unsupported value).
         first_unsupported: i32,
     },
     /// An indexed `FByteBulkData` record's `i32` index is negative or
@@ -3302,7 +3301,7 @@ impl fmt::Display for AssetParseFault {
                 first_unsupported,
             } => write!(
                 f,
-                "unsupported FileVersionUE5 {version} (Phase 2a ceiling is {})",
+                "unsupported FileVersionUE5 {version} (paksmith supports up to {})",
                 first_unsupported - 1
             ),
             Self::DataResourceIndexOob { index, entry_count } => write!(
@@ -5649,14 +5648,14 @@ mod tests {
         let err = PaksmithError::AssetParse {
             asset_path: "x.uasset".to_string(),
             fault: AssetParseFault::UnsupportedFileVersionUE5 {
-                version: 1011,
-                first_unsupported: 1011,
+                version: 1014,
+                first_unsupported: 1014,
             },
         };
         assert_eq!(
             format!("{err}"),
             "asset deserialization failed for `x.uasset`: \
-             unsupported FileVersionUE5 1011 (Phase 2a ceiling is 1010)"
+             unsupported FileVersionUE5 1014 (paksmith supports up to 1013)"
         );
     }
 
