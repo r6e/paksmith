@@ -670,6 +670,26 @@ mod tests {
                 ..
             }
         ));
+
+        // Boundary: count == 0 is accepted (pins `count < 0`, not `<= 0`):
+        // an empty cue-point array consumes only its 4-byte count.
+        let wire = 0i32.to_le_bytes();
+        let mut cur = std::io::Cursor::new(&wire[..]);
+        read_and_discard_cue_points(&mut cur, &ctx, 4, "s.uasset").unwrap();
+        assert_eq!(cur.position(), 4);
+
+        // Boundary: count == MAX_COLLECTION_ELEMENTS is accepted (pins
+        // `count > MAX`, not `>= MAX`): exactly-cap bodies decode.
+        let cap = crate::asset::property::max_collection_elements();
+        let mut wire = Vec::with_capacity(4 + cap * 8);
+        wire.extend_from_slice(&i32::try_from(cap).unwrap().to_le_bytes());
+        for _ in 0..cap {
+            wire.extend_from_slice(&[0u8; 8]); // empty body: None terminator
+        }
+        let total = wire.len() as u64;
+        let mut cur = std::io::Cursor::new(&wire[..]);
+        read_and_discard_cue_points(&mut cur, &ctx, total, "s.uasset").unwrap();
+        assert_eq!(cur.position(), total, "all cap bodies consumed");
     }
 
     use crate::asset::property::test_utils::{
