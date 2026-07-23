@@ -41,6 +41,7 @@ pub mod container;
 pub mod digest;
 pub mod error;
 pub mod export;
+pub mod localization;
 pub mod profile;
 
 mod seams;
