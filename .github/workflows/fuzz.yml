@@ -61,6 +61,7 @@ jobs:
           - fuzz_texture_decode
           - fuzz_audio_decode
           - fuzz_export_pipeline
+          - fuzz_locres_parse
         include:
           # Seed glob per target — `.pak` fixtures for the container
           # reader, `.usmap` for the mappings parser, `.uasset` for
@@ -76,7 +77,11 @@ jobs:
           - target: fuzz_export_pipeline
             seed_glob: '*.uasset'
           # fuzz_bulk_decompress / fuzz_lz4_decompress / fuzz_texture_decode /
-          # fuzz_audio_decode have no `tests/fixtures` seed: their input is a
+          # fuzz_audio_decode / fuzz_locres_parse have no top-level
+          # `tests/fixtures` seed (the sole `.locres` fixture lives at
+          # `tests/fixtures/data/`, below the `-maxdepth 1` seed glob;
+          # the flat header-first parser reaches its magic/version/
+          # count/string paths on random input by construction): their input is a
           # synthetic `[header byte(s)][payload]` layout (a size/format/codec
           # selector prefix), not a committed fixture file, so a file seed
           # wouldn't be well-formed for the harness. They fuzz from scratch — the decode
