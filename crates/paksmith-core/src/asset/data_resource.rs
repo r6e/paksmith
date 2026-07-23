@@ -95,8 +95,9 @@ pub struct FObjectDataResource {
 ///
 /// # Errors
 ///
-/// - [`AssetParseFault::UnexpectedEof`] — offset/header/entries past the
-///   end of `bytes`.
+/// - [`AssetParseFault::UnexpectedEof`] — the table offset or its
+///   8-byte version/count header lies past the end of `bytes`
+///   (truncated ENTRIES surface as `BoundsExceeded` below, not EOF).
 /// - [`AssetParseFault::NegativeValue`] — negative entry count.
 /// - [`AssetParseFault::BoundsExceeded`] — count × entry size exceeds
 ///   the bytes actually present (a lying count cannot force
