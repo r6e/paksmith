@@ -4850,9 +4850,13 @@ pub enum LocresParseFault {
         limit: u64,
     },
 
-    /// The strings-array offset points outside the file (or into the
-    /// header). CUE4Parse seeks blindly; paksmith bounds-checks.
-    #[error("locres strings-array offset {offset} out of bounds for a {file_len}-byte file")]
+    /// The strings-array offset is not a valid strings-array position:
+    /// negative (non-`-1`), past EOF, inside the 25-byte header prefix
+    /// (stage-1), or overlapping the namespace table (stage-2).
+    /// CUE4Parse seeks blindly; paksmith runs the two-stage check.
+    #[error(
+        "locres strings-array offset {offset} is not a valid strings-array position in a {file_len}-byte file"
+    )]
     StringsOffsetOutOfBounds {
         /// The i64 offset read from the header.
         offset: i64,
@@ -6139,7 +6143,7 @@ mod tests {
                         file_len: 100,
                     },
                 },
-                "locres deserialization failed: locres strings-array offset 999 out of bounds for a 100-byte file",
+                "locres deserialization failed: locres strings-array offset 999 is not a valid strings-array position in a 100-byte file",
             ),
             (
                 PaksmithError::LocresParse {

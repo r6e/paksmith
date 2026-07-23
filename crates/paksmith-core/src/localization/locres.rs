@@ -622,16 +622,23 @@ mod tests {
         }
     }
 
-    /// Two-stage offset check: an offset below the 25-byte header prefix
-    /// (stage-1) and an offset that overlaps the namespace table
-    /// (stage-2) are both rejected, even though both are `< file_len`
-    /// and so passed the old single-bound check. #646.
+    /// Two-stage offset check with a boundary-accept case that pins
+    /// stage-1's `>=` (a `>` mutant would reject the exact minimum). A
+    /// v1 helper file: `magic(16) + version(1) + offset(8)` then a
+    /// caller-chosen `[u8]` tail. #646.
     #[test]
-    fn strings_offset_overlapping_header_or_namespaces_rejected() {
-        // Stage-1: offset 10 points into the magic/version prefix.
-        let mut bytes = SAMPLE_V2.to_vec();
-        bytes[17..25].copy_from_slice(&10i64.to_le_bytes());
-        let err = LocresResource::parse(&bytes).unwrap_err();
+    fn strings_offset_two_stage_bounds() {
+        fn v1_with(offset: i64, tail: &[u8]) -> Vec<u8> {
+            let mut b = Vec::new();
+            b.extend_from_slice(&LOCRES_MAGIC);
+            b.push(1); // v1
+            b.extend_from_slice(&offset.to_le_bytes());
+            b.extend_from_slice(tail);
+            b
+        }
+
+        // Stage-1 reject: offset 10 points into the header (< 25).
+        let err = LocresResource::parse(&v1_with(10, &[0u8; 4])).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -642,27 +649,40 @@ mod tests {
             "stage-1 (offset < 25) must reject, got {err:?}"
         );
 
-        // Stage-2: a v1 file whose offset (25) points at a valid but
-        // OVERLAPPING empty strings array — the array read succeeds
-        // (count 0), but 25 < the post-namespace cursor (29), so the
-        // overlap is caught after the loop. Layout: magic(16) + ver(1) +
-        // offset=25(8) + namespaceCount=0(4) = 29 bytes; byte 25's u32
-        // serves as both the (empty) strings count and the (zero)
-        // namespace count.
-        let mut overlap = Vec::new();
-        overlap.extend_from_slice(&LOCRES_MAGIC);
-        overlap.push(1); // v1
-        overlap.extend_from_slice(&25i64.to_le_bytes());
-        overlap.extend_from_slice(&0u32.to_le_bytes());
-        let err = LocresResource::parse(&overlap).unwrap_err();
+        // Stage-1 boundary ACCEPT: offset 25 (== MIN) passes stage-1,
+        // so the strings read runs and hits the -1 count there — a
+        // DISTINCT fault (NegativeValue), proving 25 was accepted. A
+        // `>=`→`>` mutant would instead reject 25 as
+        // StringsOffsetOutOfBounds, so the two are distinguishable.
+        let err = LocresResource::parse(&v1_with(25, &(-1i32).to_le_bytes())).unwrap_err();
         assert!(
             matches!(
                 err,
                 PaksmithError::LocresParse {
-                    fault: LocresParseFault::StringsOffsetOutOfBounds { offset: 25, .. },
+                    fault: LocresParseFault::NegativeValue {
+                        field: LocresWireField::StringsArrayCount,
+                        value: -1,
+                    },
                 }
             ),
-            "stage-2 (offset overlaps namespace table) must reject, got {err:?}"
+            "offset == 25 must be ACCEPTED by stage-1 (then fault on the -1 count), got {err:?}"
+        );
+
+        // Stage-2 reject: offset 26 (> 25, unambiguously past stage-1)
+        // reads a valid empty array at byte 26 (count 0), but overlaps
+        // the namespace table — the main cursor reaches 30 after the
+        // (also-zero) namespace count, so 26 < 30 → reject after the
+        // loop. Tail `[00 × 5]`: bytes 25..29 = namespace count 0,
+        // bytes 26..30 = strings count 0.
+        let err = LocresResource::parse(&v1_with(26, &[0u8; 5])).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::LocresParse {
+                    fault: LocresParseFault::StringsOffsetOutOfBounds { offset: 26, .. },
+                }
+            ),
+            "stage-2 (offset 26 overlaps namespace table) must reject, got {err:?}"
         );
     }
 
