@@ -735,7 +735,13 @@ impl FByteBulkData {
         // `payload_is_inline` has exact-equality arms (`== 0`,
         // `== LAZY_LOADABLE`) that the synthesized NoOffsetFixUp bit
         // would defeat. CUE4Parse gates its `Ar.Position += SizeOnDisk`
-        // advance on the raw LegacyBulkDataFlags.
+        // advance on the raw LegacyBulkDataFlags. No BadDataVersion
+        // normalization happens here either — deliberately: CUE4Parse's
+        // DataResourceMap branch returns the legacy flags VERBATIM (the
+        // BadDataVersion clear + 2-byte tail skip are classic-path-only
+        // code), so a BadDataVersion-only (0x8000) entry is NOT
+        // BULKDATA_None on this path and its payload is NOT consumed.
+        // Pinned by `read_from_ctx_indexed_bad_data_version_not_inline`.
         let inline_payload =
             Self::consume_inline(reader, flags, size_on_disk, capture_inline, asset_path)?;
 
@@ -1979,6 +1985,37 @@ mod tests {
                 "legacy flags {legacy:#x}: cursor must land past the payload"
             );
         }
+    }
+
+    /// A BadDataVersion-only (0x8000) indexed entry is NOT inline and
+    /// consumes NOTHING after the i32 — CUE4Parse's DataResourceMap
+    /// branch returns the legacy flags verbatim (the BadDataVersion
+    /// clear + tail skip are classic-path-only), so `0x8000 != 0` gates
+    /// as not-inline. Pins the deliberate ABSENCE of classic-path
+    /// normalization on the indexed read. #642.
+    #[test]
+    fn read_from_ctx_indexed_bad_data_version_not_inline() {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        let ctx = ctx_with_resources(vec![resource_entry(FLAG_BAD_DATA_VERSION, 0x40, 8, 8)]);
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&0i32.to_le_bytes()); // index
+        wire.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // sentinel DIRECTLY after
+        let mut cur = std::io::Cursor::new(&wire[..]);
+        let (record, payload) =
+            FByteBulkData::read_from_ctx_capturing_inline(&mut cur, &ctx, "t").unwrap();
+        assert_eq!(
+            payload, None,
+            "0x8000 is not BULKDATA_None here — no consumption"
+        );
+        assert!(
+            record.flags.has_bad_data_version(),
+            "the verbatim legacy flags keep BadDataVersion on the record"
+        );
+        let sentinel = cur.read_u32::<LittleEndian>().unwrap();
+        assert_eq!(
+            sentinel, 0xDEAD_BEEF,
+            "cursor must sit immediately after the i32 index"
+        );
     }
 
     /// Out-of-range / negative indices fail closed (`DataResourceIndexOob`)
