@@ -968,6 +968,59 @@ mod tests {
         }
     }
 
+    /// `type_name_parameter` / `skip_subtree` walk semantics, driven
+    /// directly on hand-built trees (they are the load-bearing tree
+    /// arithmetic behind every 1012 type-extras field). #643.
+    #[test]
+    fn type_name_parameter_walk_semantics() {
+        // Map(2) → [ Struct(2) → [Vec(0), Mod(0)], Int(0) ]. Reaching
+        // the value (param 1) requires skip_subtree to jump the WHOLE
+        // 3-node key subtree (Struct + its 2 children), which only a
+        // correctly-accumulating counter does — a `*=` mutant lands
+        // short on NodeB, a wrong bound reads the wrong node.
+        let n = |name: &str, ic: i32| TypeNameNode {
+            name: Arc::from(name),
+            inner_count: ic,
+        };
+        let nodes = vec![
+            n("MapProperty", 2),
+            n("StructProperty", 2),
+            n("Vector", 0),
+            n("CoreUObject", 0),
+            n("IntProperty", 0),
+        ];
+        // param 0 = key subtree root (StructProperty at index 1).
+        assert_eq!(type_name_parameter(&nodes, 0, 1), Some(4));
+        assert_eq!(
+            nodes[type_name_parameter(&nodes, 0, 0).unwrap()]
+                .name
+                .as_ref(),
+            "StructProperty"
+        );
+        assert_eq!(
+            nodes[type_name_parameter(&nodes, 0, 1).unwrap()]
+                .name
+                .as_ref(),
+            "IntProperty"
+        );
+        // Out-of-declared-range param → None.
+        assert_eq!(type_name_parameter(&nodes, 0, 2), None);
+
+        // A tree whose last parameter's start index lands EXACTLY at
+        // nodes.len() (a struct declaring 1 param but with no node for
+        // it) → None, not Some(len). Pins the `idx < nodes.len()`
+        // bound against `<=`.
+        let short = vec![n("StructProperty", 1), n("Vector", 0)];
+        // param 0 of Struct = index 1 (Vector) — in range.
+        assert_eq!(type_name_parameter(&short, 0, 0), Some(1));
+        // param 0 of the LEAF Vector (index 1) declares 0 params → None
+        // even though the walk would compute idx == len (2).
+        assert_eq!(type_name_parameter(&short, 1, 0), None);
+        // A struct claiming a param whose start is past the end.
+        let lying = vec![n("StructProperty", 1)];
+        assert_eq!(type_name_parameter(&lying, 0, 0), None);
+    }
+
     /// Adversarial trees: negative inner_count faults; a
     /// remaining-counter chain past MAX_TYPE_NAME_NODES faults before
     /// unbounded reads. #643.
