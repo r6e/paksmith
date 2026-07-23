@@ -2334,8 +2334,8 @@ pub fn build_minimal_ue5_1010_with_data_resources() -> MinimalPackage {
 pub fn build_minimal_ue5_legacy_neg9() -> MinimalPackage {
     let (exports, imports, payloads) = ue5_1010_export_import(vec![0xAA; 16]);
     // Same UE5 export-table shape as build_minimal_ue5_1010 — the
-    // wire-format differences -9 introduces are at UE5 ≥ 1015 (PACKAGE_SAVED_HASH),
-    // above paksmith's Phase 2a ceiling.
+    // wire-format differences -9 introduces are at UE5 ≥ 1016 (PACKAGE_SAVED_HASH),
+    // above the 1014 ceiling (#643).
     let engine = EngineVersion {
         major: 5,
         minor: 4,
