@@ -141,7 +141,17 @@ impl LocresResource {
         // assume legacy when the magic is absent).
         let version = if bytes.len() >= 17 && bytes[..16] == LOCRES_MAGIC {
             let b = bytes[16];
-            let Some(v) = LocresVersion::from_byte(b) else {
+            // Fail-closed divergence from CUE4Parse: a version byte of
+            // 0 AFTER a magic match is a contradictory state (Legacy
+            // files have no magic prefix). The oracle parses it as a
+            // legacy body from offset 17 — almost certainly garbage —
+            // whereas paksmith rejects it. Byte > 3 is also rejected
+            // (as the oracle does).
+            // A version byte of 0 after the magic is the contradictory
+            // case (see below) — `from_byte(0)` would yield Legacy, so
+            // it is filtered out explicitly here.
+            let non_legacy = LocresVersion::from_byte(b).filter(|v| *v != LocresVersion::Legacy);
+            let Some(v) = non_legacy else {
                 return Err(fault(LocresParseFault::UnsupportedVersion { found: b }));
             };
             cur.pos = 17;
@@ -504,21 +514,31 @@ mod tests {
         }
     }
 
-    /// Oracle parity (D4): magic + version byte 0 parses as the LEGACY
-    /// layout starting after the version byte.
+    /// Fail-closed divergence (D4): magic + version byte 0 is a
+    /// contradictory state (legacy files have no magic) — paksmith
+    /// rejects it where the oracle would parse a garbage legacy body
+    /// from offset 17.
     #[test]
-    fn magic_with_version_zero_parses_legacy_layout_after_header() {
+    fn magic_with_version_zero_rejected() {
         let mut b = Vec::new();
         b.extend_from_slice(&LOCRES_MAGIC);
         b.push(0);
         b.extend_from_slice(&build_v0());
-        // The v0 body sits after the 17-byte header — but a Legacy
-        // parse restarts at offset 0 per the oracle ONLY when the
-        // magic is absent. With magic + version 0 the oracle keeps
-        // reading from offset 17.
-        let r = LocresResource::parse(&b).expect("magic+v0 parses per oracle");
+        let err = LocresResource::parse(&b).unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::LocresParse {
+                fault: LocresParseFault::UnsupportedVersion { found: 0 },
+            }
+        ));
+    }
+
+    /// A genuine legacy (v0) file has NO magic — the first 16 bytes are
+    /// its namespace count etc., not the GUID — so it parses fine.
+    #[test]
+    fn genuine_legacy_without_magic_parses() {
+        let r = LocresResource::parse(&build_v0()).expect("no-magic legacy parses");
         assert_eq!(r.version, LocresVersion::Legacy);
-        assert_eq!(r.namespaces[0].entries[0].localized, "Hallo");
     }
 
     /// Fail-closed divergence (D1): negative string indices are a
