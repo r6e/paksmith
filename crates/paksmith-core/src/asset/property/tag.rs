@@ -996,17 +996,38 @@ mod tests {
             write_node(&mut buf, 2, 1);
         }
         let err = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x").unwrap_err();
+        // Exact value/limit pin: the reported over-cap value is
+        // MAX + 1 (the node that WOULD have been pushed).
+        let expected_value = (MAX_TYPE_NAME_NODES as u64) + 1;
+        let expected_limit = MAX_TYPE_NAME_NODES as u64;
         assert!(matches!(
             err,
             crate::PaksmithError::AssetParse {
                 fault: AssetParseFault::BoundsExceeded {
                     field: AssetWireField::PropertyTagType,
                     unit: BoundsUnit::Items,
-                    ..
+                    value,
+                    limit,
                 },
                 ..
-            }
+            } if value == expected_value && limit == expected_limit
         ));
+    }
+
+    /// A tag whose Size is EXACTLY `MAX_PROPERTY_TAG_SIZE` is accepted
+    /// — the cap is exclusive-above (pins `>` vs `>=`). #643.
+    #[test]
+    fn tag_1012_size_at_cap_accepted() {
+        let ctx = ue5_1012_ctx(&["None", "P", "IntProperty"]);
+        let mut buf = Vec::new();
+        write_fname(&mut buf, 1, 0);
+        write_node(&mut buf, 2, 0);
+        buf.extend_from_slice(&MAX_PROPERTY_TAG_SIZE.to_le_bytes());
+        buf.push(0x00);
+        let tag = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(tag.size, MAX_PROPERTY_TAG_SIZE);
     }
 
     /// 1011 (extension byte, legacy shape) still applies when the

@@ -1413,6 +1413,20 @@ mod tests {
         ] {
             let parsed = Package::read_from(&pkg.bytes, None, None, "t.uasset")
                 .unwrap_or_else(|e| panic!("ue5 {label} must parse: {e}"));
+            // Helper-field pin: the builder's engine-version fields
+            // must survive into the parsed summary (a dropped spec
+            // field silently falls back to the default fixture
+            // version).
+            assert_eq!(
+                parsed.summary.saved_by_engine_version.branch,
+                format!("++UE5+Release-5.{}", if label == "1012" { 4 } else { 5 }),
+                "{label}"
+            );
+            assert_eq!(
+                parsed.summary.compatible_with_engine_version.branch,
+                parsed.summary.saved_by_engine_version.branch,
+                "{label}"
+            );
             let crate::asset::Asset::Generic(bag) = &parsed.payloads[0] else {
                 panic!("{label}: expected Generic payload");
             };
