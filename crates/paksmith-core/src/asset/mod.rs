@@ -27,6 +27,7 @@ use serde::Serialize;
 
 pub mod bulk_data;
 pub mod custom_version;
+pub mod data_resource;
 pub mod engine_version;
 pub mod export_table;
 pub(crate) mod exports;
@@ -883,6 +884,14 @@ pub struct AssetContext {
     /// [`AssetContext::new`]; set from the summary only on the
     /// `Package::read_from*` path. #638.
     pub(crate) soft_object_paths_indexed: bool,
+    /// The package's parsed UE 5.2+ `FObjectDataResource` table (#642).
+    /// Empty for pre-5.2 packages, absent/empty tables, and every
+    /// non-package construction path. NON-empty switches every
+    /// `FByteBulkData` read in this package to the indexed form (a
+    /// single `i32` into this table) — see
+    /// [`bulk_data::FByteBulkData::read_from_ctx`]. `Arc` so context
+    /// clones are refcount-cheap.
+    pub(crate) data_resources: std::sync::Arc<[crate::asset::data_resource::FObjectDataResource]>,
 }
 
 impl AssetContext {
@@ -910,6 +919,9 @@ impl AssetContext {
             // `Package::read_from*` path (which has the summary in scope)
             // sets this from the editor-index guard. #638.
             soft_object_paths_indexed: false,
+            // Default: classic inline bulk headers. Only the real
+            // `Package::read_from*` path parses a data-resource table. #642.
+            data_resources: std::sync::Arc::from(Vec::new()),
         }
     }
 }

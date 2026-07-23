@@ -1529,7 +1529,7 @@ pub(crate) fn read_typed(
                     // availability-info skip. The post-loop cursor-landing sentinel
                     // guards a wrong skip.
                     let (bulk, inline_payload) =
-                        FByteBulkData::read_from_capturing_inline(&mut cur, asset_path)?;
+                        FByteBulkData::read_from_ctx_capturing_inline(&mut cur, ctx, asset_path)?;
                     if let Some(payload) = inline_payload {
                         let sections = header.lod.sections.clone();
                         read_streamed_data(

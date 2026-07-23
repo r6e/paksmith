@@ -2415,18 +2415,18 @@ pub enum AssetParseFault {
         /// The Phase 2a ceiling (exclusive — first unsupported value).
         first_unsupported: i32,
     },
-    /// The package declares a non-empty object data-resource map
-    /// (UE 5.2+ `DataResourceOffset`, present when cooked with the
-    /// experimental "serialize bulk data as resource" path). When
-    /// present, `FByteBulkData` headers are resolved through
-    /// `FObjectDataResource` entries *by index* rather than the inline
-    /// header layout paksmith reads — so the inline path would silently
-    /// misparse the first bulk field as a data index. paksmith fails
-    /// loud here instead of decoding garbage; resolving the indirection
-    /// is deferred.
-    DataResourceMapUnsupported {
-        /// Number of `FObjectDataResource` entries the map declares.
-        entry_count: u32,
+    /// An indexed `FByteBulkData` record's `i32` index is negative or
+    /// past the end of the package's `FObjectDataResource` table
+    /// (#642). CUE4Parse rewinds 4 bytes and re-parses as a classic
+    /// header on this condition — a guessing heuristic paksmith
+    /// deliberately does not copy: a well-formed UE 5.2+ package with
+    /// a populated table always emits in-range indices, so an
+    /// out-of-range one is corruption or crafted input.
+    DataResourceIndexOob {
+        /// The out-of-range index as read from the wire.
+        index: i32,
+        /// The table's entry count.
+        entry_count: usize,
     },
     /// A wire-claimed count or size exceeds a structural cap. Same
     /// shape as [`IndexParseFault::BoundsExceeded`] (issue #133);
@@ -3305,10 +3305,10 @@ impl fmt::Display for AssetParseFault {
                 "unsupported FileVersionUE5 {version} (Phase 2a ceiling is {})",
                 first_unsupported - 1
             ),
-            Self::DataResourceMapUnsupported { entry_count } => write!(
+            Self::DataResourceIndexOob { index, entry_count } => write!(
                 f,
-                "non-empty object data-resource map ({entry_count} entries) is unsupported; \
-                 FByteBulkData resolution via FObjectDataResource is unimplemented"
+                "bulk-data resource index {index} is out of range for the \
+                 {entry_count}-entry FObjectDataResource table"
             ),
             Self::BoundsExceeded {
                 field,
@@ -3746,6 +3746,12 @@ pub enum AssetWireField {
     /// `FPackageFileSummary::ChunkIdCount` (an `i32` count for the
     /// chunk-ids `i32` array; rows are discarded by paksmith).
     ChunkIdCount,
+    /// The UE 5.2+ object data-resource table (version/entry reads). #642.
+    DataResourceTable,
+    /// The data-resource table's `i32` entry count. #642.
+    DataResourceCount,
+    /// An indexed bulk record's `i32` data-resource index. #642.
+    DataResourceIndex,
     /// `FObjectExport::bForcedExport` — UE bool32.
     ExportForcedExport,
     /// `FObjectExport::bNotForClient` — UE bool32.
@@ -4305,6 +4311,9 @@ impl fmt::Display for AssetWireField {
             Self::AdditionalPackagesToCookCount => "additional_packages_to_cook_count",
             Self::AdditionalPackagesToCookEntry => "additional_packages_to_cook_entry",
             Self::ChunkIdCount => "chunk_id_count",
+            Self::DataResourceTable => "data_resource_table",
+            Self::DataResourceCount => "data_resource_count",
+            Self::DataResourceIndex => "data_resource_index",
             Self::ExportForcedExport => "export_forced_export",
             Self::ExportNotForClient => "export_not_for_client",
             Self::ExportNotForServer => "export_not_for_server",
@@ -4665,6 +4674,9 @@ pub enum AssetAllocationContext {
     SplitAssetCombined,
     /// `Vec<DataTableRow>` for a `UDataTable`'s row list (Phase 3d).
     DataTableRows,
+    /// `Vec<FObjectDataResource>` for the UE 5.2+ data-resource
+    /// table (#642).
+    DataResourceTable,
 }
 
 impl AssetAllocationContext {
@@ -4682,7 +4694,8 @@ impl AssetAllocationContext {
             | Self::CustomVersionContainer
             | Self::ExportPayloads
             | Self::CollectionElements
-            | Self::DataTableRows => BoundsUnit::Items,
+            | Self::DataTableRows
+            | Self::DataResourceTable => BoundsUnit::Items,
         }
     }
 }
@@ -4699,6 +4712,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::CollectionElements => "collection elements",
             Self::SplitAssetCombined => "combined .uasset+.uexp buffer",
             Self::DataTableRows => "data table rows",
+            Self::DataResourceTable => "data resource entries",
         };
         f.write_str(s)
     }
@@ -7239,6 +7253,9 @@ mod tests {
                 "additional_packages_to_cook_entry",
             ),
             (AssetWireField::ChunkIdCount, "chunk_id_count"),
+            (AssetWireField::DataResourceTable, "data_resource_table"),
+            (AssetWireField::DataResourceCount, "data_resource_count"),
+            (AssetWireField::DataResourceIndex, "data_resource_index"),
             (AssetWireField::ExportForcedExport, "export_forced_export"),
             (AssetWireField::ExportNotForClient, "export_not_for_client"),
             (AssetWireField::ExportNotForServer, "export_not_for_server"),
@@ -7596,6 +7613,10 @@ mod tests {
                 "combined .uasset+.uexp buffer",
             ),
             (AssetAllocationContext::DataTableRows, "data table rows"),
+            (
+                AssetAllocationContext::DataResourceTable,
+                "data resource entries",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -7690,6 +7711,7 @@ mod tests {
                 BoundsUnit::Bytes,
             ),
             (AssetAllocationContext::DataTableRows, BoundsUnit::Items),
+            (AssetAllocationContext::DataResourceTable, BoundsUnit::Items),
         ];
         for (context, expected) in cases {
             assert_eq!(

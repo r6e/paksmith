@@ -278,11 +278,11 @@ fn read_nonstreaming_platform_data(
                 asset_path,
                 AssetWireField::SoundWaveFormatKey,
             )?);
-            bulk.push(FByteBulkData::read_from(cur, asset_path)?);
+            bulk.push(FByteBulkData::read_from_ctx(cur, ctx, asset_path)?);
         }
     } else {
         // `RawData`: a single uncompressed `FByteBulkData` (no codec key).
-        bulk.push(FByteBulkData::read_from(cur, asset_path)?);
+        bulk.push(FByteBulkData::read_from_ctx(cur, ctx, asset_path)?);
     }
     debug_assert!(cur.position() <= total_len);
 
@@ -350,7 +350,7 @@ fn read_streaming_platform_data(
         let flags = cur
             .read_u32::<LittleEndian>()
             .map_err(|_| eof(asset_path, AssetWireField::SoundWaveChunk))?;
-        bulk.push(FByteBulkData::read_from(cur, asset_path)?);
+        bulk.push(FByteBulkData::read_from_ctx(cur, ctx, asset_path)?);
         let data_size = read_chunk_i32(cur, asset_path)?;
         let audio_data_size = read_chunk_i32(cur, asset_path)?;
         let seek_offset_in_audio_frames = if flags & STREAMED_AUDIO_CHUNK_HAS_SEEK_OFFSET != 0 {

@@ -2295,6 +2295,37 @@ pub fn build_minimal_ue5_1010() -> MinimalPackage {
     })
 }
 
+/// [`build_minimal_ue5_1010`] with a POPULATED 2-entry
+/// `FObjectDataResource` table appended and the summary's
+/// `DataResourceOffset` (the final i32 of the summary region) patched
+/// to point at it (#642). Entry fields: `serial_offset` 0x100/0x200,
+/// `legacy_bulk_data_flags` 0x0100 (PayloadInSeperateFile) / 0x0001
+/// (PayloadAtEndOfFile), sizes 64/64.
+#[must_use]
+pub fn build_minimal_ue5_1010_with_data_resources() -> MinimalPackage {
+    let mut pkg = build_minimal_ue5_1010();
+    let dro_pos = usize::try_from(pkg.summary.name_offset).expect("name_offset") - 4;
+    assert_eq!(
+        &pkg.bytes[dro_pos..dro_pos + 4],
+        &0i32.to_le_bytes(),
+        "builder writes an empty (offset 0) data-resource map by default"
+    );
+    let section_pos = i32::try_from(pkg.bytes.len()).expect("section offset fits i32");
+    pkg.bytes.extend_from_slice(&1u32.to_le_bytes()); // version = Initial
+    pkg.bytes.extend_from_slice(&2i32.to_le_bytes()); // count
+    for (offset, legacy_flags) in [(0x100i64, 0x0100u32), (0x200, 0x0001)] {
+        pkg.bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
+        pkg.bytes.extend_from_slice(&offset.to_le_bytes()); // serial_offset
+        pkg.bytes.extend_from_slice(&(-1i64).to_le_bytes()); // duplicate
+        pkg.bytes.extend_from_slice(&64i64.to_le_bytes()); // serial_size
+        pkg.bytes.extend_from_slice(&64i64.to_le_bytes()); // raw_size
+        pkg.bytes.extend_from_slice(&1i32.to_le_bytes()); // outer_index
+        pkg.bytes.extend_from_slice(&legacy_flags.to_le_bytes());
+    }
+    pkg.bytes[dro_pos..dro_pos + 4].copy_from_slice(&section_pos.to_le_bytes());
+    pkg
+}
+
 /// UE5 with `legacy_file_version = -9` (UE 5.4+ forward-compat).
 /// PR #234 widened the accepted window from `{-7, -8}` to
 /// `{-7, -8, -9}`; this fixture validates that -9 + UE5 1010 wire

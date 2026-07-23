@@ -185,13 +185,16 @@ pub enum AssetSeam {
     /// `data_table::read_from`'s row-list reservation (Phase 3d).
     /// Surfaces as `AssetAllocationContext::DataTableRows`.
     DataTableRows,
+    /// `parse_data_resource_table`'s entries-vec reservation (#642).
+    /// Surfaces as `AssetAllocationContext::DataResourceTable`.
+    DataResourceTable,
 }
 
 impl AssetSeam {
     /// Total number of asset-side seam sites. Pinned by the `const _`
     /// guard below and by the exhaustive `match` in
     /// [`SeamSite::slot`].
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 10;
 
     /// Map an asset seam to its paired
     /// [`crate::error::AssetAllocationContext`].
@@ -217,12 +220,13 @@ impl AssetSeam {
             Self::CollectionElements => C::CollectionElements,
             Self::SplitAssetCombined => C::SplitAssetCombined,
             Self::DataTableRows => C::DataTableRows,
+            Self::DataResourceTable => C::DataResourceTable,
         }
     }
 }
 
 // Same compile-time guard pattern as PakSeam above (see precondition).
-const _: [(); AssetSeam::COUNT] = [(); AssetSeam::DataTableRows as usize + 1];
+const _: [(); AssetSeam::COUNT] = [(); AssetSeam::DataResourceTable as usize + 1];
 
 // In the feature-off LIB target `COUNT`/`slot` are dead: their only
 // production consumers live in the `__test_utils`-gated
@@ -360,6 +364,9 @@ mod tests {
                 AssetSeam::DataTableRows => {
                     "read_asset_data_table_rows_surfaces_allocation_failed_under_oom"
                 }
+                AssetSeam::DataResourceTable => {
+                    "read_asset_data_resource_table_surfaces_allocation_failed_under_oom"
+                }
             }
         }
         // Touch both const fns so the matches' compile-time
@@ -407,6 +414,7 @@ mod tests {
                 AssetSeam::CollectionElements => PakSeam::COUNT + 6,
                 AssetSeam::SplitAssetCombined => PakSeam::COUNT + 7,
                 AssetSeam::DataTableRows => PakSeam::COUNT + 8,
+                AssetSeam::DataResourceTable => PakSeam::COUNT + 9,
             }
         }
         let pak_all = [
@@ -441,6 +449,7 @@ mod tests {
             AssetSeam::CollectionElements,
             AssetSeam::SplitAssetCombined,
             AssetSeam::DataTableRows,
+            AssetSeam::DataResourceTable,
         ];
         assert_eq!(asset_all.len(), AssetSeam::COUNT);
         for site in asset_all {

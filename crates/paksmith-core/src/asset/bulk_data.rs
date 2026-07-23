@@ -613,6 +613,218 @@ impl FByteBulkData {
         Self::read_from_inner(reader, asset_path, false).map(|(record, _payload)| record)
     }
 
+    /// Context-aware record read (#642): when the owning package's
+    /// `FObjectDataResource` table is non-empty, the wire form is a
+    /// single `i32` index into that table (no classic header at all) —
+    /// the entry supplies flags/count/size/offset. With an empty table
+    /// this is exactly [`Self::read_from`]. Every typed-reader call
+    /// site routes through this (or the capturing sibling) so UE 5.2+
+    /// data-resource packages decode instead of misparsing.
+    pub(crate) fn read_from_ctx<R: std::io::Read>(
+        reader: &mut R,
+        ctx: &crate::asset::AssetContext,
+        asset_path: &str,
+    ) -> crate::Result<Self> {
+        if ctx.data_resources.is_empty() {
+            return Self::read_from(reader, asset_path);
+        }
+        Self::read_indexed_inner(reader, ctx, asset_path, false).map(|(record, _payload)| record)
+    }
+
+    /// Context-aware sibling of [`Self::read_from_capturing_inline`] —
+    /// same indexed-form dispatch as [`Self::read_from_ctx`]. #642.
+    pub(crate) fn read_from_ctx_capturing_inline<R: std::io::Read>(
+        reader: &mut R,
+        ctx: &crate::asset::AssetContext,
+        asset_path: &str,
+    ) -> crate::Result<(Self, Option<Vec<u8>>)> {
+        if ctx.data_resources.is_empty() {
+            return Self::read_from_capturing_inline(reader, asset_path);
+        }
+        Self::read_indexed_inner(reader, ctx, asset_path, true)
+    }
+
+    /// Read the indexed (data-resource) record form: one `i32` index
+    /// into the package's `FObjectDataResource` table, translated to
+    /// the classic record shape per CUE4Parse `FByteBulkDataHeader`:
+    /// `flags = entry.legacy_bulk_data_flags` (verbatim classic bits),
+    /// `element_count = raw_size`, `size_on_disk = serial_size`,
+    /// `offset_in_file = serial_offset`. Entry offsets are ABSOLUTE
+    /// (CUE4Parse applies no `BulkDataStartOffset` fix-up on this
+    /// path), so `BULKDATA_NoOffsetFixUp` is set on the translated
+    /// flags — the resolver's existing fix-up logic then does the
+    /// right thing unchanged. Inline payload bytes still follow the
+    /// `i32` in-stream and are consumed exactly like the classic path.
+    ///
+    /// Divergence from CUE4Parse (documented): an out-of-range index is
+    /// a structured error (`DataResourceIndexOob`) — CUE4Parse rewinds
+    /// 4 bytes and re-parses as a classic header, a heuristic paksmith
+    /// deliberately does not copy (fail-loud over guess). A non-zero
+    /// `cooked_index` (numbered `.NNN.ubulk` sidecars, post-UE5.3) is
+    /// fail-closed via `UnsupportedFeature` — no numbered companion
+    /// loaders exist yet.
+    fn read_indexed_inner<R: std::io::Read>(
+        reader: &mut R,
+        ctx: &crate::asset::AssetContext,
+        asset_path: &str,
+        capture_inline: bool,
+    ) -> crate::Result<(Self, Option<Vec<u8>>)> {
+        use byteorder::{LittleEndian, ReadBytesExt};
+
+        let index = reader
+            .read_i32::<LittleEndian>()
+            .map_err(|_| eof_at(asset_path, crate::error::AssetWireField::DataResourceIndex))?;
+        let entry = usize::try_from(index)
+            .ok()
+            .and_then(|i| ctx.data_resources.get(i))
+            .ok_or_else(|| crate::PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: crate::error::AssetParseFault::DataResourceIndexOob {
+                    index,
+                    entry_count: ctx.data_resources.len(),
+                },
+            })?;
+
+        if entry.cooked_index != 0 {
+            return Err(crate::PaksmithError::UnsupportedFeature {
+                context: format!(
+                    "FObjectDataResource cooked_index={} ({asset_path}); numbered \
+                     .NNN.ubulk sidecar payloads are not yet supported",
+                    entry.cooked_index
+                ),
+            });
+        }
+
+        let flags = BulkDataFlags::from(entry.legacy_bulk_data_flags);
+        flags
+            .validate()
+            .map_err(|fault| crate::PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault,
+            })?;
+        // Entry offsets are absolute — synthesize NoOffsetFixUp so the
+        // resolver skips the `bulk_data_start_offset` adjustment. Done
+        // AFTER validate() (bit 16 is a valid bit; this is a semantic
+        // annotation, not wire data).
+        let mut flags_out = flags;
+        flags_out.0 |= FLAG_NO_OFFSET_FIXUP;
+
+        let element_count = entry.raw_size;
+        if element_count < 0 {
+            return Err(crate::PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: crate::error::AssetParseFault::BulkDataElementCountNegative {
+                    count: element_count,
+                },
+            });
+        }
+        if entry.serial_size < 0 {
+            return Err(crate::PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: crate::error::AssetParseFault::NegativeValue {
+                    field: crate::error::AssetWireField::BulkDataSizeOnDisk,
+                    value: entry.serial_size,
+                },
+            });
+        }
+        #[allow(clippy::cast_sign_loss, reason = "sign-checked above")]
+        let size_on_disk = entry.serial_size as u64;
+        Self::check_size_caps(flags, size_on_disk, asset_path)?;
+
+        // Inline detection MUST see the raw wire flags, not `flags_out`:
+        // `payload_is_inline` has exact-equality arms (`== 0`,
+        // `== LAZY_LOADABLE`) that the synthesized NoOffsetFixUp bit
+        // would defeat. CUE4Parse gates its `Ar.Position += SizeOnDisk`
+        // advance on the raw LegacyBulkDataFlags. No BadDataVersion
+        // normalization happens here either — deliberately: CUE4Parse's
+        // DataResourceMap branch returns the legacy flags VERBATIM (the
+        // BadDataVersion clear + 2-byte tail skip are classic-path-only
+        // code), so a BadDataVersion-only (0x8000) entry is NOT
+        // BULKDATA_None on this path and its payload is NOT consumed.
+        // Pinned by `read_from_ctx_indexed_bad_data_version_not_inline`.
+        let inline_payload =
+            Self::consume_inline(reader, flags, size_on_disk, capture_inline, asset_path)?;
+
+        Ok((
+            Self {
+                flags: flags_out,
+                element_count,
+                size_on_disk,
+                offset_in_file: entry.serial_offset,
+            },
+            inline_payload,
+        ))
+    }
+
+    /// The compressed/uncompressed size-cap chain, shared by the
+    /// classic and indexed read paths so the caps cannot drift. #642.
+    fn check_size_caps(
+        flags: BulkDataFlags,
+        size_on_disk: u64,
+        asset_path: &str,
+    ) -> crate::Result<()> {
+        let is_compressed = flags.is_any_compressed();
+        if is_compressed && size_on_disk > MAX_BULK_DATA_COMPRESSED_SIZE {
+            return Err(crate::PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: crate::error::AssetParseFault::BulkDataCompressedSizeExceeded {
+                    size: size_on_disk,
+                    cap: MAX_BULK_DATA_COMPRESSED_SIZE,
+                },
+            });
+        }
+        if size_on_disk > MAX_BULK_DATA_SIZE {
+            return Err(crate::PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: crate::error::AssetParseFault::BulkDataSizeExceeded {
+                    size: size_on_disk,
+                    cap: MAX_BULK_DATA_SIZE,
+                },
+            });
+        }
+        Ok(())
+    }
+
+    /// In-stream inline-payload consumption, shared by the classic and
+    /// indexed read paths (#642): for a non-zero, non-`Unused`,
+    /// inline-flagged payload, consume `size_on_disk` bytes — captured
+    /// for the caller when `capture_inline`, drained to a sink
+    /// otherwise. Mirrors CUE4Parse `TBulkData`'s
+    /// `Ar.Position += Header.SizeOnDisk` advance.
+    fn consume_inline<R: std::io::Read>(
+        reader: &mut R,
+        flags: BulkDataFlags,
+        size_on_disk: u64,
+        capture_inline: bool,
+        asset_path: &str,
+    ) -> crate::Result<Option<Vec<u8>>> {
+        use std::io::Read;
+        if size_on_disk != 0 && !flags.has_unused() && flags.payload_is_inline() {
+            if capture_inline {
+                let mut buf = Vec::new();
+                let read = std::io::Read::take(reader.by_ref(), size_on_disk)
+                    .read_to_end(&mut buf)
+                    .map_err(crate::PaksmithError::Io)?;
+                if read as u64 != size_on_disk {
+                    return Err(eof_at(
+                        asset_path,
+                        crate::error::AssetWireField::BulkDataInlinePayload,
+                    ));
+                }
+                Ok(Some(buf))
+            } else {
+                let _ = std::io::copy(
+                    &mut std::io::Read::take(reader.by_ref(), size_on_disk),
+                    &mut std::io::sink(),
+                )
+                .map_err(crate::PaksmithError::Io)?;
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Like [`Self::read_from`], but when the record carries an **in-stream inline
     /// payload** (per [`BulkDataFlags::payload_is_inline`]), the payload bytes are
     /// captured and returned as `Some(Vec<u8>)` instead of discarded into a sink.
@@ -637,7 +849,6 @@ impl FByteBulkData {
         capture_inline: bool,
     ) -> crate::Result<(Self, Option<Vec<u8>>)> {
         use byteorder::{LittleEndian, ReadBytesExt};
-        use std::io::Read;
 
         let raw_flags = reader
             .read_u32::<LittleEndian>()
@@ -698,26 +909,8 @@ impl FByteBulkData {
         // compression flag is set; uncompressed cap otherwise. The
         // compression-aware split prevents a zlib bomb from reading
         // 8 GiB of compressed bytes off disk before the resolver
-        // even sees the record.
-        let is_compressed = flags.is_any_compressed();
-        if is_compressed && size_on_disk > MAX_BULK_DATA_COMPRESSED_SIZE {
-            return Err(crate::PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: crate::error::AssetParseFault::BulkDataCompressedSizeExceeded {
-                    size: size_on_disk,
-                    cap: MAX_BULK_DATA_COMPRESSED_SIZE,
-                },
-            });
-        }
-        if size_on_disk > MAX_BULK_DATA_SIZE {
-            return Err(crate::PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: crate::error::AssetParseFault::BulkDataSizeExceeded {
-                    size: size_on_disk,
-                    cap: MAX_BULK_DATA_SIZE,
-                },
-            });
-        }
+        // even sees the record. Shared with the indexed path (#642).
+        Self::check_size_caps(flags, size_on_disk, asset_path)?;
 
         let offset_in_file = reader.read_i64::<LittleEndian>().map_err(|_| {
             eof_at(
@@ -763,45 +956,18 @@ impl FByteBulkData {
         // are serialized inline (after the header in the same archive), so a
         // subsequent field reads at the right offset. paksmith reads `R: Read`
         // (no `Seek`), so it consumes the bytes — into a sink by default, or
-        // captured for the caller when `capture_inline` (see the branches below).
-        // Skipped only for a non-zero, non-`Unused`, inline-flagged payload —
-        // matching the oracle's `SizeOnDisk == 0 || Unused` early-exit and
-        // inline-flag guard. `PayloadAtEndOfFile` / separate-file records (cooked
-        // content) are not inline, so their cursor is unchanged. A truncated
-        // inline payload EOFs: the capture branch faults immediately on the
-        // `BulkDataInlinePayload` field; the sink branch leaves fewer than
-        // `size_on_disk` bytes consumed, EOF-ing the next read.
-        // (`!= 0` not `> 0`: the `u64` makes `>= 0` always-true / equivalent.)
+        // captured for the caller when `capture_inline`. Consumption logic
+        // shared with the indexed path (#642) via `consume_inline`.
+        //
+        // `flags_out` (post-BadDataVersion-clear) is deliberate here, unlike
+        // the indexed path's raw `flags`: CUE4Parse's classic header clears
+        // BadDataVersion BEFORE `TBulkData` runs its inline gate, so the
+        // post-clear value IS the oracle's gate input (raw `0x8000` must gate
+        // as `None` → inline). The indexed path differs only because its
+        // mutation ADDS a synthetic non-wire bit the oracle never sees.
+        // Pinned by `read_inline_skip_uses_post_bad_data_version_clear_flags`.
         let inline_payload =
-            if size_on_disk != 0 && !flags_out.has_unused() && flags_out.payload_is_inline() {
-                if capture_inline {
-                    // Capture the inline bytes for the caller (#563). `take` + length
-                    // check bounds the read to `size_on_disk` and EOF-checks a short
-                    // payload (the cap on `size_on_disk` was already enforced above, so
-                    // this Vec cannot exceed MAX_BULK_DATA_SIZE).
-                    let mut buf = Vec::new();
-                    let read = std::io::Read::take(reader.by_ref(), size_on_disk)
-                        .read_to_end(&mut buf)
-                        .map_err(crate::PaksmithError::Io)?;
-                    if read as u64 != size_on_disk {
-                        return Err(eof_at(
-                            asset_path,
-                            crate::error::AssetWireField::BulkDataInlinePayload,
-                        ));
-                    }
-                    Some(buf)
-                } else {
-                    // Default: advance past the payload without retaining it.
-                    let _ = std::io::copy(
-                        &mut std::io::Read::take(reader.by_ref(), size_on_disk),
-                        &mut std::io::sink(),
-                    )
-                    .map_err(crate::PaksmithError::Io)?;
-                    None
-                }
-            } else {
-                None
-            };
+            Self::consume_inline(reader, flags_out, size_on_disk, capture_inline, asset_path)?;
 
         Ok((
             Self {
@@ -1693,6 +1859,248 @@ pub(crate) fn decompress_zlib(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an `AssetContext` carrying a data-resource table (#642).
+    fn ctx_with_resources(
+        entries: Vec<crate::asset::data_resource::FObjectDataResource>,
+    ) -> crate::asset::AssetContext {
+        let mut ctx = crate::asset::property::test_utils::make_ctx(&[]);
+        ctx.data_resources = std::sync::Arc::from(entries);
+        ctx
+    }
+
+    fn resource_entry(
+        legacy_flags: u32,
+        serial_offset: i64,
+        serial_size: i64,
+        raw_size: i64,
+    ) -> crate::asset::data_resource::FObjectDataResource {
+        crate::asset::data_resource::FObjectDataResource {
+            flags: 0,
+            cooked_index: 0,
+            serial_offset,
+            duplicate_serial_offset: -1,
+            serial_size,
+            raw_size,
+            outer_index: 1,
+            legacy_bulk_data_flags: legacy_flags,
+        }
+    }
+
+    /// Indexed form (#642): the wire is ONE i32 index; the entry supplies
+    /// the classic fields, with `NoOffsetFixUp` synthesized (entry
+    /// offsets are absolute — CUE4Parse applies no fix-up on this path).
+    #[test]
+    fn read_from_ctx_indexed_translates_entry() {
+        let ctx = ctx_with_resources(vec![resource_entry(
+            FLAG_PAYLOAD_IN_SEPARATE_FILE,
+            0x100,
+            64,
+            64,
+        )]);
+        let wire = 0i32.to_le_bytes();
+        let record =
+            FByteBulkData::read_from_ctx(&mut std::io::Cursor::new(&wire[..]), &ctx, "t").unwrap();
+        assert_eq!(record.offset_in_file, 0x100);
+        assert_eq!(record.size_on_disk, 64);
+        assert_eq!(record.element_count, 64);
+        assert!(record.flags.payload_in_separate_file());
+        assert!(
+            record.flags.no_offset_fixup(),
+            "NoOffsetFixUp must be synthesized — entry offsets are absolute"
+        );
+    }
+
+    /// An inline-flagged entry's payload bytes still follow the i32
+    /// in-stream and must be consumed (cursor lands past them). #642.
+    #[test]
+    fn read_from_ctx_indexed_consumes_inline_payload() {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        let ctx = ctx_with_resources(vec![resource_entry(
+            FLAG_FORCE_INLINE_PAYLOAD | FLAG_PAYLOAD_AT_END_OF_FILE,
+            0,
+            8,
+            8,
+        )]);
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&0i32.to_le_bytes()); // index
+        wire.extend_from_slice(&[0xABu8; 8]); // inline payload
+        wire.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // sentinel
+        let mut cur = std::io::Cursor::new(&wire[..]);
+        let record = FByteBulkData::read_from_ctx(&mut cur, &ctx, "t").unwrap();
+        assert_eq!(record.size_on_disk, 8);
+        let sentinel = cur.read_u32::<LittleEndian>().unwrap();
+        assert_eq!(sentinel, 0xDEAD_BEEF, "inline payload must be consumed");
+    }
+
+    /// Zero is a VALID `raw_size`/`serial_size` (empty payloads exist in
+    /// real cooked content) — the negative-value guards must be strict
+    /// `< 0`, not `<= 0`. Boundary-pins both sign checks in
+    /// `read_indexed_inner`. #642.
+    #[test]
+    fn read_from_ctx_indexed_zero_sizes_accepted() {
+        let ctx = ctx_with_resources(vec![resource_entry(
+            FLAG_PAYLOAD_AT_END_OF_FILE,
+            0x40,
+            0,
+            0,
+        )]);
+        let wire = 0i32.to_le_bytes();
+        let record =
+            FByteBulkData::read_from_ctx(&mut std::io::Cursor::new(&wire[..]), &ctx, "t").unwrap();
+        assert_eq!(record.element_count, 0);
+        assert_eq!(record.size_on_disk, 0);
+        assert_eq!(record.offset_in_file, 0x40);
+    }
+
+    /// The equality-tested inline flag states (`BULKDATA_None` == 0 and
+    /// exactly `LazyLoadable`) must ALSO consume their in-stream payload
+    /// on the indexed path — the synthesized NoOffsetFixUp bit must not
+    /// leak into `payload_is_inline`'s `== 0` / `== LAZY_LOADABLE` arms
+    /// (CUE4Parse gates the advance on the raw LegacyBulkDataFlags). #642.
+    #[test]
+    fn read_from_ctx_indexed_inline_equality_flags_consume_payload() {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        for legacy in [0u32, FLAG_LAZY_LOADABLE] {
+            let ctx = ctx_with_resources(vec![resource_entry(legacy, 0, 8, 8)]);
+            let mut wire = Vec::new();
+            wire.extend_from_slice(&0i32.to_le_bytes()); // index
+            wire.extend_from_slice(&[0xCDu8; 8]); // inline payload
+            wire.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // sentinel
+            let mut cur = std::io::Cursor::new(&wire[..]);
+            let (record, payload) =
+                FByteBulkData::read_from_ctx_capturing_inline(&mut cur, &ctx, "t").unwrap();
+            assert_eq!(
+                payload.as_deref(),
+                Some(&[0xCDu8; 8][..]),
+                "legacy flags {legacy:#x}: inline payload must be captured"
+            );
+            assert!(
+                record.flags.no_offset_fixup(),
+                "legacy flags {legacy:#x}: NoOffsetFixUp still synthesized on the record"
+            );
+            let sentinel = cur.read_u32::<LittleEndian>().unwrap();
+            assert_eq!(
+                sentinel, 0xDEAD_BEEF,
+                "legacy flags {legacy:#x}: cursor must land past the payload"
+            );
+        }
+    }
+
+    /// A BadDataVersion-only (0x8000) indexed entry is NOT inline and
+    /// consumes NOTHING after the i32 — CUE4Parse's DataResourceMap
+    /// branch returns the legacy flags verbatim (the BadDataVersion
+    /// clear + tail skip are classic-path-only), so `0x8000 != 0` gates
+    /// as not-inline. Pins the deliberate ABSENCE of classic-path
+    /// normalization on the indexed read. #642.
+    #[test]
+    fn read_from_ctx_indexed_bad_data_version_not_inline() {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        let ctx = ctx_with_resources(vec![resource_entry(FLAG_BAD_DATA_VERSION, 0x40, 8, 8)]);
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&0i32.to_le_bytes()); // index
+        wire.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // sentinel DIRECTLY after
+        let mut cur = std::io::Cursor::new(&wire[..]);
+        let (record, payload) =
+            FByteBulkData::read_from_ctx_capturing_inline(&mut cur, &ctx, "t").unwrap();
+        assert_eq!(
+            payload, None,
+            "0x8000 is not BULKDATA_None here — no consumption"
+        );
+        assert!(
+            record.flags.has_bad_data_version(),
+            "the verbatim legacy flags keep BadDataVersion on the record"
+        );
+        let sentinel = cur.read_u32::<LittleEndian>().unwrap();
+        assert_eq!(
+            sentinel, 0xDEAD_BEEF,
+            "cursor must sit immediately after the i32 index"
+        );
+    }
+
+    /// Out-of-range / negative indices fail closed (`DataResourceIndexOob`)
+    /// — paksmith deliberately does NOT copy CUE4Parse's rewind-and-guess
+    /// fallback. #642.
+    #[test]
+    fn read_from_ctx_index_oob_rejected() {
+        let ctx = ctx_with_resources(vec![resource_entry(FLAG_PAYLOAD_AT_END_OF_FILE, 0, 4, 4)]);
+        for bad in [1i32, 5, -1, i32::MIN] {
+            let wire = bad.to_le_bytes();
+            let err = FByteBulkData::read_from_ctx(&mut std::io::Cursor::new(&wire[..]), &ctx, "t")
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    crate::PaksmithError::AssetParse {
+                        fault: crate::error::AssetParseFault::DataResourceIndexOob {
+                            index,
+                            entry_count: 1,
+                        },
+                        ..
+                    } if index == bad
+                ),
+                "index {bad} must fail closed, got {err:?}"
+            );
+        }
+    }
+
+    /// A non-zero `cooked_index` (numbered `.NNN.ubulk` sidecars) is
+    /// fail-closed — no numbered companion loaders exist. #642.
+    #[test]
+    fn read_from_ctx_cooked_index_fail_closed() {
+        let mut entry = resource_entry(FLAG_PAYLOAD_IN_SEPARATE_FILE, 0, 4, 4);
+        entry.cooked_index = 2;
+        let ctx = ctx_with_resources(vec![entry]);
+        let wire = 0i32.to_le_bytes();
+        let err = FByteBulkData::read_from_ctx(&mut std::io::Cursor::new(&wire[..]), &ctx, "t")
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::PaksmithError::UnsupportedFeature { .. }),
+            "cooked_index != 0 must fail closed, got {err:?}"
+        );
+    }
+
+    /// With an EMPTY table, `read_from_ctx` is exactly the classic read
+    /// — a classic-wire record parses identically through both. #642.
+    #[test]
+    fn read_from_ctx_empty_table_is_classic() {
+        let ctx = ctx_with_resources(Vec::new());
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&FLAG_PAYLOAD_AT_END_OF_FILE.to_le_bytes());
+        wire.extend_from_slice(&16i32.to_le_bytes()); // element_count
+        wire.extend_from_slice(&16u32.to_le_bytes()); // size_on_disk
+        wire.extend_from_slice(&0x40i64.to_le_bytes()); // offset
+        let via_ctx =
+            FByteBulkData::read_from_ctx(&mut std::io::Cursor::new(&wire[..]), &ctx, "t").unwrap();
+        let classic = FByteBulkData::read_from(&mut std::io::Cursor::new(&wire[..]), "t").unwrap();
+        assert_eq!(via_ctx, classic);
+    }
+
+    /// Negative entry sizes (crafted table) fail closed. #642.
+    #[test]
+    fn read_from_ctx_negative_entry_sizes_rejected() {
+        let ctx = ctx_with_resources(vec![resource_entry(FLAG_PAYLOAD_AT_END_OF_FILE, 0, 4, -4)]);
+        let wire = 0i32.to_le_bytes();
+        let err = FByteBulkData::read_from_ctx(&mut std::io::Cursor::new(&wire[..]), &ctx, "t")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BulkDataElementCountNegative { .. },
+                ..
+            }
+        ));
+        let ctx = ctx_with_resources(vec![resource_entry(FLAG_PAYLOAD_AT_END_OF_FILE, 0, -4, 4)]);
+        let err = FByteBulkData::read_from_ctx(&mut std::io::Cursor::new(&wire[..]), &ctx, "t")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::NegativeValue { .. },
+                ..
+            }
+        ));
+    }
 
     /// Pins the chunked-framing wire constants against the reference
     /// values (CUE4Parse `FArchive.SerializeCompressedNew` +

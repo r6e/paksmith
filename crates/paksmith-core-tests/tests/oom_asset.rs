@@ -29,6 +29,7 @@ use paksmith_core::testing::oom::{AssetSeam, SeamSite, arm_at};
 use paksmith_core::testing::uasset::{
     build_minimal_custom_versions_populated, build_minimal_ue4_27, build_minimal_ue4_27_split,
     build_minimal_ue4_27_with_array_of_struct, build_minimal_ue4_27_with_data_table,
+    build_minimal_ue5_1010_with_data_resources,
 };
 
 /// Arm `AssetSeam::NameTable` → `Package::read_from`'s name-table
@@ -265,5 +266,33 @@ fn read_asset_data_table_rows_surfaces_allocation_failed_under_oom() {
             }
         ),
         "expected AllocationFailed{{DataTableRows}}; got {err:?}"
+    );
+}
+
+/// Arm `AssetSeam::DataResourceTable` → a UE5.2+ package's populated
+/// `FObjectDataResource` table entries-vec reservation surfaces
+/// `AssetParseFault::AllocationFailed{DataResourceTable}` through the
+/// `Package::read_from` surface (#642). The fixture's 2-entry table
+/// reaches the `try_reserve_asset` call (a count-0 table early-returns
+/// before the reserve, so a populated fixture is required). (The
+/// end-to-end counterpart to the in-source unit test in
+/// `asset/data_resource.rs`.)
+#[test]
+fn read_asset_data_resource_table_surfaces_allocation_failed_under_oom() {
+    let pkg = build_minimal_ue5_1010_with_data_resources();
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::DataResourceTable), 0);
+    let err = Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::AllocationFailed {
+                    context: AssetAllocationContext::DataResourceTable,
+                    ..
+                },
+                ..
+            }
+        ),
+        "expected AllocationFailed{{DataResourceTable}}; got {err:?}"
     );
 }
