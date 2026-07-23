@@ -159,7 +159,10 @@ pub(crate) fn parse_data_resource_table(
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
             fault: AssetParseFault::BoundsExceeded {
-                field: AssetWireField::DataResourceCount,
+                // The bounded quantity is the TABLE's byte extent
+                // (count × entry size vs bytes remaining), so blame the
+                // table field — the count itself was already validated.
+                field: AssetWireField::DataResourceTable,
                 value: needed as u64,
                 limit: remaining as u64,
                 unit: BoundsUnit::Bytes,
@@ -344,7 +347,11 @@ mod tests {
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
-                fault: AssetParseFault::BoundsExceeded { .. },
+                fault: AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::DataResourceTable,
+                    unit: BoundsUnit::Bytes,
+                    ..
+                },
                 ..
             }
         ));
