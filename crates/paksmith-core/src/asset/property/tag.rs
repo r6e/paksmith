@@ -632,19 +632,26 @@ fn skip_subtree(nodes: &[TypeNameNode], idx: usize) -> Option<usize> {
     Some(end)
 }
 
-/// `u8 EPropertyTagFlags` bits (UE5 ≥ 1012). #643.
+/// `u8 EPropertyTagFlags` bits (UE5 ≥ 1012). #643. The four that gate
+/// a wire read live here; the two payload-free bits
+/// (`BinaryOrNativeSerialize` 0x08, `SkippedSerialize` 0x20) don't
+/// affect header parsing and are named only by the mask drift-guard
+/// test, so they are `#[cfg(test)]` to avoid a lib-build dead-code
+/// lint.
 const TAG_FLAG_HAS_ARRAY_INDEX: u8 = 0x01;
 const TAG_FLAG_HAS_PROPERTY_GUID: u8 = 0x02;
 const TAG_FLAG_HAS_PROPERTY_EXTENSIONS: u8 = 0x04;
+#[cfg(test)]
 const TAG_FLAG_HAS_BINARY_OR_NATIVE_SERIALIZE: u8 = 0x08;
 const TAG_FLAG_BOOL_TRUE: u8 = 0x10;
+#[cfg(test)]
 const TAG_FLAG_SKIPPED_SERIALIZE: u8 = 0x20;
-const TAG_FLAG_KNOWN_MASK: u8 = TAG_FLAG_HAS_ARRAY_INDEX
-    | TAG_FLAG_HAS_PROPERTY_GUID
-    | TAG_FLAG_HAS_PROPERTY_EXTENSIONS
-    | TAG_FLAG_HAS_BINARY_OR_NATIVE_SERIALIZE
-    | TAG_FLAG_BOOL_TRUE
-    | TAG_FLAG_SKIPPED_SERIALIZE;
+/// All six defined `EPropertyTagFlags` bits (0x01..=0x20). A literal,
+/// not an `|`-chain of the named constants: the bits are disjoint, so
+/// `A | B == A ^ B`, which makes every `|`→`^` in such a chain an
+/// EQUIVALENT (unkillable) mutant. `known_mask_is_all_defined_bits`
+/// (test-only, not mutated) pins the literal against drift. #643.
+const TAG_FLAG_KNOWN_MASK: u8 = 0x3F;
 
 /// The UE5 ≥ 1012 (`PROPERTY_TAG_COMPLETE_TYPE_NAME`) tag shape,
 /// after the (already-read) Name: `FPropertyTypeName` tree → `i32 Size`
@@ -948,6 +955,23 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!tag.bool_val);
+    }
+
+    /// The `TAG_FLAG_KNOWN_MASK` literal equals the OR of every named
+    /// flag bit — guards the literal against drift when a bit is
+    /// added/removed. Lives in `#[cfg(test)]` (cargo-mutants does not
+    /// mutate test code), so no equivalent `|`→`^` mutant hides here. #643.
+    #[test]
+    fn known_mask_is_all_defined_bits() {
+        assert_eq!(
+            TAG_FLAG_KNOWN_MASK,
+            TAG_FLAG_HAS_ARRAY_INDEX
+                | TAG_FLAG_HAS_PROPERTY_GUID
+                | TAG_FLAG_HAS_PROPERTY_EXTENSIONS
+                | TAG_FLAG_HAS_BINARY_OR_NATIVE_SERIALIZE
+                | TAG_FLAG_BOOL_TRUE
+                | TAG_FLAG_SKIPPED_SERIALIZE
+        );
     }
 
     /// Unknown flag bits (0x40/0x80) fail closed. #643.
