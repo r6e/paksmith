@@ -390,20 +390,18 @@ impl Cursor<'_> {
     fn read_fstring(&mut self, field: LocresWireField) -> crate::Result<String> {
         let len = self.read_i32(field)?;
         let string_fault = |detail| fault(LocresParseFault::MalformedString { field, detail });
-        if len == 0 {
-            return Ok(String::new());
-        }
         if len == i32::MIN {
             return Err(string_fault(LocresStringFault::LengthOverflow));
         }
         if len < 0 {
+            // UTF-16: `-len` code units of 2 bytes each, terminator
+            // included. `checked_mul` guards the `chars * 2` product on
+            // 32-bit targets; `take` bounds the read against the file
+            // (an over-long string surfaces as its structured EOF).
             let chars = len.unsigned_abs() as usize;
             let byte_len = chars
                 .checked_mul(2)
                 .ok_or_else(|| string_fault(LocresStringFault::LengthExceedsFile))?;
-            if byte_len > self.bytes.len() - self.pos {
-                return Err(string_fault(LocresStringFault::LengthExceedsFile));
-            }
             let raw = self.take(byte_len, field)?;
             let units: Vec<u16> = raw.chunks_exact(2).map(LittleEndian::read_u16).collect();
             if units.last() != Some(&0) {
@@ -411,10 +409,13 @@ impl Cursor<'_> {
             }
             Ok(String::from_utf16_lossy(&units[..units.len() - 1]))
         } else {
+            // `len == 0` (empty string) lands here — no terminator on
+            // the wire. Positive lengths read `len` ANSI bytes + a
+            // required null terminator; `take` bounds the read.
             #[allow(clippy::cast_sign_loss, reason = "the negative arm returned above")]
             let byte_len = len as usize;
-            if byte_len > self.bytes.len() - self.pos {
-                return Err(string_fault(LocresStringFault::LengthExceedsFile));
+            if byte_len == 0 {
+                return Ok(String::new());
             }
             let raw = self.take(byte_len, field)?;
             if raw.last() != Some(&0) {
@@ -474,6 +475,43 @@ mod tests {
         let off = i64::try_from(strings_at).unwrap();
         b[offset_pos..offset_pos + 8].copy_from_slice(&off.to_le_bytes());
         b
+    }
+
+    /// `checked_count` accepts exactly the cap and rejects one over —
+    /// pins the `>` boundary (a `>=` mutant would reject the cap). #646.
+    #[test]
+    fn checked_count_boundary() {
+        assert_eq!(
+            checked_count(
+                u32::try_from(MAX_LOCRES_COUNT).unwrap(),
+                LocresWireField::NamespaceCount,
+            )
+            .unwrap(),
+            MAX_LOCRES_COUNT
+        );
+        let err = checked_count(
+            u32::try_from(MAX_LOCRES_COUNT + 1).unwrap(),
+            LocresWireField::NamespaceCount,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::LocresParse {
+                fault: LocresParseFault::CountExceeded {
+                    field: LocresWireField::NamespaceCount,
+                    ..
+                },
+            }
+        ));
+    }
+
+    /// `try_reserve` must genuinely reserve — a no-op stub returning
+    /// `Ok(())` (the mutation) leaves capacity 0. #646.
+    #[test]
+    fn try_reserve_actually_reserves() {
+        let mut v: Vec<String> = Vec::new();
+        try_reserve(&mut v, 128, LocresAllocationContext::StringsArray).unwrap();
+        assert!(v.capacity() >= 128, "try_reserve must reserve capacity");
     }
 
     #[test]
@@ -725,6 +763,49 @@ mod tests {
             let r = LocresResource::parse(&SAMPLE_V2[..cut]);
             assert!(r.is_err(), "truncation at {cut} must error");
         }
+    }
+
+    /// An empty FString (`len == 0`) decodes to "" with NO terminator
+    /// on the wire — it takes the positive branch's `byte_len == 0`
+    /// path. Pins that len==0 does NOT enter the UTF-16 branch (a
+    /// `< 0`→`<= 0` mutant would, then fault on the absent terminator).
+    /// #646.
+    #[test]
+    fn empty_fstring_decodes_to_empty() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u32.to_le_bytes()); // v0 namespace count
+        b.extend_from_slice(&0i32.to_le_bytes()); // namespace = empty FString
+        b.extend_from_slice(&0u32.to_le_bytes()); // key count 0
+        let r = LocresResource::parse(&b).expect("empty namespace parses");
+        assert_eq!(r.namespaces[0].namespace, "");
+        assert!(r.namespaces[0].entries.is_empty());
+    }
+
+    /// An FString whose length runs past the file fails closed (via the
+    /// bounded `take`) rather than over-reading — both ANSI and UTF-16.
+    /// #646.
+    #[test]
+    fn overlong_fstring_fails_closed() {
+        // v0: namespace count 1, then a namespace FString claiming 999
+        // ANSI bytes with only a few present.
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&999i32.to_le_bytes());
+        b.extend_from_slice(b"hi\0");
+        assert!(
+            LocresResource::parse(&b).is_err(),
+            "over-long ANSI must fault"
+        );
+
+        // UTF-16 claiming 999 units.
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&(-999i32).to_le_bytes());
+        b.extend_from_slice(&[0u8; 4]);
+        assert!(
+            LocresResource::parse(&b).is_err(),
+            "over-long UTF-16 must fault"
+        );
     }
 
     /// UTF-16 strings (negative FString length) round-trip; a missing
