@@ -454,6 +454,13 @@ pub fn read_tag<R: Read>(
         None
     };
 
+    if ctx
+        .version
+        .ue5_at_least(crate::asset::version::VER_UE5_PROPERTY_TAG_EXTENSION)
+    {
+        read_tag_extension(reader, asset_path)?;
+    }
+
     Ok(Some(PropertyTag {
         name,
         type_name,
@@ -469,11 +476,155 @@ pub fn read_tag<R: Read>(
     }))
 }
 
+/// `u8 EPropertyTagExtension` flags byte (UE5 ≥ 1011), shared by the
+/// legacy tag tail and (via `HasPropertyExtensions`) the 1012 tag
+/// shape. Known bits: `OverridableInformation` (0x02) — its payload
+/// (`u8 EOverriddenPropertyOperation` + `u8 bExperimentalOverridableLogic`)
+/// is consumed and discarded, mirroring CUE4Parse's skip. Any OTHER
+/// bit set (incl. `ReserveForFutureUse` 0x01, which marks a further
+/// extension group of unknown wire shape) fails closed — unknown
+/// trailing bytes would desync every subsequent tag. #643.
+fn read_tag_extension<R: Read>(reader: &mut R, asset_path: &str) -> crate::Result<()> {
+    const OVERRIDABLE_INFORMATION: u8 = 0x02;
+    let ext = reader
+        .read_u8()
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagExtension))?;
+    if ext & !OVERRIDABLE_INFORMATION != 0 {
+        return Err(crate::PaksmithError::UnsupportedFeature {
+            context: format!(
+                "EPropertyTagExtension flags {ext:#04x} in {asset_path}: only \
+                 OverridableInformation (0x02) has a known wire shape; other bits \
+                 mark extension groups whose size is undefined"
+            ),
+        });
+    }
+    if ext & OVERRIDABLE_INFORMATION != 0 {
+        let mut payload = [0u8; 2];
+        reader
+            .read_exact(&mut payload)
+            .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagExtension))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::property::test_utils::{make_ctx, write_fname};
+    use crate::asset::property::test_utils::{
+        make_ctx, make_ctx_with_version_and_names, write_fname,
+    };
     use std::io::Cursor;
+
+    /// Bytes of a minimal IntProperty tag through the guid-presence
+    /// byte (legacy tail shape) — the shared prefix for the UE5 ≥ 1011
+    /// extension-byte tests. Names: 1 = "Score", 2 = "IntProperty".
+    fn int_tag_prefix() -> Vec<u8> {
+        let mut buf = Vec::new();
+        write_fname(&mut buf, 1, 0);
+        write_fname(&mut buf, 2, 0);
+        buf.extend_from_slice(&4i32.to_le_bytes()); // size
+        buf.extend_from_slice(&0i32.to_le_bytes()); // array_index
+        buf.push(0); // HasPropertyGuid = 0
+        buf
+    }
+
+    fn ue5_1011_ctx() -> crate::asset::AssetContext {
+        make_ctx_with_version_and_names(522, Some(1011), &["None", "Score", "IntProperty"])
+    }
+
+    /// UE5 ≥ 1011: a NoExtension (0x00) flags byte after the guid
+    /// block is consumed — the sentinel that follows stays unread. #643.
+    #[test]
+    fn extension_byte_no_extension_consumed_at_1011() {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        let ctx = ue5_1011_ctx();
+        let mut buf = int_tag_prefix();
+        buf.push(0x00); // EPropertyTagExtension::NoExtension
+        buf.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // sentinel
+        let mut cur = Cursor::new(&buf[..]);
+        let tag = read_tag(&mut cur, &ctx, "x.uasset").unwrap().unwrap();
+        assert_eq!(tag.name(), "Score");
+        assert_eq!(cur.read_u32::<LittleEndian>().unwrap(), 0xDEAD_BEEF);
+    }
+
+    /// UE5 ≥ 1011: OverridableInformation (0x02) carries a 2-byte
+    /// payload, consumed and discarded. #643.
+    #[test]
+    fn extension_byte_overridable_information_skips_payload() {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        let ctx = ue5_1011_ctx();
+        let mut buf = int_tag_prefix();
+        buf.push(0x02); // OverridableInformation
+        buf.extend_from_slice(&[0x01, 0x00]); // operation + experimental bool
+        buf.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // sentinel
+        let mut cur = Cursor::new(&buf[..]);
+        let tag = read_tag(&mut cur, &ctx, "x.uasset").unwrap().unwrap();
+        assert_eq!(tag.name(), "Score");
+        assert_eq!(cur.read_u32::<LittleEndian>().unwrap(), 0xDEAD_BEEF);
+    }
+
+    /// Unknown extension bits (incl. ReserveForFutureUse 0x01, which
+    /// marks a further group of UNKNOWN size) fail closed. #643.
+    #[test]
+    fn extension_byte_unknown_bits_fail_closed() {
+        let ctx = ue5_1011_ctx();
+        for bad in [0x01u8, 0x04, 0x80, 0x03] {
+            let mut buf = int_tag_prefix();
+            buf.push(bad);
+            let err = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset").unwrap_err();
+            assert!(
+                matches!(err, crate::PaksmithError::UnsupportedFeature { .. }),
+                "flags {bad:#04x} must fail closed, got {err:?}"
+            );
+        }
+    }
+
+    /// A truncated extension byte / payload is a structured EOF. #643.
+    #[test]
+    fn extension_byte_truncation_is_structured_eof() {
+        let ctx = ue5_1011_ctx();
+        // Missing the flags byte entirely.
+        let buf = int_tag_prefix();
+        let err = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::UnexpectedEof {
+                    field: AssetWireField::PropertyTagExtension,
+                },
+                ..
+            }
+        ));
+        // Flags byte present but payload truncated.
+        let mut buf = int_tag_prefix();
+        buf.push(0x02);
+        buf.push(0x01); // only 1 of 2 payload bytes
+        let err = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::UnexpectedEof {
+                    field: AssetWireField::PropertyTagExtension,
+                },
+                ..
+            }
+        ));
+    }
+
+    /// UE5 = 1010 must NOT read an extension byte (regression pin for
+    /// the gate boundary). #643.
+    #[test]
+    fn no_extension_byte_below_1011() {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        let ctx =
+            make_ctx_with_version_and_names(522, Some(1010), &["None", "Score", "IntProperty"]);
+        let mut buf = int_tag_prefix();
+        buf.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // sentinel directly
+        let mut cur = Cursor::new(&buf[..]);
+        let tag = read_tag(&mut cur, &ctx, "x.uasset").unwrap().unwrap();
+        assert_eq!(tag.name(), "Score");
+        assert_eq!(cur.read_u32::<LittleEndian>().unwrap(), 0xDEAD_BEEF);
+    }
 
     #[test]
     fn none_terminator_returns_none() {

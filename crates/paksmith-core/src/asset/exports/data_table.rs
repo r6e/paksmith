@@ -69,6 +69,9 @@ pub(crate) fn read_from(
     // Segment 1: class-level tagged properties (None-terminated), then the
     // `UObject::Serialize` object-GUID tail (bSerializeGuid + optional FGuid)
     // that precedes the UDataTable row map.
+    // UE5 >= 1011: per-object serialization-control byte precedes the
+    // export root's tagged stream (#643).
+    crate::asset::property::read_class_serialization_control(&mut cur, ctx, asset_path)?;
     let class_props = read_properties(&mut cur, ctx, 0, total_len, asset_path)?;
     let _object_guid = read_object_guid_tail(&mut cur, total_len, asset_path)?;
 

@@ -3798,6 +3798,13 @@ pub enum AssetWireField {
     /// `FPropertyTag::HasPropertyGuid` — the u8 flag indicating
     /// whether a per-property GUID follows.
     PropertyTagHasGuid,
+    /// The `u8 EPropertyTagExtension` flags byte (UE5 >= 1011) and its
+    /// conditional OverridableInformation payload. #643.
+    PropertyTagExtension,
+    /// The per-object `u8 EClassSerializationControlExtension` byte
+    /// (UE5 >= 1011) before an export root's tagged stream, and its
+    /// conditional operation byte. #643.
+    ClassSerializationControl,
     /// `FPropertyTag::PropertyGuid` — the 16-byte trailing GUID
     /// (present only when `HasPropertyGuid != 0`).
     PropertyTagGuid,
@@ -4333,6 +4340,8 @@ impl fmt::Display for AssetWireField {
             Self::PropertyTagBoolVal => "property_tag_bool_val",
             Self::PropertyTagStructGuid => "property_tag_struct_guid",
             Self::PropertyTagHasGuid => "property_tag_has_guid",
+            Self::PropertyTagExtension => "property_tag_extension",
+            Self::ClassSerializationControl => "class_serialization_control",
             Self::PropertyTagGuid => "property_tag_guid",
             Self::FTextHistoryType => "ftext_history_type",
             Self::FTextField => "ftext_field",
@@ -7302,6 +7311,14 @@ mod tests {
                 "property_tag_struct_guid",
             ),
             (AssetWireField::PropertyTagHasGuid, "property_tag_has_guid"),
+            (
+                AssetWireField::PropertyTagExtension,
+                "property_tag_extension",
+            ),
+            (
+                AssetWireField::ClassSerializationControl,
+                "class_serialization_control",
+            ),
             (AssetWireField::PropertyTagGuid, "property_tag_guid"),
             (AssetWireField::FTextHistoryType, "ftext_history_type"),
             (AssetWireField::FTextField, "ftext_field"),

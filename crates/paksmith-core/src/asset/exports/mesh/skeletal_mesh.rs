@@ -1370,6 +1370,9 @@ pub(crate) fn read_typed(
     let mut cur = Cursor::new(payload);
 
     // Segment 1: tagged-property stream + UObject object-GUID tail.
+    // UE5 >= 1011: per-object serialization-control byte precedes the
+    // export root's tagged stream (#643).
+    crate::asset::property::read_class_serialization_control(&mut cur, ctx, asset_path)?;
     let properties = read_properties(&mut cur, ctx, 0, total_len, asset_path)?;
     let _object_guid = read_object_guid_tail(&mut cur, total_len, asset_path)?;
 

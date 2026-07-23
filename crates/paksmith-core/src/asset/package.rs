@@ -1340,13 +1340,21 @@ fn read_payloads(
         // allocator path and would abort on OOM — violating
         // CLAUDE.md's "no panics in core" invariant). The hot
         // success path stays allocation-free.
-        let bag = match crate::asset::property::read_properties(
-            &mut Cursor::new(export_slice),
-            ctx,
-            0,
-            export_slice.len() as u64,
-            asset_path,
-        ) {
+        // UE5 >= 1011: per-object serialization-control byte precedes
+        // the export root's tagged stream (#643). Read inside the
+        // fallible block so its errors degrade to Opaque exactly like
+        // a tag-level parse error would.
+        let bag = match (|| {
+            let mut cur = Cursor::new(export_slice);
+            crate::asset::property::read_class_serialization_control(&mut cur, ctx, asset_path)?;
+            crate::asset::property::read_properties(
+                &mut cur,
+                ctx,
+                0,
+                export_slice.len() as u64,
+                asset_path,
+            )
+        })() {
             Ok(props) => {
                 tracing::debug!(
                     asset = asset_path,
