@@ -255,7 +255,7 @@ impl PackageSummary {
     /// - [`AssetParseFault::UnsupportedFileVersionUE4`] if
     ///   `file_version_ue4 < VER_UE4_NAME_HASHES_SERIALIZED` (504).
     /// - [`AssetParseFault::UnsupportedFileVersionUE5`] if
-    ///   `file_version_ue5 >= FIRST_UNSUPPORTED_UE5_VERSION` (1011).
+    ///   `file_version_ue5 >= FIRST_UNSUPPORTED_UE5_VERSION` (1014).
     /// - [`AssetParseFault::NegativeValue`] (with field
     ///   [`AssetWireField::TotalHeaderSize`], [`AssetWireField::GenerationCount`],
     ///   [`AssetWireField::AdditionalPackagesToCookCount`], or
@@ -944,14 +944,14 @@ mod tests {
     }
 
     /// `legacy_file_version = -9` is the UE 5.4+ marker. Within
-    /// paksmith's accepted UE5 ceiling (< 1011), -9 introduces no
+    /// paksmith's accepted UE5 ceiling (< 1014), -9 introduces no
     /// new wire fields beyond what -8 emits (PACKAGE_SAVED_HASH is at
-    /// 1015, above the ceiling). Round-trip must accept the value.
+    /// 1016, above the ceiling). Round-trip must accept the value.
     #[test]
     fn ue5_legacy_minus_nine_round_trip() {
         let mut s = minimal_ue4_27_summary();
         s.version.legacy_file_version = -9;
-        s.version.file_version_ue5 = Some(1010); // Phase 2a max
+        s.version.file_version_ue5 = Some(1010);
         s.soft_object_paths_count = Some(0);
         s.soft_object_paths_offset = Some(0);
         s.names_referenced_from_export_data_count = Some(0);

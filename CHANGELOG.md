@@ -24,6 +24,15 @@ overwrites them on every release.
 
 ## [Unreleased]
 
+- **UE 5.4/5.5 asset support (#643)**: the UE5 summary-version ceiling
+  moves from 1011 to 1014 (UE 5.0-5.5 accepted). Versioned tagged
+  properties gain the 1011 extension + serialization-control bytes and
+  the 1012 complete-type-name tag shape (tree type names, flag-gated
+  tail, `Array<Struct>` inner-tag elision); cooked `USoundWave` cue
+  points are consumed; static-mesh LODs skip the UE 5.5
+  `bHasRayTracingGeometry` bool; versioned UE 5.5 skeletal meshes fail
+  closed to the generic property bag (unparsed `FNaniteResources`).
+
 The project is pre-1.0 and under active development across multiple
 phases:
 

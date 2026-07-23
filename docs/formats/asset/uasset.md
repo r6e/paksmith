@@ -70,7 +70,7 @@ across UE versions due to conditional reads; the canonical sequence (UE
 | 4 | 4 | LE | `legacy_file_version` | `i32` | Negative; one of `-7`, `-8`, `-9`. |
 | 8 | 4 | LE | `legacy_ue3_version` | `i32` | Always `-1` for paksmith-supported archives. |
 | 12 | 4 | LE | `file_version_ue4` | `i32` | 504–522 (UE 4.21 – 4.27). |
-| 16 | 4 | LE | `file_version_ue5` | `i32` | 0 (UE4) or 1000–1010 (UE5). Present only if `legacy_file_version ≤ -8`. |
+| 16 | 4 | LE | `file_version_ue5` | `i32` | 0 (UE4) or 1000–1013 (UE5). Present only if `legacy_file_version ≤ -8`. |
 | → varies | 4 | LE | `file_version_licensee_ue4` | `i32` | Game-studio fork version (usually 0). |
 | → varies | variable | — | `custom_versions` | `FCustomVersion[]`[^3] | See [`primitive/fcustom-version.md`](../primitive/fcustom-version.md). |
 | → varies | 4 | LE | `total_header_size` | `i32` | Total byte length of the header region (everything before payloads). Capped at 256 MiB by paksmith. |

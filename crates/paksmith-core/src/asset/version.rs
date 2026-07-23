@@ -323,8 +323,9 @@ pub(crate) const VER_UE5_SCRIPT_SERIALIZATION_OFFSET: i32 = 1010;
 /// UE 5.4+ (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`):
 /// the tagged-property wire gains (a) a per-tag `u8`
 /// `EPropertyTagExtension` flags byte immediately after the
-/// `HasPropertyGuid` byte (+ optional guid), with two conditional
-/// trailing bytes when `OverridableInformation` (0x02) is set, and
+/// `HasPropertyGuid` byte (+ optional guid), with a conditional
+/// 5-byte payload (u8 op + bool32) when `OverridableInformation`
+/// (0x02) is set, and
 /// (b) a per-OBJECT `u8 EClassSerializationControlExtension` byte
 /// before the whole tagged stream of an export root (never before
 /// struct-fallback bodies). Never ships standalone: UE releases jump

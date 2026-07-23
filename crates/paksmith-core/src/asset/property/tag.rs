@@ -473,6 +473,11 @@ pub fn read_tag<R: Read>(
                 AssetWireField::PropertyTagValueType,
             )?;
         }
+        // OptionalProperty (an FName inner type in the oracle's legacy
+        // constructor) is deliberately absent: it ships with UE 5.4
+        // (object 1012), which always takes the tree branch — reaching
+        // here with OptionalProperty means version-inconsistent crafted
+        // input, surfaced downstream by the cursor invariant.
         _ => {}
     }
 
@@ -601,11 +606,7 @@ fn read_type_name_tree<R: Read>(
 /// — CUE4Parse `GetParameter` semantics: parameters are the pre-order
 /// siblings after `root`, each skipping its own subtree. `None` when
 /// the parameter doesn't exist. #643.
-pub(crate) fn type_name_parameter(
-    nodes: &[TypeNameNode],
-    root: usize,
-    param: usize,
-) -> Option<usize> {
+fn type_name_parameter(nodes: &[TypeNameNode], root: usize, param: usize) -> Option<usize> {
     let root_node = nodes.get(root)?;
     if param >= usize::try_from(root_node.inner_count).ok()? {
         return None;
@@ -664,7 +665,6 @@ fn read_tag_complete_type_name<R: Read>(
     let nodes = read_type_name_tree(reader, ctx, asset_path)?;
     let type_name = Arc::clone(&nodes[0].name);
 
-    let mut bool_val = false;
     let mut struct_name: Arc<str> = Arc::clone(&EMPTY_ARC_STR);
     let mut enum_name: Arc<str> = Arc::clone(&EMPTY_ARC_STR);
     let mut inner_type: Arc<str> = Arc::clone(&EMPTY_ARC_STR);
@@ -709,9 +709,7 @@ fn read_tag_complete_type_name<R: Read>(
             ),
         });
     }
-    if flags & TAG_FLAG_BOOL_TRUE != 0 {
-        bool_val = true;
-    }
+    let bool_val = flags & TAG_FLAG_BOOL_TRUE != 0;
     let array_index = if flags & TAG_FLAG_HAS_ARRAY_INDEX != 0 {
         reader
             .read_i32::<LittleEndian>()
@@ -751,11 +749,15 @@ fn read_tag_complete_type_name<R: Read>(
 /// `u8 EPropertyTagExtension` flags byte (UE5 ≥ 1011), shared by the
 /// legacy tag tail and (via `HasPropertyExtensions`) the 1012 tag
 /// shape. Known bits: `OverridableInformation` (0x02) — its payload
-/// (`u8 EOverriddenPropertyOperation` + `u8 bExperimentalOverridableLogic`)
-/// is consumed and discarded, mirroring CUE4Parse's skip. Any OTHER
-/// bit set (incl. `ReserveForFutureUse` 0x01, which marks a further
-/// extension group of unknown wire shape) fails closed — unknown
-/// trailing bytes would desync every subsequent tag. #643.
+/// (`u8 EOverriddenPropertyOperation` + a **bool32**
+/// `bExperimentalOverridableLogic`, CUE4Parse `Ar.ReadBoolean()` =
+/// 4-byte int; 5 bytes total — NOT the 1-byte payload of the
+/// per-object serialization-control byte) is consumed and discarded,
+/// mirroring CUE4Parse's skip; the bool32 is 0/1-validated per house
+/// style. Any OTHER bit set (incl. `ReserveForFutureUse` 0x01, which
+/// marks a further extension group of unknown wire shape) fails
+/// closed — unknown trailing bytes would desync every subsequent
+/// tag. #643.
 fn read_tag_extension<R: Read>(reader: &mut R, asset_path: &str) -> crate::Result<()> {
     const OVERRIDABLE_INFORMATION: u8 = 0x02;
     let ext = reader
@@ -771,10 +773,23 @@ fn read_tag_extension<R: Read>(reader: &mut R, asset_path: &str) -> crate::Resul
         });
     }
     if ext & OVERRIDABLE_INFORMATION != 0 {
-        let mut payload = [0u8; 2];
-        reader
-            .read_exact(&mut payload)
+        let _override_operation = reader
+            .read_u8()
             .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagExtension))?;
+        // bool32, 0/1-validated; EOF keeps the tag reader's typed-EOF
+        // contract rather than read_bool32's raw Io propagation.
+        let experimental = reader
+            .read_i32::<LittleEndian>()
+            .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagExtension))?;
+        if !matches!(experimental, 0 | 1) {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::InvalidBool32 {
+                    field: AssetWireField::PropertyTagExtension,
+                    observed: experimental,
+                },
+            });
+        }
     }
     Ok(())
 }
@@ -1025,15 +1040,16 @@ mod tests {
         assert_eq!(cur.read_u32::<LittleEndian>().unwrap(), 0xDEAD_BEEF);
     }
 
-    /// UE5 ≥ 1011: OverridableInformation (0x02) carries a 2-byte
-    /// payload, consumed and discarded. #643.
+    /// UE5 ≥ 1011: OverridableInformation (0x02) carries a 5-byte
+    /// payload (u8 op + bool32), consumed and discarded. #643.
     #[test]
     fn extension_byte_overridable_information_skips_payload() {
         use byteorder::{LittleEndian, ReadBytesExt};
         let ctx = ue5_1011_ctx();
         let mut buf = int_tag_prefix();
         buf.push(0x02); // OverridableInformation
-        buf.extend_from_slice(&[0x01, 0x00]); // operation + experimental bool
+        buf.push(0x01); // OverrideOperation
+        buf.extend_from_slice(&1u32.to_le_bytes()); // bExperimentalOverridableLogic (bool32)
         buf.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // sentinel
         let mut cur = Cursor::new(&buf[..]);
         let tag = read_tag(&mut cur, &ctx, "x.uasset").unwrap().unwrap();
@@ -1073,16 +1089,39 @@ mod tests {
                 ..
             }
         ));
-        // Flags byte present but payload truncated.
+        // Flags byte present but payload truncated (op byte only, no
+        // bool32).
         let mut buf = int_tag_prefix();
         buf.push(0x02);
-        buf.push(0x01); // only 1 of 2 payload bytes
+        buf.push(0x01); // only 1 of 5 payload bytes
         let err = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset").unwrap_err();
         assert!(matches!(
             err,
             crate::PaksmithError::AssetParse {
                 fault: crate::error::AssetParseFault::UnexpectedEof {
                     field: AssetWireField::PropertyTagExtension,
+                },
+                ..
+            }
+        ));
+    }
+
+    /// The OverridableInformation payload's bool32 is 0/1-validated —
+    /// garbage fails as InvalidBool32, not silent acceptance. #643.
+    #[test]
+    fn extension_byte_payload_bool32_validated() {
+        let ctx = ue5_1011_ctx();
+        let mut buf = int_tag_prefix();
+        buf.push(0x02);
+        buf.push(0x00); // OverrideOperation
+        buf.extend_from_slice(&7i32.to_le_bytes()); // bool32 = 7: invalid
+        let err = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::PaksmithError::AssetParse {
+                fault: AssetParseFault::InvalidBool32 {
+                    field: AssetWireField::PropertyTagExtension,
+                    observed: 7,
                 },
                 ..
             }
