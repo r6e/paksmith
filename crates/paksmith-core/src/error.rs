@@ -4674,6 +4674,9 @@ pub enum AssetAllocationContext {
     SplitAssetCombined,
     /// `Vec<DataTableRow>` for a `UDataTable`'s row list (Phase 3d).
     DataTableRows,
+    /// `Vec<FObjectDataResource>` for the UE 5.2+ data-resource
+    /// table (#642).
+    DataResourceTable,
 }
 
 impl AssetAllocationContext {
@@ -4691,7 +4694,8 @@ impl AssetAllocationContext {
             | Self::CustomVersionContainer
             | Self::ExportPayloads
             | Self::CollectionElements
-            | Self::DataTableRows => BoundsUnit::Items,
+            | Self::DataTableRows
+            | Self::DataResourceTable => BoundsUnit::Items,
         }
     }
 }
@@ -4708,6 +4712,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::CollectionElements => "collection elements",
             Self::SplitAssetCombined => "combined .uasset+.uexp buffer",
             Self::DataTableRows => "data table rows",
+            Self::DataResourceTable => "data resource entries",
         };
         f.write_str(s)
     }
@@ -7608,6 +7613,10 @@ mod tests {
                 "combined .uasset+.uexp buffer",
             ),
             (AssetAllocationContext::DataTableRows, "data table rows"),
+            (
+                AssetAllocationContext::DataResourceTable,
+                "data resource entries",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -7702,6 +7711,7 @@ mod tests {
                 BoundsUnit::Bytes,
             ),
             (AssetAllocationContext::DataTableRows, BoundsUnit::Items),
+            (AssetAllocationContext::DataResourceTable, BoundsUnit::Items),
         ];
         for (context, expected) in cases {
             assert_eq!(

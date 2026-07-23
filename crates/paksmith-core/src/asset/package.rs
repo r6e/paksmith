@@ -1387,7 +1387,7 @@ mod tests {
         MinimalPackage, build_minimal_ue4_27, build_minimal_ue4_27_split,
         build_minimal_ue4_27_with_data_table,
         build_minimal_ue4_27_with_valid_and_corrupt_data_tables, build_minimal_ue5_1010,
-        build_minimal_with_texture2d,
+        build_minimal_ue5_1010_with_data_resources, build_minimal_with_texture2d,
     };
 
     /// End-to-end (#642): `Package::read_from` on a UE5.2+ package whose
@@ -1397,34 +1397,8 @@ mod tests {
     /// non-empty data-resource map on a real package parse.
     #[test]
     fn read_from_parses_populated_data_resource_map() {
-        let pkg = build_minimal_ue5_1010();
-        let mut bytes = pkg.bytes.clone();
-        // `data_resource_offset` is the final i32 of the summary (write order ends
-        // with it), so it occupies the last 4 bytes of the summary region, which
-        // spans `bytes[0..name_offset]`.
-        let dro_pos = usize::try_from(pkg.summary.name_offset).expect("name_offset") - 4;
-        assert_eq!(
-            &bytes[dro_pos..dro_pos + 4],
-            &0i32.to_le_bytes(),
-            "builder writes an empty (offset 0) data-resource map by default"
-        );
-        // Append a populated section [version=1][count=2] + two 44-byte
-        // entries, and point the summary's offset at it.
-        let section_pos = i32::try_from(bytes.len()).expect("section offset fits i32");
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-        bytes.extend_from_slice(&2i32.to_le_bytes());
-        for (offset, legacy_flags) in [(0x100i64, 0x0100u32), (0x200, 0x0001)] {
-            bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
-            bytes.extend_from_slice(&offset.to_le_bytes()); // serial_offset
-            bytes.extend_from_slice(&(-1i64).to_le_bytes()); // duplicate
-            bytes.extend_from_slice(&64i64.to_le_bytes()); // serial_size
-            bytes.extend_from_slice(&64i64.to_le_bytes()); // raw_size
-            bytes.extend_from_slice(&1i32.to_le_bytes()); // outer_index
-            bytes.extend_from_slice(&legacy_flags.to_le_bytes());
-        }
-        bytes[dro_pos..dro_pos + 4].copy_from_slice(&section_pos.to_le_bytes());
-
-        let parsed = Package::read_from(&bytes, None, None, "dr.uasset")
+        let pkg = build_minimal_ue5_1010_with_data_resources();
+        let parsed = Package::read_from(&pkg.bytes, None, None, "dr.uasset")
             .expect("populated data-resource map must parse (#642)");
         assert_eq!(parsed.data_resources.len(), 2);
         assert_eq!(parsed.data_resources[0].serial_offset, 0x100);

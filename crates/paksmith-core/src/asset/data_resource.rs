@@ -101,6 +101,9 @@ pub struct FObjectDataResource {
 /// - [`AssetParseFault::BoundsExceeded`] — count × entry size exceeds
 ///   the bytes actually present (a lying count cannot force
 ///   proportional allocation; the reserve happens after this check).
+/// - [`AssetParseFault::AllocationFailed`] — the entries-vec
+///   reservation itself fails (routed through `try_reserve_asset`,
+///   `AssetSeam::DataResourceTable`).
 pub(crate) fn parse_data_resource_table(
     bytes: &[u8],
     offset: i32,
@@ -174,7 +177,17 @@ pub(crate) fn parse_data_resource_table(
         });
     }
 
-    let mut entries = Vec::with_capacity(count);
+    // Fallible reservation via the house pattern (#133): the count is
+    // wire-driven (already bounds-checked against real input above, so
+    // proportional to actual bytes, but the allocation itself must
+    // still surface as a structured fault instead of aborting).
+    let mut entries = Vec::new();
+    crate::error::try_reserve_asset(
+        &mut entries,
+        count,
+        asset_path,
+        crate::seams::AssetSeam::DataResourceTable,
+    )?;
     let mut pos = entries_start;
     let word_at =
         |p: usize| -> u32 { u32::from_le_bytes(bytes[p..p + 4].try_into().expect("in-bounds")) };
@@ -383,6 +396,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Arms the `DataResourceTable` OOM seam and confirms the
+    /// entries-vec reservation surfaces
+    /// `AllocationFailed { DataResourceTable }` — pins the seam wiring
+    /// + `AssetSeam::DataResourceTable.context()` arm. #642.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn entries_reservation_surfaces_allocation_failed_under_oom() {
+        let bytes = table_bytes(1, &[sample_entry()]);
+        let _guard = crate::testing::oom::arm_at(
+            crate::seams::SeamSite::Asset(crate::seams::AssetSeam::DataResourceTable),
+            0,
+        );
+        match parse_data_resource_table(&bytes, 4, "t") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::AllocationFailed { context, .. },
+                ..
+            }) => assert_eq!(
+                context,
+                crate::error::AssetAllocationContext::DataResourceTable
+            ),
+            other => panic!("expected AllocationFailed(DataResourceTable), got {other:?}"),
+        }
     }
 
     /// A truncated header (offset near EOF) is a fault. #642.
