@@ -44,6 +44,7 @@ impl ExtractJob<'_> {
                 entry: entry_path.to_string(),
             },
             EntryClass::Raw => self.extract_raw(entry_path),
+            EntryClass::Locres => self.extract_locres(entry_path),
             EntryClass::Asset => self.extract_asset(entry_path),
         }
     }
@@ -89,6 +90,35 @@ impl ExtractJob<'_> {
         }
     }
 
+    /// `.locres` entries: parse + export per `--locres-format`. A parse
+    /// failure degrades to a raw copy with a warning (mirroring the
+    /// asset path's no-typed-handler fallback) — one malformed file
+    /// must not fail the batch, and the raw bytes stay available for
+    /// offline analysis.
+    fn extract_locres(&self, entry_path: &str) -> EntryOutcome {
+        let bytes = match self.reader.read_entry(entry_path) {
+            Ok(b) => b,
+            Err(e) => return failed(entry_path, e),
+        };
+        match locres_output(&bytes, self.cfg.prefs.locres) {
+            Some((ext, out)) => match write_output(self.cfg, entry_path, Some(ext), &out) {
+                Ok(output) => EntryOutcome::Converted {
+                    entry: entry_path.to_string(),
+                    output,
+                    handler: ext.to_string(),
+                },
+                Err(e) => failed(entry_path, e),
+            },
+            None => match write_output(self.cfg, entry_path, None, &bytes) {
+                Ok(output) => EntryOutcome::RawCopied {
+                    entry: entry_path.to_string(),
+                    output,
+                },
+                Err(e) => failed(entry_path, e),
+            },
+        }
+    }
+
     fn extract_raw(&self, entry_path: &str) -> EntryOutcome {
         let bytes = match self.reader.read_entry(entry_path) {
             Ok(b) => b,
@@ -123,6 +153,35 @@ impl ExtractJob<'_> {
 
 /// Build a `Failed` outcome. Centralises the repeated construction so callers
 /// use `return failed(entry_path, e)` rather than inlining the struct literal.
+/// Pure conversion step for a `.locres` entry: parse + export per the
+/// preference. `None` = unparsable (caller degrades to a raw copy).
+/// Factored out of [`ExtractJob::extract_locres`] so the parse/convert/
+/// degrade logic is unit-testable without a pak reader.
+fn locres_output(bytes: &[u8], pref: select::DataTableFormat) -> Option<(&'static str, Vec<u8>)> {
+    let resource = match paksmith_core::localization::LocresResource::parse(bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "locres parse failed, copying raw");
+            return None;
+        }
+    };
+    let result = match pref {
+        select::DataTableFormat::Csv => {
+            paksmith_core::export::locres::locres_to_csv(&resource).map(|b| ("csv", b))
+        }
+        select::DataTableFormat::Json => {
+            paksmith_core::export::locres::locres_to_json(&resource).map(|b| ("json", b))
+        }
+    };
+    match result {
+        Ok(pair) => Some(pair),
+        Err(e) => {
+            tracing::warn!(error = %e, "locres export failed, copying raw");
+            None
+        }
+    }
+}
+
 fn failed(entry_path: &str, e: impl std::fmt::Display) -> EntryOutcome {
     EntryOutcome::Failed {
         entry: entry_path.to_owned(),
@@ -190,8 +249,29 @@ mod write_output_tests {
             prefs: FormatPrefs {
                 audio: AudioFormat::Ogg,
                 datatable: DataTableFormat::Csv,
+                locres: DataTableFormat::Csv,
             },
         }
+    }
+
+    /// `locres_output` (#646): CSV/JSON per pref on the committed
+    /// fixture; unparsable bytes → None (degrade to raw copy).
+    #[test]
+    fn locres_output_converts_or_degrades() {
+        let fixture = include_bytes!("../../../../tests/fixtures/data/sample_v2.locres");
+        let (ext, csv) = locres_output(fixture, DataTableFormat::Csv).expect("fixture parses");
+        assert_eq!(ext, "csv");
+        assert_eq!(
+            String::from_utf8(csv).unwrap(),
+            "namespace,key,localized\nGame,key1,Hello\nGame,key2,World\n"
+        );
+        let (ext, json) = locres_output(fixture, DataTableFormat::Json).expect("fixture parses");
+        assert_eq!(ext, "json");
+        let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(v["namespaces"][0]["entries"][0]["localized"], "Hello");
+
+        // Unparsable (truncated) → None.
+        assert!(locres_output(&fixture[..20], DataTableFormat::Csv).is_none());
     }
 
     #[test]

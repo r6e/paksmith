@@ -6,6 +6,8 @@ pub(crate) enum EntryClass {
     Asset,
     /// `.uexp` / `.ubulk` / `.uptnl` — consumed by the asset parse; never emitted.
     Companion,
+    /// `.locres` — parse + convert to CSV/JSON (#646).
+    Locres,
     /// Anything else — copy raw.
     Raw,
 }
@@ -20,6 +22,7 @@ pub(crate) fn classify(entry_path: &str) -> EntryClass {
     match ext.as_deref() {
         Some("uasset" | "umap") => EntryClass::Asset,
         Some("uexp" | "ubulk" | "uptnl") => EntryClass::Companion,
+        Some("locres") => EntryClass::Locres,
         _ => EntryClass::Raw,
     }
 }
@@ -44,9 +47,17 @@ mod tests {
 
     #[test]
     fn classifies_raw() {
-        for p in ["Config.ini", "Strings.locres", "noext", "data.bin"] {
+        for p in ["Config.ini", "noext", "data.bin"] {
             assert_eq!(classify(p), EntryClass::Raw, "{p}");
         }
+    }
+
+    #[test]
+    fn classifies_locres() {
+        assert_eq!(classify("Game.locres"), EntryClass::Locres);
+        assert_eq!(classify("L10N/de/Game/Game.LOCRES"), EntryClass::Locres);
+        // Hidden file, no extension → Raw (same rule as assets).
+        assert_eq!(classify(".locres"), EntryClass::Raw);
     }
 
     #[test]

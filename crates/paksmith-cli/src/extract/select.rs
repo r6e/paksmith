@@ -24,6 +24,9 @@ pub(crate) enum DataTableFormat {
 pub(crate) struct FormatPrefs {
     pub(crate) audio: AudioFormat,
     pub(crate) datatable: DataTableFormat,
+    /// Output format for `.locres` localization tables (#646).
+    /// Reuses [`DataTableFormat`] — the choice set is identical.
+    pub(crate) locres: DataTableFormat,
 }
 
 pub(crate) fn preferred_extension(asset: &Asset, prefs: FormatPrefs) -> Option<&'static str> {
@@ -77,7 +80,11 @@ mod tests {
     use paksmith_core::asset::{Asset, DataTableData, SoundWaveData, Texture2DData};
 
     fn prefs(audio: AudioFormat, datatable: DataTableFormat) -> FormatPrefs {
-        FormatPrefs { audio, datatable }
+        FormatPrefs {
+            audio,
+            datatable,
+            locres: DataTableFormat::Csv,
+        }
     }
 
     #[test]
