@@ -3805,6 +3805,9 @@ pub enum AssetWireField {
     /// (UE5 >= 1011) before an export root's tagged stream, and its
     /// conditional operation byte. #643.
     ClassSerializationControl,
+    /// The `u8 EPropertyTagFlags` byte of a UE5 >= 1012 property tag.
+    /// #643.
+    PropertyTagFlags,
     /// `FPropertyTag::PropertyGuid` — the 16-byte trailing GUID
     /// (present only when `HasPropertyGuid != 0`).
     PropertyTagGuid,
@@ -4342,6 +4345,7 @@ impl fmt::Display for AssetWireField {
             Self::PropertyTagHasGuid => "property_tag_has_guid",
             Self::PropertyTagExtension => "property_tag_extension",
             Self::ClassSerializationControl => "class_serialization_control",
+            Self::PropertyTagFlags => "property_tag_flags",
             Self::PropertyTagGuid => "property_tag_guid",
             Self::FTextHistoryType => "ftext_history_type",
             Self::FTextField => "ftext_field",
@@ -7319,6 +7323,7 @@ mod tests {
                 AssetWireField::ClassSerializationControl,
                 "class_serialization_control",
             ),
+            (AssetWireField::PropertyTagFlags, "property_tag_flags"),
             (AssetWireField::PropertyTagGuid, "property_tag_guid"),
             (AssetWireField::FTextHistoryType, "ftext_history_type"),
             (AssetWireField::FTextField, "ftext_field"),
