@@ -1400,10 +1400,24 @@ mod tests {
         let pkg = build_minimal_ue5_1010_with_data_resources();
         let parsed = Package::read_from(&pkg.bytes, None, None, "dr.uasset")
             .expect("populated data-resource map must parse (#642)");
-        assert_eq!(parsed.data_resources.len(), 2);
-        assert_eq!(parsed.data_resources[0].serial_offset, 0x100);
-        assert_eq!(parsed.data_resources[0].legacy_bulk_data_flags, 0x0100);
-        assert_eq!(parsed.data_resources[1].serial_offset, 0x200);
+        // Full-struct equality pins every field the fixture builder
+        // emits (helper-field pin-test discipline) — a drifted builder
+        // constant fails here even if the parser ignores the field.
+        let expected_entry =
+            |serial_offset: i64, legacy: u32| crate::asset::data_resource::FObjectDataResource {
+                flags: 0,
+                cooked_index: 0,
+                serial_offset,
+                duplicate_serial_offset: -1,
+                serial_size: 64,
+                raw_size: 64,
+                outer_index: 1,
+                legacy_bulk_data_flags: legacy,
+            };
+        assert_eq!(
+            parsed.data_resources.as_ref(),
+            &[expected_entry(0x100, 0x0100), expected_entry(0x200, 0x0001)]
+        );
         // The context hands the same table to typed readers.
         assert_eq!(parsed.context().data_resources.len(), 2);
     }
