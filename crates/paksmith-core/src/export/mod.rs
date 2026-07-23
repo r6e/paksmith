@@ -71,6 +71,7 @@ mod vorbis;
 pub use audio::{OggHandler, RawSoundHandler, VorbisHandler, WavHandler};
 pub use data_table::{DataTableCsvHandler, DataTableJsonHandler};
 pub use generic::GenericHandler;
+pub use locres::{locres_to_csv, locres_to_json};
 #[cfg(feature = "__test_utils")]
 pub use pcm::max_audio_decoded_bytes;
 pub use skeletal_mesh::GltfSkeletalMeshHandler;

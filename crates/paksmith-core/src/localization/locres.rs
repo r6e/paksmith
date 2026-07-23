@@ -29,7 +29,10 @@
 //!   bounds check is upper-only and it CRASHES on negative input.
 //! - Over-range indices also fail closed where the oracle warns and
 //!   leaves the entry untranslated.
-//! - The strings-array offset is bounds-checked before seeking.
+//! - The strings-array offset is bounds-checked in two stages: stage-1
+//!   (`25 <= offset < file_len`) before seeking, stage-2 (offset must
+//!   not overlap the namespace table) after parsing it. CUE4Parse
+//!   seeks blindly.
 
 use byteorder::{ByteOrder, LittleEndian};
 
@@ -49,6 +52,12 @@ pub const LOCRES_MAGIC: [u8; 16] = [
 /// adversarial count before any proportional allocation (see
 /// `docs/formats/data/locres.md` §Caps & limits).
 pub const MAX_LOCRES_COUNT: usize = 1_048_576;
+
+/// Minimum valid `StringsArrayOffset`: the byte just past the
+/// `magic(16) + version(1) + offset(8)` header prefix. An offset below
+/// this points back into the header itself (stage-1 of the two-stage
+/// bounds check in `docs/formats/data/locres.md`).
+const MIN_STRINGS_OFFSET: usize = 25;
 
 /// `ELocResVersion` — the version byte after the magic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -160,11 +169,13 @@ impl LocresResource {
             LocresVersion::Legacy
         };
 
-        // v1+: the dedup strings array, read at its offset.
-        let strings: Vec<String> = if version.has_strings_array() {
+        // v1+: the dedup strings array, read at its offset. `strings_at`
+        // is the validated absolute offset (None when the array is
+        // absent), kept for the stage-2 overlap check below.
+        let (strings, strings_at): (Vec<String>, Option<usize>) = if version.has_strings_array() {
             read_strings_at_offset(&mut cur, bytes, version)?
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
 
         // v2+: EntriesCount, read-and-discarded (the oracle skips it).
@@ -240,6 +251,22 @@ impl LocresResource {
             });
         }
 
+        // Stage-2 of the strings-offset bounds check
+        // (docs/formats/data/locres.md): the strings array must sit
+        // AFTER the namespace table it belongs to, never overlapping
+        // the header/EntriesCount/namespace bytes. The main cursor now
+        // sits at the end of the namespace table, so a well-formed
+        // offset is >= that position. A smaller offset means the
+        // strings were (already, harmlessly — every read is bounded and
+        // capped) parsed out of namespace-table bytes; reject the whole
+        // resource rather than return a double-interpreted result.
+        if let Some(off) = strings_at.filter(|&o| o < cur.pos) {
+            return Err(fault(LocresParseFault::StringsOffsetOutOfBounds {
+                offset: i64::try_from(off).unwrap_or(i64::MAX),
+                file_len: bytes.len() as u64,
+            }));
+        }
+
         Ok(Self {
             version,
             namespaces,
@@ -254,12 +281,15 @@ fn read_strings_at_offset(
     cur: &mut Cursor<'_>,
     bytes: &[u8],
     version: LocresVersion,
-) -> crate::Result<Vec<String>> {
+) -> crate::Result<(Vec<String>, Option<usize>)> {
     let offset = cur.read_i64(LocresWireField::StringsArrayOffset)?;
     if offset == -1 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
-    let in_bounds = usize::try_from(offset).ok().filter(|&o| o < bytes.len());
+    // Stage-1: non-negative, past the header prefix, inside the file.
+    let in_bounds = usize::try_from(offset)
+        .ok()
+        .filter(|&o| o >= MIN_STRINGS_OFFSET && o < bytes.len());
     let Some(offset_usize) = in_bounds else {
         return Err(fault(LocresParseFault::StringsOffsetOutOfBounds {
             offset,
@@ -270,7 +300,8 @@ fn read_strings_at_offset(
         bytes,
         pos: offset_usize,
     };
-    read_strings_array(&mut sc, version)
+    let strings = read_strings_array(&mut sc, version)?;
+    Ok((strings, Some(offset_usize)))
 }
 
 /// The strings array at its offset: `i32 count` + `count ×`
@@ -589,6 +620,50 @@ mod tests {
                 "offset {bad} must fail closed, got {err:?}"
             );
         }
+    }
+
+    /// Two-stage offset check: an offset below the 25-byte header prefix
+    /// (stage-1) and an offset that overlaps the namespace table
+    /// (stage-2) are both rejected, even though both are `< file_len`
+    /// and so passed the old single-bound check. #646.
+    #[test]
+    fn strings_offset_overlapping_header_or_namespaces_rejected() {
+        // Stage-1: offset 10 points into the magic/version prefix.
+        let mut bytes = SAMPLE_V2.to_vec();
+        bytes[17..25].copy_from_slice(&10i64.to_le_bytes());
+        let err = LocresResource::parse(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::LocresParse {
+                    fault: LocresParseFault::StringsOffsetOutOfBounds { offset: 10, .. },
+                }
+            ),
+            "stage-1 (offset < 25) must reject, got {err:?}"
+        );
+
+        // Stage-2: a v1 file whose offset (25) points at a valid but
+        // OVERLAPPING empty strings array — the array read succeeds
+        // (count 0), but 25 < the post-namespace cursor (29), so the
+        // overlap is caught after the loop. Layout: magic(16) + ver(1) +
+        // offset=25(8) + namespaceCount=0(4) = 29 bytes; byte 25's u32
+        // serves as both the (empty) strings count and the (zero)
+        // namespace count.
+        let mut overlap = Vec::new();
+        overlap.extend_from_slice(&LOCRES_MAGIC);
+        overlap.push(1); // v1
+        overlap.extend_from_slice(&25i64.to_le_bytes());
+        overlap.extend_from_slice(&0u32.to_le_bytes());
+        let err = LocresResource::parse(&overlap).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::LocresParse {
+                    fault: LocresParseFault::StringsOffsetOutOfBounds { offset: 25, .. },
+                }
+            ),
+            "stage-2 (offset overlaps namespace table) must reject, got {err:?}"
+        );
     }
 
     /// Offset −1 (INDEX_NONE) means "no strings array" — entries then

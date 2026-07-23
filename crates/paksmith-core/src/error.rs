@@ -4806,8 +4806,6 @@ impl fmt::Display for CompanionFileKind {
     }
 }
 
-/// Wire-format fault encountered while parsing a `.usmap` mappings file.
-///
 /// Structured fault categories for `.locres`
 /// (`FTextLocalizationResource`) parsing (#646). Wire recipe per
 /// CUE4Parse `FTextLocalizationResource.cs` / `FTextKey.cs` /
@@ -6095,6 +6093,84 @@ mod tests {
             format!("{err}"),
             "usmap deserialization failed: unsupported usmap compression method 1 (Oodle requires Phase 8 system-library support)"
         );
+    }
+
+    #[test]
+    fn locres_parse_display_pins_rendered_strings() {
+        use LocresParseFault as F;
+        let cases: &[(PaksmithError, &str)] = &[
+            (
+                PaksmithError::LocresParse {
+                    fault: F::UnsupportedVersion { found: 7 },
+                },
+                "locres deserialization failed: unsupported locres version 7 (paksmith accepts 0-3)",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::UnexpectedEof {
+                        field: LocresWireField::NamespaceCount,
+                    },
+                },
+                "locres deserialization failed: unexpected EOF reading locres namespace_count",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::NegativeValue {
+                        field: LocresWireField::StringsArrayCount,
+                        value: -3,
+                    },
+                },
+                "locres deserialization failed: negative locres strings_array_count: -3",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::CountExceeded {
+                        field: LocresWireField::KeyCount,
+                        value: 9,
+                        limit: 4,
+                    },
+                },
+                "locres deserialization failed: locres key_count 9 exceeds maximum 4",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::StringsOffsetOutOfBounds {
+                        offset: 999,
+                        file_len: 100,
+                    },
+                },
+                "locres deserialization failed: locres strings-array offset 999 out of bounds for a 100-byte file",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::StringIndexOutOfRange {
+                        index: -1,
+                        count: 2,
+                    },
+                },
+                "locres deserialization failed: locres string index -1 out of range for the 2-entry strings array",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::MalformedString {
+                        field: LocresWireField::Key,
+                        detail: LocresStringFault::MissingNullTerminator,
+                    },
+                },
+                "locres deserialization failed: malformed locres FString in key: missing null terminator",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::AllocationFailed {
+                        context: LocresAllocationContext::StringsArray,
+                    },
+                },
+                "locres deserialization failed: locres allocation failed for strings array",
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(&format!("{err}"), expected);
+        }
     }
 
     #[test]

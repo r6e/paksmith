@@ -158,7 +158,7 @@ impl ExtractJob<'_> {
 /// Factored out of [`ExtractJob::extract_locres`] so the parse/convert/
 /// degrade logic is unit-testable without a pak reader.
 fn locres_output(bytes: &[u8], pref: select::DataTableFormat) -> Option<(&'static str, Vec<u8>)> {
-    let resource = match paksmith_core::localization::LocresResource::parse(bytes) {
+    let resource = match paksmith_core::LocresResource::parse(bytes) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "locres parse failed, copying raw");
@@ -166,11 +166,9 @@ fn locres_output(bytes: &[u8], pref: select::DataTableFormat) -> Option<(&'stati
         }
     };
     let result = match pref {
-        select::DataTableFormat::Csv => {
-            paksmith_core::export::locres::locres_to_csv(&resource).map(|b| ("csv", b))
-        }
+        select::DataTableFormat::Csv => paksmith_core::locres_to_csv(&resource).map(|b| ("csv", b)),
         select::DataTableFormat::Json => {
-            paksmith_core::export::locres::locres_to_json(&resource).map(|b| ("json", b))
+            paksmith_core::locres_to_json(&resource).map(|b| ("json", b))
         }
     };
     match result {

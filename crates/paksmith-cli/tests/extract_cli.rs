@@ -174,6 +174,7 @@ fn extract_help_lists_flags() {
         "--overwrite",
         "--audio-format",
         "--datatable-format",
+        "--locres-format",
         "--jobs",
         "--game",
     ] {
