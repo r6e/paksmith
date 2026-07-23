@@ -557,7 +557,7 @@ known-good reference parser.**
 | 17 | 2a | `minimal_ue4_522.uasset` | 4.27 | UE cook | `-targetplatform=LinuxNoEditor` | `*.uasset`/`.uexp` | synthetic in tree (canonical reference) | no |
 | 18 | 2a | `minimal_ue5_1009.uasset` | 5.2 / 5.3 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | synthetic in tree | UE install |
 | 19 | 2a | `minimal_ue5_1012.uasset` | 5.4 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | needs cook — paksmith support landed (#643); synthetic 1012/1013 builders exist (`build_minimal_ue5_1012/1013`), real-cook fixture still valuable | UE install |
-| 19b | 2a | `minimal_ue5_1013.uasset` | 5.5 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | needs cook — **awaiting paksmith support** | UE install |
+| 19b | 2a | `minimal_ue5_1013.uasset` | 5.5 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | needs cook — paksmith support landed (#643); synthetic 1013 builder exists (`build_minimal_ue5_1013`), real-cook fixture still valuable | UE install |
 | 19c | 2a | `minimal_ue5_1017.uasset` | 5.6 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | needs cook — **awaiting paksmith support** | UE install |
 | 19d | 2a | `minimal_ue5_1018.uasset` | 5.7 / 5.8 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | needs cook — **awaiting paksmith support** | UE install |
 | 20 | 2b | `bp_bool.uasset` | 4.27 | UE cook | author BP w/ bool variable, then `-run=Cook` | `*.uasset`/`.uexp` | needs cook | UE install |
@@ -568,7 +568,7 @@ known-good reference parser.**
 | 25 | 2d | `bp_ftext.uasset` | 4.27 | UE cook | author BP referencing `LOCTEXT` literal | `*.uasset`/`.uexp` | needs cook | UE install |
 | 26 | 2d | `bp_softref.uasset` | 4.27 | UE cook | author BP holding `FSoftObjectPath` | `*.uasset`/`.uexp` | needs cook | UE install |
 | 27 | 2e | `texture_with_bulk.uasset` | 4.27 | UE cook | import a small PNG as Texture2D, cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
-| 28 | 2f | `bp_unversioned.uasset` | 5.4+ | UE cook (cooked target — unversioned is the cook-time default) | author Blueprint, cook for any shipped-target platform | `*.uasset`/`.uexp` + paired `.usmap` from a packaged build | needs cook + dumper — **awaiting paksmith UE5 ≥1012 support** | UE install + dumper |
+| 28 | 2f | `bp_unversioned.uasset` | 5.4+ | UE cook (cooked target — unversioned is the cook-time default) | author Blueprint, cook for any shipped-target platform | `*.uasset`/`.uexp` + paired `.usmap` from a packaged build | needs cook + dumper (paksmith UE5 ≤1013 support landed #643; the fixture itself still needs a cook + `.usmap` dumper) | UE install + dumper |
 | 29 | 2f | `bp_versioned_ue4.uasset` | 4.27 | UE cook | author Blueprint, cook for any UE 4.27 target — UE4 cooks always emit versioned tagged properties | `*.uasset`/`.uexp` (no `.usmap` needed) | needs cook (or use synthetic from `paksmith-fixture-gen` already in tree) | UE install |
 | 30 | 3 | `tex_dxt1.uasset` | 4.27 | UE cook | author Texture2D forced to DXT1 (BC1), cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
 | 31 | 3 | `tex_bc7.uasset` | 4.27 | UE cook | author Texture2D forced to BC7, cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
@@ -676,9 +676,11 @@ matching `EngineAssociation`. UE5 rows use the matching UE 5.x
 release + `-targetplatform=Linux`: row 18 uses UE 5.2 or 5.3 (both
 emit `FileVersionUE5 = 1009`); rows 19/19b/19c/19d use UE 5.4
 (1012), 5.5 (1013), 5.6 (1017), and 5.7/5.8 (1018) respectively.
-Paksmith currently rejects any cook with `FileVersionUE5 ≥ 1014`
+Paksmith accepts `FileVersionUE5 ≤ 1013` (UE 5.0–5.5, #643) and
+rejects `≥ 1014`
 ([`FIRST_UNSUPPORTED_UE5_VERSION`][src-asset-summary]), so rows 19
-and later are checked in as **awaiting parser support**.
+(5.4) and 19b (5.5) are within support while rows 19c (5.6) and 19d
+(5.7/5.8) are checked in as **awaiting parser support**.
 
 ### Phase 2b — Tagged properties
 
