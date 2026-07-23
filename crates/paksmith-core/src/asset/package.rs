@@ -1395,8 +1395,44 @@ mod tests {
         MinimalPackage, build_minimal_ue4_27, build_minimal_ue4_27_split,
         build_minimal_ue4_27_with_data_table,
         build_minimal_ue4_27_with_valid_and_corrupt_data_tables, build_minimal_ue5_1010,
-        build_minimal_ue5_1010_with_data_resources, build_minimal_with_texture2d,
+        build_minimal_ue5_1010_with_data_resources, build_minimal_ue5_1012, build_minimal_ue5_1013,
+        build_minimal_with_texture2d,
     };
+
+    /// End-to-end acceptance (#643): UE 5.4 (1012) and 5.5 (1013)
+    /// packages with a REAL complete-type-name tagged payload parse
+    /// into a `PropertyBag::Tree` — the serialization-control byte,
+    /// the tree-shaped tag, and the flag-gated tail all decode through
+    /// the generic bag path (previously rejected at the summary
+    /// version gate).
+    #[test]
+    fn read_from_parses_ue5_1012_and_1013_tagged_payloads() {
+        for (label, pkg) in [
+            ("1012", build_minimal_ue5_1012()),
+            ("1013", build_minimal_ue5_1013()),
+        ] {
+            let parsed = Package::read_from(&pkg.bytes, None, None, "t.uasset")
+                .unwrap_or_else(|e| panic!("ue5 {label} must parse: {e}"));
+            let crate::asset::Asset::Generic(bag) = &parsed.payloads[0] else {
+                panic!("{label}: expected Generic payload");
+            };
+            match bag {
+                PropertyBag::Tree { properties } => {
+                    assert_eq!(properties.len(), 1, "{label}");
+                    assert_eq!(properties[0].name(), "Score", "{label}");
+                    assert!(
+                        matches!(
+                            properties[0].value,
+                            crate::asset::property::PropertyValue::Int(7)
+                        ),
+                        "{label}: expected Int(7), got {:?}",
+                        properties[0].value
+                    );
+                }
+                other => panic!("{label}: expected Tree, got {other:?}"),
+            }
+        }
+    }
 
     /// End-to-end (#642): `Package::read_from` on a UE5.2+ package whose
     /// `DataResourceOffset` points at a POPULATED table now PARSES the

@@ -2355,6 +2355,70 @@ pub fn build_minimal_ue5_legacy_neg9() -> MinimalPackage {
     })
 }
 
+/// UE 5.4/5.5 fixture family (#643): `legacy = -9`, a REAL
+/// UE5 ≥ 1012 tagged payload (per-object serialization-control byte +
+/// one complete-type-name IntProperty tag + i32 value `7` + None
+/// terminator), names `Score`/`IntProperty` appended to the default
+/// table at indices 3/4. Parsed by the generic bag path into a
+/// `PropertyBag::Tree`.
+fn build_minimal_ue5_tagged_1012_shape(ue5: i32, minor: u16) -> MinimalPackage {
+    let mut payload = Vec::new();
+    payload.push(0x00); // EClassSerializationControlExtension: NoExtension
+    payload.extend_from_slice(&3i32.to_le_bytes()); // Name = Score
+    payload.extend_from_slice(&0i32.to_le_bytes());
+    payload.extend_from_slice(&4i32.to_le_bytes()); // tree root: IntProperty
+    payload.extend_from_slice(&0i32.to_le_bytes());
+    payload.extend_from_slice(&0i32.to_le_bytes()); // inner_count = 0
+    payload.extend_from_slice(&4i32.to_le_bytes()); // Size = 4
+    payload.push(0x00); // EPropertyTagFlags: none
+    payload.extend_from_slice(&7i32.to_le_bytes()); // value
+    payload.extend_from_slice(&[0u8; 8]); // None terminator (0, 0)
+
+    let (exports, imports, payloads) = ue5_1010_export_import(payload);
+    let mut names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new("Default__Object"),
+        ],
+    };
+    names.names.push(FName::new("Score"));
+    names.names.push(FName::new("IntProperty"));
+    let engine = EngineVersion {
+        major: 5,
+        minor,
+        patch: 0,
+        changelist: 0,
+        branch: format!("++UE5+Release-5.{minor}"),
+    };
+    build_minimal(MinimalPackageSpec {
+        legacy_file_version: -9,
+        file_version_ue5: Some(ue5),
+        names,
+        exports,
+        imports,
+        payloads,
+        saved_by_engine_version: engine.clone(),
+        compatible_with_engine_version: engine,
+        ..MinimalPackageSpec::default()
+    })
+}
+
+/// UE 5.4 (`FileVersionUE5 = 1012`, `PROPERTY_TAG_COMPLETE_TYPE_NAME`)
+/// with a real 1012-shaped tagged payload. #643.
+#[must_use]
+pub fn build_minimal_ue5_1012() -> MinimalPackage {
+    build_minimal_ue5_tagged_1012_shape(1012, 4)
+}
+
+/// UE 5.5 (`FileVersionUE5 = 1013`,
+/// `ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES` — no wire impact outside
+/// the asset-registry blob) with the same 1012-shaped payload. #643.
+#[must_use]
+pub fn build_minimal_ue5_1013() -> MinimalPackage {
+    build_minimal_ue5_tagged_1012_shape(1013, 5)
+}
+
 // ---------- Shape variation fixtures (UE 4.27, fixtures 8-12) ----------
 
 /// 5-import fixture — each import's `outer_index` points at the next
@@ -2889,6 +2953,8 @@ mod tests {
             ("ue4_519_uncooked", build_minimal_ue4_519_uncooked()),
             ("ue5_1010", build_minimal_ue5_1010()),
             ("ue5_legacy_neg9", build_minimal_ue5_legacy_neg9()),
+            ("ue5_1012", build_minimal_ue5_1012()),
+            ("ue5_1013", build_minimal_ue5_1013()),
             ("multi_import", build_minimal_multi_import()),
             ("multi_export", build_minimal_multi_export()),
             (

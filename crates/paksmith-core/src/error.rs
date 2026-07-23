@@ -3807,6 +3807,9 @@ pub enum AssetWireField {
     /// The `u8 EPropertyTagFlags` byte of a UE5 >= 1012 property tag.
     /// #643.
     PropertyTagFlags,
+    /// The UE 5.4+ cooked `USoundWave` cue-point array (i32 count +
+    /// tagged struct bodies). #643.
+    SoundWaveCuePoints,
     /// `FPropertyTag::PropertyGuid` — the 16-byte trailing GUID
     /// (present only when `HasPropertyGuid != 0`).
     PropertyTagGuid,
@@ -4345,6 +4348,7 @@ impl fmt::Display for AssetWireField {
             Self::PropertyTagExtension => "property_tag_extension",
             Self::ClassSerializationControl => "class_serialization_control",
             Self::PropertyTagFlags => "property_tag_flags",
+            Self::SoundWaveCuePoints => "sound_wave_cue_points",
             Self::PropertyTagGuid => "property_tag_guid",
             Self::FTextHistoryType => "ftext_history_type",
             Self::FTextField => "ftext_field",
@@ -7323,6 +7327,7 @@ mod tests {
                 "class_serialization_control",
             ),
             (AssetWireField::PropertyTagFlags, "property_tag_flags"),
+            (AssetWireField::SoundWaveCuePoints, "sound_wave_cue_points"),
             (AssetWireField::PropertyTagGuid, "property_tag_guid"),
             (AssetWireField::FTextHistoryType, "ftext_history_type"),
             (AssetWireField::FTextField, "ftext_field"),
