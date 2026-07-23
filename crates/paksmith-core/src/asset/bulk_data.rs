@@ -952,6 +952,14 @@ impl FByteBulkData {
         // (no `Seek`), so it consumes the bytes — into a sink by default, or
         // captured for the caller when `capture_inline`. Consumption logic
         // shared with the indexed path (#642) via `consume_inline`.
+        //
+        // `flags_out` (post-BadDataVersion-clear) is deliberate here, unlike
+        // the indexed path's raw `flags`: CUE4Parse's classic header clears
+        // BadDataVersion BEFORE `TBulkData` runs its inline gate, so the
+        // post-clear value IS the oracle's gate input (raw `0x8000` must gate
+        // as `None` → inline). The indexed path differs only because its
+        // mutation ADDS a synthetic non-wire bit the oracle never sees.
+        // Pinned by `read_inline_skip_uses_post_bad_data_version_clear_flags`.
         let inline_payload =
             Self::consume_inline(reader, flags_out, size_on_disk, capture_inline, asset_path)?;
 
