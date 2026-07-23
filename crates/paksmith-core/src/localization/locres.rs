@@ -74,9 +74,15 @@ pub enum LocresVersion {
 }
 
 impl LocresVersion {
-    fn from_byte(b: u8) -> Option<Self> {
+    /// The version byte read AFTER a magic match — accepts only 1..=3.
+    /// Byte 0 (`Legacy`) is rejected here: a Legacy file has no magic
+    /// prefix, so byte 0 on the magic-match path is contradictory (the
+    /// oracle would parse a garbage legacy body from offset 17;
+    /// paksmith fails closed). Bytes above 3 are rejected as the oracle
+    /// does. Legacy is reached only via the no-magic branch, which
+    /// never calls this.
+    fn from_magic_version_byte(b: u8) -> Option<Self> {
         match b {
-            0 => Some(Self::Legacy),
             1 => Some(Self::Compact),
             2 => Some(Self::OptimizedCrc32),
             3 => Some(Self::OptimizedCityHash64Utf16),
@@ -150,17 +156,7 @@ impl LocresResource {
         // assume legacy when the magic is absent).
         let version = if bytes.len() >= 17 && bytes[..16] == LOCRES_MAGIC {
             let b = bytes[16];
-            // Fail-closed divergence from CUE4Parse: a version byte of
-            // 0 AFTER a magic match is a contradictory state (Legacy
-            // files have no magic prefix). The oracle parses it as a
-            // legacy body from offset 17 — almost certainly garbage —
-            // whereas paksmith rejects it. Byte > 3 is also rejected
-            // (as the oracle does).
-            // A version byte of 0 after the magic is the contradictory
-            // case (see below) — `from_byte(0)` would yield Legacy, so
-            // it is filtered out explicitly here.
-            let non_legacy = LocresVersion::from_byte(b).filter(|v| *v != LocresVersion::Legacy);
-            let Some(v) = non_legacy else {
+            let Some(v) = LocresVersion::from_magic_version_byte(b) else {
                 return Err(fault(LocresParseFault::UnsupportedVersion { found: b }));
             };
             cur.pos = 17;
