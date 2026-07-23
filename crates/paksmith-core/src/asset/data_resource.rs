@@ -113,6 +113,11 @@ pub(crate) fn parse_data_resource_table(
         },
     };
 
+    // Non-positive offset = "no table", NOT a fault: CUE4Parse's gate is
+    // exactly `Summary.DataResourceOffset > 0`, and the engine writes
+    // INDEX_NONE (-1) for the absent case — failing closed on negative
+    // would reject legitimate packages. Pinned by
+    // `empty_and_absent_tables_yield_empty` (offsets 0 and -1).
     let Ok(offset) = usize::try_from(offset) else {
         return Ok(Vec::new());
     };
