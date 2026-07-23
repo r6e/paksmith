@@ -25,12 +25,12 @@
 //! The pre-4.23 legacy layout is decoded separately by [`read_lod_legacy`]
 //! (dispatched from [`super::render_data`]) — a deliberately UNVERIFIED path (#561).
 //!
-//! The UE5 `SerializeBuffers` envelope (5.0–5.3, the only UE5 band that reaches
-//! here — `FIRST_UNSUPPORTED_UE5_VERSION` rejects ≥ 5.4 at the package level) is
-//! byte-identical to UE4.27 except that the tessellation `AdjacencyIndexBuffer`
-//! was removed in UE5.0; that is the lone version-gated read below. The UE5.5+
-//! `bHasRayTracingGeometry` field and UE5.6+ header changes are above the
-//! supported band and are not handled.
+//! The UE5 `SerializeBuffers` envelope (5.0–5.4) is byte-identical to UE4.27
+//! except that the tessellation `AdjacencyIndexBuffer` was removed in UE5.0.
+//! UE 5.5 (object 1013, #643) inserts a serialized `bHasRayTracingGeometry`
+//! bool before the buffers — consumed via a version-gated 4-byte skip in
+//! [`read_lod`]. UE5.6+ header changes are above the supported band (ceiling
+//! 1014) and are not handled.
 //!
 //! ## Adjacency-buffer version gate
 //!
@@ -119,6 +119,16 @@ pub(crate) fn read_lod(
 
     let av_stripped = outer_global & STRIP_FLAG_AV_DATA != 0;
     if !av_stripped && !is_lod_cooked_out {
+        // UE 5.5: a serialized `bHasRayTracingGeometry` bool (4 bytes)
+        // precedes the buffers (CUE4Parse FStaticMeshLODResources.cs,
+        // `Ar.Game >= GAME_UE5_5`; no custom-version signal exists —
+        // the versioned-package proxy is object version 1013). #643.
+        if ctx
+            .version
+            .ue5_at_least(crate::asset::version::VER_UE5_ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES)
+        {
+            read::skip(cur, 4, asset_path, AssetWireField::MeshLodInlined)?;
+        }
         if b_inlined {
             serialize_buffers(cur, ctx, asset_path, &mut lod)?;
         } else {
@@ -899,6 +909,54 @@ mod tests {
     use super::test_support::{inlined_lod_ue4_23, inlined_lod_ue5_0, ue5_release_ctx};
     use super::*;
     use crate::asset::property::test_utils::make_ctx_with_version;
+
+    /// UE 5.5 (object 1013, #643): a serialized `bHasRayTracingGeometry`
+    /// bool precedes the buffers and is skipped; at 1012 nothing extra
+    /// is read (regression pin). Header-length pin guards the splice.
+    #[test]
+    fn ue5_1013_ray_tracing_bool_skipped() {
+        // UE5.0-shaped fixture offsets: strip(2) + count(4) +
+        // section ints(20) → 4 bools at 26..42 → maxDev(4) +
+        // cookedOut(4) + bInlined(4) → header ends at 54.
+        const FIFTH_BOOL_AT: usize = 42;
+        const HEADER_END: usize = 54;
+        let full = inlined_lod_ue5_0();
+        assert_eq!(
+            &full[HEADER_END - 4..HEADER_END],
+            &1i32.to_le_bytes(),
+            "offset pin: bInlined=1 must close the header"
+        );
+        // ≥ 1008 contexts read the fifth section bool
+        // (bAffectDistanceFieldLighting, 5.1+), so both legs splice it in.
+        let with_fifth = |extra_after_header: bool| {
+            let mut w = full[..FIFTH_BOOL_AT].to_vec();
+            w.extend_from_slice(&1i32.to_le_bytes()); // fifth section bool
+            w.extend_from_slice(&full[FIFTH_BOOL_AT..HEADER_END]);
+            if extra_after_header {
+                w.extend_from_slice(&0u32.to_le_bytes()); // bHasRayTracingGeometry
+            }
+            w.extend_from_slice(&full[HEADER_END..]);
+            w
+        };
+
+        // 1013: the serialized ray-tracing bool IS present and skipped.
+        let wire = with_fifth(true);
+        let mut ctx = ue5_release_ctx(REMOVING_TESSELLATION);
+        ctx.version.file_version_ue5 = Some(1013);
+        let mut cur = Cursor::new(&wire[..]);
+        let lod = read_lod(&mut cur, &ctx, "m.uasset").unwrap();
+        assert_eq!(cur.position(), wire.len() as u64, "every byte consumed");
+        assert_eq!(lod.positions.len(), 3, "geometry decodes past the skip");
+
+        // 1012: NO ray-tracing bool on the wire — the skip must not fire.
+        let wire12 = with_fifth(false);
+        let mut ctx12 = ue5_release_ctx(REMOVING_TESSELLATION);
+        ctx12.version.file_version_ue5 = Some(1012);
+        let mut cur12 = Cursor::new(&wire12[..]);
+        let lod12 = read_lod(&mut cur12, &ctx12, "m.uasset").unwrap();
+        assert_eq!(cur12.position(), wire12.len() as u64);
+        assert_eq!(lod12.positions.len(), 3);
+    }
 
     /// UE5 (`FUE5ReleaseStreamObjectVersion >= RemovingTessellation`): the
     /// `AdjacencyIndexBuffer` was removed from the engine, so a LOD whose inner

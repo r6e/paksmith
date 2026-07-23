@@ -19,9 +19,9 @@
 //! `ScreenSize` are therefore unreachable. The classic LOD array (read first) is
 //! the renderable geometry, and the export framework dispatches the next export
 //! by table offset, not cursor position (see [`super::static_mesh::read_from`]),
-//! so the unconsumed UE5 tail is harmless. UE5.4+ is rejected at the package
-//! level (`FIRST_UNSUPPORTED_UE5_VERSION`), so the UE5.4+ trailing
-//! `FStripDataFlags` and the 5.5+/5.6+ additions are never reached.
+//! so the unconsumed UE5 tail is harmless — for every UE5 version: the 5.4+
+//! trailing `FStripDataFlags`, the 5.4 distance-field float-ization, and the
+//! 5.5 ray-tracing-proxy block all sit in that never-consumed tail (#643).
 //!
 //! Pre-4.23 uses the legacy `SerializeBuffersLegacy` LOD layout (see
 //! [`super::lod::read_lod_legacy`]). This is a **deliberately UNVERIFIED** path
@@ -123,9 +123,9 @@ pub(crate) fn read_render_data(
         let _num_inlined_lods = read::read_u8(cur, asset_path, AssetWireField::MeshNumInlinedLods)?;
     }
 
-    // UE5 geometry-only boundary. For UE5.0–5.3 (≥5.4 is rejected at the package
-    // level, `FIRST_UNSUPPORTED_UE5_VERSION`), an un-decoded `FNaniteResources`
-    // blob plus the inline-data-representations block follow `numInlinedLODs`; the
+    // UE5 geometry-only boundary. For every accepted UE5 version, an un-decoded
+    // `FNaniteResources` blob plus the inline-data-representations block (and at
+    // 5.4/5.5 further tail changes, #643) follow `numInlinedLODs`; the
     // distance-field / bounds / screen-size tail sits past them. The classic LOD
     // array above is the renderable geometry, so we stop and return geometry-only.
     // The unconsumed tail is harmless: the export framework dispatches the next
