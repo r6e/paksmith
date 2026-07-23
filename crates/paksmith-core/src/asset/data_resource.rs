@@ -154,8 +154,12 @@ pub(crate) fn parse_data_resource_table(
     let entry_size = entry_wire_size(version);
     let entries_start = offset + 8;
     let remaining = bytes.len().saturating_sub(entries_start);
-    let needed = count.checked_mul(entry_size).ok_or_else(eof)?;
-    if needed > remaining {
+    // Computed in u64, not usize: on 32-bit targets a wire-valid count
+    // (≤ i32::MAX) × 45 overflows usize, which would surface as a
+    // platform-dependent fault instead of this deterministic
+    // BoundsExceeded. The u64 product cannot overflow (≤ 2^31 × 45).
+    let needed = count as u64 * entry_size as u64;
+    if needed > remaining as u64 {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
             fault: AssetParseFault::BoundsExceeded {
@@ -163,7 +167,7 @@ pub(crate) fn parse_data_resource_table(
                 // (count × entry size vs bytes remaining), so blame the
                 // table field — the count itself was already validated.
                 field: AssetWireField::DataResourceTable,
-                value: needed as u64,
+                value: needed,
                 limit: remaining as u64,
                 unit: BoundsUnit::Bytes,
             },
@@ -351,6 +355,30 @@ mod tests {
                     field: AssetWireField::DataResourceTable,
                     unit: BoundsUnit::Bytes,
                     ..
+                },
+                ..
+            }
+        ));
+    }
+
+    /// A count exceeding the entries actually present by ONE entry is
+    /// rejected — pins the `count × entry_size` product against the
+    /// remaining bytes (a sum or quotient would slip past a 2-entry
+    /// buffer and hit the in-bounds expects). #642.
+    #[test]
+    fn count_one_entry_beyond_buffer_rejected() {
+        let mut bytes = table_bytes(1, &[sample_entry(), sample_entry()]);
+        // Rewrite the count from 2 to 3; the two serialized entries stay.
+        bytes[8..12].copy_from_slice(&3i32.to_le_bytes());
+        let err = parse_data_resource_table(&bytes, 4, "t").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::DataResourceTable,
+                    value: 132, // 3 × 44
+                    limit: 88,  // 2 × 44 remaining
+                    unit: BoundsUnit::Bytes,
                 },
                 ..
             }
