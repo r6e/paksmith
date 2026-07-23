@@ -165,8 +165,21 @@ pub fn write_fstring(buf: &mut Vec<u8>, s: &str) {
 /// pins the sign.
 #[must_use]
 pub fn make_ctx_with_version(ue4: i32, ue5: Option<i32>) -> AssetContext {
+    make_ctx_with_version_and_names(ue4, ue5, &["None"])
+}
+
+/// [`make_ctx_with_version`] with a caller-supplied name table — for
+/// version-gated wire shapes whose tests need real FName resolution
+/// (e.g. the UE5 ≥ 1011 property-tag forms, #643). Index 0 MUST be
+/// `"None"` (same contract as [`make_ctx`]).
+#[must_use]
+pub fn make_ctx_with_version_and_names(ue4: i32, ue5: Option<i32>, names: &[&str]) -> AssetContext {
+    debug_assert!(
+        matches!(names.first(), Some(&"None")),
+        "test name tables MUST start with \"None\" at index 0 — see `make_ctx` docstring"
+    );
     let table = NameTable {
-        names: vec![FName::new("None")],
+        names: names.iter().map(|n| FName::new(n)).collect(),
     };
     AssetContext::new(
         Arc::new(table),

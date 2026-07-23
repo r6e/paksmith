@@ -1340,13 +1340,21 @@ fn read_payloads(
         // allocator path and would abort on OOM — violating
         // CLAUDE.md's "no panics in core" invariant). The hot
         // success path stays allocation-free.
-        let bag = match crate::asset::property::read_properties(
-            &mut Cursor::new(export_slice),
-            ctx,
-            0,
-            export_slice.len() as u64,
-            asset_path,
-        ) {
+        // UE5 >= 1011: per-object serialization-control byte precedes
+        // the export root's tagged stream (#643). Read inside the
+        // fallible block so its errors degrade to Opaque exactly like
+        // a tag-level parse error would.
+        let bag = match (|| {
+            let mut cur = Cursor::new(export_slice);
+            crate::asset::property::read_class_serialization_control(&mut cur, ctx, asset_path)?;
+            crate::asset::property::read_properties(
+                &mut cur,
+                ctx,
+                0,
+                export_slice.len() as u64,
+                asset_path,
+            )
+        })() {
             Ok(props) => {
                 tracing::debug!(
                     asset = asset_path,
@@ -1387,8 +1395,58 @@ mod tests {
         MinimalPackage, build_minimal_ue4_27, build_minimal_ue4_27_split,
         build_minimal_ue4_27_with_data_table,
         build_minimal_ue4_27_with_valid_and_corrupt_data_tables, build_minimal_ue5_1010,
-        build_minimal_ue5_1010_with_data_resources, build_minimal_with_texture2d,
+        build_minimal_ue5_1010_with_data_resources, build_minimal_ue5_1012, build_minimal_ue5_1013,
+        build_minimal_with_texture2d,
     };
+
+    /// End-to-end acceptance (#643): UE 5.4 (1012) and 5.5 (1013)
+    /// packages with a REAL complete-type-name tagged payload parse
+    /// into a `PropertyBag::Tree` — the serialization-control byte,
+    /// the tree-shaped tag, and the flag-gated tail all decode through
+    /// the generic bag path (previously rejected at the summary
+    /// version gate).
+    #[test]
+    fn read_from_parses_ue5_1012_and_1013_tagged_payloads() {
+        for (label, pkg) in [
+            ("1012", build_minimal_ue5_1012()),
+            ("1013", build_minimal_ue5_1013()),
+        ] {
+            let parsed = Package::read_from(&pkg.bytes, None, None, "t.uasset")
+                .unwrap_or_else(|e| panic!("ue5 {label} must parse: {e}"));
+            // Helper-field pin: the builder's engine-version fields
+            // must survive into the parsed summary (a dropped spec
+            // field silently falls back to the default fixture
+            // version).
+            assert_eq!(
+                parsed.summary.saved_by_engine_version.branch,
+                format!("++UE5+Release-5.{}", if label == "1012" { 4 } else { 5 }),
+                "{label}"
+            );
+            assert_eq!(
+                parsed.summary.compatible_with_engine_version.branch,
+                parsed.summary.saved_by_engine_version.branch,
+                "{label}"
+            );
+            let crate::asset::Asset::Generic(bag) = &parsed.payloads[0] else {
+                panic!("{label}: expected Generic payload");
+            };
+            match bag {
+                PropertyBag::Tree { properties } => {
+                    assert_eq!(properties.len(), 1, "{label}");
+                    assert_eq!(properties[0].name(), "Score", "{label}");
+                    assert!(
+                        matches!(
+                            properties[0].value,
+                            crate::asset::property::PropertyValue::Int(7)
+                        ),
+                        "{label}: expected Int(7), got {:?}",
+                        properties[0].value
+                    );
+                }
+                other => panic!("{label}: expected Tree, got {other:?}"),
+            }
+        }
+    }
 
     /// End-to-end (#642): `Package::read_from` on a UE5.2+ package whose
     /// `DataResourceOffset` points at a POPULATED table now PARSES the

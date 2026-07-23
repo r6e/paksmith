@@ -37,10 +37,10 @@ skip safety net, the `PropertyValue::Unknown` fallback contract,
 and the per-export iteration loop with cursor-invariant checks.
 Per-type body wire shapes live in the sibling docs
 ([`primitives.md`](primitives.md), [`containers.md`](containers.md),
-[`struct.md`](struct.md), [`text.md`](text.md)). UE5 ≥ 1011
-(`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`) and ≥ 1012
-(`PROPERTY_TAG_COMPLETE_TYPE_NAME`) are explicitly rejected at the
-summary level — see §*Versions*.
+[`struct.md`](struct.md), [`text.md`](text.md)). The UE5 1011
+extension bytes and the 1012 complete-type-name tag shape are both
+handled as of #643 — see §*Versions* and §*UE5 ≥ 1011/1012 tag
+shapes* below; UE5 ≥ 1014 is rejected at the summary level.
 
 **Paksmith parser status: `complete`.** Phase 2b deliverable; ships
 as `paksmith-core/src/asset/property/tag.rs`.
@@ -51,8 +51,8 @@ as `paksmith-core/src/asset/property/tag.rs`.
 |------------------|---------------------|--------|
 | `FileVersionUE4 ≥ 504` (UE 4.21+) | Current shape. `VER_UE4_STRUCT_GUID_IN_PROPERTY_TAG (441)` and `VER_UE4_PROPERTY_GUID_IN_PROPERTY_TAG (503)` are both below 504, so `struct_guid` and the optional `PropertyGuid` are unconditionally present. | `CUE4Parse/UE4/Assets/Objects/FPropertyTag.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
 | `FileVersionUE5 ∈ [1000, 1010]` | Same as UE4 ≥ 504; no UE5 changes to the tag header within paksmith's accepted range. | Same[^1] |
-| `FileVersionUE5 ≥ 1011` `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` | Adds a new byte after `HasPropertyGuid` (overridable-serialization flag) — **paksmith rejects archives at this version**, see [`uasset.md`](../asset/uasset.md). | Same[^1] |
-| `FileVersionUE5 ≥ 1012` `PROPERTY_TAG_COMPLETE_TYPE_NAME` | Replaces the legacy FName-typed `Type` with a tree-based type-name representation — also rejected. | Same[^1] |
+| `FileVersionUE5 ≥ 1011` `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` | Two additions to versioned tagged streams (#643): a per-tag `u8 EPropertyTagExtension` flags byte after the `HasPropertyGuid` block (`OverridableInformation` 0x02 carries `u8 OverrideOperation` + a bool32 `bExperimentalOverridableLogic` — 5 payload bytes, unlike the per-object byte's 1), and a per-object `u8 EClassSerializationControlExtension` byte before an export root's tagged stream (never struct-fallback bodies; 0x02 carries a `u8` operation). Paksmith consumes and discards both payloads; any other extension bit fails closed (further groups have undefined size). Never ships standalone — UE releases jump 1009 → 1012. | Same[^1] |
+| `FileVersionUE5 ≥ 1012` `PROPERTY_TAG_COMPLETE_TYPE_NAME` (UE 5.4) | Replaces everything after the tag's `Name` (#643): a pre-order `FPropertyTypeName` tree of `(FName, i32 inner_count)` nodes (read with a remaining-counter; no total prefix), then `i32 Size`, then a `u8 EPropertyTagFlags` byte — `HasArrayIndex` 0x01 → `i32`, `HasPropertyGuid` 0x02 → 16-byte guid, `HasPropertyExtensions` 0x04 → the 1011 extension byte, `HasBinaryOrNativeSerialize` 0x08 / `SkippedSerialize` 0x20 payload-free, `BoolTrue` 0x10 replaces the bool payload byte. Gone from the wire: standalone `ArrayIndex`, bool payload byte, `StructGuid`, guid-presence byte. Type extras (struct/enum/inner/value names) map from the tree (root = type; `Struct` param0 = struct name, its param0 = module path; `Byte`/`Enum` param0 = enum; `Array`/`Set`/`Optional` param0 = inner, recursive; `Map` param0/param1 = key/value). `Array<Struct>` elides its inner `FPropertyTag` — the element struct name derives from the outer tag's tree. Set/map VALUE bodies are unchanged at every version (verified — only `FPropertyTag.cs` and `UScriptArray.cs` gate on 1012 in CUE4Parse). | Same[^1] |
 
 ## Wire layout
 
@@ -177,12 +177,18 @@ See `docs/security/allocation-caps.md` for the broader policy.
 - **Hex anchor commands:** `(none yet — see [#347](https://github.com/r6e/paksmith/issues/347))`.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^3].
 - **Known divergences:**
-  - **UE5 1011+ rejection.** The
-    `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` extension
-    byte after `HasPropertyGuid` is not handled by paksmith's
-    `read_tag`; paksmith rejects archives at this version at the
-    summary level (see [`../asset/uasset.md`](../asset/uasset.md)).
-    CUE4Parse and unreal_asset handle 1011+.
+  - **UE5 1011/1012 extension payloads are consumed, not decoded.**
+    The overridable-serialization payloads (`OverrideOperation` +
+    `bExperimentalOverridableLogic`; the per-object operation byte)
+    are consumed for cursor correctness and discarded — CUE4Parse
+    does the same (`EOverriddenPropertyOperation` is undocumented
+    there). Unknown extension bits fail closed, where CUE4Parse
+    would misparse. Module-path nodes in 1012 type-name trees are
+    parsed but not surfaced (paksmith carries no module field). The
+    `unreal_asset` oracle's version enum ends at 1009
+    (`DATA_RESOURCES`) — no oracle exists for 1011+ fixtures, so
+    the 1012/1013 fixtures are paksmith-only with hand-verified
+    bytes (same posture as the pak v1/v2 gap, #637).
   - **Parse-error → Opaque fallback.** If `read_properties` returns
     an error mid-iteration (malformed tag, unknown encoding, depth
     violation, cursor mismatch), the caller
@@ -231,6 +237,6 @@ iteration loop, the two outer caps).
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FPropertyTag.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the tag header layout, including the version-conditional UE5 1011/1012 extensions paksmith rejects.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FPropertyTag.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the tag header layout, including the version-conditional UE5 1011/1012 extensions paksmith decodes as of #643.
 [^2]: See [`../primitive/fname.md`](../primitive/fname.md) for FName wire shape and `(index, number)` resolution.
 [^3]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_properties/src/lib.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle for the per-type property dispatch.

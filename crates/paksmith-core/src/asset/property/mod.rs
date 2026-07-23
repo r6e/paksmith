@@ -294,6 +294,56 @@ pub fn read_properties<R: Read + Seek>(
     Ok(props)
 }
 
+/// Consume the per-object `u8 EClassSerializationControlExtension` byte that
+/// UE5 ≥ 1011 writes BEFORE an export root's tagged-property stream (#643).
+/// Mirrors CUE4Parse `UObject.DeserializePropertiesTagged`'s `!isStruct`
+/// pre-read: export-root streams only — struct-fallback bodies (nested
+/// `StructProperty` payloads, DataTable rows) never carry it, so this is an
+/// explicit call at each export-root site rather than logic inside
+/// [`read_properties`] (whose `depth == 0` is also true for row bodies).
+///
+/// Known bit: `OverridableSerializationInformation` (0x02) — its `u8`
+/// operation payload is consumed and discarded, mirroring CUE4Parse's skip.
+/// Any other bit (incl. `ReserveForFutureUse` 0x01, marking a further
+/// extension group of unknown wire shape) fails closed: unknown bytes here
+/// would desync the entire tagged stream. Below UE5 1011 this is a no-op.
+///
+/// # Errors
+/// [`AssetParseFault::UnexpectedEof`] on truncation;
+/// [`PaksmithError::UnsupportedFeature`] on unknown extension bits.
+pub(crate) fn read_class_serialization_control<R: Read>(
+    reader: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<()> {
+    const OVERRIDABLE_SERIALIZATION_INFORMATION: u8 = 0x02;
+    if !ctx
+        .version
+        .ue5_at_least(crate::asset::version::VER_UE5_PROPERTY_TAG_EXTENSION)
+    {
+        return Ok(());
+    }
+    let mut byte = [0u8; 1];
+    reader
+        .read_exact(&mut byte)
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::ClassSerializationControl))?;
+    let control = byte[0];
+    if control & !OVERRIDABLE_SERIALIZATION_INFORMATION != 0 {
+        return Err(PaksmithError::UnsupportedFeature {
+            context: format!(
+                "EClassSerializationControlExtension flags {control:#04x} in {asset_path}: \
+                 only OverridableSerializationInformation (0x02) has a known wire shape"
+            ),
+        });
+    }
+    if control & OVERRIDABLE_SERIALIZATION_INFORMATION != 0 {
+        reader
+            .read_exact(&mut byte)
+            .map_err(|_| unexpected_eof(asset_path, AssetWireField::ClassSerializationControl))?;
+    }
+    Ok(())
+}
+
 /// Consume the object-GUID tail `UObject::Serialize` writes immediately after a
 /// top-level export's tagged-property `None` terminator, before any
 /// class-specific binary fields. Per CUE4Parse `UObject.Deserialize`, a UE4.0+
@@ -337,6 +387,63 @@ mod tests {
     use crate::asset::AssetContext;
     use crate::asset::property::test_utils::make_ctx;
     use std::io::Cursor;
+
+    /// UE5 ≥ 1011: the pre-byte is consumed (0x00), and 0x02 also
+    /// consumes its 1-byte operation payload — cursor lands on the
+    /// sentinel either way. #643.
+    #[test]
+    fn class_serialization_control_consumed_at_1011() {
+        use crate::asset::property::test_utils::make_ctx_with_version;
+        let ctx = make_ctx_with_version(522, Some(1011));
+        for (bytes, label) in [
+            (&[0x00u8][..], "NoExtension"),
+            (&[0x02, 0x07][..], "0x02+op"),
+        ] {
+            let mut wire = bytes.to_vec();
+            wire.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+            let mut cur = Cursor::new(&wire[..]);
+            read_class_serialization_control(&mut cur, &ctx, "x.uasset").unwrap();
+            let mut sentinel = [0u8; 4];
+            std::io::Read::read_exact(&mut cur, &mut sentinel).unwrap();
+            assert_eq!(sentinel, 0xDEAD_BEEFu32.to_le_bytes(), "{label}");
+        }
+    }
+
+    /// Unknown control bits fail closed; truncation is a structured
+    /// EOF; below 1011 nothing is read. #643.
+    #[test]
+    fn class_serialization_control_guards() {
+        use crate::asset::property::test_utils::make_ctx_with_version;
+        let ctx = make_ctx_with_version(522, Some(1011));
+        for bad in [0x01u8, 0x04, 0x80, 0x03] {
+            let err =
+                read_class_serialization_control(&mut Cursor::new(&[bad][..]), &ctx, "x.uasset")
+                    .unwrap_err();
+            assert!(
+                matches!(err, PaksmithError::UnsupportedFeature { .. }),
+                "{bad:#04x} must fail closed, got {err:?}"
+            );
+        }
+        for truncated in [&[][..], &[0x02][..]] {
+            let err =
+                read_class_serialization_control(&mut Cursor::new(truncated), &ctx, "x.uasset")
+                    .unwrap_err();
+            assert!(matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::UnexpectedEof {
+                        field: AssetWireField::ClassSerializationControl,
+                    },
+                    ..
+                }
+            ));
+        }
+        // 1010: no byte consumed even when one is present.
+        let ctx_1010 = make_ctx_with_version(522, Some(1010));
+        let mut cur = Cursor::new(&[0xFFu8][..]);
+        read_class_serialization_control(&mut cur, &ctx_1010, "x.uasset").unwrap();
+        assert_eq!(cur.position(), 0, "below 1011 nothing is read");
+    }
 
     fn bool_property_then_none() -> (Vec<u8>, AssetContext) {
         let ctx = make_ctx(&["None", "bEnabled", "BoolProperty"]);

@@ -423,6 +423,40 @@ fn read_array_of_struct<R: Read + Seek>(
     expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
+    // UE5 ≥ 1012 (`PROPERTY_TAG_COMPLETE_TYPE_NAME`): the inner
+    // FPropertyTag is ELIDED from the wire — the element struct name
+    // comes from the outer tag's type-name tree instead (CUE4Parse
+    // `UScriptArray`'s ≥ 1012 branch short-circuits before the
+    // INNER_ARRAY_TAG_INFO read). #643.
+    if ctx
+        .version
+        .ue5_at_least(crate::asset::version::VER_UE5_PROPERTY_TAG_COMPLETE_TYPE_NAME)
+    {
+        let struct_name = tag.tree_inner_struct_name();
+        let mut elements: Vec<PropertyValue> = Vec::new();
+        try_reserve_asset(
+            &mut elements,
+            count_usize,
+            asset_path,
+            AssetSeam::CollectionElements,
+        )?;
+        for _ in 0..count_usize {
+            let elem = read_struct_value(
+                Arc::clone(&struct_name),
+                reader,
+                ctx,
+                depth,
+                expected_end,
+                asset_path,
+            )?;
+            elements.push(elem);
+        }
+        return Ok(Some(PropertyValue::Array {
+            inner_type: tag.inner_type.clone(),
+            elements,
+        }));
+    }
+
     let inner_header =
         read_tag(reader, ctx, asset_path)?.ok_or_else(|| PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
@@ -1092,6 +1126,98 @@ mod tests {
 
     fn make_set_tag(inner_type: &str, size: i32) -> PropertyTag {
         PropertyTag::for_test("Prop", "SetProperty", size).with_inner_type(inner_type)
+    }
+
+    /// UE5 ≥ 1012: `Array<Struct>` elides the inner FPropertyTag — the
+    /// wire is count + element bodies directly, and the struct name
+    /// resolves from the outer tag's type-name tree. #643.
+    #[test]
+    fn array_of_struct_1012_elides_inner_tag() {
+        let ctx = make_ctx_with_version(522, Some(1012));
+        let tag = make_array_tag("StructProperty", 24).with_type_name_tree(&[
+            ("ArrayProperty", 1),
+            ("StructProperty", 1),
+            ("MyStruct", 0),
+        ]);
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&2i32.to_le_bytes()); // count
+        // Two empty generic struct bodies: each is just the tagged
+        // None terminator (fname (0,0)).
+        for _ in 0..2 {
+            wire.extend_from_slice(&[0u8; 8]);
+        }
+        let end = wire.len() as u64;
+        let v = read_container_value(&tag, &mut Cursor::new(&wire[..]), &ctx, 0, end, "x")
+            .unwrap()
+            .unwrap();
+        match v {
+            PropertyValue::Array {
+                inner_type,
+                elements,
+            } => {
+                assert_eq!(inner_type.as_ref(), "StructProperty");
+                assert_eq!(elements.len(), 2);
+                for e in &elements {
+                    assert!(
+                        matches!(e, PropertyValue::Struct { struct_name, .. }
+                            if struct_name.as_ref() == "MyStruct"),
+                        "element should carry the tree-derived struct name, got {e:?}"
+                    );
+                }
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    /// Below 1012 the inner tag is still REQUIRED — the elision branch
+    /// must not fire at 1011/1010 (a missing inner tag stays a
+    /// structured fault). #643.
+    #[test]
+    fn array_of_struct_pre_1012_still_requires_inner_tag() {
+        for ue5 in [Some(1010), Some(1011)] {
+            let ctx = make_ctx_with_version(522, ue5);
+            let tag = make_array_tag("StructProperty", 24);
+            let mut wire = Vec::new();
+            wire.extend_from_slice(&1i32.to_le_bytes()); // count
+            wire.extend_from_slice(&[0u8; 8]); // None terminator, NOT an inner tag
+            let end = wire.len() as u64;
+            let err = read_container_value(&tag, &mut Cursor::new(&wire[..]), &ctx, 0, end, "x")
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PaksmithError::AssetParse {
+                        fault: AssetParseFault::ArrayOfStructHeaderMissing { .. },
+                        ..
+                    }
+                ),
+                "ue5={ue5:?} must still read the inner tag, got {err:?}"
+            );
+        }
+    }
+
+    /// A 1012 array tag whose tree lacks the struct parameter degrades
+    /// to an empty struct name (generic parse), mirroring CUE4Parse's
+    /// null InnerTypeData fall-through. #643.
+    #[test]
+    fn array_of_struct_1012_missing_tree_param_degrades() {
+        let ctx = make_ctx_with_version(522, Some(1012));
+        // Tree with no parameter under StructProperty.
+        let tag = make_array_tag("StructProperty", 12)
+            .with_type_name_tree(&[("ArrayProperty", 1), ("StructProperty", 0)]);
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&1i32.to_le_bytes());
+        wire.extend_from_slice(&[0u8; 8]);
+        let end = wire.len() as u64;
+        let v = read_container_value(&tag, &mut Cursor::new(&wire[..]), &ctx, 0, end, "x")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            v,
+            PropertyValue::Array { ref elements, .. }
+                if matches!(&elements[0], PropertyValue::Struct { struct_name, .. }
+                    if struct_name.is_empty())
+        ));
     }
 
     #[test]

@@ -20,16 +20,16 @@ field divides "header region" from "payload region" in either layout.
 
 **Document status: complete.** Wire format documented in full for
 `FPackageFileSummary` across `LegacyFileVersion ∈ {-7, -8, -9}` +
-`FileVersionUE4 ∈ [504, 522]` + `FileVersionUE5 ∈ [1000, 1010]`,
+`FileVersionUE4 ∈ [504, 522]` + `FileVersionUE5 ∈ [1000, 1013]`,
 the `NameTable` / `ImportTable` / `ExportTable` counted-array
 tables (including the UE4 4.27 104-byte `ObjectExport` record + UE5
 1003 / 1005 / 1006 / 1010 conditional fields), the monolithic-vs-split
 discriminator, the `total_header_size` partition, and the ancillary
 offset tables (dependencies, gatherable text, soft-object paths).
 Per-export property-body decode lives in [`uexp.md`](uexp.md) +
-[`../property/tagged.md`](../property/tagged.md). UE5 ≥ 1011
-(`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`) is
-explicitly out of paksmith's accepted range — see §*Variants*.
+[`../property/tagged.md`](../property/tagged.md). UE5 ≥ 1014
+(`METADATA_SERIALIZATION_OFFSET`) is explicitly out of paksmith's
+accepted range — see §*Variants*.
 
 **Paksmith parser status: `complete`.** Phase 2a deliverable; ships
 as `paksmith-core/src/asset/`. Per-property bodies covered separately
@@ -41,13 +41,16 @@ in the [`../property/`](../property/) family.
 |------------------|---------------------|--------|
 | `LegacyFileVersion ∈ {-7, -8, -9}` | Paksmith's accepted legacy-version floor; pre-`-7` archives have a different summary shape and are rejected at parse time. | `CUE4Parse/UE4/Versions/ObjectVersion.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
 | `FileVersionUE4 ∈ [504, 522]` (UE 4.21 – 4.27) | Paksmith's accepted UE4 version range. 504 sets the name-table-with-hash-trailers shape; 522 is UE 4.27's latest object-version constant. | Same[^1] |
-| `FileVersionUE5 ∈ [1000, 1010]` (UE 5.0 – 5.1+) | Paksmith's accepted UE5 version range. 1011 (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`) introduces an FPropertyTag wire-format break Phase 2b cannot handle. | Same[^1] |
+| `FileVersionUE5 ∈ [1000, 1013]` (UE 5.0 – 5.5) | Paksmith's accepted UE5 version range (#643). 1014 (`METADATA_SERIALIZATION_OFFSET`) adds a summary field the reader does not consume. | Same[^1] |
 | 1003 `OPTIONAL_RESOURCES` | Adds `generate_public_hash` bool32 to each `ObjectExport` and `bImportOptional` bool32 to each `ObjectImport`. | Same[^1] |
 | 1005 `REMOVE_OBJECT_EXPORT_PACKAGE_GUID` | Removes `package_guid` from `ObjectExport`. | Same[^1] |
 | 1006 `TRACK_OBJECT_EXPORT_IS_INHERITED` | Adds `is_inherited_instance` bool32 to each `ObjectExport`. | Same[^1] |
 | 1008 `ADD_SOFTOBJECTPATH_LIST` | Adds `soft_object_paths_count` + `soft_object_paths_offset` to summary. | Same[^1] |
 | 1009 `DATA_RESOURCES` | Adds `data_resource_offset` to summary. | Same[^1] |
 | 1010 `SCRIPT_SERIALIZATION_OFFSET` | Adds `script_serialization_start_offset` + `script_serialization_end_offset` to each `ObjectExport` (gated by `PKG_UnversionedProperties` package-flag absence). | Same[^1] |
+| 1011 `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` | No summary change. Adds the per-tag extension byte + per-object serialization-control byte to versioned tagged-property streams — see [`../property/tagged.md`](../property/tagged.md). Never ships standalone (UE releases jump 1009 → 1012). | Same[^1] |
+| 1012 `PROPERTY_TAG_COMPLETE_TYPE_NAME` (UE 5.4) | No summary change. Replaces the tag's FName type with a type-name tree and elides the `Array<Struct>` inner tag — see [`../property/tagged.md`](../property/tagged.md). Also: cooked `USoundWave` gains a cue-point array. | Same[^1] |
+| 1013 `ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES` (UE 5.5) | Changes only the asset-registry data blob (not parsed by paksmith); no summary/tag/export wire impact. | Same[^1] |
 
 See `crates/paksmith-core/src/asset/version.rs` and
 `crates/paksmith-core/src/asset/summary.rs` (the `FIRST_UNSUPPORTED_UE5_VERSION` constant and its comment) for the
@@ -67,7 +70,7 @@ across UE versions due to conditional reads; the canonical sequence (UE
 | 4 | 4 | LE | `legacy_file_version` | `i32` | Negative; one of `-7`, `-8`, `-9`. |
 | 8 | 4 | LE | `legacy_ue3_version` | `i32` | Always `-1` for paksmith-supported archives. |
 | 12 | 4 | LE | `file_version_ue4` | `i32` | 504–522 (UE 4.21 – 4.27). |
-| 16 | 4 | LE | `file_version_ue5` | `i32` | 0 (UE4) or 1000–1010 (UE5). Present only if `legacy_file_version ≤ -8`. |
+| 16 | 4 | LE | `file_version_ue5` | `i32` | 0 (UE4) or 1000–1013 (UE5). Present only if `legacy_file_version ≤ -8`. |
 | → varies | 4 | LE | `file_version_licensee_ue4` | `i32` | Game-studio fork version (usually 0). |
 | → varies | variable | — | `custom_versions` | `FCustomVersion[]`[^3] | See [`primitive/fcustom-version.md`](../primitive/fcustom-version.md). |
 | → varies | 4 | LE | `total_header_size` | `i32` | Total byte length of the header region (everything before payloads). Capped at 256 MiB by paksmith. |
@@ -241,7 +244,7 @@ shapes) are rejected.
 - **`magic`**: fixed `u32` = `0x9E2A83C1` (`PACKAGE_FILE_TAG`).
 - **`legacy_file_version`**: `i32` LE; wire-format-wise the field is unbounded (any `i32` could appear on disk). UE writers historically emit a small set of negative discriminants; paksmith's acceptance of `{-7, -8, -9}` is a parser-policy decision — see §*Implementation hardening* below.
 - **`file_version_ue4`**: `i32` LE; wire field unbounded. Paksmith's acceptance range of `[504, 522]` (UE 4.21 – 4.27) is a parser-policy decision — see §*Implementation hardening* below.
-- **`file_version_ue5`**: `i32` LE; wire field unbounded. Paksmith's acceptance range of `[1000, 1010]` is a parser-policy decision (rejecting `≥ 1011` because of the `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` wire-format break the property reader cannot handle) — see §*Implementation hardening* below.
+- **`file_version_ue5`**: `i32` LE; wire field unbounded. Paksmith's acceptance range of `[1000, 1013]` is a parser-policy decision (rejecting `≥ 1014` because `METADATA_SERIALIZATION_OFFSET` adds a summary field the reader does not consume, with further summary-shape breaks at 1015/1016) — see §*Implementation hardening* below.
 - **`package_flags`**: `u32` LE; `EPackageFlags` mask. `PKG_FilterEditorOnly = 0x8000_0000` set for cooked content; `PKG_UnversionedProperties = 0x2000` requires `.usmap` schema.
 - **`ObjectImport` row**: 28 bytes (UE4 baseline) / 32 bytes (UE5 ≥ 1003 with `bImportOptional` bool32).
 - **`ObjectExport` row**: 104 bytes (UE 4.27, `EXPORT_RECORD_SIZE_UE4_27`). UE5 conditionally adds / removes fields (1003 `+generate_public_hash`, 1005 `-package_guid`, 1006 `+is_inherited_instance`, 1010 `+script_serialization_*_offset` when not `PKG_UnversionedProperties`).
@@ -299,10 +302,13 @@ policy.
   fixture oracle) and CUE4Parse[^1]. Every `minimal_uasset_v5*` fixture
   round-trips through `unreal_asset` at fixture-gen time.
 - **Known divergences:**
-  - **UE5 1011+ rejection.** Paksmith rejects archives at
-    `FileVersionUE5 ≥ 1011` (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`)
-    because the `FPropertyTag` reader does not handle the extended tag
-    shape. CUE4Parse and unreal_asset both support 1011+.
+  - **UE5 1014+ rejection.** Paksmith rejects archives at
+    `FileVersionUE5 ≥ 1014` (`METADATA_SERIALIZATION_OFFSET`) because
+    the summary reader does not consume the new `MetaDataOffset`
+    field (1015/1016 add further summary-shape breaks: cell tables,
+    `FGuid` → `FIoHash`). The 1011/1012 property-tag shapes are
+    handled as of #643; CUE4Parse supports 1014+ while the
+    `unreal_asset` oracle's version enum ends at 1009.
   - **`PKG_UnversionedProperties` requires mappings.** Unversioned
     packages are decoded against a `.usmap` schema supplied via the
     `mappings: Option<&Usmap>` parameter (Phase 2f's loader shipped).

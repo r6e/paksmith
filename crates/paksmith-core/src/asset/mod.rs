@@ -133,8 +133,8 @@ pub enum Asset {
     /// platform-data branches parse into [`SoundWaveData`] — the non-streaming
     /// `FFormatContainer` (per-codec buffers) and the streaming
     /// `FStreamedAudioPlatformData` chunks — each with the `CompressedDataGuid`.
-    /// (The oracle's UE 5.4+ cue points are unreachable — they need object
-    /// version 1012, above paksmith's 1011 `FPropertyTag` ceiling.) The audio
+    /// (UE 5.4+ cooked cue points are consumed and discarded for versioned
+    /// packages as of #643.) The audio
     /// `FormatHandler`s (OGG/Opus passthrough, WAV) export it.
     SoundWave(SoundWaveData),
     /// A `UStaticMesh` export. Phase 3g. As of 3g1 it carries the segment-1
@@ -560,9 +560,9 @@ pub struct DataTableRow {
 /// the `FFormatContainer` — its per-codec keys land in `compressed_format_keys`
 /// and the encoded buffers in the `read_typed` bulk-record list — plus the
 /// `CompressedDataGuid`. The UE 5.4+ cue points the oracle reads between the
-/// header and platform data are absent for every asset paksmith parses (they
-/// require object version 1012, above paksmith's `FIRST_UNSUPPORTED_UE5_VERSION`
-/// 1011 `FPropertyTag` ceiling), so platform data follows `DummyCompressionName`
+/// header and platform data are consumed and discarded for versioned ≥ 1012
+/// packages as of #643 (unversioned cooked assets cannot resolve the gate
+/// until #656); below 1012, platform data follows `DummyCompressionName`
 /// directly. As of 3f-4 the streaming branch (`streaming && cooked`) parses the
 /// `FStreamedAudioPlatformData` — the `CompressedDataGuid`, the `AudioFormat`
 /// codec, and the per-chunk metadata (into [`Self::streamed`]) with the chunk

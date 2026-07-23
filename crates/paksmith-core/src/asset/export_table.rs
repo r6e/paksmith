@@ -201,11 +201,10 @@ impl ObjectExport {
     /// load-bearing one; `FObjectExport`'s editor-only fields are not
     /// affected, but rejection happens earlier in the parse pipeline).
     ///
-    /// Phase 2a's accepted UE5 range is 1000..=1010 — at UE5 version
-    /// 1011 (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`),
-    /// UE adds a byte to `FPropertyTag` that Phase 2b's tagged-property
-    /// reader cannot decode. The export-table reader itself is shape-
-    /// stable across the entire 1000-1010 range and beyond: the per-export
+    /// The accepted UE5 range is 1000..=1013 (#643 — the 1011/1012
+    /// `FPropertyTag` shapes are handled by the tagged-property
+    /// reader). The export-table reader itself is shape-
+    /// stable across the entire 1000-1013 range and beyond: the per-export
     /// `package_guid` was removed at 1005 (already handled here via
     /// `Option<FGuid>`); the summary-level FGuid migrates to FIoHash at
     /// 1016 (above the ceiling). [`crate::asset::PackageSummary::read_from`]

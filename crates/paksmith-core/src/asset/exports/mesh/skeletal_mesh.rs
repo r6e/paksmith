@@ -1366,10 +1366,32 @@ pub(crate) fn read_typed(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<(Asset, Vec<FByteBulkData>)> {
+    // Versioned UE 5.5 (object 1013): skeletal render data inserts an
+    // FNaniteResources envelope after the LOD array (CUE4Parse
+    // USkeletalMesh.cs, `Ar.Game >= GAME_UE5_5`), which this reader
+    // does not parse — fail closed so the package walker degrades the
+    // export to a generic property bag instead of desyncing in the
+    // post-LOD tail. UE 5.4 (1012) is fully handled (the HalfEdge
+    // block sits inside the BuffersSize-measured blob the reader
+    // seeks past). #643.
+    if ctx
+        .version
+        .ue5_at_least(crate::asset::version::VER_UE5_ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES)
+    {
+        return Err(crate::PaksmithError::UnsupportedFeature {
+            context: format!(
+                "versioned UE 5.5 skeletal-mesh render data (FNaniteResources \
+                 after the LOD array) is not yet supported ({asset_path})"
+            ),
+        });
+    }
     let total_len = payload.len() as u64;
     let mut cur = Cursor::new(payload);
 
     // Segment 1: tagged-property stream + UObject object-GUID tail.
+    // UE5 >= 1011: per-object serialization-control byte precedes the
+    // export root's tagged stream (#643).
+    crate::asset::property::read_class_serialization_control(&mut cur, ctx, asset_path)?;
     let properties = read_properties(&mut cur, ctx, 0, total_len, asset_path)?;
     let _object_guid = read_object_guid_tail(&mut cur, total_len, asset_path)?;
 
@@ -1570,6 +1592,27 @@ pub(crate) fn read_typed(
 
 #[cfg(test)]
 mod tests {
+
+    /// Versioned UE 5.5 (1013) fails closed before any byte is read —
+    /// the FNaniteResources insertion after the LOD array is not
+    /// parsed; the package walker degrades to a generic bag. 1012
+    /// passes the gate (fails later on the empty payload). #643.
+    #[test]
+    fn read_typed_fails_closed_at_1013() {
+        use crate::asset::property::test_utils::make_ctx_with_version;
+        let ctx = make_ctx_with_version(522, Some(1013));
+        let err = read_typed(&[], &ctx, "sk.uasset").unwrap_err();
+        assert!(
+            matches!(err, crate::PaksmithError::UnsupportedFeature { .. }),
+            "1013 must fail closed, got {err:?}"
+        );
+        let ctx12 = make_ctx_with_version(522, Some(1012));
+        let err12 = read_typed(&[], &ctx12, "sk.uasset").unwrap_err();
+        assert!(
+            !matches!(err12, crate::PaksmithError::UnsupportedFeature { .. }),
+            "1012 must pass the version gate, got {err12:?}"
+        );
+    }
     use super::*;
     use crate::PaksmithError;
     use crate::asset::BoneWeights;

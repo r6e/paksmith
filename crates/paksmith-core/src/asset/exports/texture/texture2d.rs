@@ -169,6 +169,9 @@ pub(crate) fn read_from(
     // Segment 1: tagged properties (None-terminated). Stops at "None", then the
     // `UObject::Serialize` object-GUID tail (bSerializeGuid + optional FGuid)
     // that precedes the UTexture class-specific fields.
+    // UE5 >= 1011: per-object serialization-control byte precedes the
+    // export root's tagged stream (#643).
+    crate::asset::property::read_class_serialization_control(&mut cur, ctx, asset_path)?;
     let properties = read_properties(&mut cur, ctx, 0, total_len, asset_path)?;
     let _object_guid = read_object_guid_tail(&mut cur, total_len, asset_path)?;
 

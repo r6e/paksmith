@@ -16,8 +16,9 @@
 //! the chosen branch fail. **This slice** parses the non-streaming non-cooked
 //! `RawData` path (a single `FByteBulkData` + `CompressedDataGuid`), completing
 //! the platform-data matrix — so every `(streaming, cooked)` combo is a real
-//! read and the retry is now unconditional. (The oracle's UE 5.4+ cue points
-//! are unreachable — they need object version 1012, above paksmith's 1011
+//! read and the retry is now unconditional. (UE 5.4+ cue points are consumed
+//! and discarded for versioned packages as of #643 — previously they needed
+//! object version 1012, above the then-1011
 //! `FPropertyTag` ceiling
 //! — so platform data follows
 //! `DummyCompressionName` directly.)
@@ -133,6 +134,9 @@ pub(crate) fn read_from(
     // Segment 1a: the USoundBase tagged-property stream, None-terminated, then
     // the `UObject::Serialize` object-GUID tail (bSerializeGuid + optional FGuid)
     // that precedes the USoundWave class-specific fields.
+    // UE5 >= 1011: per-object serialization-control byte precedes the
+    // export root's tagged stream (#643).
+    crate::asset::property::read_class_serialization_control(&mut cur, ctx, asset_path)?;
     let properties = read_properties(&mut cur, ctx, 0, total_len, asset_path)?;
     let _object_guid = read_object_guid_tail(&mut cur, total_len, asset_path)?;
 
@@ -150,11 +154,23 @@ pub(crate) fn read_from(
     // The version-conditional `DummyCompressionName` `FName` (discarded).
     maybe_skip_dummy_compression_name(&mut cur, ctx, asset_path)?;
 
-    // The oracle reads UE 5.4+ cue points (`FStructFallback[]`) here when
-    // cooked — but they require object version 1012 (UE 5.4), above paksmith's
-    // `FIRST_UNSUPPORTED_UE5_VERSION` (1011) `FPropertyTag` ceiling, so no asset
-    // paksmith parses carries them. Platform data therefore follows
-    // `DummyCompressionName` directly.
+    // UE 5.4+ cooked: the cue-point array (`FStructFallback[]` keyed
+    // "SoundWaveCuePoint") sits between `DummyCompressionName` and the
+    // platform data (#643). The oracle's gate is `Game >= UE5_4 &&
+    // bCooked`; for VERSIONED packages the object-version proxy is
+    // 1012 (`PROPERTY_TAG_COMPLETE_TYPE_NAME`, the version UE 5.4
+    // ships). Unversioned cooked assets carry no version and cannot
+    // resolve the gate until profile engine-version plumbing lands
+    // (#656) — they parse as before. Bodies are consumed for cursor
+    // correctness and discarded (no export surface for cues yet).
+    if cooked
+        && ctx
+            .version
+            .ue5_at_least(crate::asset::version::VER_UE5_PROPERTY_TAG_COMPLETE_TYPE_NAME)
+    {
+        read_and_discard_cue_points(&mut cur, ctx, total_len, asset_path)?;
+    }
+
     //
     // Segment 3: platform data, branched on the resolved `streaming` per the
     // oracle's `SerializePlatformData` (see [`read_platform_data`]). The resolved
@@ -525,6 +541,50 @@ fn fault(asset_path: &str, fault: AssetParseFault) -> PaksmithError {
     }
 }
 
+/// Consume the UE 5.4+ cooked cue-point array: `i32 count` +
+/// `count ×` tagged-property struct bodies (each None-terminated, no
+/// serialization-control pre-byte — struct fallbacks are `isStruct` in
+/// the oracle). Count is capped by [`MAX_COLLECTION_ELEMENTS`]; bodies
+/// are parsed for cursor correctness and discarded. #643.
+fn read_and_discard_cue_points<R: std::io::Read + std::io::Seek>(
+    cur: &mut R,
+    ctx: &AssetContext,
+    total_len: u64,
+    asset_path: &str,
+) -> crate::Result<()> {
+    let count = cur
+        .read_i32::<LittleEndian>()
+        .map_err(|_| eof(asset_path, AssetWireField::SoundWaveCuePoints))?;
+    if count < 0 {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::NegativeValue {
+                field: AssetWireField::SoundWaveCuePoints,
+                value: i64::from(count),
+            },
+        });
+    }
+    #[allow(clippy::cast_sign_loss, reason = "sign-checked above")]
+    let count = count as u32 as usize;
+    if count > crate::asset::property::MAX_COLLECTION_ELEMENTS {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::BoundsExceeded {
+                field: AssetWireField::SoundWaveCuePoints,
+                value: count as u64,
+                limit: crate::asset::property::MAX_COLLECTION_ELEMENTS as u64,
+                unit: BoundsUnit::Items,
+            },
+        });
+    }
+    for _ in 0..count {
+        // Struct-fallback body: tagged properties at depth 1 (nested
+        // budget), ending at its own None terminator.
+        let _ = read_properties(cur, ctx, 1, total_len, asset_path)?;
+    }
+    Ok(())
+}
+
 fn eof(asset_path: &str, field: AssetWireField) -> PaksmithError {
     fault(asset_path, AssetParseFault::UnexpectedEof { field })
 }
@@ -557,6 +617,81 @@ fn bounds(asset_path: &str, field: AssetWireField, value: i32, limit: i32) -> Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cue-point consume (#643): count + None-terminated struct bodies
+    /// are consumed (cursor lands on the sentinel); negative and
+    /// over-cap counts fail closed.
+    #[test]
+    fn cue_points_consumed_and_guarded() {
+        use crate::asset::property::test_utils::make_ctx_with_version;
+        use std::io::Read as _;
+        let ctx = make_ctx_with_version(522, Some(1012));
+        // Two empty struct bodies (each just the (0,0) None terminator).
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&2i32.to_le_bytes());
+        wire.extend_from_slice(&[0u8; 16]);
+        wire.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+        let total = wire.len() as u64;
+        let mut cur = std::io::Cursor::new(&wire[..]);
+        read_and_discard_cue_points(&mut cur, &ctx, total, "s.uasset").unwrap();
+        let mut sentinel = [0u8; 4];
+        cur.read_exact(&mut sentinel).unwrap();
+        assert_eq!(sentinel, 0xDEAD_BEEFu32.to_le_bytes());
+
+        // Negative count.
+        let wire = (-1i32).to_le_bytes();
+        let err =
+            read_and_discard_cue_points(&mut std::io::Cursor::new(&wire[..]), &ctx, 4, "s.uasset")
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::NegativeValue {
+                    field: AssetWireField::SoundWaveCuePoints,
+                    ..
+                },
+                ..
+            }
+        ));
+
+        // Over-cap count fails before any body read.
+        let too_many = i32::try_from(crate::asset::property::MAX_COLLECTION_ELEMENTS + 1).unwrap();
+        let wire = too_many.to_le_bytes();
+        let err =
+            read_and_discard_cue_points(&mut std::io::Cursor::new(&wire[..]), &ctx, 4, "s.uasset")
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::SoundWaveCuePoints,
+                    ..
+                },
+                ..
+            }
+        ));
+
+        // Boundary: count == 0 is accepted (pins `count < 0`, not `<= 0`):
+        // an empty cue-point array consumes only its 4-byte count.
+        let wire = 0i32.to_le_bytes();
+        let mut cur = std::io::Cursor::new(&wire[..]);
+        read_and_discard_cue_points(&mut cur, &ctx, 4, "s.uasset").unwrap();
+        assert_eq!(cur.position(), 4);
+
+        // Boundary: count == MAX_COLLECTION_ELEMENTS is accepted (pins
+        // `count > MAX`, not `>= MAX`): exactly-cap bodies decode.
+        let cap = crate::asset::property::MAX_COLLECTION_ELEMENTS;
+        let mut wire = Vec::with_capacity(4 + cap * 8);
+        wire.extend_from_slice(&i32::try_from(cap).unwrap().to_le_bytes());
+        for _ in 0..cap {
+            wire.extend_from_slice(&[0u8; 8]); // empty body: None terminator
+        }
+        let total = wire.len() as u64;
+        let mut cur = std::io::Cursor::new(&wire[..]);
+        read_and_discard_cue_points(&mut cur, &ctx, total, "s.uasset").unwrap();
+        assert_eq!(cur.position(), total, "all cap bodies consumed");
+    }
+
     use crate::asset::property::test_utils::{
         make_ctx,
         make_ctx_with_version,

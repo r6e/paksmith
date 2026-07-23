@@ -320,6 +320,42 @@ pub(crate) const VER_UE5_DATA_RESOURCES: i32 = 1009;
 /// `SCRIPT_SERIALIZATION_OFFSET`.
 pub(crate) const VER_UE5_SCRIPT_SERIALIZATION_OFFSET: i32 = 1010;
 
+/// UE 5.4+ (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`):
+/// the tagged-property wire gains (a) a per-tag `u8`
+/// `EPropertyTagExtension` flags byte immediately after the
+/// `HasPropertyGuid` byte (+ optional guid), with a conditional
+/// 5-byte payload (u8 op + bool32) when `OverridableInformation`
+/// (0x02) is set, and
+/// (b) a per-OBJECT `u8 EClassSerializationControlExtension` byte
+/// before the whole tagged stream of an export root (never before
+/// struct-fallback bodies). Never ships standalone: UE releases jump
+/// 1009 (5.2/5.3) → 1012 (5.4). Source: CUE4Parse
+/// `EUnrealEngineObjectUE5Version` (ObjectVersion.cs), `FPropertyTag.cs`
+/// (the `< PROPERTY_TAG_COMPLETE_TYPE_NAME` branch), `UObject.cs`
+/// `DeserializePropertiesTagged` (the `!isStruct` pre-byte).
+pub(crate) const VER_UE5_PROPERTY_TAG_EXTENSION: i32 = 1011;
+
+/// UE 5.4+ (`PROPERTY_TAG_COMPLETE_TYPE_NAME`): the tag's single
+/// `FName` Type (+ per-type extras + standalone `ArrayIndex` +
+/// guid-presence byte) is replaced by a recursive
+/// `FPropertyTypeName` tree of `(FName, i32 inner_count)` nodes,
+/// then `i32 Size`, then a `u8 EPropertyTagFlags` byte whose bits
+/// gate `ArrayIndex` / `PropertyGuid` / the 1011 extension byte, with
+/// `BoolTrue` replacing the bool payload byte. Also elides the inner
+/// `FPropertyTag` of array-of-struct bodies (type data comes from the
+/// outer tag's tree). UE 5.4 ships exactly this version. Source:
+/// CUE4Parse `FPropertyTag.cs` / `FPropertyTagData.cs` /
+/// `UScriptArray.cs`.
+pub(crate) const VER_UE5_PROPERTY_TAG_COMPLETE_TYPE_NAME: i32 = 1012;
+
+/// UE 5.5 (`ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES`): changes only
+/// the asset-registry data blob (which paksmith does not parse) —
+/// zero summary/tag/export wire impact; the constant exists so the
+/// ceiling rationale can name what 1013 is. UE 5.5 ships exactly
+/// this version. Source: CUE4Parse `EUnrealEngineObjectUE5Version`
+/// (referenced nowhere else in that codebase).
+pub(crate) const VER_UE5_ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES: i32 = 1013;
+
 /// Resolved version snapshot for one parsed asset. Threaded by `&` or
 /// `Copy` into every downstream parser. Cheap to copy (5 × i32).
 ///
@@ -464,6 +500,28 @@ mod tests {
             file_version_ue5: ue5,
             file_version_licensee_ue4: 0,
         }
+    }
+
+    /// Pair-anchors the UE 5.4/5.5 constants against the two
+    /// established neighbours (1009/1010) and each other — the enum is
+    /// consecutive in `EUnrealEngineObjectUE5Version`, so any
+    /// transcription slip breaks an equality here. #643.
+    #[test]
+    fn ue54_version_constants_anchor_consecutively() {
+        assert_eq!(VER_UE5_DATA_RESOURCES, 1009);
+        assert_eq!(VER_UE5_SCRIPT_SERIALIZATION_OFFSET, 1010);
+        assert_eq!(
+            VER_UE5_PROPERTY_TAG_EXTENSION,
+            VER_UE5_SCRIPT_SERIALIZATION_OFFSET + 1
+        );
+        assert_eq!(
+            VER_UE5_PROPERTY_TAG_COMPLETE_TYPE_NAME,
+            VER_UE5_PROPERTY_TAG_EXTENSION + 1
+        );
+        assert_eq!(
+            VER_UE5_ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES,
+            VER_UE5_PROPERTY_TAG_COMPLETE_TYPE_NAME + 1
+        );
     }
 
     #[test]

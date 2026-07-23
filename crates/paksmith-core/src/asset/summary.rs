@@ -58,29 +58,28 @@ const MAX_ADDITIONAL_PACKAGES_TO_COOK_COUNT: i32 = 4_096;
 /// discarded i32; cap bounds the CPU loop.
 const MAX_CHUNK_ID_COUNT: i32 = 65_536;
 
-/// Phase 2a ceiling on `FileVersionUE5` (exclusive). Verified against
+/// Ceiling on `FileVersionUE5` (exclusive). Verified against
 /// CUE4Parse's `EUnrealEngineObjectUE5Version` enum
 /// (`CUE4Parse/UE4/Versions/ObjectVersion.cs`):
 ///
-/// - `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION = 1011`
-///   adds a new byte after `HasPropertyGuid` in `FPropertyTag`.
-///   Phase 2b's tag reader does not handle this and would misparse.
-/// - `PROPERTY_TAG_COMPLETE_TYPE_NAME = 1012` replaces the legacy
-///   FName-typed tag with a tree-based type-name representation.
-///   Phase 2b's tag reader does not handle this at all.
-/// - `PACKAGE_SAVED_HASH = 1016` replaces the summary's `FGuid` with
-///   an `FIoHash` (different size + shape).
+/// Accepted: 1000–1013 inclusive — UE 5.0 (1004) through UE 5.5
+/// (1013). The property-tag wire breaks at
+/// `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION = 1011`
+/// (extension + serialization-control bytes) and
+/// `PROPERTY_TAG_COMPLETE_TYPE_NAME = 1012` (tree-based type names,
+/// flag-gated tag tail, `Array<Struct>` inner-tag elision — the
+/// version UE 5.4 ships) are handled by the tag reader as of #643.
+/// `ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES = 1013` (UE 5.5) changes
+/// only the asset-registry blob, which paksmith does not parse.
 ///
-/// The earliest UE5 version that breaks Phase 2's readers is therefore
-/// `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION = 1011` (an
-/// FPropertyTag wire-format break, not an export break as a prior draft
-/// of this plan asserted). Accept versions 1000–1010 inclusive; reject
-/// 1011+. The `ObjectExport.package_guid` removal at version 1005, the
-/// `is_inherited_instance` addition at 1006, the `generate_public_hash`
-/// addition at 1003, the `data_resource_offset` summary addition at
-/// 1009, etc. are all WITHIN the accepted range and are handled with
-/// conditional reads (see Tasks 7–9).
-pub const FIRST_UNSUPPORTED_UE5_VERSION: i32 = 1011;
+/// Rejected: 1014+ —
+/// - `METADATA_SERIALIZATION_OFFSET = 1014` adds a summary
+///   `MetaDataOffset` i32 the summary reader does not consume, which
+///   would desync every subsequent summary field.
+/// - `VERSE_CELLS = 1015` adds four cell-table summary fields;
+///   `PACKAGE_SAVED_HASH = 1016` replaces the summary's `FGuid` with
+///   an `FIoHash` and moves `TotalHeaderSize`.
+pub const FIRST_UNSUPPORTED_UE5_VERSION: i32 = 1014;
 
 /// `PKG_FilterEditorOnly` — UE's `EPackageFlags` bit for "this archive
 /// was cooked and stripped of editor-only state". Cooked game archives
@@ -256,7 +255,7 @@ impl PackageSummary {
     /// - [`AssetParseFault::UnsupportedFileVersionUE4`] if
     ///   `file_version_ue4 < VER_UE4_NAME_HASHES_SERIALIZED` (504).
     /// - [`AssetParseFault::UnsupportedFileVersionUE5`] if
-    ///   `file_version_ue5 >= FIRST_UNSUPPORTED_UE5_VERSION` (1011).
+    ///   `file_version_ue5 >= FIRST_UNSUPPORTED_UE5_VERSION` (1014).
     /// - [`AssetParseFault::NegativeValue`] (with field
     ///   [`AssetWireField::TotalHeaderSize`], [`AssetWireField::GenerationCount`],
     ///   [`AssetWireField::AdditionalPackagesToCookCount`], or
@@ -945,14 +944,14 @@ mod tests {
     }
 
     /// `legacy_file_version = -9` is the UE 5.4+ marker. Within
-    /// paksmith's accepted UE5 ceiling (< 1011), -9 introduces no
+    /// paksmith's accepted UE5 ceiling (< 1014), -9 introduces no
     /// new wire fields beyond what -8 emits (PACKAGE_SAVED_HASH is at
-    /// 1015, above the ceiling). Round-trip must accept the value.
+    /// 1016, above the ceiling). Round-trip must accept the value.
     #[test]
     fn ue5_legacy_minus_nine_round_trip() {
         let mut s = minimal_ue4_27_summary();
         s.version.legacy_file_version = -9;
-        s.version.file_version_ue5 = Some(1010); // Phase 2a max
+        s.version.file_version_ue5 = Some(1010);
         s.soft_object_paths_count = Some(0);
         s.soft_object_paths_offset = Some(0);
         s.names_referenced_from_export_data_count = Some(0);
@@ -1079,22 +1078,57 @@ mod tests {
         ));
     }
 
+    /// The exact ceiling boundary (#643): 1014
+    /// (`METADATA_SERIALIZATION_OFFSET`, unread summary field) and
+    /// above are rejected with the version echoed back.
     #[test]
     fn rejects_ue5_above_ceiling() {
-        let mut buf = vec![];
-        buf.extend_from_slice(&PACKAGE_FILE_TAG.to_le_bytes());
-        buf.extend_from_slice(&(-8i32).to_le_bytes());
-        buf.extend_from_slice(&(-1i32).to_le_bytes());
-        buf.extend_from_slice(&(522i32).to_le_bytes()); // ue4
-        buf.extend_from_slice(&(1011i32).to_le_bytes()); // ue5 — first unsupported
-        let err = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap_err();
-        assert!(matches!(
-            err,
-            PaksmithError::AssetParse {
-                fault: AssetParseFault::UnsupportedFileVersionUE5 { version: 1011, .. },
-                ..
-            }
-        ));
+        for ue5 in [1014i32, 1015, 1016] {
+            let mut buf = vec![];
+            buf.extend_from_slice(&PACKAGE_FILE_TAG.to_le_bytes());
+            buf.extend_from_slice(&(-8i32).to_le_bytes());
+            buf.extend_from_slice(&(-1i32).to_le_bytes());
+            buf.extend_from_slice(&(522i32).to_le_bytes()); // ue4
+            buf.extend_from_slice(&ue5.to_le_bytes());
+            let err = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PaksmithError::AssetParse {
+                        fault: AssetParseFault::UnsupportedFileVersionUE5 { version, .. },
+                        ..
+                    } if version == ue5
+                ),
+                "ue5={ue5} must be rejected"
+            );
+        }
+    }
+
+    /// UE 5.4 (1012) and 5.5 (1013) summary versions pass the version
+    /// gate (#643) — the version check no longer rejects them (the
+    /// truncated buffer then fails at the next summary field, NOT with
+    /// UnsupportedFileVersionUE5).
+    #[test]
+    fn accepts_ue5_54_and_55_at_version_gate() {
+        for ue5 in [1011i32, 1012, 1013] {
+            let mut buf = vec![];
+            buf.extend_from_slice(&PACKAGE_FILE_TAG.to_le_bytes());
+            buf.extend_from_slice(&(-8i32).to_le_bytes());
+            buf.extend_from_slice(&(-1i32).to_le_bytes());
+            buf.extend_from_slice(&(522i32).to_le_bytes()); // ue4
+            buf.extend_from_slice(&ue5.to_le_bytes());
+            let err = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap_err();
+            assert!(
+                !matches!(
+                    err,
+                    PaksmithError::AssetParse {
+                        fault: AssetParseFault::UnsupportedFileVersionUE5 { .. },
+                        ..
+                    }
+                ),
+                "ue5={ue5} must pass the version gate, got {err:?}"
+            );
+        }
     }
 
     /// Cooked-only enforcement (Fix 1): an uncooked asset

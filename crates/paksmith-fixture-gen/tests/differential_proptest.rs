@@ -32,9 +32,14 @@
 //!   of the GUID gate) and 520-521 (Gap 1 trigger combined with
 //!   uncooked, which we don't generate anyway).
 //! - **`file_version_ue5` ∈ \{None, Some(1010)\}.** None mostly; the
-//!   1010 case exercises the `SCRIPT_SERIALIZATION_OFFSET` path. Higher
-//!   values are rejected by paksmith (`FIRST_UNSUPPORTED_UE5_VERSION =
-//!   1011`); lower values would need shape variants on each export's
+//!   1010 case exercises the `SCRIPT_SERIALIZATION_OFFSET` path.
+//!   paksmith accepts up to 1013 as of #643, but the differential
+//!   strategy stays capped at 1010: the `unreal_asset` oracle's
+//!   version enum ends at `DATA_RESOURCES` (1009) and it has no
+//!   1011/1012 tag-shape support, so there is no oracle to diff
+//!   against above 1010 (paksmith-only fixtures + hand-verified
+//!   bytes cover 1012/1013 — same posture as the pak v1/v2 gap,
+//!   #637). Lower values would need shape variants on each export's
 //!   `Option<_>` fields that the strategy doesn't currently emit.
 //! - **`legacy_file_version`** paired to `ue5` presence: -7 ↔ None;
 //!   -8 / -9 ↔ Some(1010). Required by paksmith's wire-format
