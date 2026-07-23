@@ -680,7 +680,7 @@ mod tests {
 
         // Boundary: count == MAX_COLLECTION_ELEMENTS is accepted (pins
         // `count > MAX`, not `>= MAX`): exactly-cap bodies decode.
-        let cap = crate::asset::property::max_collection_elements();
+        let cap = crate::asset::property::MAX_COLLECTION_ELEMENTS;
         let mut wire = Vec::with_capacity(4 + cap * 8);
         wire.extend_from_slice(&i32::try_from(cap).unwrap().to_le_bytes());
         for _ in 0..cap {
