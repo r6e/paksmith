@@ -201,9 +201,9 @@ When `bIsVirtual != 0`, the trailing data isn't a flat mip array but
 an `FVirtualTextureBuiltData` record (page table + tile chunks). Far
 less common in cooked content than streaming `Texture2D`; deferred.
 
-### Texture cube / 2D array / volume (issue #648 — implemented)
+### Texture cube / 2D array / volume
 
-The sibling export classes — `UTextureCube`, `UTexture2DArray`,
+Implemented via issue #648. The sibling export classes — `UTextureCube`, `UTexture2DArray`,
 `UVolumeTexture` — share `UTexture2D`'s cooked wire shape end-to-end
 (two `FStripDataFlags`, owner `bCooked`, the same
 `FTexturePlatformData` per-format loop) with exactly **one wire
