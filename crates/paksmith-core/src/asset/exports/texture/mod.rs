@@ -9,12 +9,12 @@
 //! Phase 3e lands incrementally:
 //! - **3e-1**: routes the `Texture2D` class through dispatch and
 //!   decodes **segment 1** (tagged properties).
-//! - **3e-2** ([`texture2d::read_from`]): the **full**
+//! - **3e-2** ([`texture2d::read_from_kind`]): the **full**
 //!   `FTexturePlatformData` header — the version-gated stripped-data
 //!   prefix, `SizeX`, `SizeY`, `PackedData`, `PixelFormat` (3e-2a), then
 //!   the conditional `OptData` / `CPUCopy`, `FirstMipToSerialize`, and
 //!   the mip-count prefix (3e-2b) — into [`crate::asset::Texture2DData`].
-//! - **3e-3** ([`texture2d::read_from`], cont.): the **segment-2 entry**
+//! - **3e-3** ([`texture2d::read_from_kind`], cont.): the **segment-2 entry**
 //!   (`UTexture` / `UTexture2D` `FStripDataFlags` + owner `bCooked` +
 //!   `bSerializeMipData`) that precedes the platform data, then the
 //!   per-mip `FTexture2DMipMap` records — `bCooked` (UE4) + each mip's
@@ -38,7 +38,7 @@
 //!   linear float then tone-mapped (ACES + sRGB) to 8-bit. `PngHandler` (3e-8)
 //!   follows.
 
-//! - **3e-VT-a** ([`texture2d::read_from`], cont.): reads the trailing
+//! - **3e-VT-a** ([`texture2d::read_from_kind`], cont.): reads the trailing
 //!   `bIsVirtual` flag (UE 4.23+) so virtual textures are identified.
 //! - **3e-VT-b1** ([`virtual_textures`]): the structural parse of the
 //!   `FVirtualTextureBuiltData` blob (header, dispatch tables, layer formats)
@@ -51,10 +51,14 @@ pub(crate) mod virtual_textures;
 use crate::PaksmithError;
 use crate::asset::Asset;
 use crate::asset::Texture2DData;
-use crate::asset::exports::texture::pixel_format::{DecodedTexture, PixelFormat, decode_mip};
+use crate::asset::TextureKind;
+use crate::asset::exports::texture::pixel_format::{
+    DecodedTexture, PixelFormat, decode_texture_slab,
+};
 use crate::asset::exports::texture::virtual_textures::flatten_virtual_texture;
 use crate::asset::package::Package;
 use crate::asset::property::primitives::{Property, PropertyValue};
+use crate::error::AssetParseFault;
 
 /// A decoded texture mip as a tightly-packed RGBA8 buffer.
 ///
@@ -82,8 +86,11 @@ pub struct DecodedTextureRgba {
 pub struct TextureInfo {
     /// Index into `Package.payloads` of the `Asset::Texture2D` export.
     pub export_idx: usize,
-    /// Serialized mip dimensions in wire order (index 0 = top serialized mip).
-    /// For virtual textures this is `[(width, height)]` (one entry, full res).
+    /// Decoded mip dimensions in wire order (index 0 = top serialized mip),
+    /// always the size [`decode_texture_mip`] actually produces: for a
+    /// multidim texture (cube/array/volume, #648) each entry is the
+    /// COMPOSITE strip `(width, height × slices)`, and for virtual textures
+    /// it is `[(width, height)]` (one entry, the flattened bitmap).
     pub mips: Vec<(u32, u32)>,
     /// Human-readable pixel format label (`data.pixel_format` for standard
     /// textures; `vt.layer_types[0]` for virtual textures).
@@ -216,13 +223,25 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
             // width·height·4 ≤ the cap and this never fires for a parsed asset; it
             // guards hand-assembled or future uncapped inputs, keeping
             // classify⟂decode agreement explicit.)
-            if !data
+            // For a multidim texture (#648) the decoded image is the
+            // COMPOSITE strip (height × slices), so both the cap screen and
+            // the advertised dims use the same product `decode_texture_slab`
+            // produces — keeping the reported size in lockstep with the
+            // decode, as the VT branch above documents. An invalid slice
+            // count (bad cube PackedData, zero SizeZ) or an over-cap /
+            // overflowing composite declassifies — every decode of that mip
+            // would fail.
+            let composite_mips: Option<Vec<(u32, u32)>> = data
                 .mips
                 .iter()
-                .all(|m| pixel_format::decoded_rgba_bytes_within_cap(m.size_x, m.size_y).is_some())
-            {
-                return None;
-            }
+                .map(|m| {
+                    let slices = export_slice_count(data, m, "<classify>").ok()?;
+                    let h = m.size_y.checked_mul(slices)?;
+                    let _within = pixel_format::decoded_rgba_bytes_within_cap(m.size_x, h)?;
+                    Some((m.size_x, h))
+                })
+                .collect();
+            let composite_mips = composite_mips?;
 
             // Every reported mip is decodable: `read_mip_records` gates the
             // per-mip `FByteBulkData` push on the texture-level
@@ -235,10 +254,9 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
             // truncating the list to the bulk-record count would be a no-op.
             // The `bulk_data[idx].len() == data.mips.len()` invariant is pinned
             // by `decodable_texture_has_one_bulk_record_per_mip`.
-            let mips = data.mips.iter().map(|m| (m.size_x, m.size_y)).collect();
             Some(TextureInfo {
                 export_idx,
-                mips,
+                mips: composite_mips,
                 format_label: data.pixel_format.clone(),
                 is_normal_map,
             })
@@ -272,8 +290,13 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
 ///   mip bytes for `mip_index` (e.g. a texture with `bSerializeMipData = false`).
 ///   [`classify_texture`] already screens these out, so a well-behaved GUI
 ///   caller never hits this path.
+/// - [`AssetParseFault::TextureSliceCountInvalid`](crate::error::AssetParseFault::TextureSliceCountInvalid)
+///   if the texture is multidim (cube/array/volume, #648) and its slice
+///   count is unusable (a non-6 cube `PackedData` count, or a zero mip
+///   `SizeZ`) — raised before any decode work.
 /// - Any decode error from the pixel-format decode layer
-///   (`pixel_format::decode_mip`) or the virtual-texture flatten
+///   (`pixel_format::decode_texture_slab`, which composes multidim slices
+///   and delegates each to `decode_mip`) or the virtual-texture flatten
 ///   (`flatten_virtual_texture`).
 pub fn decode_texture_mip(
     package: &Package,
@@ -347,19 +370,78 @@ pub fn decode_texture_mip(
         })?;
 
     let format = PixelFormat::from_name(&data.pixel_format);
+    let context = format!("texture export {export_idx} mip {mip_index}");
+    // Multidim textures (cube/array/volume, #648): the mip's bulk bytes are
+    // a slab of consecutive slices; compose them into one vertical strip so
+    // the GUI renders the same image the PNG export emits. `slices == 1`
+    // (every TwoD texture) is a decode_mip passthrough.
+    let slices = export_slice_count(data, mip_record, &context)?;
     // Thread the export/mip identity into the decode context so a codec error
     // (unsupported pixel format, size mismatch, over-cap dimensions) names which
     // export and mip failed instead of the opaque "<texture mip>" placeholder —
     // this is a public API, so its errors surface directly to callers.
-    let decoded = decode_mip(
+    let decoded = decode_texture_slab(
         &format,
         &bulk_record.bytes,
         mip_record.size_x,
         mip_record.size_y,
+        slices,
         is_normal_map,
-        &format!("texture export {export_idx} mip {mip_index}"),
+        &context,
     )?;
     Ok(decoded_texture_to_rgba(decoded))
+}
+
+/// The slice count the export layer composes for this texture — the
+/// per-kind policy behind #648's strip output:
+///
+/// - [`TextureKind::TwoD`] → `1`, always. A 2D texture never slices; its
+///   `PackedData` count is not consulted (a corrupt count cannot redirect
+///   the export).
+/// - [`TextureKind::Cube`] → `6`, validated: the `PackedData` slice count
+///   (with the overlapping `HasCpuCopy` bit 29 masked out — `num_slices`
+///   keeps CUE4Parse's raw `GetNumSlices()` convention) must be exactly 6,
+///   else [`AssetParseFault::TextureSliceCountInvalid`]. A plain
+///   `UTextureCube` is definitionally 6 faces; any other count is
+///   out-of-spec wire data (`TextureCubeArray` is not dispatched).
+/// - [`TextureKind::Array`] / [`TextureKind::Volume`] → the **target
+///   mip's own** `SizeZ`. Per-mip because a volume's depth halves with
+///   each mip level (an array's `SizeZ` is its constant `ArraySize`).
+///   Deliberately NOT the top-level `PackedData` count: CUE4Parse folds
+///   `GetNumSlices()` into every mip's height, which is wrong for lower
+///   volume mips (its own `FTexturePlatformData` ctor then silently
+///   REWRITES the volume's `PackedData` slice count from the normalized
+///   `Mips[0].SizeZ` — papering over the inconsistency, not flagging
+///   it). `SizeZ == 0` fails closed.
+pub(crate) fn export_slice_count(
+    data: &Texture2DData,
+    mip: &crate::asset::Texture2DMipMap,
+    asset_path: &str,
+) -> crate::Result<u32> {
+    let (kind_label, count) = match data.kind {
+        TextureKind::TwoD => return Ok(1),
+        TextureKind::Cube => (
+            "TextureCube",
+            data.num_slices & !texture2d::PACKED_DATA_HAS_CPU_COPY_BIT,
+        ),
+        TextureKind::Array => ("Texture2DArray", mip.size_z),
+        TextureKind::Volume => ("VolumeTexture", mip.size_z),
+    };
+
+    let valid = match data.kind {
+        TextureKind::Cube => count == 6,
+        _ => count >= 1,
+    };
+    if !valid {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::TextureSliceCountInvalid {
+                kind: kind_label,
+                count,
+            },
+        });
+    }
+    Ok(count)
 }
 
 /// Convert the internal [`DecodedTexture`] to the public [`DecodedTextureRgba`].
@@ -476,6 +558,37 @@ mod tests {
             !info.is_normal_map,
             "fixture has no CompressionSettings property"
         );
+    }
+
+    #[test]
+    fn classify_texture_reports_composite_strip_dims_for_multidim() {
+        // A cube's decode yields the 6-face vertical strip, so the GUI's
+        // advertised mip dims must be the COMPOSITE (w, h×slices) — the
+        // same lockstep-with-decode invariant the VT path documents.
+        let fixture = build_minimal_with_decodable_texture2d();
+        let mut pkg = parse_pkg(&fixture.bytes);
+        {
+            let d = sole_texture2d_mut(&mut pkg);
+            d.kind = TextureKind::Cube;
+            d.num_slices = 6;
+            d.is_cubemap = true;
+        }
+        let info = classify_texture(&pkg).expect("cube classifies");
+        assert_eq!(info.mips[0], (4, 24), "6 faces × 4 rows stacked");
+    }
+
+    #[test]
+    fn classify_texture_none_for_an_invalid_multidim_slice_count() {
+        // A cube whose PackedData count is not 6 can never decode — it must
+        // declassify (None), keeping classify⟂decode agreement.
+        let fixture = build_minimal_with_decodable_texture2d();
+        let mut pkg = parse_pkg(&fixture.bytes);
+        {
+            let d = sole_texture2d_mut(&mut pkg);
+            d.kind = TextureKind::Cube;
+            d.num_slices = 5;
+        }
+        assert!(classify_texture(&pkg).is_none());
     }
 
     #[test]
@@ -1023,6 +1136,98 @@ mod tests {
             mips: vec![mip_data(4, 4)],
             properties: crate::asset::property::bag::PropertyBag::tree(props),
             ..Texture2DData::empty()
+        }
+    }
+
+    // --- #648: export slice-count policy ---
+
+    fn kinded(kind: TextureKind, num_slices: u32, mip_size_z: u32) -> Texture2DData {
+        let mut d = texture_data("PF_R8G8B8A8", Vec::new());
+        d.kind = kind;
+        d.num_slices = num_slices;
+        d.mips[0].size_z = mip_size_z;
+        d
+    }
+
+    /// `export_slice_count(&d, &d.mips[0], "t")` — every policy test
+    /// targets the first (exported) mip.
+    fn count_of(d: &Texture2DData) -> crate::Result<u32> {
+        export_slice_count(d, &d.mips[0], "t")
+    }
+
+    #[test]
+    fn slice_count_two_d_is_one_regardless_of_packed_data() {
+        // A plain 2D texture never slices, even with a (corrupt) slice count.
+        let d = kinded(TextureKind::TwoD, 6, 6);
+        assert_eq!(count_of(&d).expect("2d"), 1);
+    }
+
+    #[test]
+    fn slice_count_cube_is_six_and_validated() {
+        let d = kinded(TextureKind::Cube, 6, 1);
+        assert_eq!(count_of(&d).expect("cube"), 6);
+
+        // A cube whose PackedData claims any other count is out-of-spec
+        // (a plain UTextureCube is definitionally 6 faces) — fail closed.
+        let bad = kinded(TextureKind::Cube, 5, 1);
+        match count_of(&bad) {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::TextureSliceCountInvalid { kind, count },
+                ..
+            }) => {
+                assert_eq!(kind, "TextureCube");
+                assert_eq!(count, 5);
+            }
+            other => panic!("expected TextureSliceCountInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slice_count_cube_masks_the_overlapping_cpu_copy_bit() {
+        // `num_slices` keeps CUE4Parse's GetNumSlices() convention of NOT
+        // stripping the overlapping HasCpuCopy bit (bit 29, inside the
+        // slice mask). The slice-count interpretation must mask it out, or
+        // a UE 5.4+ cpu-copy cube would read as ~536M slices.
+        let d = kinded(TextureKind::Cube, 6 | (1 << 29), 1);
+        assert_eq!(count_of(&d).expect("cube"), 6);
+    }
+
+    #[test]
+    fn slice_count_array_and_volume_use_the_target_mips_size_z() {
+        // Array: SizeZ = ArraySize. Volume: SizeZ = the mip's own depth —
+        // deliberately NOT the top-level PackedData count, which CUE4Parse
+        // folds into every mip (wrong for lower volume mips, whose depth
+        // halves; flagged in its own FTexturePlatformData ctor).
+        let a = kinded(TextureKind::Array, 1, 3);
+        assert_eq!(count_of(&a).expect("array"), 3);
+        let v = kinded(TextureKind::Volume, 4, 4);
+        assert_eq!(count_of(&v).expect("volume"), 4);
+
+        // Per-mip, not per-texture: a lower volume mip with halved depth
+        // slices by ITS SizeZ, regardless of mips[0]'s.
+        let mut deep = kinded(TextureKind::Volume, 4, 4);
+        deep.mips.push(crate::asset::Texture2DMipMap {
+            size_x: 2,
+            size_y: 2,
+            size_z: 2,
+        });
+        assert_eq!(
+            export_slice_count(&deep, &deep.mips[1], "t").expect("mip 1"),
+            2
+        );
+    }
+
+    #[test]
+    fn slice_count_array_volume_reject_zero_size_z() {
+        for kind in [TextureKind::Array, TextureKind::Volume] {
+            let zero = kinded(kind, 1, 0);
+            match count_of(&zero) {
+                Err(PaksmithError::AssetParse {
+                    fault: AssetParseFault::TextureSliceCountInvalid { count: 0, .. },
+                    ..
+                }) => {}
+                other => panic!("{kind:?}: expected TextureSliceCountInvalid, got {other:?}"),
+            }
         }
     }
 

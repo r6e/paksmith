@@ -11,7 +11,7 @@
 //! stores `mips` and the parallel bulk records as the **serialized** mips
 //! re-indexed from 0 (the stripped top mips are absent), so the handler renders
 //! the first serialized mip — `bulk.first()` for the bytes and `mips[0]` for the
-//! decode dimensions (via [`selected_mip_dimensions`]). Reading `mips[0]` (NOT
+//! decode record (via [`selected_mip_record`]). Reading `mips[0]` (NOT
 //! the top-level `size_x`/`size_y`, which are the original top mip and mismatch
 //! when `first_mip_to_serialize > 0`) keeps the dimensions in lockstep with the
 //! bytes — both index 0.
@@ -26,9 +26,10 @@
 use crate::PaksmithError;
 use crate::asset::Asset;
 use crate::asset::Texture2DData;
-use crate::asset::exports::texture::pixel_format::{PixelFormat, decode_mip};
+use crate::asset::Texture2DMipMap;
+use crate::asset::exports::texture::pixel_format::{PixelFormat, decode_texture_slab};
 use crate::asset::exports::texture::virtual_textures::flatten_virtual_texture;
-use crate::asset::exports::texture::{has_enum, property_bool};
+use crate::asset::exports::texture::{export_slice_count, has_enum, property_bool};
 use crate::export::{BulkData, FormatHandler};
 
 /// PNG deflate compression level for [`PngHandler`]. Trades encode speed against
@@ -118,8 +119,8 @@ impl FormatHandler for PngHandler {
         // Standard mip chain. The driver passes the export's resolved bulk
         // records; `mips` and the records are the serialized mips re-indexed
         // from 0, so the first serialized mip (the one we render) is index 0 in
-        // both — `bulk.first()` for the bytes, `mips[0]` for the dimensions (via
-        // selected_mip_dimensions), kept in lockstep. An empty slice means no
+        // both — `bulk.first()` for the bytes, `mips[0]` for the record (via
+        // selected_mip_record), kept in lockstep. An empty slice means no
         // serialized mip data (e.g. a UE5.3+ texture with
         // `bSerializeMipData = false`, whose pixels live in the editor-only
         // derived-data cache); a correct caller skips such textures.
@@ -129,14 +130,26 @@ impl FormatHandler for PngHandler {
                 .to_string(),
         })?;
 
-        let (width, height) = selected_mip_dimensions(data)?;
+        // ONE record drives the bytes' interpretation end-to-end: the
+        // decode dimensions and the slice count both come from the same
+        // `Texture2DMipMap` that corresponds to `bulk.first()`'s bytes —
+        // per-mip slice sizing (array/volume SizeZ) can never desync from
+        // the dims.
+        let mip_record = selected_mip_record(data)?;
         let format = PixelFormat::from_name(&data.pixel_format);
 
-        let decoded = decode_mip(
+        // Multidim textures (cube/array/volume, #648): the mip's bulk bytes
+        // are `slices` consecutive images; compose them into one vertical
+        // strip PNG (cube = 6 faces, array/volume = the mip's SizeZ). A
+        // TwoD texture yields `slices == 1` — the plain single-mip decode.
+        let slices = export_slice_count(data, mip_record, "<texture mip>")?;
+
+        let decoded = decode_texture_slab(
             &format,
             &mip.bytes,
-            width,
-            height,
+            mip_record.size_x,
+            mip_record.size_y,
+            slices,
             is_normal_map,
             "<texture mip>",
         )?;
@@ -151,22 +164,22 @@ impl FormatHandler for PngHandler {
     }
 }
 
-/// The dimensions of the exported mip — the first **serialized** mip,
+/// The record of the exported mip — the first **serialized** mip,
 /// `mips[0]`, which is what the handler renders (`bulk.first()`). The texture
 /// reader stores `mips` and the parallel bulk records as the serialized mips
 /// **re-indexed from 0** (the stripped top mips are absent), so the
 /// first-serialized mip is index 0 in both `mips` and `bulk`, and reading
-/// `mips[0]` keeps the dimensions in lockstep with `bulk.first()`'s bytes.
+/// `mips[0]` keeps the record in lockstep with `bulk.first()`'s bytes.
 /// (`first_mip_to_serialize` is the *absolute* index of that mip in the original
-/// chain — NOT an index into the re-indexed `mips`.) Errors if the texture
-/// carries no mip records.
-fn selected_mip_dimensions(data: &Texture2DData) -> crate::Result<(u32, u32)> {
-    data.mips
-        .first()
-        .map(|mip| (mip.size_x, mip.size_y))
-        .ok_or_else(|| PaksmithError::Internal {
-            context: "PngHandler: texture has no mip records to export".to_string(),
-        })
+/// chain — NOT an index into the re-indexed `mips`.) Returning the whole
+/// record makes it the single source for the decode dimensions AND the
+/// slice count (`export_slice_count` is per-mip for array/volume SizeZ),
+/// so the two can never be computed from different mips. Errors if the
+/// texture carries no mip records.
+fn selected_mip_record(data: &Texture2DData) -> crate::Result<&Texture2DMipMap> {
+    data.mips.first().ok_or_else(|| PaksmithError::Internal {
+        context: "PngHandler: texture has no mip records to export".to_string(),
+    })
 }
 
 /// Whether the texture's PNG should be tagged sRGB. HDR formats are already
@@ -221,8 +234,14 @@ fn png_error(stage: &str, err: &png::EncodingError) -> PaksmithError {
 mod tests {
     use super::*;
     use crate::asset::Texture2DMipMap;
+    use crate::asset::exports::texture::pixel_format::decode_mip;
     use crate::asset::property::bag::PropertyBag;
     use crate::asset::property::primitives::{Property, PropertyValue};
+    // Used only by the `__test_utils`-gated slice-composition tests; the
+    // no-feature build (CI's `cargo test -p paksmith-core --no-run` with
+    // -D warnings) would flag it unused without the matching gate.
+    #[cfg(feature = "__test_utils")]
+    use crate::error::AssetParseFault;
     use crate::export::HandlerRegistry;
     use proptest::prelude::*;
 
@@ -318,8 +337,13 @@ mod tests {
 
     // ===== mip selection =====
 
+    /// `(size_x, size_y)` of a mip record — test-side shorthand.
+    fn dims(m: &Texture2DMipMap) -> (u32, u32) {
+        (m.size_x, m.size_y)
+    }
+
     #[test]
-    fn selected_mip_dimensions_is_always_the_first_serialized_mip() {
+    fn selected_mip_record_is_always_the_first_serialized_mip() {
         // The handler renders the first serialized mip — index 0 in the
         // re-indexed `mips`. `first_mip_to_serialize` is the ABSOLUTE index of
         // that mip in the original chain, NOT a re-indexed one, so it must not
@@ -327,19 +351,19 @@ mod tests {
         let mut t = texture("PF_DXT5", vec![]);
         t.mips = vec![mip(64, 64), mip(32, 32), mip(16, 16)];
         t.first_mip_to_serialize = 1;
-        assert_eq!(selected_mip_dimensions(&t).unwrap(), (64, 64));
+        assert_eq!(dims(selected_mip_record(&t).unwrap()), (64, 64));
         t.first_mip_to_serialize = 99;
-        assert_eq!(selected_mip_dimensions(&t).unwrap(), (64, 64));
+        assert_eq!(dims(selected_mip_record(&t).unwrap()), (64, 64));
         t.first_mip_to_serialize = -5;
-        assert_eq!(selected_mip_dimensions(&t).unwrap(), (64, 64));
+        assert_eq!(dims(selected_mip_record(&t).unwrap()), (64, 64));
     }
 
     #[test]
-    fn selected_mip_dimensions_errors_without_mips() {
+    fn selected_mip_record_errors_without_mips() {
         let mut t = texture("PF_DXT5", vec![]);
         t.mips = vec![];
         assert!(matches!(
-            selected_mip_dimensions(&t),
+            selected_mip_record(&t),
             Err(PaksmithError::Internal { .. })
         ));
     }
@@ -354,7 +378,7 @@ mod tests {
         t.size_x = 8;
         t.size_y = 8;
         t.mips = vec![mip(4, 4)];
-        let (w, h) = selected_mip_dimensions(&t).unwrap();
+        let (w, h) = dims(selected_mip_record(&t).unwrap());
         assert_eq!((w, h), (4, 4));
         let decoded = decode_mip(&PixelFormat::Bc3, &SOLID_RED_DXT5, w, h, false, "t")
             .expect("mips[0] 4×4 → the 16-byte block decodes");
@@ -433,6 +457,116 @@ mod tests {
         }
     }
 
+    // ===== #648: multidim slice composition through export() =====
+
+    /// Decode a PNG's pixels + dimensions (test-side inverse of `encode_png`).
+    #[cfg(feature = "__test_utils")]
+    fn decode_png(png_bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes))
+            .read_info()
+            .expect("read PNG");
+        let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
+        let frame = reader.next_frame(&mut buf).expect("decode");
+        buf.truncate(frame.buffer_size());
+        (frame.width, frame.height, buf)
+    }
+
+    /// A `BulkData` wrapping `bytes` as an inline record (test-only ctor).
+    #[cfg(feature = "__test_utils")]
+    fn inline_bulk(bytes: Vec<u8>) -> crate::asset::bulk_data::BulkData {
+        use crate::asset::bulk_data::{BulkData, BulkDataFlags, BulkDataTier, FByteBulkData};
+        let len = u32::try_from(bytes.len()).unwrap();
+        BulkData {
+            record: FByteBulkData::for_test(
+                BulkDataFlags::from(0),
+                i64::from(len),
+                u64::from(len),
+                0,
+            ),
+            tier: BulkDataTier::Inline,
+            bytes,
+        }
+    }
+
+    /// A 2×2 `PF_R8G8B8A8` multidim texture of `slices` solid-fill slices
+    /// (slice `i` filled with byte `10*(i+1)`), plus its slab bulk record.
+    #[cfg(feature = "__test_utils")]
+    fn sliced_texture(
+        kind: crate::asset::TextureKind,
+        num_slices: u32,
+        mip_size_z: u32,
+        slices: u32,
+    ) -> (Texture2DData, crate::asset::bulk_data::BulkData) {
+        let mut data = texture("PF_R8G8B8A8", vec![]);
+        data.kind = kind;
+        data.num_slices = num_slices;
+        data.mips = vec![mip(2, 2)];
+        data.mips[0].size_z = mip_size_z;
+        let mut slab = Vec::new();
+        for i in 0..slices {
+            slab.extend_from_slice(&[u8::try_from(10 * (i + 1)).unwrap(); 16]);
+        }
+        (data, inline_bulk(slab))
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn export_composes_a_cube_into_a_six_face_strip_png() {
+        let (data, bulk) = sliced_texture(crate::asset::TextureKind::Cube, 6, 1, 6);
+        let png = PngHandler::default()
+            .export(&Asset::Texture2D(data), std::slice::from_ref(&bulk))
+            .expect("cube export");
+        let (w, h, rgba) = decode_png(&png);
+        assert_eq!((w, h), (2, 12), "6 faces stacked vertically");
+        assert_eq!(&rgba[..4], &[10, 10, 10, 10], "face 0 on top");
+        assert_eq!(&rgba[rgba.len() - 4..], &[60, 60, 60, 60], "face 5 last");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn export_composes_array_and_volume_by_mip_size_z() {
+        for kind in [
+            crate::asset::TextureKind::Array,
+            crate::asset::TextureKind::Volume,
+        ] {
+            let (data, bulk) = sliced_texture(kind, 1, 3, 3);
+            let png = PngHandler::default()
+                .export(&Asset::Texture2D(data), std::slice::from_ref(&bulk))
+                .expect("sliced export");
+            let (w, h, rgba) = decode_png(&png);
+            assert_eq!((w, h), (2, 6), "{kind:?}: 3 slices stacked");
+            assert_eq!(&rgba[..4], &[10, 10, 10, 10]);
+            assert_eq!(&rgba[rgba.len() - 4..], &[30, 30, 30, 30]);
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn export_rejects_a_cube_with_a_non_six_slice_count() {
+        let (data, bulk) = sliced_texture(crate::asset::TextureKind::Cube, 5, 1, 5);
+        match PngHandler::default().export(&Asset::Texture2D(data), std::slice::from_ref(&bulk)) {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::TextureSliceCountInvalid { kind, count: 5 },
+                ..
+            }) => assert_eq!(kind, "TextureCube"),
+            other => panic!("expected TextureSliceCountInvalid, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn export_two_d_never_slices() {
+        // A TwoD texture with a (stale/corrupt) PackedData slice count and a
+        // single-slice bulk record exports as plain 2×2 — the kind, not the
+        // count, drives composition.
+        let (data, bulk) = sliced_texture(crate::asset::TextureKind::TwoD, 6, 1, 1);
+        let png = PngHandler::default()
+            .export(&Asset::Texture2D(data), std::slice::from_ref(&bulk))
+            .expect("2d export");
+        let (w, h, _) = decode_png(&png);
+        assert_eq!((w, h), (2, 2));
+    }
+
     // ===== decode → encode pixel pipeline =====
     // The full `export()` (parse → resolve real BulkData → export) is covered
     // end-to-end in `paksmith-core-tests`; the BulkData ctor is `__test_utils`-
@@ -503,7 +637,7 @@ mod tests {
     /// test is too). `mips[0]` is 4×4 while the top-level dims are 8×8; a 16-byte
     /// BC3 block is exactly one 4×4 block, so reading (4,4) decodes but reading
     /// (8,8) would demand 64 bytes and fail. Strict discriminant against a
-    /// `selected_mip_dimensions(data)` → `(data.size_x, data.size_y)` substitution.
+    /// `selected_mip_record(data)` → top-level-dims substitution.
     #[cfg(feature = "__test_utils")]
     #[test]
     fn export_reads_first_mip_dims_not_top_level() {

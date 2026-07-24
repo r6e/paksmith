@@ -19,10 +19,12 @@
 #![allow(missing_docs)]
 
 use paksmith_core::Asset;
-use paksmith_core::asset::Package;
+use paksmith_core::asset::{Package, TextureKind};
 use paksmith_core::export::HandlerRegistry;
 use paksmith_core::testing::uasset::{
-    build_minimal_with_decodable_texture2d, build_minimal_with_texture2d,
+    build_minimal_with_decodable_texture2d, build_minimal_with_texture_class,
+    build_minimal_with_texture2d, cooked_decodable_array_body, cooked_decodable_cube_body,
+    cooked_decodable_volume_body,
 };
 
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
@@ -90,6 +92,67 @@ fn texture2d_exports_to_a_valid_png_end_to_end() {
     // RGBA; the exact pixels are package-buffer bytes and not asserted —
     // decode correctness is pinned in-source against the spec golden vector).
     assert_eq!(png_dimensions(&png), (4, 4));
+}
+
+#[test]
+fn texture_cube_dispatches_and_exports_a_six_face_strip_png() {
+    // #648: a "TextureCube"-class export routes through the typed reader
+    // (kind-tagged), its 96-byte mip slab (6 faces × one 4×4 BC3 block)
+    // resolves, and the PNG handler composes the 4×24 vertical face strip.
+    let fixture = build_minimal_with_texture_class("TextureCube", cooked_decodable_cube_body());
+    let (parsed, asset) = parse_texture(&fixture);
+
+    let Asset::Texture2D(data) = &asset else {
+        panic!("expected Asset::Texture2D, got {asset:?}");
+    };
+    assert_eq!(data.kind, TextureKind::Cube);
+    assert_eq!(data.num_slices, 6);
+    assert!(data.is_cubemap, "PackedData bit 31");
+
+    let resolved = parsed.resolve_bulk_for_export(1).expect("resolve mip slab");
+    assert_eq!(resolved[0].bytes.len(), 96, "6 faces × 16-byte BC3 blocks");
+
+    let registry = HandlerRegistry::all_default_handlers();
+    let handler = registry.find_handler(&asset).expect("Texture2D handler");
+    let png = handler.export(&asset, resolved).expect("cube strip PNG");
+    assert_eq!(png_dimensions(&png), (4, 24), "6 faces stacked vertically");
+}
+
+#[test]
+fn texture_array_and_volume_export_per_slice_strip_pngs() {
+    // #648: Texture2DArray (SizeZ = ArraySize = 3) and VolumeTexture
+    // (SizeZ = depth = 2) compose one image per slice into a strip.
+    for (class, body, slices, kind) in [
+        (
+            "Texture2DArray",
+            cooked_decodable_array_body(),
+            3u32,
+            TextureKind::Array,
+        ),
+        (
+            "VolumeTexture",
+            cooked_decodable_volume_body(),
+            2u32,
+            TextureKind::Volume,
+        ),
+    ] {
+        let fixture = build_minimal_with_texture_class(class, body);
+        let (parsed, asset) = parse_texture(&fixture);
+
+        let Asset::Texture2D(data) = &asset else {
+            panic!("{class}: expected Asset::Texture2D, got {asset:?}");
+        };
+        assert_eq!(data.kind, kind, "{class}");
+        assert_eq!(data.mips[0].size_z, slices, "{class}: per-mip SizeZ");
+
+        let resolved = parsed.resolve_bulk_for_export(1).expect("resolve slab");
+        assert_eq!(resolved[0].bytes.len(), 16 * slices as usize, "{class}");
+
+        let registry = HandlerRegistry::all_default_handlers();
+        let handler = registry.find_handler(&asset).expect("handler");
+        let png = handler.export(&asset, resolved).expect("strip PNG");
+        assert_eq!(png_dimensions(&png), (4, 4 * slices), "{class}");
+    }
 }
 
 #[test]

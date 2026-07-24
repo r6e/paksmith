@@ -203,10 +203,68 @@ less common in cooked content than streaming `Texture2D`; deferred.
 
 ### Texture cube / 2D array / volume
 
-Related sibling export classes — `UTextureCube`, `UTexture2DArray`,
-`UVolumeTexture` — share the `FTexturePlatformData` wire shape but
-differ in `PackedData` slice/face counts and mip stride. Each will get
-its own format doc when Phase 3 specializes.
+Implemented via issue #648. The sibling export classes — `UTextureCube`, `UTexture2DArray`,
+`UVolumeTexture` — share `UTexture2D`'s cooked wire shape end-to-end
+(two `FStripDataFlags`, owner `bCooked`, the same
+`FTexturePlatformData` per-format loop) with exactly **one wire
+divergence**: only `UTexture2D` reads the UE 5.3+ `bSerializeMipData`
+bool. The siblings' `Deserialize` bodies (CUE4Parse
+`UTextureCube.cs:41`, `UTexture2DArray.cs:30`, `UVolumeTexture.cs:24` —
+all line cites in this section are pinned to CUE4Parse commit
+`b26351d`, the rev they were verified against; symbols may move in
+later revs)
+call `DeserializeCookedPlatformData(Ar)` with the flag defaulted
+`true`, so a sibling parser must NOT consume the bool even at object
+versions ≥ 1010. Their owner `bCooked` is read unconditionally (no
+`ADD_COOKED_TO_TEXTURE2D` gate — moot at paksmith's UE 4.13+ floor),
+and `UTextureCube`'s UE3-era legacy branches sit below that floor.
+
+paksmith parses all three through the shared `texture2d` reader,
+tagged via `Texture2DData::kind` (set by the dispatch entry, not read
+from the wire). Slice semantics per class:
+
+- **Cube** — `PackedData` slice count 6 + bit 31 set; each mip's bulk
+  bytes hold the 6 faces consecutively. The export layer validates the
+  count (with the overlapping `HasCpuCopy` bit 29 masked) is exactly 6
+  and fails closed otherwise.
+- **Array** — each mip's `SizeZ` = `ArraySize` (constant across mips);
+  the mip bytes hold `SizeZ` independent layers.
+- **Volume** — each mip's `SizeZ` = that mip's depth (halves per mip
+  level); the mip bytes hold `SizeZ` depth slices.
+
+**Export**: one vertical strip PNG per texture — slices stacked in
+wire order, slice 0 on top — decoded per-slice (each slice is a
+standalone block-aligned image). Two deliberate divergences from
+CUE4Parse: (1) its `FTexturePlatformData` ctor multiplies every mip's
+`SizeY` by the top-level `GetNumSlices()` for cube/volume owners —
+wrong for lower volume mips (whose depth has halved), and, because it
+multiplies the *unaligned* per-slice height, block-misaligning for
+small mips of every block-compressed format; the ctor then silently
+rewrites the volume's `PackedData` slice count from the normalized
+`Mips[0].SizeZ`, papering the inconsistency over. paksmith keeps wire
+values raw and uses the target mip's own `SizeZ`. (2) its BC7 decoder
+entry points `Align(4)` the dims before their own `sizeY * sizeZ`
+fold — avoiding the misalignment but silently inflating small slices
+with block padding. paksmith decodes each slice independently, so
+neither quirk applies. `TextureCubeArray` is not dispatched
+(out of #648's scope; falls through to the generic property bag).
+
+**CLI extract policy note**: registering these classes moves them from
+the Generic raw-copy fallback to the typed-conversion path, which — per
+the established typed-asset policy — fails the entry loudly on any
+export error instead of degrading to a raw copy. In particular, a
+legitimate cubemap whose 6-face composite exceeds the 1 GiB decode cap
+(faces above ~6688²) now fails extraction with
+`DecodedTextureBytesExceeded` where it previously extracted as a raw
+`.uasset`. This is the same fail-loud behavior a plain `Texture2D` has
+always had. A failed entry does not abort the batch — every other
+entry still extracts, with the failure reported per-entry and via the
+exit code; a narrower `--filter` (a single include glob; there is no
+negation syntax) avoids re-processing the failing asset. In-tool
+recovery of a failing typed asset's raw bytes is not currently
+supported (`.uasset` entries route to the typed path unconditionally,
+and the `.uexp`/`.ubulk` companions carrying the mip bytes are never
+emitted standalone).
 
 ### Stripped editor-only data
 

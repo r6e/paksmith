@@ -686,10 +686,42 @@ impl SoundWaveData {
     }
 }
 
-/// Parsed contents of a `UTexture2D` export.
+/// Which engine texture class a [`Texture2DData`] was parsed from. The
+/// four classes share the `FTexturePlatformData` wire shape (so they share
+/// the struct), but differ in how the mip bulk data is sliced: a cube's
+/// mip holds 6 consecutive faces, an array's holds `SizeZ` independent
+/// layers, a volume's holds `SizeZ` depth slices. `#[non_exhaustive]`
+/// so `TextureCubeArray` (out of #648's scope) can land later without a
+/// breaking change.
+/// Serializes as the engine class name (`"Texture2D"`, `"TextureCube"`,
+/// `"Texture2DArray"`, `"VolumeTexture"`) — matching the `Asset` enum's
+/// engine-class-cased tag convention and the dispatch-table keys. These
+/// tokens are frozen into the CLI `inspect` JSON (schema_version 1), so
+/// the renames are load-bearing, not cosmetic (`"TwoD"` must never leak
+/// to the wire). Pinned by `texture_kind_serializes_as_engine_class_names`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub enum TextureKind {
+    /// `UTexture2D` — a plain one-slice 2D texture (the Phase 3e baseline).
+    #[serde(rename = "Texture2D")]
+    TwoD,
+    /// `UTextureCube` — six faces stored as consecutive slices in each mip
+    /// (`PackedData` slice count 6, bit 31 set).
+    #[serde(rename = "TextureCube")]
+    Cube,
+    /// `UTexture2DArray` — `SizeZ` independent 2D layers per mip.
+    #[serde(rename = "Texture2DArray")]
+    Array,
+    /// `UVolumeTexture` — `SizeZ` depth slices per mip.
+    #[serde(rename = "VolumeTexture")]
+    Volume,
+}
+
+/// Parsed contents of a `UTexture2D`-family export (2D, cube, array, or
+/// volume — the class is recorded in [`kind`](Self::kind)).
 ///
-/// Phase 3e. Produced by `texture::texture2d::read_from`; consumed by
-/// the upcoming `PngHandler` (3e-8).
+/// Phase 3e. Produced by `texture::texture2d::read_from_kind`; consumed
+/// by the `PngHandler` (3e-8, extended for slice composition in #648).
 ///
 /// **Grows across the 3e milestones.** As of 3e-3 it carries the
 /// segment-1 tagged properties, the full `FTexturePlatformData` header
@@ -707,6 +739,11 @@ pub struct Texture2DData {
     /// standard `FPropertyTag` iterator. See
     /// `docs/formats/texture/texture2d.md` §"Segment 1".
     pub properties: property::bag::PropertyBag,
+    /// Which texture class this was parsed from (set by the dispatch
+    /// entry's reader, not read from the wire). Drives the export layer's
+    /// slice composition; the platform-data fields above/below are
+    /// class-agnostic. #648.
+    pub kind: TextureKind,
     /// Top-mip width in pixels (`FTexturePlatformData::SizeX`). Phase 3e-2.
     pub size_x: u32,
     /// Top-mip height in pixels (`FTexturePlatformData::SizeY`). Phase 3e-2.
@@ -773,6 +810,7 @@ impl Texture2DData {
     pub fn empty() -> Self {
         Self {
             properties: property::bag::PropertyBag::tree(Vec::new()),
+            kind: TextureKind::TwoD,
             size_x: 0,
             size_y: 0,
             pixel_format: String::new(),
@@ -929,6 +967,22 @@ impl AssetContext {
 #[cfg(all(test, feature = "__test_utils"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn texture_kind_serializes_as_engine_class_names() {
+        // These tokens flow verbatim into the CLI `inspect` JSON under
+        // schema_version 1 — once shipped they are frozen. The engine
+        // class names match the `Asset` tag convention and the dispatch
+        // keys; the Rust variant names (`TwoD` etc.) must never leak.
+        for (kind, token) in [
+            (TextureKind::TwoD, "\"Texture2D\""),
+            (TextureKind::Cube, "\"TextureCube\""),
+            (TextureKind::Array, "\"Texture2DArray\""),
+            (TextureKind::Volume, "\"VolumeTexture\""),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).expect("serialize"), token);
+        }
+    }
 
     #[test]
     fn asset_generic_clone_and_debug() {

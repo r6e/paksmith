@@ -395,6 +395,125 @@ pub(crate) fn decode_mip(
     })
 }
 
+/// Decode a multi-slice mip slab — `slices` consecutive `width × height`
+/// images of `format` (a cube's 6 faces, an array's layers, a volume's
+/// depth slices) — into ONE vertically-stacked RGBA8 strip of
+/// `width × (height × slices)` (slice 0 on top, wire order). #648.
+///
+/// Each slice is decoded **independently** via [`decode_mip`]: a
+/// block-compressed slice is a standalone block-aligned image, so small
+/// mips (e.g. a 2×2 face occupying one full 4×4 block) never straddle a
+/// block boundary. (CUE4Parse instead folds the slice count into the
+/// mip's height up front — `FTexturePlatformData` ctor, `SizeY *=
+/// GetNumSlices()` for cube/volume owners — which multiplies the
+/// *unaligned* per-slice height and so block-misaligns small mips of
+/// every block-compressed format; its BC7 decoder entry points `Align(4)`
+/// the dims before their own `sizeY * sizeZ` fold, trading the
+/// misalignment for silent pad inflation instead. Neither fold is
+/// ported.)
+///
+/// # Errors
+/// - [`PaksmithError::Internal`] on `slices == 0` (caller misuse — the
+///   slice-count policy layer guarantees ≥ 1).
+/// - [`AssetParseFault::DecodedTextureBytesExceeded`] if the **composite**
+///   `width × height × slices × 4` exceeds [`MAX_DECODED_TEXTURE_BYTES`]
+///   or overflows (checked before any allocation or per-slice work).
+/// - [`AssetParseFault::UnsupportedPixelFormat`] for a decoder-less format.
+/// - [`AssetParseFault::TextureMipSizeMismatch`] if `encoded.len()` is not
+///   exactly `slices ×` the format's per-slice encoded size.
+/// - Any per-slice fault from [`decode_mip`].
+pub(crate) fn decode_texture_slab(
+    format: &PixelFormat,
+    encoded: &[u8],
+    width: u32,
+    height: u32,
+    slices: u32,
+    is_normal_map: bool,
+    asset_path: &str,
+) -> crate::Result<DecodedTexture> {
+    if slices == 0 {
+        return Err(PaksmithError::Internal {
+            context: "decode_texture_slab called with zero slices \
+                      (the slice-count policy layer guarantees >= 1)"
+                .to_string(),
+        });
+    }
+
+    // Composite cap FIRST: the total strip must fit the same 1 GiB decode
+    // ceiling a single mip is held to. `checked_mul` degrades a u32
+    // height×slices overflow into the same rejection (never wraps into a
+    // small "valid" height). Binding the concrete values here proves them
+    // for the allocation and the returned dims below.
+    let Some((composite_height, total_rgba_bytes)) = height
+        .checked_mul(slices)
+        .and_then(|h| decoded_rgba_bytes_within_cap(width, h).map(|bytes| (h, bytes)))
+    else {
+        let attempted = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|p| p.checked_mul(u64::from(slices)))
+            .and_then(|p| p.checked_mul(RGBA8_BYTES_PER_PIXEL));
+        return Err(fault(
+            asset_path,
+            AssetParseFault::DecodedTextureBytesExceeded {
+                bytes: attempted.unwrap_or(u64::MAX),
+                cap: MAX_DECODED_TEXTURE_BYTES,
+            },
+        ));
+    };
+
+    if slices == 1 {
+        return decode_mip(format, encoded, width, height, is_normal_map, asset_path);
+    }
+
+    // Slab length must be exactly `slices` per-slice images BEFORE any
+    // slicing (the offsets below index by per-slice length). `None` (an
+    // undecodable format) falls through to the same UnsupportedPixelFormat
+    // rejection decode_mip issues.
+    let Some(per_slice) = encoded_len(format, width, height) else {
+        return Err(fault(
+            asset_path,
+            AssetParseFault::UnsupportedPixelFormat {
+                name: format.label().to_string(),
+            },
+        ));
+    };
+    let expected = per_slice.checked_mul(u64::from(slices));
+    if expected != Some(encoded.len() as u64) {
+        return Err(fault(
+            asset_path,
+            AssetParseFault::TextureMipSizeMismatch {
+                expected: expected.unwrap_or(u64::MAX),
+                actual: encoded.len(),
+            },
+        ));
+    }
+
+    // `per_slice × slices == encoded.len()` (a usize) — both fit usize.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "per_slice * slices == encoded.len() (validated above), so per_slice fits usize"
+    )]
+    let per_slice = per_slice as usize;
+    // Composite RGBA8 size is validated <= 1 GiB above; same allocation
+    // posture as decode_mip's output buffer.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "total_rgba_bytes is validated <= MAX_DECODED_TEXTURE_BYTES (1 GiB) < usize::MAX above"
+    )]
+    let mut rgba = Vec::with_capacity(total_rgba_bytes as usize);
+    for i in 0..slices as usize {
+        let slice = &encoded[i * per_slice..(i + 1) * per_slice];
+        let decoded = decode_mip(format, slice, width, height, is_normal_map, asset_path)?;
+        rgba.extend_from_slice(&decoded.rgba);
+    }
+
+    Ok(DecodedTexture {
+        width,
+        height: composite_height,
+        rgba,
+    })
+}
+
 /// Map a decodable [`PixelFormat`] to its [`Codec`] (encoded-size formula +
 /// decoder). `None` for [`PixelFormat::Unknown`] (no decoder), which
 /// [`decode_mip`] turns into [`AssetParseFault::UnsupportedPixelFormat`].
@@ -1250,6 +1369,130 @@ fn fault(asset_path: &str, fault: AssetParseFault) -> PaksmithError {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    // --- #648: multi-slice slab composition ---
+
+    #[test]
+    fn slab_composes_slices_vertically_in_wire_order() {
+        // Two 2×2 PF_R8G8B8A8 slices with distinct fills: the composite is
+        // a 2×4 vertical strip, slice 0 on top (wire order).
+        let slice0 = [10u8; 16];
+        let slice1 = [200u8; 16];
+        let mut slab = Vec::new();
+        slab.extend_from_slice(&slice0);
+        slab.extend_from_slice(&slice1);
+
+        let out =
+            decode_texture_slab(&PixelFormat::R8G8B8A8, &slab, 2, 2, 2, false, "t").expect("slab");
+        assert_eq!((out.width, out.height), (2, 4));
+        assert_eq!(&out.rgba[..16], &slice0);
+        assert_eq!(&out.rgba[16..], &slice1);
+    }
+
+    #[test]
+    fn slab_single_slice_matches_decode_mip() {
+        let encoded = [7u8; 16]; // 2×2 PF_R8G8B8A8
+        let via_slab =
+            decode_texture_slab(&PixelFormat::R8G8B8A8, &encoded, 2, 2, 1, false, "t").expect("s");
+        let via_mip = decode_mip(&PixelFormat::R8G8B8A8, &encoded, 2, 2, false, "t").expect("m");
+        assert_eq!(via_slab, via_mip);
+    }
+
+    #[test]
+    fn slab_rejects_length_not_matching_slice_count() {
+        // 2 slices of 2×2 RGBA8 = 32 bytes expected; feed 24 (1.5 slices).
+        let slab = [0u8; 24];
+        match decode_texture_slab(&PixelFormat::R8G8B8A8, &slab, 2, 2, 2, false, "t") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::TextureMipSizeMismatch { expected, actual },
+                ..
+            }) => {
+                assert_eq!(expected, 32);
+                assert_eq!(actual, 24);
+            }
+            other => panic!("expected TextureMipSizeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slab_rejects_composite_over_cap() {
+        // A single 16384×16384 slice is exactly AT the decode cap, so two
+        // slices exceed it — the composite must be rejected BEFORE any
+        // decode/allocation, regardless of the (empty) slab bytes.
+        match decode_texture_slab(&PixelFormat::R8G8B8A8, &[], 16384, 16384, 2, false, "t") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::DecodedTextureBytesExceeded { bytes, cap },
+                ..
+            }) => {
+                assert_eq!(bytes, MAX_DECODED_TEXTURE_BYTES * 2);
+                assert_eq!(cap, MAX_DECODED_TEXTURE_BYTES);
+            }
+            other => panic!("expected DecodedTextureBytesExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slab_rejects_u32_height_overflow() {
+        // height × slices overflows u32 — must fail the cap check, not wrap.
+        match decode_texture_slab(&PixelFormat::R8G8B8A8, &[], 1, u32::MAX, 2, false, "t") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::DecodedTextureBytesExceeded { .. },
+                ..
+            }) => {}
+            other => panic!("expected DecodedTextureBytesExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slab_rejects_zero_slices() {
+        // Zero slices is caller misuse (the policy layer guarantees >= 1).
+        let err = decode_texture_slab(&PixelFormat::R8G8B8A8, &[], 2, 2, 0, false, "t")
+            .expect_err("zero slices");
+        assert!(matches!(err, PaksmithError::Internal { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn slab_rejects_unknown_format() {
+        match decode_texture_slab(
+            &PixelFormat::Unknown("PF_Bogus".to_string()),
+            &[0u8; 4],
+            1,
+            1,
+            2,
+            false,
+            "t",
+        ) {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::UnsupportedPixelFormat { .. },
+                ..
+            }) => {}
+            other => panic!("expected UnsupportedPixelFormat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slab_composes_block_compressed_slices() {
+        // Two 4×4 BC3 (PF_DXT5) slices — 16 bytes each. Solid-red and
+        // solid-transparent-black blocks; the composite is 4×8 with the red
+        // slice's pixels on top. (Block alignment: each slice decodes
+        // independently, so small mips never straddle a block row.)
+        let red_block: [u8; 16] = [
+            0xFF, 0xFF, 0, 0, 0, 0, 0, 0, // alpha: constant 0xFF
+            0x00, 0xF8, 0x00, 0xF8, 0, 0, 0, 0, // color: red endpoints
+        ];
+        let zero_block = [0u8; 16];
+        let mut slab = Vec::new();
+        slab.extend_from_slice(&red_block);
+        slab.extend_from_slice(&zero_block);
+
+        let out = decode_texture_slab(&PixelFormat::Bc3, &slab, 4, 4, 2, false, "t").expect("slab");
+        assert_eq!((out.width, out.height), (4, 8));
+        // Top-left pixel of slice 0: opaque red.
+        assert_eq!(&out.rgba[..4], &[0xFF, 0, 0, 0xFF]);
+        // First pixel of slice 1 (row 4): transparent black.
+        let row4 = 4 * 4 * 4;
+        assert_eq!(&out.rgba[row4..row4 + 4], &[0, 0, 0, 0]);
+    }
 
     #[test]
     fn from_name_resolves_the_decodable_formats() {

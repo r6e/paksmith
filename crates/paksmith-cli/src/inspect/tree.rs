@@ -305,11 +305,22 @@ fn typed_struct_label(value: &TypedStructValue) -> &'static str {
 }
 
 /// Human label for a non-`Generic` [`Asset`] variant's payload-shape line.
+/// The `Texture2D` variant is shared by the multidim texture classes
+/// (#648), so its label consults `kind` — the engine class name, matching
+/// the export's class row.
 fn typed_variant_label(asset: &Asset) -> &'static str {
+    use paksmith_core::asset::TextureKind;
     match asset {
         Asset::Generic(_) => "generic",
         Asset::DataTable(_) => "DataTable",
-        Asset::Texture2D(_) => "Texture2D",
+        Asset::Texture2D(t) => match t.kind {
+            TextureKind::Cube => "TextureCube",
+            TextureKind::Array => "Texture2DArray",
+            TextureKind::Volume => "VolumeTexture",
+            // TwoD, plus any future #[non_exhaustive] TextureKind variant
+            // until this label learns its name.
+            _ => "Texture2D",
+        },
         Asset::SoundWave(_) => "SoundWave",
         Asset::StaticMesh(_) => "StaticMesh",
         Asset::SkeletalMesh(_) => "SkeletalMesh",
@@ -355,6 +366,55 @@ fn class_name(pkg: &Package, class_index: PackageIndex) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_variant_label_consults_texture_kind() {
+        use paksmith_core::asset::{Texture2DData, TextureKind};
+        // The shared Asset::Texture2D variant carries all four texture
+        // classes (#648); the payload-shape label must show the engine
+        // class, matching the export's class row.
+        for (kind, label) in [
+            (TextureKind::TwoD, "Texture2D"),
+            (TextureKind::Cube, "TextureCube"),
+            (TextureKind::Array, "Texture2DArray"),
+            (TextureKind::Volume, "VolumeTexture"),
+        ] {
+            let mut data = Texture2DData::empty();
+            data.kind = kind;
+            assert_eq!(typed_variant_label(&Asset::Texture2D(data)), label);
+        }
+    }
+
+    #[test]
+    fn typed_variant_label_pins_every_non_texture_arm() {
+        // Each remaining arm gets its own distinct label — a deleted arm
+        // would fall to the non_exhaustive wildcard's "typed" and fail
+        // here. (The Texture2D arm's kinds are pinned above.)
+        use paksmith_core::asset::property::bag::PropertyBag;
+        use paksmith_core::asset::{
+            DataTableData, SkeletalMeshData, SoundWaveData, StaticMeshData,
+        };
+        assert_eq!(
+            typed_variant_label(&Asset::Generic(PropertyBag::opaque(Vec::new()))),
+            "generic"
+        );
+        assert_eq!(
+            typed_variant_label(&Asset::DataTable(DataTableData::empty())),
+            "DataTable"
+        );
+        assert_eq!(
+            typed_variant_label(&Asset::SoundWave(SoundWaveData::empty())),
+            "SoundWave"
+        );
+        assert_eq!(
+            typed_variant_label(&Asset::StaticMesh(StaticMeshData::empty())),
+            "StaticMesh"
+        );
+        assert_eq!(
+            typed_variant_label(&Asset::SkeletalMesh(SkeletalMeshData::empty())),
+            "SkeletalMesh"
+        );
+    }
 
     #[test]
     fn vector_compact() {

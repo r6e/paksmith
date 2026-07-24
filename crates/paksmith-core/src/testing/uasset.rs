@@ -542,11 +542,55 @@ pub fn cooked_decodable_texture2d_body() -> Vec<u8> {
     cooked_texture2d_body_dims(4, 16, 16)
 }
 
+/// A cooked `UTextureCube` body: 4×4 `PF_DXT5`, `PackedData` = 6 slices +
+/// the cubemap bit (31), one mip whose inline slab is 96 bytes — 6 faces ×
+/// one 16-byte BC3 block each. At UE 4.27 the sibling classes' wire is
+/// byte-identical to `UTexture2D`'s (their only divergence,
+/// `bSerializeMipData`, is UE 5.3+), so this reuses the shared writer.
+/// Feed to [`build_minimal_with_texture_class`] with `"TextureCube"`. #648.
+#[must_use]
+pub fn cooked_decodable_cube_body() -> Vec<u8> {
+    // PackedData 0x8000_0006 = slice count 6 | cubemap bit 31, written as
+    // one literal: `6 | (1 << 31)` invites the equivalent `|`→`^` mutant
+    // (disjoint bits) — see MEMORY's disjoint-bit OR-mask class.
+    cooked_texture_body_raw(4, 96, 96, 0x8000_0006, 1)
+}
+
+/// A cooked `UTexture2DArray` body: 4×4 `PF_DXT5`, 3 layers (`PackedData`
+/// slice count 3, mip `SizeZ` 3), 48-byte slab (3 × 16-byte BC3 blocks).
+/// Feed to [`build_minimal_with_texture_class`] with `"Texture2DArray"`. #648.
+#[must_use]
+pub fn cooked_decodable_array_body() -> Vec<u8> {
+    cooked_texture_body_raw(4, 48, 48, 3, 3)
+}
+
+/// A cooked `UVolumeTexture` body: 4×4 `PF_DXT5`, depth 2 (`PackedData`
+/// slice count 2, mip `SizeZ` 2), 32-byte slab (2 × 16-byte BC3 blocks).
+/// Feed to [`build_minimal_with_texture_class`] with `"VolumeTexture"`. #648.
+#[must_use]
+pub fn cooked_decodable_volume_body() -> Vec<u8> {
+    cooked_texture_body_raw(4, 32, 32, 2, 2)
+}
+
 /// Shared body writer for the cooked `UTexture2D` fixtures. `dim` is the
 /// (square) texture + mip size; `element_count` / `size_on_disk` size the
 /// single inline mip's `FByteBulkData` (`offset 0`, so it resolves against the
 /// package buffer's first `size_on_disk` bytes).
 fn cooked_texture2d_body_dims(dim: i32, element_count: i32, size_on_disk: u32) -> Vec<u8> {
+    cooked_texture_body_raw(dim, element_count, size_on_disk, 1, 1)
+}
+
+/// The fully-parameterized cooked-texture body writer behind both the
+/// `UTexture2D` and the #648 multidim fixtures: `packed_data` lands in the
+/// `FTexturePlatformData` `PackedData` field verbatim (slice count low
+/// bits, bit 31 cubemap), `mip_size_z` in the single mip's `SizeZ`.
+fn cooked_texture_body_raw(
+    dim: i32,
+    element_count: i32,
+    size_on_disk: u32,
+    packed_data: u32,
+    mip_size_z: i32,
+) -> Vec<u8> {
     let mut b = Vec::new();
     // Segment 1: tagged properties — just the `None` terminator (FName 0,0) +
     // the UObject object-GUID tail (bSerializeGuid = 0).
@@ -566,7 +610,7 @@ fn cooked_texture2d_body_dims(dim: i32, element_count: i32, size_on_disk: u32) -
     // FTexturePlatformData header.
     b.extend_from_slice(&dim.to_le_bytes()); // SizeX
     b.extend_from_slice(&dim.to_le_bytes()); // SizeY
-    b.extend_from_slice(&1u32.to_le_bytes()); // PackedData (1 slice)
+    b.extend_from_slice(&packed_data.to_le_bytes()); // PackedData
     write_fstring(&mut b, "PF_DXT5"); // PixelFormat
     b.extend_from_slice(&0i32.to_le_bytes()); // FirstMipToSerialize
     b.extend_from_slice(&1i32.to_le_bytes()); // mip count
@@ -579,7 +623,7 @@ fn cooked_texture2d_body_dims(dim: i32, element_count: i32, size_on_disk: u32) -
     b.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile (inline → package start)
     b.extend_from_slice(&dim.to_le_bytes()); // mip SizeX
     b.extend_from_slice(&dim.to_le_bytes()); // mip SizeY
-    b.extend_from_slice(&1i32.to_le_bytes()); // mip SizeZ (UE 4.20+)
+    b.extend_from_slice(&mip_size_z.to_le_bytes()); // mip SizeZ (UE 4.20+)
     // bIsVirtual = 0: the trailing UTexture2D flag the reader consumes for
     // UE 4.23+ content. The default MinimalPackageSpec is UE 4.27 (object
     // version 522 ≥ the 517 VirtualTextures proxy), so the reader's gated read
@@ -643,12 +687,23 @@ pub fn build_minimal_with_decodable_texture2d() -> MinimalPackage {
 }
 
 fn build_minimal_with_texture2d_body(texture_body: Vec<u8>) -> MinimalPackage {
+    build_minimal_with_texture_class("Texture2D", texture_body)
+}
+
+/// Like [`build_minimal_with_texture2d`] but with the texture export's
+/// class name parameterized — `"TextureCube"` / `"Texture2DArray"` /
+/// `"VolumeTexture"` route the body through the #648 multidim dispatch
+/// entries (any other registered class name works the same way). The
+/// export layout is unchanged: `export[0]` Generic, `export[1]` the
+/// texture with `texture_body` as its payload.
+#[must_use]
+pub fn build_minimal_with_texture_class(class_name: &str, texture_body: Vec<u8>) -> MinimalPackage {
     let names = NameTable {
         names: vec![
             FName::new("/Script/CoreUObject"),
             FName::new("Package"),
             FName::new("Default__Object"),
-            FName::new("Texture2D"),
+            FName::new(class_name),
         ],
     };
     let imports = ImportTable {
@@ -2639,6 +2694,65 @@ pub fn build_minimal_licensee_engine_version() -> MinimalPackage {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// Builder pins for the #648 multidim fixture bodies. In-source because
+    /// `cargo-mutants` excludes the `texture_integration` capstone (it lives
+    /// in `paksmith-core-tests`): a body replaced wholesale (`vec![]`) or a
+    /// mutated `PackedData`/`SizeZ`/slab literal must fail HERE, not only in
+    /// the integration crate. Each body is parsed through the real pipeline
+    /// and its kind-relevant wire fields + resolved slab length asserted.
+    #[test]
+    fn multidim_fixture_bodies_parse_with_pinned_slice_fields() {
+        for (class, body, num_slices, is_cubemap, size_z, slab_len) in [
+            (
+                "TextureCube",
+                cooked_decodable_cube_body(),
+                6u32,
+                true,
+                1u32,
+                96usize,
+            ),
+            (
+                "Texture2DArray",
+                cooked_decodable_array_body(),
+                3,
+                false,
+                3,
+                48,
+            ),
+            (
+                "VolumeTexture",
+                cooked_decodable_volume_body(),
+                2,
+                false,
+                2,
+                32,
+            ),
+        ] {
+            let pkg = build_minimal_with_texture_class(class, body);
+            let parsed = crate::asset::Package::read_from(&pkg.bytes, None, None, "tex.uasset")
+                .unwrap_or_else(|e| panic!("{class} fixture must parse: {e}"));
+            match &parsed.payloads[1] {
+                crate::asset::Asset::Texture2D(data) => {
+                    assert_eq!(data.num_slices, num_slices, "{class} PackedData count");
+                    assert_eq!(data.is_cubemap, is_cubemap, "{class} PackedData bit 31");
+                    assert_eq!(data.pixel_format, "PF_DXT5", "{class}");
+                    assert_eq!(data.mips.len(), 1, "{class}");
+                    assert_eq!(data.mips[0].size_z, size_z, "{class} mip SizeZ");
+                    assert_eq!(
+                        (data.mips[0].size_x, data.mips[0].size_y),
+                        (4, 4),
+                        "{class}"
+                    );
+                }
+                other => panic!("{class}: expected Asset::Texture2D, got {other:?}"),
+            }
+            let resolved = parsed
+                .resolve_bulk_for_export(1)
+                .unwrap_or_else(|e| panic!("{class} slab must resolve: {e}"));
+            assert_eq!(resolved[0].bytes.len(), slab_len, "{class} slab length");
+        }
+    }
 
     /// Builder pin for `build_minimal_with_decodable_texture2d` /
     /// `cooked_decodable_texture2d_body`. In-source because `cargo-mutants`
