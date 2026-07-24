@@ -239,6 +239,10 @@ Both dispatch paths exist in parallel on the wire for UE 5.0+ content.
 The chosen path at runtime is determined by `IsLegacyData()`:
 `TileOffsetInChunk == null || TileOffsetInChunk.Length > 0` means
 legacy; otherwise the UE5.0+ `TileOffsetData[]` is the active path.
+(The `null` arm is defensive C# — the three legacy arrays are
+unconditionally serialized in both eras, so the discriminator reduces
+to the data-presence test `Length > 0`, which is exactly paksmith's
+`is_legacy_data`.)
 Pre-UE-5 content always uses the legacy path (the UE5.0+ fields aren't
 serialized). Both paths flatten (issue #649); the discriminator is the
 data-presence test above, never the archive version — a UE5-versioned

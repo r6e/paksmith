@@ -1004,11 +1004,17 @@ fn fill_tile(
 }
 
 /// A texture axis's pixel extent at mip `level`: halved per level, floored
-/// at 1 (the standard mip chain). Shift-safe: a `level` past the bit width
-/// (possible — `level` is bounded by the fencepost-array length, up to
-/// `MAX_VT_ARRAY_ENTRIES`, not by 32) degrades to the 1-pixel floor instead
-/// of a debug-panic shift. #649 (legacy grids).
+/// at 1 (the standard mip chain) — EXCEPT a zero base, which stays 0 so a
+/// malformed zero-dimension legacy VT produces a zero-axis grid and hits
+/// `flatten_geometry`'s zero-dimension rejection, exactly like the UE5
+/// path (fail-closed, not floored into a renderable 1×N grid). Shift-safe:
+/// a `level` past the bit width (possible — `level` is bounded by the
+/// fencepost-array length, up to `MAX_VT_ARRAY_ENTRIES`, not by 32)
+/// degrades to the 1-pixel floor instead of a debug-panic shift. #649.
 fn level_pixel_dim(base: u32, level: usize) -> u32 {
+    if base == 0 {
+        return 0;
+    }
     u32::try_from(level)
         .ok()
         .and_then(|l| base.checked_shr(l))
@@ -2363,6 +2369,34 @@ mod tests {
         // divisor as 1 defensively.
         vt.num_layers = 0;
         assert_eq!(vt.tile_grid_for(0).unwrap().max_address, 8);
+    }
+
+    #[test]
+    fn zero_dimension_legacy_vt_fails_closed() {
+        // A 0-width (or 0-height) legacy VT must produce a zero-axis grid
+        // and hit flatten_geometry's zero-dimension rejection — matching
+        // the UE5 path — NOT get floored into a renderable 1×N grid
+        // (Copilot round 1). Pins level_pixel_dim's zero-base guard.
+        for (w, h) in [(0u32, 64u32), (64, 0)] {
+            let vt = VirtualTextureData {
+                num_layers: 1,
+                num_mips: 1,
+                width: w,
+                height: h,
+                tile_size: 32,
+                tile_index_per_mip: vec![0, 4],
+                tile_offset_in_chunk: vec![0],
+                ..Default::default()
+            };
+            let grid = vt.tile_grid_for(0).expect("grid resolves");
+            assert_eq!(grid.width.min(grid.height), 0, "{w}x{h}: zero axis");
+            let err = vt.flatten_geometry().expect_err("zero-dim rejected");
+            assert!(
+                matches!(err, PaksmithError::UnsupportedFeature { ref context }
+                    if context.contains("zero dimension")),
+                "{w}x{h}: got {err:?}"
+            );
+        }
     }
 
     #[test]
