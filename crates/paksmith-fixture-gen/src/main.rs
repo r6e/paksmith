@@ -558,7 +558,7 @@ fn main() {
     );
     let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
     let mut uasset_written = 0;
-    let uasset_total = 8;
+    let uasset_total = 9;
 
     let uasset_path = out_dir.join("minimal_uasset_v5.uasset");
     if let Err(e) = uasset::write_minimal_ue4_27(&uasset_path) {
@@ -623,6 +623,20 @@ fn main() {
             "  {} ({} bytes)",
             uptnl_pak_path.display(),
             std::fs::metadata(&uptnl_pak_path).map_or(0, |m| m.len())
+        );
+    }
+
+    // Issue #651: unversioned uasset pak — pairs with
+    // external_minimal_v0.usmap for mappings-pipeline CLI tests.
+    let unversioned_pak_path = out_dir.join("real_v8b_unversioned.pak");
+    if let Err(e) = uasset::write_minimal_pak_with_unversioned_uasset(&unversioned_pak_path) {
+        failures.push(("real_v8b_unversioned.pak", e.to_string().into()));
+    } else {
+        uasset_written += 1;
+        println!(
+            "  {} ({} bytes)",
+            unversioned_pak_path.display(),
+            std::fs::metadata(&unversioned_pak_path).map_or(0, |m| m.len())
         );
     }
 

@@ -1103,6 +1103,65 @@ pub fn write_minimal_pak_with_uptnl(path: &Path) -> anyhow::Result<()> {
     write_minimal_pak_with_bulk_companion(path, "uptnl")
 }
 
+/// Write `tests/fixtures/real_v8b_unversioned.pak` — a pak whose single
+/// entry `Game/Heroes/Hero.uasset` is an UNVERSIONED uasset
+/// (`PKG_UnversionedProperties`, UE 4.27): class `Hero`, payload
+/// `Health = 100i32, Speed = 600.0f32`. The schema matches the on-disk
+/// `external_minimal_v0.usmap` fixture, so CLI-level tests decode this
+/// pak end-to-end with that mappings file (issue #651 — `extract
+/// --mappings` and mappings-bearing profiles). Without mappings the
+/// entry fails with `UnversionedWithoutMappings`, which is the
+/// before/after those tests pin.
+///
+/// No `unreal_asset` cross-validation here: the reference parser needs
+/// a mappings provider for unversioned assets, and the asset bytes are
+/// already pinned at the wire level by `paksmith-core`'s
+/// `MINIMAL_UNVERSIONED_PAYLOAD_HEX` doc-tests and the
+/// `unversioned_integration` suite. The repak self-test below guards
+/// the pak wrapper.
+pub fn write_minimal_pak_with_unversioned_uasset(path: &Path) -> anyhow::Result<()> {
+    let uasset_bytes = paksmith_core::testing::usmap::build_minimal_unversioned_uasset_bytes();
+
+    // Atomic write via .tmp + rename, mirroring `write_minimal_pak_with_uasset`.
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("path has no filename: {}", path.display()))?
+    ));
+    {
+        let file = File::create(&tmp)?;
+        let mut writer =
+            PakBuilder::new().writer(file, Version::V8B, super::MOUNT_POINT.to_string(), None);
+        writer
+            .write_file("Game/Heroes/Hero.uasset", false, &uasset_bytes)
+            .map_err(|e| anyhow::anyhow!("repak write_file: {e}"))?;
+        let _ = writer
+            .write_index()
+            .map_err(|e| anyhow::anyhow!("repak write_index: {e}"))?;
+    }
+    fs::rename(&tmp, path)?;
+
+    // Self-test: re-open via repak's reader and assert structural facts.
+    let mut reader_file = File::open(path)?;
+    let pak_reader = PakBuilder::new()
+        .reader(&mut reader_file)
+        .map_err(|e| anyhow::anyhow!("repak reader: {e}"))?;
+    let files = pak_reader.files();
+    anyhow::ensure!(
+        files.len() == 1,
+        "expected 1 entry in {}, got {}",
+        path.display(),
+        files.len()
+    );
+    anyhow::ensure!(
+        files[0] == "Game/Heroes/Hero.uasset",
+        "expected entry path 'Game/Heroes/Hero.uasset', got '{}'",
+        files[0]
+    );
+    Ok(())
+}
+
 /// Verify the split-form fixture against `unreal_asset`'s two-reader
 /// `Asset::new(asset, Some(uexp), ...)` API — the reference parser's
 /// dedicated split-asset path. Also re-runs the concat form (header +

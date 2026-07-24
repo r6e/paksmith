@@ -260,6 +260,23 @@ fn anchor_external_minimal_v0_usmap_fixture_bytes() {
 }
 
 #[test]
+fn anchor_real_v8b_unversioned_pak_fixture_bytes() {
+    // Issue #651: pak wrapping the minimal UNVERSIONED uasset (class
+    // `Hero`, `PKG_UnversionedProperties`) whose schema matches
+    // `external_minimal_v0.usmap` — the mappings-pipeline CLI tests
+    // decode the pair end-to-end. Anchors both the in-source
+    // `build_minimal_unversioned_uasset_bytes` builder output and the
+    // repak wrapper against drift.
+    //
+    // To regenerate: `cargo run -p paksmith-fixture-gen`, then
+    // `shasum tests/fixtures/real_v8b_unversioned.pak` and paste below.
+    anchor_fixture_sha1(
+        "real_v8b_unversioned.pak",
+        "62fbf7db1a1636f7a1e33b82c070b630c5cad1ac",
+    );
+}
+
+#[test]
 fn anchor_external_minimal_v4_usmap_fixture_bytes() {
     // Issue #376: externally-produced `.usmap` fixture at version 4
     // (`ExplicitEnumValues`). Exercises every wire-format branch added
