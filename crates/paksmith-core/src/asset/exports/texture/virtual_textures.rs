@@ -282,23 +282,24 @@ impl VirtualTextureData {
     /// (unspecified-but-in-bounds bucket), and a monotonic-but-TRUNCATED
     /// table (fewer than `chunks.len() + 1` fenceposts — the old loop's
     /// missing-`get(i+1)` break defaulted to the last chunk where this
-    /// search can pick an earlier bucket at `t == last`). Both land in the
+    /// search can pick an earlier bucket at or past the last fencepost).
+    /// Both land in the
     /// same checked byte-range slicing downstream, so each divergence is
     /// behavioral on malformed input only, never a safety difference.
     fn chunk_index_legacy(&self, tile_index: u32) -> usize {
         let max = self.chunks.len().saturating_sub(1);
-        let fences = &self.tile_index_per_chunk;
-        match fences.last() {
-            Some(&last) if tile_index <= last => {
-                // Number of fenceposts <= tile_index; the containing range
-                // starts at the previous one. Below-first (0) and past-last
-                // candidates fall back to the last chunk, matching the
-                // oracle's loop (which finds no range and returns `max`).
-                let count = fences.partition_point(|&f| f <= tile_index);
-                count.checked_sub(1).map_or(max, |bucket| bucket.min(max))
-            }
-            _ => max,
-        }
+        // Number of fenceposts <= tile_index; the containing range starts
+        // at the previous one. Below-first (count 0) falls back to the
+        // last chunk, and past-last clamps to it via `.min(max)` (count ==
+        // len, and a well-formed table has `chunks.len() + 1` fenceposts,
+        // so `len - 1 >= max`) — matching the oracle's loop, which finds
+        // no range in either case and returns `max`. No separate
+        // `tile_index <= last` early-out: it would be indistinguishable
+        // from the clamp on every input (an equivalent-mutant construct).
+        self.tile_index_per_chunk
+            .partition_point(|&f| f <= tile_index)
+            .checked_sub(1)
+            .map_or(max, |bucket| bucket.min(max))
     }
 
     /// CUE4Parse `GetTileIndex_Legacy(vLevel, vAddress)` —
