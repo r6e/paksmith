@@ -246,7 +246,9 @@ asset carrying non-empty legacy arrays takes the legacy path, matching
 the oracle.
 
 Two deliberate paksmith divergences from CUE4Parse on the legacy path
-(cites pinned to CUE4Parse commit `b26351d`):
+(this section's claims were verified against CUE4Parse commit
+`b26351d` — newer than the `cf74fc32` pin the rest of this doc was
+originally verified at; the VT sources are unchanged between the two):
 
 - **Per-level grids, computed exactly.** CUE4Parse's
   `GetTileOffsetData` synthesizes every legacy level's grid from the
@@ -262,10 +264,21 @@ Two deliberate paksmith divergences from CUE4Parse on the legacy path
   validity checks. paksmith divides the span by `NumLayers` (divisor
   floored at 1 — a zero layer count parses).
 
-One oracle-parity behavior worth naming: a legacy tile whose offset
-span is zero is "no data" and is skipped **before** codec dispatch
-(CUE4Parse `GetTileData`) — even a constant-fill codec renders that
-cell transparent black.
+Two precision notes on the oracle's shrink: it fires only when the
+level's `MaxAddress > 1`, and — because it divides the mip-0-sized
+bitmap — its deep-level output is *cropped* (`(ceil(W/T)·T) >> L`)
+where paksmith emits *whole tiles* (`ceil((W>>L)/T)·T`, cooked tile
+padding visible). Content agrees on the overlap; only the padding
+differs, and paksmith's classify/decode dims agree by construction.
+
+Zero-span tiles: paksmith treats a legacy tile whose offset span is
+zero as "no data" and skips it **before** codec dispatch — parity with
+`GetTileData`'s data model, but a **deliberate divergence from
+CUE4Parse's decoder**, which never checks the span: its `DecodeVT`
+would raw-copy the chunk's first `packedOutputSize` bytes for such a
+tile (and has no constant-fill special case at all — Black/White/Flat
+fall into the same raw-copy branch). paksmith renders the cell
+transparent black, even for a fill codec.
 
 ### Codec-payload offset width (4.27 boundary)
 
@@ -315,9 +328,8 @@ arrays would over-allocate without this cap.
 
 ### Implementation hardening (recommended for any parser)
 
-A virtual-texture reader (paksmith parses VT structure in
-`asset/exports/texture/virtual_textures.rs`; tile flatten-to-PNG is
-deferred) MUST:
+A virtual-texture reader (paksmith's parse + flatten live in
+`asset/exports/texture/virtual_textures.rs`) MUST:
 
 - **Cap `NumLayers`** at the engine-asserted 8. CUE4Parse uses `Debug.Assert` (no runtime check in release); paksmith MUST validate `NumLayers <= 8` and reject larger values to bound the fixed-length `LayerTypes` and `LayerFallbackColors` array allocations.
 - **Verify all `i32` count prefixes are non-negative** before allocating the counted arrays. The 8 outer counted arrays plus the 2 inner counted arrays inside each `FVirtualTextureTileOffsetData` are all `i32` on wire; negative values cast to `usize` produce `usize::MAX`-adjacent allocations. Per-array byte-budget: `4 × count` for the `u32[]` arrays; per `FVirtualTextureTileOffsetData` the budget is `12 + 4 + 4 × addresses_count + 4 + 4 × offsets_count = 20 + 4 × (addresses_count + offsets_count)` bytes (12-byte fixed header + 2 separate `i32` count prefixes + per-entry `u32` for each array).

@@ -199,7 +199,9 @@ are absent because their gating bits are zero.
 
 When `bIsVirtual != 0`, the trailing data isn't a flat mip array but
 an `FVirtualTextureBuiltData` record (page table + tile chunks). Far
-less common in cooked content than streaming `Texture2D`; deferred.
+less common in cooked content than streaming `Texture2D`. Parsed and
+flattened to PNG for both dispatch eras — see
+[`virtual-textures.md`](virtual-textures.md).
 
 ### Texture cube / 2D array / volume
 
@@ -362,8 +364,8 @@ See `docs/security/allocation-caps.md` for the broader policy.
   above. No Rust counterpart in the surveyed ecosystem decodes
   `Texture2D` exports.
 - **Known divergences:** none currently known. The per-mip records,
-  the BCn/ASTC/ETC decoders, and `PngHandler` all ship; only the
-  virtual-texture page-table flatten step is deferred.
+  the BCn/ASTC/ETC decoders, `PngHandler`, and the virtual-texture
+  page-table flatten (both eras, issue #649) all ship.
 
 ## Paksmith implementation
 

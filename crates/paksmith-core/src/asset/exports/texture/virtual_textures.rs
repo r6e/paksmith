@@ -269,24 +269,31 @@ impl VirtualTextureData {
     /// CUE4Parse `GetChunkIndex_Legacy(tileIndex)` — the chunk bucket whose
     /// `[TileIndexPerChunk[i], TileIndexPerChunk[i+1])` range contains
     /// `tile_index`; defaults to the last chunk.
+    ///
+    /// CUE4Parse scans the ranges linearly. This runs **once per grid cell**
+    /// on the legacy flatten path, and the linear scan is the one per-cell
+    /// cost the decode-work cap doesn't tally — with the 256-chunk record
+    /// budget a crafted legacy VT could force `grid cells × 255` range
+    /// compares (#649 security review). The range semantics require the
+    /// fencepost table to be non-decreasing, so `partition_point` finds the
+    /// same bucket in O(log n). For a crafted NON-monotonic table the two
+    /// searches can pick different buckets — both land in the same checked
+    /// byte-range slicing downstream, so the divergence is behavioral on
+    /// malformed input only, never a safety difference.
     fn chunk_index_legacy(&self, tile_index: u32) -> usize {
         let max = self.chunks.len().saturating_sub(1);
-        if let Some(&last) = self.tile_index_per_chunk.last()
-            && tile_index <= last
-        {
-            for i in 0..max {
-                let (Some(&lo), Some(&hi)) = (
-                    self.tile_index_per_chunk.get(i),
-                    self.tile_index_per_chunk.get(i + 1),
-                ) else {
-                    break;
-                };
-                if tile_index >= lo && tile_index < hi {
-                    return i;
-                }
+        let fences = &self.tile_index_per_chunk;
+        match fences.last() {
+            Some(&last) if tile_index <= last => {
+                // Number of fenceposts <= tile_index; the containing range
+                // starts at the previous one. Below-first (0) and past-last
+                // candidates fall back to the last chunk, matching the
+                // oracle's loop (which finds no range and returns `max`).
+                let count = fences.partition_point(|&f| f <= tile_index);
+                count.checked_sub(1).map_or(max, |bucket| bucket.min(max))
             }
+            _ => max,
         }
-        max
     }
 
     /// CUE4Parse `GetTileIndex_Legacy(vLevel, vAddress)` —
@@ -485,7 +492,8 @@ impl VirtualTextureData {
     /// size, no cap-fitting `min_level`, a missing tile grid, an
     /// over-65536-tile grid axis, a zero grid dimension, or a dimension/size
     /// overflow. Legacy (UE4) VTs flatten like UE5 ones (#649) — the
-    /// addressing dispatch lives in `tile_grid_for` / `tile_data`. It does NOT apply the flatten's further *per-tile* sizing
+    /// addressing dispatch lives in `tile_grid_for` / `tile_data`. It does
+    /// NOT apply the flatten's further *per-tile* sizing
     /// checks — the decode-work cap and the per-tile encoded-size-overflow guard
     /// (the deliberate classify⟂decode fidelity line documented on
     /// [`min_level`](Self::min_level)) — so a VT this accepts can still fail the
@@ -530,11 +538,15 @@ impl VirtualTextureData {
         }
 
         // Bitmap dims = tile grid × tile size. CUE4Parse applies a post-hoc
-        // bitmap-shrink factor (divide by 2^level) to correct its legacy
-        // mip-0 grid synthesis, and for a single-tile grid (maxLevel == 0);
+        // bitmap-shrink factor (divide by 2^level, and ONLY when the level's
+        // MaxAddress > 1) to correct its legacy mip-0 grid synthesis;
         // paksmith's `tile_grid_for` computes exact per-level grids up front
-        // (#649), so no correction applies to well-formed content of either
-        // era. (A malformed UE5 VT with a 1×1 grid AND MaxAddress > 1 could
+        // (#649), so no correction factor exists here. Output-dims nuance vs
+        // the oracle for deep legacy levels: paksmith emits whole tiles
+        // (ceil((W>>L)/T)·T — cooked tile padding visible), where the
+        // oracle's shrink (when it fires) emits the cropped (ceil(W/T)·T)>>L.
+        // Content agrees on the overlap; classify⟂decode dims agree by
+        // construction either way. (A malformed UE5 VT with a 1×1 grid AND MaxAddress > 1 could
         // trip CUE4Parse's shrink; paksmith would instead emit a larger
         // zero-padded bitmap — a safe, deliberate divergence on malformed
         // input, never an OOB.) `min_level` already proved
@@ -673,18 +685,18 @@ fn vt_unsupported(context: &str) -> PaksmithError {
     }
 }
 
-/// Flatten a UE5.0+ virtual texture's layer-0 tiles into one tightly-packed
+/// Flatten a virtual texture's layer-0 tiles into one tightly-packed
 /// RGBA8 [`DecodedTexture`] (3e-VT-c2 — port of CUE4Parse
-/// `TextureDecoder.DecodeVT`).
+/// `TextureDecoder.DecodeVT`; both the UE 5.0+ and, per #649, the legacy
+/// UE4 dispatch paths).
 ///
 /// `bulk` is the export's resolved bulk records; a chunk's tile payload is
 /// `bulk[chunk.bulk_record_index]`. Tiles are decoded at the highest-resolution
 /// mip level whose bitmap fits the decode cap, border-stripped, and stitched
 /// into their Z-order grid positions.
 ///
-/// **Scope.** Renders **layer 0** only (compositing deferred). **UE5.0+ only** —
-/// legacy (UE4) VTs return [`PaksmithError::UnsupportedFeature`]. The deprecated
-/// `ZippedGPU` / `Crunch` codecs are unsupported.
+/// **Scope.** Renders **layer 0** only (compositing deferred). The
+/// deprecated `ZippedGPU` / `Crunch` codecs are unsupported.
 ///
 /// **Safety.** Every per-tile read is `packedOutputSize` bytes (trusted —
 /// derived from the layer format and the fixed physical tile size) sliced with
@@ -694,7 +706,7 @@ fn vt_unsupported(context: &str) -> PaksmithError {
 /// zero-tile-size and per-axis tile-count rejections.
 ///
 /// # Errors
-/// [`PaksmithError::UnsupportedFeature`] for a legacy VT, a missing/undecodable
+/// [`PaksmithError::UnsupportedFeature`] for a missing/undecodable
 /// layer-0 format, a VT too large to decode at any level, or a deprecated codec;
 /// plus any [`decode_mip`] fault on a tile's bytes.
 pub(crate) fn flatten_virtual_texture(
@@ -702,7 +714,7 @@ pub(crate) fn flatten_virtual_texture(
     bulk: &[BulkData],
     is_normal_map: bool,
 ) -> crate::Result<DecodedTexture> {
-    // Output-bitmap geometry: legacy rejection, the cap-fitting `min_level`, its
+    // Output-bitmap geometry: the cap-fitting `min_level`, its
     // tile grid, and the bitmap dimensions/size — the single source of truth
     // `classify_texture` also reads, so classify⟂decode dimensions agree by
     // construction. (See `flatten_geometry` for each rejection cause.)
@@ -984,9 +996,6 @@ fn fill_tile(
     }
 }
 
-/// `numerator / denominator` rounded up (CUE4Parse `DivideAndRoundUp`). `0`
-/// when `denominator == 0` (CUE4Parse would divide by zero); the guard also
-/// keeps [`u32::div_ceil`] from panicking.
 /// A texture axis's pixel extent at mip `level`: halved per level, floored
 /// at 1 (the standard mip chain). Shift-safe: a `level` past the bit width
 /// (possible — `level` is bounded by the fencepost-array length, up to
@@ -1000,6 +1009,9 @@ fn level_pixel_dim(base: u32, level: usize) -> u32 {
         .max(1)
 }
 
+/// `numerator / denominator` rounded up (CUE4Parse `DivideAndRoundUp`). `0`
+/// when `denominator == 0` (CUE4Parse would divide by zero); the guard also
+/// keeps [`u32::div_ceil`] from panicking.
 fn divide_round_up(numerator: u32, denominator: u32) -> u32 {
     if denominator == 0 {
         return 0;
@@ -2176,11 +2188,8 @@ mod tests {
         assert_eq!(vt.tile_grid_for(1).unwrap().max_address, 1);
     }
 
-    // --- #649: exact per-level legacy grids (deliberate oracle divergence:
-    // CUE4Parse synthesizes every legacy level's grid from MIP-0 tile counts
-    // and corrects the bitmap size downstream by dividing by 2^level; its
-    // MaxAddress is the raw tileIndex-slot span, over-counting by NumLayers.
-    // paksmith computes the real per-level extents up front.) ---
+    // --- #649 exact per-level legacy grids; divergence rationale on
+    // `tile_grid_for`. ---
 
     #[test]
     fn tile_grid_for_legacy_uses_per_level_tile_counts() {
@@ -2612,6 +2621,43 @@ mod tests {
     }
 
     #[test]
+    fn flatten_legacy_non_pow2_grid_renders_the_morton_corner() {
+        // Discriminating non-pow2 case (R1 general finding): on a 3×3 grid
+        // the far corner (2,2) has Morton address 12 — Morton space leaves
+        // gaps at 5/7/10/11 — so rendering it needs max_address ≥ 13, i.e.
+        // a fencepost span of 13, NOT the dense 3×3 = 9 tile count. A
+        // regression deriving max_address from width·height would blank
+        // this corner while passing every pow2-grid test.
+        let mut chunk = vt_chunk_codec(VT_CODEC_RAW_GPU);
+        chunk.size_in_bytes = 52; // 13 slots × 4 bytes
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            width: 3,
+            height: 3,
+            tile_size: 1,
+            tile_border_size: 0,
+            tile_index_per_mip: vec![0, 13],
+            tile_index_per_chunk: vec![0, 13],
+            tile_offset_in_chunk: (0..13u32).map(|i| i * 4).collect(),
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![chunk],
+            ..Default::default()
+        };
+        // Slot payloads: address N holds byte value N in all 4 channels.
+        let payload: Vec<u8> = (0..13u8).flat_map(|i| [i; 4]).collect();
+        let out = flatten_virtual_texture(&vt, &[raw_bulk(payload)], false).expect("flatten");
+        assert_eq!((out.width, out.height), (3, 3));
+        // Corner (2,2) = Morton address 12; row-major offset (2·3 + 2)·4.
+        let off = (2 * 3 + 2) * 4;
+        assert_eq!(
+            &out.rgba[off..off + 4],
+            &[12, 12, 12, 12],
+            "(2,2) renders slot 12 — the span-derived bound admits it"
+        );
+    }
+
+    #[test]
     fn flatten_legacy_multi_layer_reads_layer_zero() {
         // Two layers: tileIndex slots stride 2 per address; layer 0 of
         // address N sits at offsets[2N]. The flatten renders layer 0 only.
@@ -2686,10 +2732,10 @@ mod tests {
     #[test]
     fn flatten_legacy_special_fill_codec() {
         // Constant-fill codecs need no payload BYTES on the legacy path, but
-        // the tile must still span a non-zero byte range: the legacy
-        // addressing declares a zero-span tile "no data" BEFORE codec
-        // dispatch (CUE4Parse GetTileData: tileOffset == nextTileOffset →
-        // skip) — pinned separately below. Span 0..4 (chunk size 4) with an
+        // the tile must still span a non-zero byte range: paksmith declares
+        // a zero-span tile "no data" before codec dispatch (per
+        // `GetTileData`'s data model; the oracle's DECODER diverges — see
+        // the zero-span test below). Span 0..4 (chunk size 4) with an
         // empty payload: the fill never reads it.
         let mut chunk = vt_chunk_codec(VT_CODEC_WHITE);
         chunk.size_in_bytes = 4;
@@ -2714,9 +2760,12 @@ mod tests {
 
     #[test]
     fn flatten_legacy_zero_span_tile_is_skipped_even_for_fill_codecs() {
-        // Oracle parity: a legacy tile whose offset span is zero carries no
-        // data and is skipped BEFORE codec dispatch — even a WHITE-codec
-        // chunk renders that cell transparent black.
+        // Parity with `GetTileData`'s no-data contract (zero span = no
+        // tile), and a DELIBERATE divergence from CUE4Parse's decoder,
+        // which never checks the span: it would raw-copy the chunk's
+        // first packedOutputSize bytes (fill codecs included — its DecodeVT
+        // has no fill special-case). paksmith skips the cell BEFORE codec
+        // dispatch — even a WHITE-codec chunk renders it transparent black.
         let mut chunk = vt_chunk_codec(VT_CODEC_WHITE);
         chunk.size_in_bytes = 0; // next fencepost == offset → zero span
         let vt = VirtualTextureData {
