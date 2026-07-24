@@ -24,6 +24,14 @@ overwrites them on every release.
 
 ## [Unreleased]
 
+- **Localization table (`.locres`) support (#646)**: a
+  `FTextLocalizationResource` parser (versions 0-3, legacy/compact/
+  optimized layouts) in the new `paksmith-core` `localization` module,
+  with CSV and JSON exporters. The CLI `extract` command converts
+  `.locres` entries via `--locres-format csv|json` (a parse failure
+  degrades to a raw copy). Hashes are carried opaquely; string indices
+  and offsets are bounds-checked fail-closed.
+
 - **UE 5.4/5.5 asset support (#643)**: the UE5 summary-version ceiling
   moves from 1011 to 1014 (UE 5.0-5.5 accepted). Versioned tagged
   properties gain the 1011 extension + serialization-control bytes and

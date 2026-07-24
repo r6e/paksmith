@@ -153,6 +153,14 @@ pub enum PaksmithError {
         fault: MappingsParseFault,
     },
 
+    /// A `.locres` (FTextLocalizationResource) file failed to parse.
+    /// The structured fault pinpoints the wire field (#646).
+    #[error("locres deserialization failed: {fault}")]
+    LocresParse {
+        /// Structured category + payload for the locres parse fault.
+        fault: LocresParseFault,
+    },
+
     /// The pak footer is malformed or unreadable. The structured
     /// `fault` carries category-specific detail so consumers can
     /// match exhaustively rather than substring-scanning a `String`
@@ -4798,8 +4806,210 @@ impl fmt::Display for CompanionFileKind {
     }
 }
 
-/// Wire-format fault encountered while parsing a `.usmap` mappings file.
-///
+/// Structured fault categories for `.locres`
+/// (`FTextLocalizationResource`) parsing (#646). Wire recipe per
+/// CUE4Parse `FTextLocalizationResource.cs` / `FTextKey.cs` /
+/// `FTextLocalizationResourceString.cs`; see
+/// `docs/formats/data/locres.md`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum LocresParseFault {
+    /// Version byte above the latest supported version (3 =
+    /// `Optimized_CityHash64_UTF16`). Mirrors CUE4Parse's
+    /// `ParserException` on `version > Latest`.
+    #[error(
+        "unsupported locres version {found} (paksmith accepts 0-3; 0 only without the magic prefix)"
+    )]
+    UnsupportedVersion {
+        /// The version byte read after the magic GUID.
+        found: u8,
+    },
+
+    /// A wire field ran past the end of the file.
+    #[error("unexpected EOF reading locres {field}")]
+    UnexpectedEof {
+        /// Which field ran short.
+        field: LocresWireField,
+    },
+
+    /// An on-wire count or length is negative.
+    #[error("negative locres {field}: {value}")]
+    NegativeValue {
+        /// Which field was negative.
+        field: LocresWireField,
+        /// The value read.
+        value: i64,
+    },
+
+    /// An on-wire count exceeds its allocation cap.
+    #[error("locres {field} {value} exceeds maximum {limit}")]
+    CountExceeded {
+        /// Which count exceeded.
+        field: LocresWireField,
+        /// The value read.
+        value: u64,
+        /// The cap.
+        limit: u64,
+    },
+
+    /// The strings-array offset is not a valid strings-array position:
+    /// negative (non-`-1`), past EOF, inside the 25-byte header prefix
+    /// (stage-1), or overlapping the namespace table (stage-2).
+    /// CUE4Parse seeks blindly; paksmith runs the two-stage check.
+    #[error(
+        "locres strings-array offset {offset} is not a valid strings-array position in a {file_len}-byte file"
+    )]
+    StringsOffsetOutOfBounds {
+        /// The i64 offset read from the header.
+        offset: i64,
+        /// Total file length.
+        file_len: u64,
+    },
+
+    /// A key entry's string index is negative or past the end of the
+    /// strings array. CUE4Parse warns on over-range but CRASHES
+    /// (uncaught `IndexOutOfRangeException`) on negative — paksmith
+    /// fails closed on both.
+    #[error("locres string index {index} out of range for the {count}-entry strings array")]
+    StringIndexOutOfRange {
+        /// The i32 index read from the entry.
+        index: i32,
+        /// Strings-array entry count.
+        count: usize,
+    },
+
+    /// An `FString` field is malformed (length `i32::MIN`, length
+    /// exceeding the remaining bytes, or a missing null terminator).
+    #[error("malformed locres FString in {field}: {detail}")]
+    MalformedString {
+        /// Which field held the string.
+        field: LocresWireField,
+        /// What was wrong.
+        detail: LocresStringFault,
+    },
+
+    /// A collection reservation failed (allocator refusal). The
+    /// context names the collection.
+    #[error("locres allocation failed for {context}")]
+    AllocationFailed {
+        /// Which collection could not be reserved.
+        context: LocresAllocationContext,
+    },
+}
+
+/// Wire fields named by [`LocresParseFault`] diagnostics (#646).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LocresWireField {
+    /// The 16-byte magic GUID / version byte header.
+    Header,
+    /// The `i64` localized-strings-array offset.
+    StringsArrayOffset,
+    /// The `i32` strings-array entry count.
+    StringsArrayCount,
+    /// One strings-array entry (`FString` + v2+ `i32 RefCount`).
+    StringsArrayEntry,
+    /// The 4-byte `EntriesCount` field (v2+, skipped).
+    EntriesCount,
+    /// The `u32` namespace count.
+    NamespaceCount,
+    /// A namespace record (v2+ `u32` hash + `FString`).
+    Namespace,
+    /// The `u32` per-namespace key count.
+    KeyCount,
+    /// A key record (v2+ `u32` hash + `FString`).
+    Key,
+    /// The `u32` per-entry source-string hash.
+    SourceStringHash,
+    /// The `i32` string index (v1+) or inline `FString` (v0).
+    LocalizedString,
+}
+
+impl fmt::Display for LocresWireField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Header => "header",
+            Self::StringsArrayOffset => "strings_array_offset",
+            Self::StringsArrayCount => "strings_array_count",
+            Self::StringsArrayEntry => "strings_array_entry",
+            Self::EntriesCount => "entries_count",
+            Self::NamespaceCount => "namespace_count",
+            Self::Namespace => "namespace",
+            Self::KeyCount => "key_count",
+            Self::Key => "key",
+            Self::SourceStringHash => "source_string_hash",
+            Self::LocalizedString => "localized_string",
+        };
+        f.write_str(s)
+    }
+}
+
+/// What was wrong with a malformed locres `FString` (#646).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LocresStringFault {
+    /// Length was `i32::MIN` (negation would overflow).
+    LengthOverflow,
+    /// Length (absolute value, ×2 for UTF-16) exceeds remaining bytes.
+    LengthExceedsFile,
+    /// Length exceeds the per-string cap
+    /// (`MAX_LOCRES_STRING_LEN = 65_536`), before allocation.
+    LengthExceedsCap,
+    /// A `0` code unit / byte appears before the terminator. UE never
+    /// emits embedded NULs; paksmith fails closed (the oracle would
+    /// keep them).
+    EmbeddedNull,
+    /// The UTF-16 body is not valid Unicode (an unpaired surrogate).
+    /// Paksmith fails closed rather than lossy-replacing, matching the
+    /// pak index reader (the oracle stores the raw units).
+    InvalidUtf16,
+    /// A positive-length (UTF-8) body is not valid UTF-8. Positive
+    /// FStrings are UTF-8 per the codebase's FString contract; paksmith
+    /// fails closed (matching the pak index reader).
+    InvalidUtf8,
+    /// The final character was not the required null terminator.
+    MissingNullTerminator,
+}
+
+impl fmt::Display for LocresStringFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::LengthOverflow => "length is i32::MIN",
+            Self::LengthExceedsFile => "length exceeds remaining bytes",
+            Self::LengthExceedsCap => "length exceeds the 65536-unit cap",
+            Self::EmbeddedNull => "embedded null before the terminator",
+            Self::InvalidUtf16 => "invalid UTF-16 (unpaired surrogate)",
+            Self::InvalidUtf8 => "invalid UTF-8",
+            Self::MissingNullTerminator => "missing null terminator",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Collections named by [`LocresParseFault::AllocationFailed`] (#646).
+/// Mirrors [`MappingsAllocationContext`]'s closed-set pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LocresAllocationContext {
+    /// The localized-strings array.
+    StringsArray,
+    /// The namespace list.
+    Namespaces,
+    /// One namespace's key-entry list.
+    KeyEntries,
+}
+
+impl fmt::Display for LocresAllocationContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::StringsArray => "strings array",
+            Self::Namespaces => "namespaces",
+            Self::KeyEntries => "key entries",
+        };
+        f.write_str(s)
+    }
+}
+
 /// Carried by [`PaksmithError::MappingsParse`]. Unlike [`AssetParseFault`]
 /// (hand-rolled `Display`), this enum derives `thiserror::Error`, so each
 /// variant's `#[error(...)]` attribute drives the rendered string directly.
@@ -5908,6 +6118,84 @@ mod tests {
             format!("{err}"),
             "usmap deserialization failed: unsupported usmap compression method 1 (Oodle requires Phase 8 system-library support)"
         );
+    }
+
+    #[test]
+    fn locres_parse_display_pins_rendered_strings() {
+        use LocresParseFault as F;
+        let cases: &[(PaksmithError, &str)] = &[
+            (
+                PaksmithError::LocresParse {
+                    fault: F::UnsupportedVersion { found: 7 },
+                },
+                "locres deserialization failed: unsupported locres version 7 (paksmith accepts 0-3; 0 only without the magic prefix)",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::UnexpectedEof {
+                        field: LocresWireField::NamespaceCount,
+                    },
+                },
+                "locres deserialization failed: unexpected EOF reading locres namespace_count",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::NegativeValue {
+                        field: LocresWireField::StringsArrayCount,
+                        value: -3,
+                    },
+                },
+                "locres deserialization failed: negative locres strings_array_count: -3",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::CountExceeded {
+                        field: LocresWireField::KeyCount,
+                        value: 9,
+                        limit: 4,
+                    },
+                },
+                "locres deserialization failed: locres key_count 9 exceeds maximum 4",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::StringsOffsetOutOfBounds {
+                        offset: 999,
+                        file_len: 100,
+                    },
+                },
+                "locres deserialization failed: locres strings-array offset 999 is not a valid strings-array position in a 100-byte file",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::StringIndexOutOfRange {
+                        index: -1,
+                        count: 2,
+                    },
+                },
+                "locres deserialization failed: locres string index -1 out of range for the 2-entry strings array",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::MalformedString {
+                        field: LocresWireField::Key,
+                        detail: LocresStringFault::MissingNullTerminator,
+                    },
+                },
+                "locres deserialization failed: malformed locres FString in key: missing null terminator",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::AllocationFailed {
+                        context: LocresAllocationContext::StringsArray,
+                    },
+                },
+                "locres deserialization failed: locres allocation failed for strings array",
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(&format!("{err}"), expected);
+        }
     }
 
     #[test]

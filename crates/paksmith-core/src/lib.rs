@@ -41,6 +41,7 @@ pub mod container;
 pub mod digest;
 pub mod error;
 pub mod export;
+pub mod localization;
 pub mod profile;
 
 mod seams;
@@ -111,6 +112,12 @@ pub use export::{
     BulkData, ExportFormat, FormatHandler, GenericHandler, HandlerRegistry, available_formats,
     export_payload,
 };
+
+// #646: localization (.locres) public API — the parsed resource types
+// (mirroring `Usmap`'s crate-root promotion) and the byte-producing
+// exporters.
+pub use export::{locres_to_csv, locres_to_json};
+pub use localization::{LocresEntry, LocresNamespace, LocresResource, LocresVersion};
 
 // Phase 5b: game-profile public API. `GameProfile`, `KeyGuid`, and
 // `ProfileStore` are the load-bearing types that consumers need to manage
@@ -242,6 +249,12 @@ mod send_sync_assertions {
         assert_send_sync::<FText>();
         assert_send_sync::<FTextHistory>();
 
+        // Localization (.locres) — #646
+        assert_send_sync::<LocresResource>();
+        assert_send_sync::<LocresNamespace>();
+        assert_send_sync::<LocresEntry>();
+        assert_send_sync::<LocresVersion>();
+
         // Mappings (.usmap)
         assert_send_sync::<Usmap>();
         assert_send_sync::<ClassSchema>();
@@ -258,6 +271,8 @@ mod send_sync_assertions {
         assert_send_sync::<AssetParseFault>();
         assert_send_sync::<MappingsParseFault>();
         assert_send_sync::<MappingsAllocationContext>();
+        assert_send_sync::<crate::error::LocresParseFault>();
+        assert_send_sync::<crate::error::LocresAllocationContext>();
         assert_send_sync::<CompanionFileKind>();
 
         // Phase 3 export pipeline. These types must all be Send + Sync —

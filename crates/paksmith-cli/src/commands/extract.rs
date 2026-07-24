@@ -56,6 +56,10 @@ pub(crate) struct ExtractArgs {
     #[arg(long, value_enum, default_value_t = DataTableFormat::Csv)]
     pub(crate) datatable_format: DataTableFormat,
 
+    /// Output format for .locres localization tables.
+    #[arg(long, value_enum, default_value_t = DataTableFormat::Csv)]
+    pub(crate) locres_format: DataTableFormat,
+
     /// Worker-thread cap (default: CPU count).
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub(crate) jobs: Option<u32>,
@@ -99,6 +103,7 @@ pub(crate) fn run(
         prefs: FormatPrefs {
             audio: args.audio_format,
             datatable: args.datatable_format,
+            locres: args.locres_format,
         },
     };
     let job = ExtractJob {

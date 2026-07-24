@@ -82,7 +82,7 @@ section "Format inventory" for column semantics.
 | `material/parameter-values.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
 | `data/data-asset.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
 | `data/data-table.md` | complete | complete | `asset/exports/data_table.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
-| `data/locres.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
+| `data/locres.md` | complete | complete | `localization/locres.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
 | `compression/pak-block-framing.md` | complete | complete | `container/pak/index/compression.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `8f56038` |
 | `compression/zlib.md` | complete | complete | `container/pak/mod.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `8f56038` |
 | `compression/lz4.md` | complete | complete | `container/pak/mod.rs` | repak @ `e215472c51db69328b1ce77be2db24d24c1d646b` + CUE4Parse @ `c7e78422ec4858036c9bba5d9d3c55eb197f93c9` | `cfffef7` |

@@ -38,9 +38,10 @@ function for the version's hash algorithm.
 against CUE4Parse[^1] with a working `v2` fixture, hex anchors, and
 a byte-by-byte worked example.
 
-**Paksmith parser status: `not impl`.** Reading `.locres`
-into per-culture JSON/CSV is a Phase 3+ deliverable; this document
-is the implementation reference.
+**Paksmith parser status: `complete`.** `.locres` is parsed by
+`crates/paksmith-core/src/localization/locres.rs` and exported to
+CSV/JSON; the CLI `extract` command converts `.locres` entries via
+`--locres-format` (#646).
 
 ## Versions
 
@@ -86,7 +87,7 @@ hash as a corruption-detection check.
 | offset | size | endian | name | type | semantics |
 |--------|------|--------|------|------|-----------|
 | 0 | 16 | LE | `magic` | `FGuid` | `{0x7574140E, 0xFC034A67, 0x9D90154A, 0x1B7F37C3}` (four `u32` LE — see [`../primitive/fguid.md`](../primitive/fguid.md) for the standard `FGuid` four-word LE layout). Absence indicates a Legacy (v0) file: on mismatch, seek back to offset 0 and use the Legacy parse path. |
-| 16 | 1 | — | `version` | `ELocResVersion` (u8) | `1` = Compact, `2` = Optimized_CRC32, `3` = Optimized_CityHash64_UTF16. Value `0` after magic match is a contradictory state (Legacy has no magic prefix) and should be rejected; see "Implementation hardening". |
+| 16 | 1 | — | `version` | `ELocResVersion` (u8) | `1` = Compact, `2` = Optimized_CRC32, `3` = Optimized_CityHash64_UTF16. Value `0` after a magic match is a contradictory state (Legacy has no magic prefix); paksmith rejects it, see "Implementation hardening". |
 
 The on-disk byte sequence of the magic `FGuid` (four `u32` written
 in little-endian order):
@@ -150,7 +151,7 @@ see "Legacy (v0) layout" further down for v0's distinct shape):
 |-------|------|--------|------|-----------|
 | `KeyHash` | 4 | LE | `u32` | Hash of the key string. **Present only for v2 and v3** — same algorithm as `NamespaceHash`. |
 | `Key` | variable | — | `FString` | Key name (e.g. `"5DD42A4E4B5C7F8A_Continue"`). |
-| `SourceStringHash` | 4 | LE | `u32` | Cooker-side hash of the source string for change-detection. Present in **all** versions (v0/v1/v2/v3) — the oracle reads it unconditionally. Algorithm: matches `NamespaceHash` / `KeyHash` algorithm for v2 (CRC32) and v3 (CityHash64-of-UTF16 low 32). For v0/v1 the algorithm is not pinned by the oracle and is cooker-determined; the runtime does not validate the hash in any version, so the algorithm choice for v0/v1 is informational and not part of the wire-format contract. |
+| `SourceStringHash` | 4 | LE | `u32` | Cooker-side hash of the source string for change-detection. Present in **all** versions (v0/v1/v2/v3) — the oracle reads it unconditionally. Algorithm is **not** verifiable against CUE4Parse — the oracle never computes or validates any `.locres` hash, in any version, so the wire byte is read and carried opaquely. (UE itself computes `SourceStringHash` via `FCrc::StrCrc32` in all versions; the v2→v3 CityHash64 switch documented for `NamespaceHash`/`KeyHash` applies to the `FTextKey` pre-hashes only, not `SourceStringHash`. Paksmith stores all three hashes uninterpreted and validates none of them.) |
 | `StringIndex` | 4 | LE | `i32` | Index into the strings array. **Present only for `Compact` (v1) and later.** Legacy (v0) reads an inline `FString` here instead. On v1+, the source string is `strings_array[StringIndex]`. |
 
 > **Cursor-misalignment trap:** A reader that gates hash-field reads on `>= Compact` instead of `>= Optimized_CRC32` will misalign its read cursor on every key/namespace entry in v1 (Compact) files. The gating must match the wire-table row condition exactly: hashes are v2+, not v1+.
@@ -286,11 +287,11 @@ parser bugs / DoS vectors, not format-spec violations.
   version causes cursor misalignment because per-version field
   layouts differ (e.g., hash fields absent in v1 but present in
   v2+). The reference oracle throws `ParserException` on
-  `versionByte > 3`. Value `0` after magic match is contradictory
-  (Legacy has no magic prefix) and MUST also be rejected on the
-  magic-match path. This is parser correctness, not a style
-  preference — the SHOULD framing used by some lower-impact
-  hardening items does not apply here.
+  `versionByte > 3`. Value `0` after a magic match is contradictory
+  (Legacy has no magic prefix); the oracle does NOT reject it (it
+  parses a legacy body from offset 17, almost certainly garbage) but
+  paksmith fails closed on it — a deliberate divergence. This is
+  parser correctness, not a style preference.
 - **`StringsArrayOffset` bounds-check (two-stage).** When
   `StringsArrayOffset != -1`, the value MUST satisfy `25 <=
   StringsArrayOffset < file_size`. Offsets `[17, 24]` ARE the
@@ -325,12 +326,28 @@ parser bugs / DoS vectors, not format-spec violations.
   call before reading entries. A conservative parser-side cap of
   `2^20 = 1_048_576` per field comfortably exceeds any production
   `.locres` while bounding the worst-case allocation request.
+- **Per-`FString` length cap.** Each `FString`'s length prefix is an
+  independent allocation driver (the `Vec<u16>` / `String` for one
+  namespace/key/localized string). Paksmith caps it at
+  `65_536` code units/bytes (matching the pak index reader's
+  `FSTRING_MAX_LEN`) BEFORE allocating — bounding the per-string
+  allocation independently of the surrounding file size.
+- **Strict string decode.** Positive-length bodies decode as UTF-8
+  and negative-length bodies as UTF-16; invalid encoding (invalid
+  UTF-8, unpaired UTF-16 surrogate) and an embedded NUL before the
+  terminator are structured faults, not lossy replacements or a
+  byte-widen — matching the codebase's pak index reader. The oracle
+  keeps raw bytes/units; UE emits none of these, so this only rejects
+  corrupt/crafted input.
 - **`StringIndex` bounds-check.** Each `StringIndex` MUST be
-  validated as `0 <= idx < NumStrings` before indexing. Out-of-range
-  values: the oracle logs a warning and leaves the entry without a
-  translation; it does NOT attempt any fallback `FString` read on
-  the wire (a fallback would corrupt the read position for the rest
-  of the file).
+  validated as `0 <= idx < NumStrings` before indexing. The oracle's
+  own check is **upper-bound only** (`NumStrings > idx`): a NEGATIVE
+  index passes it and then throws an uncaught `IndexOutOfRangeException`
+  (a crash), while an over-range index is warned and left untranslated.
+  Paksmith fails closed on **both** sides
+  (`LocresParseFault::StringIndexOutOfRange`) — it does not port the
+  oracle's negative-index crash, and it does not attempt any fallback
+  `FString` read (a fallback would corrupt the read position).
 - **`StringsArrayOffset == -1` + non-(-1) `StringIndex`.** When
   the strings array is absent, all `StringIndex` references MUST be
   treated as invalid (effectively empty array). Do not attempt to
@@ -386,18 +403,13 @@ parser bugs / DoS vectors, not format-spec violations.
 
 ## Paksmith implementation
 
-**Parser module:** not yet implemented.
+**Parser module:** `crates/paksmith-core/src/localization/locres.rs`
+(#646). Lives outside `crates/paksmith-core/src/asset/` because
+`.locres` is not a UObject package. Exported to CSV/JSON by
+`crates/paksmith-core/src/export/locres.rs`; the CLI `extract`
+command converts `.locres` entries (`--locres-format csv|json`).
 
-**Parser status:** `not impl`.
-
-**Phase plan:** see `docs/plans/ROADMAP.md` for the Phase 3 work
-that will add the `.locres` reader and Phase 4 CLI integration.
-The module belongs outside `crates/paksmith-core/src/asset/`
-because `.locres` is not a UObject package — a likely home is
-`crates/paksmith-core/src/localization/` with a sibling
-`tests/fixtures/data/` for round-trip tests against this and
-follow-on fixtures (Legacy, v3-CityHash64, `StringsArrayOffset =
--1`, empty namespaces).
+**Parser status:** `complete`.
 
 ## References
 
