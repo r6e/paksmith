@@ -4963,6 +4963,10 @@ pub enum LocresStringFault {
     /// Paksmith fails closed rather than lossy-replacing, matching the
     /// pak index reader (the oracle stores the raw units).
     InvalidUtf16,
+    /// A positive-length (UTF-8) body is not valid UTF-8. Positive
+    /// FStrings are UTF-8 per the codebase's FString contract; paksmith
+    /// fails closed (matching the pak index reader).
+    InvalidUtf8,
     /// The final character was not the required null terminator.
     MissingNullTerminator,
 }
@@ -4975,6 +4979,7 @@ impl fmt::Display for LocresStringFault {
             Self::LengthExceedsCap => "length exceeds the 65536-unit cap",
             Self::EmbeddedNull => "embedded null before the terminator",
             Self::InvalidUtf16 => "invalid UTF-16 (unpaired surrogate)",
+            Self::InvalidUtf8 => "invalid UTF-8",
             Self::MissingNullTerminator => "missing null terminator",
         };
         f.write_str(s)

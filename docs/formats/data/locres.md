@@ -332,11 +332,13 @@ parser bugs / DoS vectors, not format-spec violations.
   `65_536` code units/bytes (matching the pak index reader's
   `FSTRING_MAX_LEN`) BEFORE allocating — bounding the per-string
   allocation independently of the surrounding file size.
-- **Strict string decode.** Invalid UTF-16 (unpaired surrogates) and
-  an embedded NUL before the terminator are structured faults, not
-  lossy replacements — matching the pak index reader. The oracle keeps
-  raw units (a C# string tolerates them); UE emits neither, so this
-  only rejects corrupt/crafted input.
+- **Strict string decode.** Positive-length bodies decode as UTF-8
+  and negative-length bodies as UTF-16; invalid encoding (invalid
+  UTF-8, unpaired UTF-16 surrogate) and an embedded NUL before the
+  terminator are structured faults, not lossy replacements or a
+  byte-widen — matching the codebase's pak index reader. The oracle
+  keeps raw bytes/units; UE emits none of these, so this only rejects
+  corrupt/crafted input.
 - **`StringIndex` bounds-check.** Each `StringIndex` MUST be
   validated as `0 <= idx < NumStrings` before indexing. The oracle's
   own check is **upper-bound only** (`NumStrings > idx`): a NEGATIVE

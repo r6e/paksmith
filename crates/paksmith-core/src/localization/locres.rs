@@ -35,9 +35,11 @@
 //!   (`25 <= offset < file_len`) before seeking, stage-2 (offset must
 //!   not overlap the namespace table) after parsing it. CUE4Parse
 //!   seeks blindly.
-//! - Invalid UTF-16 (unpaired surrogates) and embedded NULs before the
-//!   terminator fail closed — the oracle keeps raw units. UE emits
-//!   neither, so this only rejects corruption; matches the pak reader.
+//! - Strings decode strictly: invalid UTF-8 (positive length) / invalid
+//!   UTF-16 (unpaired surrogate) and embedded NULs before the
+//!   terminator fail closed — the oracle keeps raw bytes/units. UE
+//!   emits none of these, so this only rejects corruption; matches the
+//!   codebase's pak-index FString reader.
 
 use byteorder::{ByteOrder, LittleEndian};
 
@@ -398,9 +400,11 @@ impl Cursor<'_> {
         Ok(LittleEndian::read_i64(self.take(8, field)?))
     }
 
-    /// UE `FString`: `i32 len` — positive = `len` ANSI bytes,
+    /// UE `FString`: `i32 len` — positive = `len` UTF-8 bytes,
     /// negative = `-len × 2` UTF-16-LE bytes, `0` = empty; both
-    /// non-empty forms include and require a null terminator.
+    /// non-empty forms include and require a null terminator. Both
+    /// encodings are decoded strictly (invalid UTF-8 / UTF-16 and
+    /// embedded NULs fail closed).
     fn read_fstring(&mut self, field: LocresWireField) -> crate::Result<String> {
         let len = self.read_i32(field)?;
         let string_fault = |detail| fault(LocresParseFault::MalformedString { field, detail });
@@ -451,7 +455,14 @@ impl Cursor<'_> {
             if body.contains(&0) {
                 return Err(string_fault(LocresStringFault::EmbeddedNull));
             }
-            Ok(body.iter().map(|&b| char::from(b)).collect())
+            // Positive-length FStrings are UTF-8 (see
+            // `docs/formats/primitive/fstring.md` and the pak index
+            // reader); decode strictly. UE only emits this form for
+            // pure-ASCII strings, so real data is unaffected, but
+            // malformed UTF-8 fails closed rather than silently widening.
+            std::str::from_utf8(body)
+                .map(str::to_owned)
+                .map_err(|_| string_fault(LocresStringFault::InvalidUtf8))
         }
     }
 }
@@ -945,6 +956,23 @@ mod tests {
             PaksmithError::LocresParse {
                 fault: LocresParseFault::MalformedString {
                     detail: LocresStringFault::EmbeddedNull,
+                    ..
+                },
+            }
+        ));
+
+        // ANSI positive length with invalid UTF-8 (lone 0x80) fails
+        // closed — positive FStrings are UTF-8, not Latin-1.
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&2i32.to_le_bytes());
+        b.extend_from_slice(&[0x80, 0x00]); // invalid byte + terminator
+        b.extend_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            LocresResource::parse(&b).unwrap_err(),
+            PaksmithError::LocresParse {
+                fault: LocresParseFault::MalformedString {
+                    detail: LocresStringFault::InvalidUtf8,
                     ..
                 },
             }
