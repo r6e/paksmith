@@ -146,9 +146,14 @@ pub async fn load(reader: Arc<PakReader>, path: String) -> AssetLoad {
     let parsed = if let Some(e) = read_err {
         Err(e) // F2: surface the real read error
     } else if should_attempt_parse(&path) {
-        // `mappings = None`: 7a does not load `.usmap`. Unversioned assets that
-        // require a mapping return `UnversionedWithoutMappings`, surfaced here
-        // as a stringified parse error → Properties view shows the reason.
+        // `mappings = None`: the GUI does not load `.usmap` yet. Unversioned
+        // assets that require a mapping return `UnversionedWithoutMappings`,
+        // surfaced here as a stringified parse error → Properties view shows
+        // the reason. #651 follow-up seam: `resolve_pak_context` (used by the
+        // open flow's `resolve_pak_key` sibling) already returns the selected
+        // profile's `MappingsSource`; loading it once at archive-open into
+        // `LoadedArchive` and threading the `Arc<Usmap>` here (and into the
+        // export tasks) is the remaining GUI wiring.
         Package::read_from_reader(&reader, &path, None)
             .map(std::sync::Arc::new)
             .map_err(|e| e.to_string())

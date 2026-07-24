@@ -239,7 +239,8 @@ pub async fn resolve_pak_context(
 fn mappings_for_explicit_key(game: Option<&str>, detect: Option<&Path>) -> Option<MappingsSource> {
     let id: String = if let Some(g) = game {
         g.to_string()
-    } else if let Some(dir) = detect {
+    } else {
+        let dir = detect?;
         match detect_matches(dir) {
             Ok(mut matches) if matches.len() == 1 => matches.remove(0).id,
             Ok(matches) => {
@@ -259,8 +260,6 @@ fn mappings_for_explicit_key(game: Option<&str>, detect: Option<&Path>) -> Optio
                 return None;
             }
         }
-    } else {
-        return None;
     };
     match ProfileStore::load() {
         Ok(store) => profile_mappings_in(&store, &id),
@@ -293,13 +292,20 @@ async fn try_fetch(cfg: &RegistryConfig, now: u64) -> crate::Result<RegistryCach
 
 /// Resolve the AES key for `pak_guid` from a `BTreeMap<KeyGuid, AesKey>`.
 ///
-/// Resolution order: exact GUID match → zero-default (`KeyGuid::ZERO`) →
-/// `NoKeyForGuid` error.
+/// An EMPTY key map is `Ok(None)`: the profile configures no keys at all
+/// (legitimate since #651 — a mappings-only profile for an unencrypted
+/// game), matching `resolve_key`'s `None` semantics; an encrypted pak
+/// then fails loudly downstream at `PakReader::open`. A POPULATED map
+/// resolves exact GUID match → zero-default (`KeyGuid::ZERO`) →
+/// `NoKeyForGuid` error (a genuine key/GUID mismatch).
 fn resolve_within(
     keys: &BTreeMap<KeyGuid, AesKey>,
     id: &str,
     pak_guid: Option<[u8; 16]>,
 ) -> crate::Result<Option<AesKey>> {
+    if keys.is_empty() {
+        return Ok(None);
+    }
     let guid = pak_guid.map_or(KeyGuid::ZERO, KeyGuid::from_bytes);
     let key = keys
         .get(&guid)
@@ -640,7 +646,9 @@ mod tests {
     // A populated BTreeMap with KeyGuid::ZERO must yield Ok(Some(key)).
     // The `-> Ok(None)` mutant would return None despite a matching key being
     // present — the to_hex assertion below catches that.
-    // An empty map must yield Err (NoKeyForGuid path).
+    // An EMPTY map is Ok(None) (mappings-only profile, #651); a populated
+    // map with no matching GUID is Err (NoKeyForGuid) — the pair kills the
+    // `is_empty() -> true` / `-> false` mutants in both directions.
 
     #[test]
     fn resolve_within_zero_key_found() {
@@ -657,9 +665,27 @@ mod tests {
     }
 
     #[test]
-    fn resolve_within_empty_map_errors() {
+    fn resolve_within_empty_map_is_none_not_error() {
+        // #651: a profile with NO keys at all (mappings-only) resolves to
+        // "no key" — an unencrypted pak proceeds; an encrypted one fails
+        // loudly at open. Pre-#651 this was Err(NoKeyForGuid).
         let map: BTreeMap<KeyGuid, crate::AesKey> = BTreeMap::new();
-        let err = resolve_within(&map, "demo", None);
-        assert!(err.is_err(), "empty map must return Err(NoKeyForGuid)");
+        let got = resolve_within(&map, "demo", None).unwrap();
+        assert!(got.is_none(), "empty map must be Ok(None)");
+    }
+
+    #[test]
+    fn resolve_within_populated_map_without_match_errors() {
+        // A POPULATED map with no entry for the pak's GUID (and no
+        // zero-default) is a genuine mismatch → NoKeyForGuid.
+        let hex = "ab".repeat(32);
+        let key = crate::AesKey::from_hex(&hex).unwrap();
+        let mut map = BTreeMap::new();
+        let _ = map.insert(KeyGuid::from_bytes([0xA1; 16]), key);
+        let err = resolve_within(&map, "demo", Some([0xB2; 16]));
+        assert!(
+            err.is_err(),
+            "populated map without a match must stay Err(NoKeyForGuid)"
+        );
     }
 }

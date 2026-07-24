@@ -28,6 +28,52 @@ fn test_keypair() -> (SigningKey, String) {
 }
 
 #[test]
+fn add_with_mappings_shows_source_path() {
+    // #651: `profile add --mappings <path>` persists the source and
+    // `profile show` renders it unredacted (it is not key material).
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args([
+            "profile",
+            "add",
+            "hero",
+            "--name",
+            "Hero",
+            "--mappings",
+            "/maps/hero.usmap",
+        ])
+        .assert()
+        .success();
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "hero"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("mappings: /maps/hero.usmap"),
+        "show must render the mappings path: {stdout}"
+    );
+}
+
+#[test]
+fn show_without_mappings_renders_dash() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "plain", "--name", "P"])
+        .assert()
+        .success();
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "plain"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("mappings: -"),
+        "show must render a dash for absent mappings: {stdout}"
+    );
+}
+
+#[test]
 fn add_list_show_remove_roundtrip() {
     let cfg = tempdir().unwrap();
     // add

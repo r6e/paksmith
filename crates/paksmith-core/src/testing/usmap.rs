@@ -452,7 +452,9 @@ mod tests {
     /// on top of those pinned bytes.
     #[test]
     fn unversioned_asset_decodes_via_paksmith_self_test() {
-        let usmap = Usmap::from_bytes(&build_minimal_usmap_bytes()).expect("Usmap parse");
+        let usmap = std::sync::Arc::new(
+            Usmap::from_bytes(&build_minimal_usmap_bytes()).expect("Usmap parse"),
+        );
         let asset_bytes = build_minimal_unversioned_uasset_bytes();
         let pkg = Package::read_from(&asset_bytes, None, Some(&usmap), "test/Hero.uasset")
             .expect("Package::read_from");

@@ -207,6 +207,57 @@ fn inspect_mappings_nonexistent_file_errors() {
     );
 }
 
+/// #651: a mappings-bearing profile selected via `--game` supplies the
+/// usmap to inspect with no explicit `--mappings` — the unversioned
+/// asset decodes to a property tree instead of exiting 2 with
+/// `UnversionedWithoutMappings`.
+#[test]
+#[allow(
+    clippy::unnecessary_debug_formatting,
+    reason = "Debug formatting of the path IS the TOML string encoding: it \
+              quotes and backslash-escapes (Windows paths) exactly as a TOML \
+              basic string requires; .display() would emit invalid TOML"
+)]
+fn inspect_game_profile_supplies_mappings() {
+    let pak = fixture_path("real_v8b_unversioned.pak");
+    assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
+    let usmap = fixture_path("external_minimal_v0.usmap");
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let dir = config_dir.path().join("paksmith");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("profiles.toml"),
+        format!("[profiles.hero]\nname = \"Hero\"\nmappings = {{ path = {usmap:?} }}\n"),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .env("PAKSMITH_CONFIG_DIR", config_dir.path())
+        .args([
+            "--format",
+            "json",
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Heroes/Hero.uasset",
+            "--game",
+            "hero",
+        ])
+        .output()
+        .expect("run paksmith inspect --game hero");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "profile mappings must decode the unversioned asset; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Health") && stdout.contains("Speed"),
+        "decoded unversioned properties must appear in the JSON: {stdout}"
+    );
+}
+
 #[test]
 fn inspect_json_has_schema_version_first() {
     let pak = fixture_path("real_v8b_uasset.pak");

@@ -100,6 +100,11 @@ pub(crate) struct AddArgs {
     /// Engine version, e.g. 5.3
     #[arg(long)]
     pub(crate) engine_version: Option<String>,
+    /// `.usmap` mappings file this profile supplies to `--game`
+    /// consumers (inspect/extract) for unversioned assets (#651).
+    /// Stored as-given; absolute paths recommended.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) mappings: Option<std::path::PathBuf>,
 }
 
 #[derive(Args)]
@@ -164,7 +169,7 @@ fn add(a: &AddArgs) -> paksmith_core::Result<u8> {
             engine_version: a.engine_version.clone(),
             keys: BTreeMap::new(),
             detect: None,
-            mappings: None,
+            mappings: a.mappings.clone().map(paksmith_core::MappingsSource::Path),
         },
     );
     store.save()?;
@@ -226,6 +231,13 @@ fn show(a: &ShowArgs) -> paksmith_core::Result<u8> {
         "engine_version: {}",
         p.engine_version.as_deref().unwrap_or("-")
     );
+    match &p.mappings {
+        // Not key material — safe to show unredacted.
+        Some(paksmith_core::MappingsSource::Path(path)) => {
+            println!("mappings: {}", path.display());
+        }
+        None => println!("mappings: -"),
+    }
     println!("keys:");
     for (guid, key) in &p.keys {
         if a.show_keys {

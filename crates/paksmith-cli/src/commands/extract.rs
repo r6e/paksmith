@@ -63,6 +63,14 @@ pub(crate) struct ExtractArgs {
     /// Worker-thread cap (default: CPU count).
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub(crate) jobs: Option<u32>,
+
+    /// Optional `.usmap` mappings file. Required for assets whose
+    /// `PKG_UnversionedProperties` flag is set (UE 4.25+ cooked
+    /// content; common in both UE4 and UE5 shipping games) — without
+    /// it every such asset is a per-entry failure. Wins over a
+    /// `--game` profile's mappings source (#651).
+    #[arg(long, value_name = "PATH")]
+    pub(crate) mappings: Option<PathBuf>,
 }
 
 pub(crate) fn run(
@@ -72,8 +80,12 @@ pub(crate) fn run(
     game: Option<&str>,
     detect: Option<&std::path::Path>,
 ) -> paksmith_core::Result<u8> {
-    let key = crate::commands::key_resolve::resolve_pak_key(&args.pak, aes_key, game, detect)?;
-    let reader = Arc::new(match &key {
+    let ctx = crate::commands::key_resolve::resolve_pak_context(&args.pak, aes_key, game, detect)?;
+    let usmap = crate::commands::mappings_arg::resolve_usmap(
+        args.mappings.as_deref(),
+        ctx.mappings.as_ref(),
+    )?;
+    let reader = Arc::new(match &ctx.key {
         Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
         None => PakReader::open(&args.pak)?,
     });
@@ -110,6 +122,7 @@ pub(crate) fn run(
         reader: Arc::clone(&reader),
         registry: &registry,
         cfg: &cfg,
+        mappings: usmap,
     };
 
     // FIX 6: hide progress when stderr is not a TTY (e.g. CI, piped output) so

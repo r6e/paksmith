@@ -38,6 +38,183 @@ fn encrypted_entries_pak() -> std::path::PathBuf {
 mod common;
 use common::FIXTURE_AES_KEY_HEX as AES_KEY_HEX;
 
+/// Pak whose single entry is an UNVERSIONED uasset (class `Hero`); pairs
+/// with `external_minimal_v0.usmap` (issue #651).
+fn unversioned_pak() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/real_v8b_unversioned.pak")
+}
+
+/// The `.usmap` fixture carrying the `Hero { Health, Speed }` schema.
+fn hero_usmap() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/external_minimal_v0.usmap")
+}
+
+/// Seed `$PAKSMITH_CONFIG_DIR/paksmith/profiles.toml` with a `hero`
+/// profile whose mappings source is `usmap_path`.
+#[allow(
+    clippy::unnecessary_debug_formatting,
+    reason = "Debug formatting of the path IS the TOML string encoding: it \
+              quotes and backslash-escapes (Windows paths) exactly as a TOML \
+              basic string requires; .display() would emit invalid TOML"
+)]
+fn seed_hero_profile(config_dir: &std::path::Path, usmap_path: &std::path::Path) {
+    let dir = config_dir.join("paksmith");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("profiles.toml"),
+        format!("[profiles.hero]\nname = \"Hero\"\nmappings = {{ path = {usmap_path:?} }}\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn extract_unversioned_without_mappings_fails_entry() {
+    // Pins the pre-#651 baseline the mappings pipeline exists to fix: an
+    // unversioned asset with NO mappings source is a per-entry failure
+    // (`UnversionedWithoutMappings`) and the run exits 1.
+    let out = tempdir().unwrap();
+    let mut cmd = Command::cargo_bin("paksmith").unwrap();
+    let assert = cmd
+        .args(["--format", "json", "extract"])
+        .arg(unversioned_pak())
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["counts"]["failed"].as_u64().unwrap(), 1);
+}
+
+#[test]
+fn extract_unversioned_with_mappings_converts() {
+    // #651: `extract --mappings <usmap>` decodes the unversioned asset —
+    // the entry no longer fails (the generic Hero asset raw-copies).
+    let out = tempdir().unwrap();
+    let mut cmd = Command::cargo_bin("paksmith").unwrap();
+    let assert = cmd
+        .args(["--format", "json", "extract"])
+        .arg(unversioned_pak())
+        .arg("--mappings")
+        .arg(hero_usmap())
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["counts"]["failed"].as_u64().unwrap(), 0);
+    assert!(v["counts"]["raw_copied"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn extract_unversioned_with_profile_mappings_converts() {
+    // #651: a mappings-bearing profile selected via `--game` supplies the
+    // usmap with no explicit `--mappings`.
+    let config_dir = tempdir().unwrap();
+    let out = tempdir().unwrap();
+    seed_hero_profile(config_dir.path(), &hero_usmap());
+    let mut cmd = Command::cargo_bin("paksmith").unwrap();
+    let assert = cmd
+        .env("PAKSMITH_CONFIG_DIR", config_dir.path())
+        .args(["--format", "json", "extract"])
+        .arg(unversioned_pak())
+        .args(["--game", "hero"])
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["counts"]["failed"].as_u64().unwrap(), 0);
+    assert!(v["counts"]["raw_copied"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn extract_explicit_mappings_wins_over_profile() {
+    // #651 precedence: the profile's mappings path is BROKEN; the explicit
+    // `--mappings` is good. Success proves the explicit flag won (a
+    // profile-first order would exit 2 on the broken path).
+    let config_dir = tempdir().unwrap();
+    let out = tempdir().unwrap();
+    seed_hero_profile(
+        config_dir.path(),
+        std::path::Path::new("/nonexistent/broken.usmap"),
+    );
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", config_dir.path())
+        .args(["--format", "json", "extract"])
+        .arg(unversioned_pak())
+        .args(["--game", "hero"])
+        .arg("--mappings")
+        .arg(hero_usmap())
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+}
+
+#[test]
+fn extract_mappings_nonexistent_file_errors() {
+    // Mirror of inspect's `--mappings` arg-attribution contract: a bad
+    // explicit path is exit 2 with the flag name in stderr.
+    let out = tempdir().unwrap();
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .arg("extract")
+        .arg(unversioned_pak())
+        .args(["--mappings", "/nonexistent/nope.usmap"])
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("--mappings") && stderr.contains("nope.usmap"),
+        "stderr must attribute the bad path to --mappings: {stderr}"
+    );
+}
+
+#[test]
+fn extract_broken_profile_mappings_errors_loudly() {
+    // #651: a profile whose mappings path can't load is a HARD error
+    // attributed to --game — never a silent fall-through to the
+    // no-mappings behavior (which would resurface per-entry failures
+    // the user thinks they've configured away).
+    let config_dir = tempdir().unwrap();
+    let out = tempdir().unwrap();
+    seed_hero_profile(
+        config_dir.path(),
+        std::path::Path::new("/nonexistent/broken.usmap"),
+    );
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", config_dir.path())
+        .arg("extract")
+        .arg(unversioned_pak())
+        .args(["--game", "hero"])
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("--game") && stderr.contains("broken.usmap"),
+        "stderr must attribute the bad path to the profile selection: {stderr}"
+    );
+}
+
 #[test]
 fn extract_writes_outputs_and_reports_summary() {
     let out = tempdir().unwrap();
@@ -177,6 +354,7 @@ fn extract_help_lists_flags() {
         "--locres-format",
         "--jobs",
         "--game",
+        "--mappings",
     ] {
         assert!(out.contains(flag), "help missing {flag}");
     }
