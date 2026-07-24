@@ -53,18 +53,19 @@ pixel bytes themselves are out of scope for this format doc (see
 [`pixel-formats.md`](pixel-formats.md) for the per-format decode
 reference).
 
-**Paksmith parser status: `partial`** (the blob parses fully; tile
-flatten-to-PNG is not implemented). Phase 3e-VT-a reads
+**Paksmith parser status: `complete`** (blob parse + page-table
+flatten-to-PNG, both eras). Phase 3e-VT-a reads
 the trailing `bIsVirtual` flag on `UTexture2D`; 3e-VT-b1 parses the blob's
 structural fields (the fixed header, both dispatch paths, the
 `FVirtualTextureTileOffsetData` sub-records, `LayerTypes`, and UE5.0+
 `LayerFallbackColors`); 3e-VT-b2 parses the `FVirtualTextureDataChunk[]` records
 (SHA prefix, sizes, per-layer codec, and each chunk's `FByteBulkData` routed
-through the per-export bulk resolver). The whole blob now parses into
-`Texture2DData::virtual_texture`. Still pending: the page-table flatten to
-pixels (3e-VT-c). Virtual Textures are far less common in cooked content than
-standard streaming `Texture2D`, so paksmith deferred them past the initial
-mip-chain support.
+through the per-export bulk resolver) into `Texture2DData::virtual_texture`.
+3e-VT-c flattens the page table to a single RGBA8 bitmap (layer 0, the
+highest-resolution mip level whose decode fits the 1 GiB cap), consumed by
+`PngHandler`, `classify_texture`/`decode_texture_mip`, and the GUI viewer —
+for **both** the UE 5.0+ `TileOffsetData` path and, per issue #649, the
+legacy (UE 4.23-4.27) fencepost-array path.
 
 ## Versions
 
@@ -239,7 +240,32 @@ The chosen path at runtime is determined by `IsLegacyData()`:
 `TileOffsetInChunk == null || TileOffsetInChunk.Length > 0` means
 legacy; otherwise the UE5.0+ `TileOffsetData[]` is the active path.
 Pre-UE-5 content always uses the legacy path (the UE5.0+ fields aren't
-serialized).
+serialized). Both paths flatten (issue #649); the discriminator is the
+data-presence test above, never the archive version — a UE5-versioned
+asset carrying non-empty legacy arrays takes the legacy path, matching
+the oracle.
+
+Two deliberate paksmith divergences from CUE4Parse on the legacy path
+(cites pinned to CUE4Parse commit `b26351d`):
+
+- **Per-level grids, computed exactly.** CUE4Parse's
+  `GetTileOffsetData` synthesizes every legacy level's grid from the
+  MIP-0 tile counts and corrects the bitmap downstream by dividing by
+  `2^level` (its own comment concedes the synthesis doesn't know
+  whether the mip is tiled). paksmith computes each level's pixel dims
+  (halved per level, floored at 1) and tile counts up front; no
+  correction factor exists downstream.
+- **Exact Morton address bound.** CUE4Parse's synthesized `MaxAddress`
+  is the raw `TileIndexPerMip` fencepost span, which counts tileIndex
+  SLOTS (one per layer per address) and over-counts the address bound
+  by `NumLayers`; its render loop tolerates the excess via per-address
+  validity checks. paksmith divides the span by `NumLayers` (divisor
+  floored at 1 — a zero layer count parses).
+
+One oracle-parity behavior worth naming: a legacy tile whose offset
+span is zero is "no data" and is skipped **before** codec dispatch
+(CUE4Parse `GetTileData`) — even a constant-fill codec renders that
+cell transparent black.
 
 ### Codec-payload offset width (4.27 boundary)
 
@@ -332,7 +358,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 the `VirtualTextures` feature; UE5 always). When set, the blob is parsed into
 `Texture2DData::virtual_texture` (`Option<Box<VirtualTextureData>>`);
 `Texture2DData::is_virtual()` queries it, and `crate::export::PngHandler`
-reports virtual textures as not-yet-renderable.
+flattens virtual textures to a PNG via `flatten_virtual_texture`.
 
 **Blob parser module (`asset/exports/texture/virtual_textures.rs`):** `read_from`
 parses the **full** blob — the structural fields (header, dispatch tables,
@@ -349,8 +375,9 @@ cap-bounded (`MAX_VT_LAYERS = 8`, `MAX_VT_ARRAY_ENTRIES`,
 mip + chunk records would overflow the per-export cap fails loud (→ `Generic`)
 rather than silently dropping its bulk records.
 
-**Status:** `partial` — the whole `FVirtualTextureBuiltData` blob parses
-(3e-VT-a/b1/b2); the page-table flatten to PNG (3e-VT-c) is pending.
+**Status:** `complete` — the whole `FVirtualTextureBuiltData` blob parses
+(3e-VT-a/b1/b2) and the page-table flatten to PNG ships for both dispatch
+paths (3e-VT-c; legacy via issue #649).
 
 **Phase plan:** `docs/plans/phase-3e-texture-export.md` milestone 3e-VT.
 
