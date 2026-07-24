@@ -243,19 +243,6 @@ impl TileOffsetData {
 }
 
 impl VirtualTextureData {
-    /// `Width / TileSize`, rounded up (CUE4Parse `GetWidthInTiles`). `0` when
-    /// `tile_size == 0` (CUE4Parse would divide by zero).
-    #[must_use]
-    pub(crate) fn width_in_tiles(&self) -> u32 {
-        divide_round_up(self.width, self.tile_size)
-    }
-
-    /// `Height / TileSize`, rounded up (CUE4Parse `GetHeightInTiles`).
-    #[must_use]
-    pub(crate) fn height_in_tiles(&self) -> u32 {
-        divide_round_up(self.height, self.tile_size)
-    }
-
     /// `TileSize + 2 * TileBorderSize` — the tile edge including its sampling
     /// border (CUE4Parse `GetPhysicalTileSize`). Saturating (the border is an
     /// untrusted `u32`).
@@ -407,19 +394,33 @@ impl VirtualTextureData {
 
     /// CUE4Parse `GetTileOffsetData(level)` reduced to the grid extents the
     /// flatten needs (`width`/`height` in tiles + `max_address`). Legacy:
-    /// computed from the per-mip tile-index table; UE5.0+: read from
-    /// `tile_offset_data[level]`. `None` on an out-of-range access.
+    /// computed from the texture dims + per-mip tile-index table; UE5.0+:
+    /// read from `tile_offset_data[level]`. `None` on an out-of-range access.
+    ///
+    /// **Legacy divergence from the oracle (#649, deliberate).** CUE4Parse's
+    /// `GetTileOffsetData` synthesizes EVERY legacy level's grid from the
+    /// mip-0 tile counts (`GetWidthInTiles()`), then its decoder corrects the
+    /// bitmap size downstream by dividing by `2^level` — its own comment
+    /// concedes the synthesis doesn't know whether the mip is tiled. Its
+    /// `MaxAddress` is likewise the raw fencepost span, which counts
+    /// tileIndex SLOTS (one per layer per address) and so over-counts the
+    /// Morton address bound by `NumLayers` (its render loop tolerates the
+    /// excess via per-address validity checks). paksmith computes the real
+    /// per-level extents up front: pixel dims halve per level (floored at 1,
+    /// shift-safe past level 31), tiles are `ceil(dim / tile_size)`, and the
+    /// span is divided by `num_layers` (divisor floored at 1 — a zero layer
+    /// count parses). Downstream needs no correction factor.
     fn tile_grid_for(&self, level: usize) -> Option<TileGrid> {
         if self.is_legacy_data() {
-            // CUE4Parse: MaxAddress = max(TileIndexPerMip[min(level + 1, NumMips)]
-            // - TileIndexPerMip[level], 1).
             let level_start = *self.tile_index_per_mip.get(level)?;
             let next = (level + 1).min(self.num_mips as usize);
             let next_start = *self.tile_index_per_mip.get(next)?;
+            let span = next_start.saturating_sub(level_start);
+            let addresses = span / self.num_layers.max(1);
             Some(TileGrid {
-                width: self.width_in_tiles(),
-                height: self.height_in_tiles(),
-                max_address: next_start.saturating_sub(level_start).max(1),
+                width: divide_round_up(level_pixel_dim(self.width, level), self.tile_size),
+                height: divide_round_up(level_pixel_dim(self.height, level), self.tile_size),
+                max_address: addresses.max(1),
             })
         } else {
             let tod = self.tile_offset_data.get(level)?;
@@ -989,6 +990,19 @@ fn fill_tile(
 /// `numerator / denominator` rounded up (CUE4Parse `DivideAndRoundUp`). `0`
 /// when `denominator == 0` (CUE4Parse would divide by zero); the guard also
 /// keeps [`u32::div_ceil`] from panicking.
+/// A texture axis's pixel extent at mip `level`: halved per level, floored
+/// at 1 (the standard mip chain). Shift-safe: a `level` past the bit width
+/// (possible — `level` is bounded by the fencepost-array length, up to
+/// `MAX_VT_ARRAY_ENTRIES`, not by 32) degrades to the 1-pixel floor instead
+/// of a debug-panic shift. #649 (legacy grids).
+fn level_pixel_dim(base: u32, level: usize) -> u32 {
+    u32::try_from(level)
+        .ok()
+        .and_then(|l| base.checked_shr(l))
+        .unwrap_or(0)
+        .max(1)
+}
+
 fn divide_round_up(numerator: u32, denominator: u32) -> u32 {
     if denominator == 0 {
         return 0;
@@ -2057,27 +2071,40 @@ mod tests {
 
     #[test]
     fn grid_helpers_round_up_and_border() {
+        // Non-pow2 width rounds UP to a whole tile (ceil(100/32) = 4);
+        // exercised through the legacy grid path (level 0 = full dims).
         let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
             width: 100,
             height: 64,
             tile_size: 32,
             tile_border_size: 4,
+            tile_index_per_mip: vec![0, 8],
+            tile_offset_in_chunk: vec![0],
             ..Default::default()
         };
-        assert_eq!(vt.width_in_tiles(), 4); // ceil(100 / 32)
-        assert_eq!(vt.height_in_tiles(), 2); // 64 / 32
+        let grid = vt.tile_grid_for(0).unwrap();
+        assert_eq!((grid.width, grid.height), (4, 2));
         assert_eq!(vt.physical_tile_size(), 40); // 32 + 2 * 4
     }
 
     #[test]
     fn grid_helpers_zero_tile_size_is_safe() {
+        // `divide_round_up` yields 0 on a zero tile size (CUE4Parse would
+        // divide by zero); the zero-dim grid is then rejected by
+        // `flatten_geometry`'s zero-axis check.
         let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
             width: 100,
             tile_size: 0,
+            tile_index_per_mip: vec![0, 8],
+            tile_offset_in_chunk: vec![0],
             ..Default::default()
         };
-        assert_eq!(vt.width_in_tiles(), 0); // no divide-by-zero
-        assert_eq!(vt.height_in_tiles(), 0);
+        let grid = vt.tile_grid_for(0).unwrap();
+        assert_eq!((grid.width, grid.height), (0, 0)); // no divide-by-zero
     }
 
     #[test]
@@ -2150,6 +2177,99 @@ mod tests {
         // level 1: min(level+1, NumMips) = min(2,2) = 2 → TileIndexPerMip[2]=5;
         // 5 - TileIndexPerMip[1]=4 → 1.
         assert_eq!(vt.tile_grid_for(1).unwrap().max_address, 1);
+    }
+
+    // --- #649: exact per-level legacy grids (deliberate oracle divergence:
+    // CUE4Parse synthesizes every legacy level's grid from MIP-0 tile counts
+    // and corrects the bitmap size downstream by dividing by 2^level; its
+    // MaxAddress is the raw tileIndex-slot span, over-counting by NumLayers.
+    // paksmith computes the real per-level extents up front.) ---
+
+    #[test]
+    fn tile_grid_for_legacy_uses_per_level_tile_counts() {
+        // 128×64 pixels, 32-px tiles, 3 mips. Per-level pixel dims halve
+        // (min 1); tiles = ceil(dim / tile_size).
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 3,
+            width: 128,
+            height: 64,
+            tile_size: 32,
+            tile_index_per_mip: vec![0, 8, 10, 11],
+            tile_offset_in_chunk: vec![0], // non-empty → legacy
+            ..Default::default()
+        };
+        // level 0: 128×64 px → 4×2 tiles, span 8.
+        assert_eq!(
+            vt.tile_grid_for(0),
+            Some(TileGrid {
+                width: 4,
+                height: 2,
+                max_address: 8,
+            }),
+        );
+        // level 1: 64×32 px → 2×1 tiles (NOT the mip-0 4×2), span 2.
+        assert_eq!(
+            vt.tile_grid_for(1),
+            Some(TileGrid {
+                width: 2,
+                height: 1,
+                max_address: 2,
+            }),
+        );
+        // level 2: 32×16 px → 1×1 tiles (16 px rounds up to one tile), span 1.
+        assert_eq!(
+            vt.tile_grid_for(2),
+            Some(TileGrid {
+                width: 1,
+                height: 1,
+                max_address: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn tile_grid_for_legacy_divides_the_span_by_num_layers() {
+        // The fencepost span counts tileIndex SLOTS (one per layer per
+        // address); the Morton address bound is span / num_layers. CUE4Parse
+        // uses the raw span (its render loop tolerates the over-count);
+        // paksmith bounds exactly.
+        let mut vt = VirtualTextureData {
+            num_layers: 2,
+            num_mips: 1,
+            width: 64,
+            height: 64,
+            tile_size: 32,
+            tile_index_per_mip: vec![0, 8],
+            tile_offset_in_chunk: vec![0],
+            ..Default::default()
+        };
+        assert_eq!(vt.tile_grid_for(0).unwrap().max_address, 4);
+
+        // A (parseable) zero layer count must not divide by zero — treat the
+        // divisor as 1 defensively.
+        vt.num_layers = 0;
+        assert_eq!(vt.tile_grid_for(0).unwrap().max_address, 8);
+    }
+
+    #[test]
+    fn tile_grid_for_legacy_survives_a_shift_past_31_levels() {
+        // `width >> level` with level ≥ 32 is UB-adjacent (debug panic) if
+        // written as a bare shift; the per-level dims must degrade to the
+        // 1-pixel floor instead. 40 fencepost entries → levels up to 39 are
+        // scannable.
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 40,
+            width: 1024,
+            height: 1024,
+            tile_size: 32,
+            tile_index_per_mip: (0..=40u32).collect(),
+            tile_offset_in_chunk: vec![0],
+            ..Default::default()
+        };
+        let grid = vt.tile_grid_for(35).expect("level 35 resolves");
+        assert_eq!((grid.width, grid.height), (1, 1));
     }
 
     #[test]
