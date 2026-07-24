@@ -295,7 +295,8 @@ impl VirtualTextureData {
         // so `len - 1 >= max`) — matching the oracle's loop, which finds
         // no range in either case and returns `max`. No separate
         // `tile_index <= last` early-out: it would be indistinguishable
-        // from the clamp on every input (an equivalent-mutant construct).
+        // from the clamp on every WELL-FORMED input (an equivalent-mutant
+        // construct); truncated tables are the divergence documented above.
         self.tile_index_per_chunk
             .partition_point(|&f| f <= tile_index)
             .checked_sub(1)
