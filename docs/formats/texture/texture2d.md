@@ -201,12 +201,46 @@ When `bIsVirtual != 0`, the trailing data isn't a flat mip array but
 an `FVirtualTextureBuiltData` record (page table + tile chunks). Far
 less common in cooked content than streaming `Texture2D`; deferred.
 
-### Texture cube / 2D array / volume
+### Texture cube / 2D array / volume (issue #648 — implemented)
 
-Related sibling export classes — `UTextureCube`, `UTexture2DArray`,
-`UVolumeTexture` — share the `FTexturePlatformData` wire shape but
-differ in `PackedData` slice/face counts and mip stride. Each will get
-its own format doc when Phase 3 specializes.
+The sibling export classes — `UTextureCube`, `UTexture2DArray`,
+`UVolumeTexture` — share `UTexture2D`'s cooked wire shape end-to-end
+(two `FStripDataFlags`, owner `bCooked`, the same
+`FTexturePlatformData` per-format loop) with exactly **one wire
+divergence**: only `UTexture2D` reads the UE 5.3+ `bSerializeMipData`
+bool. The siblings' `Deserialize` bodies (CUE4Parse
+`UTextureCube.cs:41`, `UTexture2DArray.cs:29`, `UVolumeTexture.cs:23`)
+call `DeserializeCookedPlatformData(Ar)` with the flag defaulted
+`true`, so a sibling parser must NOT consume the bool even at object
+versions ≥ 1010. Their owner `bCooked` is read unconditionally (no
+`ADD_COOKED_TO_TEXTURE2D` gate — moot at paksmith's UE 4.13+ floor),
+and `UTextureCube`'s UE3-era legacy branches sit below that floor.
+
+paksmith parses all three through the shared `texture2d` reader,
+tagged via `Texture2DData::kind` (set by the dispatch entry, not read
+from the wire). Slice semantics per class:
+
+- **Cube** — `PackedData` slice count 6 + bit 31 set; each mip's bulk
+  bytes hold the 6 faces consecutively. The export layer validates the
+  count (with the overlapping `HasCpuCopy` bit 29 masked) is exactly 6
+  and fails closed otherwise.
+- **Array** — each mip's `SizeZ` = `ArraySize` (constant across mips);
+  the mip bytes hold `SizeZ` independent layers.
+- **Volume** — each mip's `SizeZ` = that mip's depth (halves per mip
+  level); the mip bytes hold `SizeZ` depth slices.
+
+**Export**: one vertical strip PNG per texture — slices stacked in
+wire order, slice 0 on top — decoded per-slice (each slice is a
+standalone block-aligned image). Two deliberate divergences from
+CUE4Parse: (1) its `FTexturePlatformData` ctor multiplies every mip's
+`SizeY` by the top-level `GetNumSlices()` for cube/volume owners,
+which is wrong for lower volume mips (its own post-loop `PackedData`
+rewrite flags the inconsistency) — paksmith keeps wire values raw and
+uses the target mip's own `SizeZ`; (2) its BC7-via-detex path folds
+depth into height (`sizeY * sizeZ`) before block decode, which
+misaligns small mips that occupy partial block rows — paksmith
+decodes each slice independently. `TextureCubeArray` is not dispatched
+(out of #648's scope; falls through to the generic property bag).
 
 ### Stripped editor-only data
 

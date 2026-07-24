@@ -180,9 +180,15 @@ are absolute from the file start).
 
 ### Cubemaps and texture arrays
 
-Cubemap textures have 6 face mip chains; `SizeZ = 6` (or
-`6 × num_array_slices` for cube arrays). The per-mip records carry
-all faces concatenated.
+Cubemap textures store all 6 faces concatenated inside each mip's
+bulk bytes — there is one mip chain, not six. The face count lives in
+`FTexturePlatformData::PackedData` (slice count 6, bit 31 set); the
+per-mip `SizeZ` field is inconsistently written by cookers (observed
+as both `6` and `1` — CUE4Parse normalizes either), so consumers key
+off `PackedData`, not mip `SizeZ`, for cubes. Texture arrays put
+`ArraySize` in each mip's `SizeZ`; volumes put that mip's depth there
+(halving per level). See `texture2d.md` §"Texture cube / 2D array /
+volume" for the parse/export semantics (issue #648).
 
 ### Virtual textures
 

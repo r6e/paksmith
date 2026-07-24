@@ -189,7 +189,12 @@ BitWindow is a deprecated, inert non-codec).
   (`phase-3d-datatable-export.md`)
 - **3e** — `UTexture2D` → PNG export. BC1-BC7 + ASTC + ETC2 +
   uncompressed pixel formats. Virtual textures parsed in-scope;
-  export of VT page tables is a 3e follow-up.
+  export of VT page tables is a 3e follow-up. The 3e-cube/3e-array/
+  3e-volume follow-up sub-phases shipped via issue #648:
+  `UTextureCube` / `UTexture2DArray` / `UVolumeTexture` parse through
+  the shared kind-tagged reader and export as vertical PNG strips
+  (see `docs/formats/texture/texture2d.md` §"Texture cube / 2D array
+  / volume").
   (`phase-3e-texture-export.md`)
 - **3f** — `USoundWave` → WAV / OGG export. MVP: OGG/OPUS
   passthrough + PCM-to-WAV. Follow-ups: ADPCM-to-WAV (shipped).
