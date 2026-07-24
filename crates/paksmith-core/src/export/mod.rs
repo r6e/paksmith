@@ -61,7 +61,7 @@ mod audio;
 mod data_table;
 mod generic;
 mod gltf_common;
-pub mod locres;
+mod locres;
 mod pcm;
 mod skeletal_mesh;
 mod static_mesh;

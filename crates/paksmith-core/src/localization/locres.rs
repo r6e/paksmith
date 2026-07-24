@@ -6,7 +6,9 @@
 //!
 //! ```text
 //! [magic FGuid 16B]        absent → LEGACY (v0), parse from offset 0
-//! [u8 version]             0..=3; >3 rejected (mirrors the oracle)
+//! [u8 version]             1..=3 after a magic match (0 = Legacy is
+//!                          reachable only via the no-magic path; >3
+//!                          rejected, mirroring the oracle)
 //! [v1+] i64 StringsArrayOffset   -1 = none; else seek → i32 count +
 //!                                count × { FString, [v2+] i32 RefCount }
 //! [v2+] u32 EntriesCount   read-and-discarded

@@ -116,7 +116,7 @@ pub use export::{
 // #646: localization (.locres) public API — the parsed resource types
 // (mirroring `Usmap`'s crate-root promotion) and the byte-producing
 // exporters.
-pub use export::locres::{locres_to_csv, locres_to_json};
+pub use export::{locres_to_csv, locres_to_json};
 pub use localization::{LocresEntry, LocresNamespace, LocresResource, LocresVersion};
 
 // Phase 5b: game-profile public API. `GameProfile`, `KeyGuid`, and

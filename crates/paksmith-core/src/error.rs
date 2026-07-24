@@ -4817,7 +4817,9 @@ pub enum LocresParseFault {
     /// Version byte above the latest supported version (3 =
     /// `Optimized_CityHash64_UTF16`). Mirrors CUE4Parse's
     /// `ParserException` on `version > Latest`.
-    #[error("unsupported locres version {found} (paksmith accepts 0-3)")]
+    #[error(
+        "unsupported locres version {found} (paksmith accepts 0-3; 0 only without the magic prefix)"
+    )]
     UnsupportedVersion {
         /// The version byte read after the magic GUID.
         found: u8,
@@ -6107,7 +6109,7 @@ mod tests {
                 PaksmithError::LocresParse {
                     fault: F::UnsupportedVersion { found: 7 },
                 },
-                "locres deserialization failed: unsupported locres version 7 (paksmith accepts 0-3)",
+                "locres deserialization failed: unsupported locres version 7 (paksmith accepts 0-3; 0 only without the magic prefix)",
             ),
             (
                 PaksmithError::LocresParse {

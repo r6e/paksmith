@@ -12,8 +12,11 @@
 //   - FString decode (ANSI + UTF-16, null-terminator + length checks).
 //   - fail-closed StringIndex bounds (negative and over-range).
 //
-// Seed corpus lives at `fuzz/corpus/fuzz_locres_parse/` and is
-// populated by the CI workflow from `tests/fixtures/data/*.locres`.
+// No committed seed corpus: the sole `.locres` fixture lives at
+// `tests/fixtures/data/`, below the CI seed step's top-level
+// `-maxdepth 1` glob, so this target fuzzes from scratch (the flat
+// header-first parser reaches its magic/version/count/string paths on
+// random input by construction).
 
 #![no_main]
 

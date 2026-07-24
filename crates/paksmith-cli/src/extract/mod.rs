@@ -151,8 +151,6 @@ impl ExtractJob<'_> {
     }
 }
 
-/// Build a `Failed` outcome. Centralises the repeated construction so callers
-/// use `return failed(entry_path, e)` rather than inlining the struct literal.
 /// Pure conversion step for a `.locres` entry: parse + export per the
 /// preference. `None` = unparsable (caller degrades to a raw copy).
 /// Factored out of [`ExtractJob::extract_locres`] so the parse/convert/
@@ -180,6 +178,8 @@ fn locres_output(bytes: &[u8], pref: select::DataTableFormat) -> Option<(&'stati
     }
 }
 
+/// Build a `Failed` outcome. Centralises the repeated construction so callers
+/// use `return failed(entry_path, e)` rather than inlining the struct literal.
 fn failed(entry_path: &str, e: impl std::fmt::Display) -> EntryOutcome {
     EntryOutcome::Failed {
         entry: entry_path.to_owned(),
