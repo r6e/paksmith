@@ -3114,6 +3114,19 @@ pub enum AssetParseFault {
         /// Actual encoded byte length supplied.
         actual: usize,
     },
+    /// A multidim texture's slice count is unusable for export
+    /// composition: a `TextureCube` whose `PackedData` slice count (with
+    /// the overlapping `HasCpuCopy` bit masked) is not exactly 6, or a
+    /// `Texture2DArray` / `VolumeTexture` whose exported mip has a zero
+    /// `SizeZ` (no layers/depth to compose). Out-of-spec wire data —
+    /// fail closed rather than mis-slice the mip bulk bytes (#648).
+    TextureSliceCountInvalid {
+        /// The texture class family (`"TextureCube"`, `"Texture2DArray"`,
+        /// or `"VolumeTexture"`).
+        kind: &'static str,
+        /// The offending slice count.
+        count: u32,
+    },
     /// A texture mip's decoded RGBA8 buffer (`width × height × 4`) would
     /// exceed `MAX_DECODED_TEXTURE_BYTES` (the crate-private per-call decode
     /// cap, 1 GiB) — a corrupt dimension driving an over-large decode buffer
@@ -3608,6 +3621,11 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "Texture mip encoded size {actual} does not match the {expected} bytes \
                  implied by its dimensions and pixel format"
+            ),
+            Self::TextureSliceCountInvalid { kind, count } => write!(
+                f,
+                "Texture slice count {count} is invalid for {kind} export composition \
+                 (a cube must have exactly 6 faces; an array/volume mip at least 1 slice)"
             ),
             Self::DecodedTextureBytesExceeded { bytes, cap } => {
                 write!(f, "Texture decoded RGBA size {bytes} exceeds cap {cap}")
@@ -9055,6 +9073,23 @@ mod tests {
             "asset deserialization failed for `Game/UI/Icon.uasset`: \
              Texture mip encoded size 15 does not match the 16 bytes implied by its \
              dimensions and pixel format"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_texture_slice_count_invalid() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Sky/Cube.uasset".to_string(),
+            fault: AssetParseFault::TextureSliceCountInvalid {
+                kind: "TextureCube",
+                count: 5,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Sky/Cube.uasset`: \
+             Texture slice count 5 is invalid for TextureCube export composition \
+             (a cube must have exactly 6 faces; an array/volume mip at least 1 slice)"
         );
     }
 

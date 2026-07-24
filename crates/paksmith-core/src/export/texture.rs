@@ -26,9 +26,9 @@
 use crate::PaksmithError;
 use crate::asset::Asset;
 use crate::asset::Texture2DData;
-use crate::asset::exports::texture::pixel_format::{PixelFormat, decode_mip};
+use crate::asset::exports::texture::pixel_format::{PixelFormat, decode_texture_slab};
 use crate::asset::exports::texture::virtual_textures::flatten_virtual_texture;
-use crate::asset::exports::texture::{has_enum, property_bool};
+use crate::asset::exports::texture::{export_slice_count, has_enum, property_bool};
 use crate::export::{BulkData, FormatHandler};
 
 /// PNG deflate compression level for [`PngHandler`]. Trades encode speed against
@@ -132,11 +132,19 @@ impl FormatHandler for PngHandler {
         let (width, height) = selected_mip_dimensions(data)?;
         let format = PixelFormat::from_name(&data.pixel_format);
 
-        let decoded = decode_mip(
+        // Multidim textures (cube/array/volume, #648): the mip's bulk bytes
+        // are `slices` consecutive images; compose them into one vertical
+        // strip PNG (cube = 6 faces, array/volume = the mip's SizeZ). A
+        // TwoD texture yields `slices == 1` — the plain single-mip decode.
+        // (`data.mips` is non-empty: selected_mip_dimensions just proved it.)
+        let slices = export_slice_count(data, &data.mips[0], "<texture mip>")?;
+
+        let decoded = decode_texture_slab(
             &format,
             &mip.bytes,
             width,
             height,
+            slices,
             is_normal_map,
             "<texture mip>",
         )?;
@@ -221,8 +229,10 @@ fn png_error(stage: &str, err: &png::EncodingError) -> PaksmithError {
 mod tests {
     use super::*;
     use crate::asset::Texture2DMipMap;
+    use crate::asset::exports::texture::pixel_format::decode_mip;
     use crate::asset::property::bag::PropertyBag;
     use crate::asset::property::primitives::{Property, PropertyValue};
+    use crate::error::AssetParseFault;
     use crate::export::HandlerRegistry;
     use proptest::prelude::*;
 
@@ -431,6 +441,116 @@ mod tests {
             let frame = reader.next_frame(&mut buf).expect("decode");
             assert_eq!(&buf[..frame.buffer_size()], rgba.as_slice(), "lossless");
         }
+    }
+
+    // ===== #648: multidim slice composition through export() =====
+
+    /// Decode a PNG's pixels + dimensions (test-side inverse of `encode_png`).
+    #[cfg(feature = "__test_utils")]
+    fn decode_png(png_bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes))
+            .read_info()
+            .expect("read PNG");
+        let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
+        let frame = reader.next_frame(&mut buf).expect("decode");
+        buf.truncate(frame.buffer_size());
+        (frame.width, frame.height, buf)
+    }
+
+    /// A `BulkData` wrapping `bytes` as an inline record (test-only ctor).
+    #[cfg(feature = "__test_utils")]
+    fn inline_bulk(bytes: Vec<u8>) -> crate::asset::bulk_data::BulkData {
+        use crate::asset::bulk_data::{BulkData, BulkDataFlags, BulkDataTier, FByteBulkData};
+        let len = u32::try_from(bytes.len()).unwrap();
+        BulkData {
+            record: FByteBulkData::for_test(
+                BulkDataFlags::from(0),
+                i64::from(len),
+                u64::from(len),
+                0,
+            ),
+            tier: BulkDataTier::Inline,
+            bytes,
+        }
+    }
+
+    /// A 2×2 `PF_R8G8B8A8` multidim texture of `slices` solid-fill slices
+    /// (slice `i` filled with byte `10*(i+1)`), plus its slab bulk record.
+    #[cfg(feature = "__test_utils")]
+    fn sliced_texture(
+        kind: crate::asset::TextureKind,
+        num_slices: u32,
+        mip_size_z: u32,
+        slices: u32,
+    ) -> (Texture2DData, crate::asset::bulk_data::BulkData) {
+        let mut data = texture("PF_R8G8B8A8", vec![]);
+        data.kind = kind;
+        data.num_slices = num_slices;
+        data.mips = vec![mip(2, 2)];
+        data.mips[0].size_z = mip_size_z;
+        let mut slab = Vec::new();
+        for i in 0..slices {
+            slab.extend_from_slice(&[u8::try_from(10 * (i + 1)).unwrap(); 16]);
+        }
+        (data, inline_bulk(slab))
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn export_composes_a_cube_into_a_six_face_strip_png() {
+        let (data, bulk) = sliced_texture(crate::asset::TextureKind::Cube, 6, 1, 6);
+        let png = PngHandler::default()
+            .export(&Asset::Texture2D(data), std::slice::from_ref(&bulk))
+            .expect("cube export");
+        let (w, h, rgba) = decode_png(&png);
+        assert_eq!((w, h), (2, 12), "6 faces stacked vertically");
+        assert_eq!(&rgba[..4], &[10, 10, 10, 10], "face 0 on top");
+        assert_eq!(&rgba[rgba.len() - 4..], &[60, 60, 60, 60], "face 5 last");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn export_composes_array_and_volume_by_mip_size_z() {
+        for kind in [
+            crate::asset::TextureKind::Array,
+            crate::asset::TextureKind::Volume,
+        ] {
+            let (data, bulk) = sliced_texture(kind, 1, 3, 3);
+            let png = PngHandler::default()
+                .export(&Asset::Texture2D(data), std::slice::from_ref(&bulk))
+                .expect("sliced export");
+            let (w, h, rgba) = decode_png(&png);
+            assert_eq!((w, h), (2, 6), "{kind:?}: 3 slices stacked");
+            assert_eq!(&rgba[..4], &[10, 10, 10, 10]);
+            assert_eq!(&rgba[rgba.len() - 4..], &[30, 30, 30, 30]);
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn export_rejects_a_cube_with_a_non_six_slice_count() {
+        let (data, bulk) = sliced_texture(crate::asset::TextureKind::Cube, 5, 1, 5);
+        match PngHandler::default().export(&Asset::Texture2D(data), std::slice::from_ref(&bulk)) {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::TextureSliceCountInvalid { kind, count: 5 },
+                ..
+            }) => assert_eq!(kind, "TextureCube"),
+            other => panic!("expected TextureSliceCountInvalid, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn export_two_d_never_slices() {
+        // A TwoD texture with a (stale/corrupt) PackedData slice count and a
+        // single-slice bulk record exports as plain 2×2 — the kind, not the
+        // count, drives composition.
+        let (data, bulk) = sliced_texture(crate::asset::TextureKind::TwoD, 6, 1, 1);
+        let png = PngHandler::default()
+            .export(&Asset::Texture2D(data), std::slice::from_ref(&bulk))
+            .expect("2d export");
+        let (w, h, _) = decode_png(&png);
+        assert_eq!((w, h), (2, 2));
     }
 
     // ===== decode → encode pixel pipeline =====

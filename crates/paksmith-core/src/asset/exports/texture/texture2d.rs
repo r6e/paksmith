@@ -94,7 +94,7 @@ const PACKED_DATA_HAS_OPT_DATA_BIT: u32 = 1 << 30;
 
 /// `PackedData` `HasCpuCopy` flag (bit 29) — when set (UE 5.4+ writers),
 /// an `FSharedImage` CPU-copy record follows the optional `OptData`.
-const PACKED_DATA_HAS_CPU_COPY_BIT: u32 = 1 << 29;
+pub(super) const PACKED_DATA_HAS_CPU_COPY_BIT: u32 = 1 << 29;
 
 /// Maximum mip count accepted from the `FTexturePlatformData` mip-count
 /// prefix. A real texture has ~`log2(16384) ≈ 14` mips; `32` is
