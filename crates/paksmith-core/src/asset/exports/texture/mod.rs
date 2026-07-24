@@ -712,7 +712,7 @@ mod tests {
             // min_level bitmap (grid 2×2 tiles × tile_size 4 = 8×8) so a dims test
             // that asserts the bitmap size fails against any code that reports the
             // logical `(width, height)` instead. (For a UE5.0+ VT `width`/`height`
-            // drive only the legacy `width_in_tiles` path, unused here, so a value
+            // drive only the legacy grid path, unused here, so a value
             // independent of the grid is well-formed.)
             width: 16,
             height: 16,
@@ -848,26 +848,28 @@ mod tests {
     }
 
     #[test]
-    fn classify_texture_legacy_virtual_is_none() {
-        // `flatten_virtual_texture` deterministically rejects legacy (UE4) VTs
-        // (they are not yet renderable). classify must not offer a Texture view
-        // for one — otherwise the GUI promotes a tab whose decode always fails.
-        // A non-empty `tile_offset_in_chunk` marks the VT as legacy
-        // (`is_legacy_data`), which `flatten_geometry` refuses up front.
+    fn classify_texture_legacy_virtual_is_some() {
+        // #649: legacy (UE4) VTs render through the same flatten, so classify
+        // offers them. The legacy grid comes from the texture dims + the
+        // per-mip fencepost table: 16×16 px at 4-px tiles → 4×4 tiles →
+        // a 16×16 flattened bitmap (vs the UE5 fixture's 8×8 from its
+        // TileOffsetData grid — asserting the dims pins WHICH path ran).
         let mut pkg = pkg_with_virtual_texture("PF_DXT1");
-        assert!(
-            classify_texture(&pkg).is_some(),
-            "the UE5.0+ fixture VT must classify before being made legacy"
-        );
-        sole_texture2d_mut(&mut pkg)
-            .virtual_texture
-            .as_deref_mut()
-            .expect("pkg_with_virtual_texture promoted a VT")
-            .tile_offset_in_chunk = vec![0];
+        {
+            let vt = sole_texture2d_mut(&mut pkg)
+                .virtual_texture
+                .as_deref_mut()
+                .expect("pkg_with_virtual_texture promoted a VT");
+            vt.tile_offset_in_chunk = vec![0]; // non-empty → legacy dispatch
+            vt.tile_index_per_mip = vec![0, 1];
+            vt.num_layers = 1;
+        }
 
-        assert!(
-            classify_texture(&pkg).is_none(),
-            "a legacy (UE4) virtual texture must yield None — its decode always fails"
+        let info = classify_texture(&pkg).expect("a legacy VT classifies (#649)");
+        assert_eq!(
+            info.mips,
+            vec![(16, 16)],
+            "legacy bitmap dims come from the per-level legacy grid"
         );
     }
 
