@@ -756,8 +756,6 @@ mod tests {
         );
     }
 
-    /// Parse the decodable fixture, then promote its `Texture2D` payload to a
-    /// virtual texture carrying `layer0` as its sole layer format.
     /// decode_texture_mip success path for virtual textures of BOTH eras
     /// (#649 / R1 architect recommendation): the public API returns real
     /// pixels, not just guard errors. The tile's 4 wire bytes are the
@@ -790,6 +788,8 @@ mod tests {
         }
     }
 
+    /// Parse the decodable fixture, then promote its `Texture2D` payload to a
+    /// virtual texture carrying `layer0` as its sole layer format.
     fn pkg_with_virtual_texture(layer0: &str) -> Package {
         let fixture = build_minimal_with_decodable_texture2d();
         let mut pkg = parse_pkg(&fixture.bytes);
