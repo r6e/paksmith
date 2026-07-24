@@ -1318,6 +1318,63 @@ pub(crate) fn read_from(
     })
 }
 
+/// Shared renderable-VT test fixture (#649): a single-tile (1×1 px,
+/// 1-px tile, no border) RawGPU `PF_B8G8R8A8` VT of either dispatch era,
+/// whose chunk reads bulk record 0. Consumed by the public-API
+/// success-path tests in `asset/exports/texture/mod.rs` and
+/// `export/texture.rs` — ONE definition so the two cannot drift. Gated
+/// exactly like its consumers (their test mods both require
+/// `__test_utils`), so it never exists unused in a non-test build.
+///
+/// `width`/`height` are set to 1 and pinned by
+/// `renderable_vt_fixture_pins_fields`; `tile_border_size` is deliberately
+/// OMITTED (its `Default` of 0 is the wanted value — an explicit `0` would
+/// be equivalent-mutant bait for the delete-field genus, see MEMORY).
+#[cfg(all(test, feature = "__test_utils"))]
+pub(crate) mod test_fixtures {
+    use super::{LayerCodec, TileOffsetData, VirtualTextureData, VirtualTextureDataChunk};
+
+    pub(crate) fn renderable_vt(legacy: bool) -> VirtualTextureData {
+        let chunk = VirtualTextureDataChunk {
+            bulk_data_hash: None,
+            size_in_bytes: 4,
+            codec_payload_size: 0,
+            layer_codecs: vec![LayerCodec {
+                codec_type: 4, // RawGPU
+                codec_payload_offset: 0,
+            }],
+            bulk_record_index: 0,
+        };
+        let mut vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            width: 1,
+            height: 1,
+            tile_size: 1,
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![chunk],
+            ..Default::default()
+        };
+        if legacy {
+            vt.tile_index_per_mip = vec![0, 1];
+            vt.tile_index_per_chunk = vec![0, 1];
+            vt.tile_offset_in_chunk = vec![0]; // non-empty → legacy dispatch
+        } else {
+            vt.tile_data_offset_per_layer = vec![4];
+            vt.base_offset_per_mip = vec![0];
+            vt.chunk_index_per_mip = vec![0];
+            vt.tile_offset_data = vec![TileOffsetData {
+                width: 1,
+                height: 1,
+                max_address: 1,
+                addresses: vec![0],
+                offsets: vec![0],
+            }];
+        }
+        vt
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2191,6 +2248,49 @@ mod tests {
         // level 1: min(level+1, NumMips) = min(2,2) = 2 → TileIndexPerMip[2]=5;
         // 5 - TileIndexPerMip[1]=4 → 1.
         assert_eq!(vt.tile_grid_for(1).unwrap().max_address, 1);
+    }
+
+    /// Fixture pin for `test_fixtures::renderable_vt` (every non-default
+    /// field, both eras) — the delete-field mutant genus survives on any
+    /// hardcoded field no test reads (MEMORY: test helpers with hardcoded
+    /// fields need pin-tests).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn renderable_vt_fixture_pins_fields() {
+        for legacy in [false, true] {
+            let vt = test_fixtures::renderable_vt(legacy);
+            assert_eq!(vt.num_layers, 1, "legacy: {legacy}");
+            assert_eq!(vt.num_mips, 1);
+            assert_eq!((vt.width, vt.height), (1, 1));
+            assert_eq!(vt.tile_size, 1);
+            assert_eq!(vt.tile_border_size, 0, "Default — field omitted");
+            assert_eq!(vt.layer_types, vec!["PF_B8G8R8A8".to_string()]);
+            assert_eq!(vt.chunks.len(), 1);
+            let chunk = &vt.chunks[0];
+            assert_eq!(chunk.size_in_bytes, 4);
+            assert_eq!(chunk.codec_payload_size, 0);
+            assert_eq!(chunk.bulk_record_index, 0);
+            assert_eq!(chunk.layer_codecs.len(), 1);
+            assert_eq!(chunk.layer_codecs[0].codec_type, 4);
+            if legacy {
+                assert!(vt.is_legacy_data());
+                assert_eq!(vt.tile_index_per_mip, vec![0, 1]);
+                assert_eq!(vt.tile_index_per_chunk, vec![0, 1]);
+                assert_eq!(vt.tile_offset_in_chunk, vec![0]);
+            } else {
+                assert!(!vt.is_legacy_data());
+                assert_eq!(vt.tile_data_offset_per_layer, vec![4]);
+                assert_eq!(vt.base_offset_per_mip, vec![0]);
+                assert_eq!(vt.chunk_index_per_mip, vec![0]);
+                assert_eq!(vt.tile_offset_data.len(), 1);
+                let tod = &vt.tile_offset_data[0];
+                assert_eq!((tod.width, tod.height, tod.max_address), (1, 1, 1));
+                assert_eq!(
+                    (tod.addresses.as_slice(), tod.offsets.as_slice()),
+                    (&[0][..], &[0][..])
+                );
+            }
+        }
     }
 
     // --- #649 exact per-level legacy grids; divergence rationale on

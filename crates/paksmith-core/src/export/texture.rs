@@ -459,59 +459,10 @@ mod tests {
 
     // ===== #649: virtual-texture success paths through export() =====
 
-    /// A renderable single-tile VT (1×1 px, RawGPU `PF_B8G8R8A8`) of either
-    /// era; the chunk reads bulk record 0. R1 architect recommendation:
-    /// PngHandler must emit a REAL PNG for a VT, not only route/guard.
-    #[cfg(feature = "__test_utils")]
-    fn renderable_vt(
-        legacy: bool,
-    ) -> crate::asset::exports::texture::virtual_textures::VirtualTextureData {
-        use crate::asset::exports::texture::virtual_textures::{
-            LayerCodec, TileOffsetData, VirtualTextureData, VirtualTextureDataChunk,
-        };
-        let chunk = VirtualTextureDataChunk {
-            bulk_data_hash: None,
-            size_in_bytes: 4,
-            codec_payload_size: 0,
-            layer_codecs: vec![LayerCodec {
-                codec_type: 4, // RawGPU
-                codec_payload_offset: 0,
-            }],
-            bulk_record_index: 0,
-        };
-        let mut vt = VirtualTextureData {
-            num_layers: 1,
-            num_mips: 1,
-            width: 1,
-            height: 1,
-            tile_size: 1,
-            tile_border_size: 0,
-            layer_types: vec!["PF_B8G8R8A8".to_string()],
-            chunks: vec![chunk],
-            ..Default::default()
-        };
-        if legacy {
-            vt.tile_index_per_mip = vec![0, 1];
-            vt.tile_index_per_chunk = vec![0, 1];
-            vt.tile_offset_in_chunk = vec![0];
-        } else {
-            vt.tile_data_offset_per_layer = vec![4];
-            vt.base_offset_per_mip = vec![0];
-            vt.chunk_index_per_mip = vec![0];
-            vt.tile_offset_data = vec![TileOffsetData {
-                width: 1,
-                height: 1,
-                max_address: 1,
-                addresses: vec![0],
-                offsets: vec![0],
-            }];
-        }
-        vt
-    }
-
     #[cfg(feature = "__test_utils")]
     #[test]
     fn export_emits_a_real_png_for_both_virtual_texture_eras() {
+        use crate::asset::exports::texture::virtual_textures::test_fixtures::renderable_vt;
         for legacy in [false, true] {
             let mut data = texture("PF_B8G8R8A8", vec![]);
             data.virtual_texture = Some(Box::new(renderable_vt(legacy)));

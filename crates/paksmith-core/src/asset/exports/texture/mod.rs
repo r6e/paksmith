@@ -758,89 +758,36 @@ mod tests {
 
     /// Parse the decodable fixture, then promote its `Texture2D` payload to a
     /// virtual texture carrying `layer0` as its sole layer format.
-    /// A renderable single-tile VT (1×1 px, 1-px tile, no border, RawGPU
-    /// `PF_B8G8R8A8` layer 0) whose chunk reads bulk record 0 — the
-    /// promoted texture fixture's 16-byte inline record, so the flatten's
-    /// 4-byte tile slice is the package buffer's first 4 bytes. `legacy`
-    /// selects the dispatch era; both must decode through the public API.
-    fn renderable_vt(legacy: bool) -> VirtualTextureData {
-        use crate::asset::exports::texture::virtual_textures::{
-            LayerCodec, VirtualTextureDataChunk,
-        };
-        let chunk = VirtualTextureDataChunk {
-            bulk_data_hash: None,
-            size_in_bytes: 4,
-            codec_payload_size: 0,
-            layer_codecs: vec![LayerCodec {
-                codec_type: 4, // RawGPU
-                codec_payload_offset: 0,
-            }],
-            bulk_record_index: 0,
-        };
-        let mut vt = VirtualTextureData {
-            num_layers: 1,
-            num_mips: 1,
-            width: 1,
-            height: 1,
-            tile_size: 1,
-            tile_border_size: 0,
-            layer_types: vec!["PF_B8G8R8A8".to_string()],
-            chunks: vec![chunk],
-            ..Default::default()
-        };
-        if legacy {
-            vt.tile_index_per_mip = vec![0, 1];
-            vt.tile_index_per_chunk = vec![0, 1];
-            vt.tile_offset_in_chunk = vec![0]; // non-empty → legacy dispatch
-        } else {
-            vt.tile_data_offset_per_layer = vec![4];
-            vt.base_offset_per_mip = vec![0];
-            vt.chunk_index_per_mip = vec![0];
-            vt.tile_offset_data = vec![TileOffsetData {
-                width: 1,
-                height: 1,
-                max_address: 1,
-                addresses: vec![0],
-                offsets: vec![0],
-            }];
-        }
-        vt
-    }
-
-    /// decode_texture_mip success path for a virtual texture of either era
+    /// decode_texture_mip success path for virtual textures of BOTH eras
     /// (#649 / R1 architect recommendation): the public API returns real
     /// pixels, not just guard errors. The tile's 4 wire bytes are the
     /// package buffer's first 4 (B,G,R,A) — asserted via the swizzle so the
-    /// test is self-anchoring against the fixture's actual bytes.
-    fn assert_vt_decodes_through_public_api(legacy: bool) {
-        let mut pkg = pkg_with_virtual_texture("PF_B8G8R8A8");
-        sole_texture2d_mut(&mut pkg).virtual_texture = Some(Box::new(renderable_vt(legacy)));
-        let info = classify_texture(&pkg).expect("renderable VT classifies");
-        assert_eq!(info.mips, vec![(1, 1)]);
-
-        let decoded = decode_texture_mip(&pkg, info.export_idx, 0).expect("VT decodes");
-        assert_eq!((decoded.width, decoded.height), (1, 1));
-        // The chunk reads bulk record 0 — resolve it the same way the
-        // decode did, so the expected pixel self-anchors to the fixture.
-        let bulk = pkg
-            .resolve_bulk_for_export(info.export_idx)
-            .expect("bulk resolves");
-        let src = &bulk[0].bytes[0..4]; // wire B,G,R,A
-        assert_eq!(
-            decoded.rgba,
-            vec![src[2], src[1], src[0], src[3]],
-            "pixel = swizzled tile bytes (legacy: {legacy})"
-        );
-    }
-
+    /// test is self-anchoring against the fixture's actual bytes. One
+    /// looped #[test] (not a helper called by two tests): a helper fn is
+    /// replace-with-() mutant bait that would vacuously pass both callers.
     #[test]
-    fn decode_texture_mip_flattens_a_ue5_virtual_texture() {
-        assert_vt_decodes_through_public_api(false);
-    }
+    fn decode_texture_mip_flattens_virtual_textures_of_both_eras() {
+        use crate::asset::exports::texture::virtual_textures::test_fixtures::renderable_vt;
+        for legacy in [false, true] {
+            let mut pkg = pkg_with_virtual_texture("PF_B8G8R8A8");
+            sole_texture2d_mut(&mut pkg).virtual_texture = Some(Box::new(renderable_vt(legacy)));
+            let info = classify_texture(&pkg).expect("renderable VT classifies");
+            assert_eq!(info.mips, vec![(1, 1)], "legacy: {legacy}");
 
-    #[test]
-    fn decode_texture_mip_flattens_a_legacy_virtual_texture() {
-        assert_vt_decodes_through_public_api(true);
+            let decoded = decode_texture_mip(&pkg, info.export_idx, 0).expect("VT decodes");
+            assert_eq!((decoded.width, decoded.height), (1, 1));
+            // The chunk reads bulk record 0 — resolve it the same way the
+            // decode did, so the expected pixel self-anchors to the fixture.
+            let bulk = pkg
+                .resolve_bulk_for_export(info.export_idx)
+                .expect("bulk resolves");
+            let src = &bulk[0].bytes[0..4]; // wire B,G,R,A
+            assert_eq!(
+                decoded.rgba,
+                vec![src[2], src[1], src[0], src[3]],
+                "pixel = swizzled tile bytes (legacy: {legacy})"
+            );
+        }
     }
 
     fn pkg_with_virtual_texture(layer0: &str) -> Package {
