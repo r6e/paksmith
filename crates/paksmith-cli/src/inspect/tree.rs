@@ -386,6 +386,37 @@ mod tests {
     }
 
     #[test]
+    fn typed_variant_label_pins_every_non_texture_arm() {
+        // Each remaining arm gets its own distinct label — a deleted arm
+        // would fall to the non_exhaustive wildcard's "typed" and fail
+        // here. (The Texture2D arm's kinds are pinned above.)
+        use paksmith_core::asset::property::bag::PropertyBag;
+        use paksmith_core::asset::{
+            DataTableData, SkeletalMeshData, SoundWaveData, StaticMeshData,
+        };
+        assert_eq!(
+            typed_variant_label(&Asset::Generic(PropertyBag::opaque(Vec::new()))),
+            "generic"
+        );
+        assert_eq!(
+            typed_variant_label(&Asset::DataTable(DataTableData::empty())),
+            "DataTable"
+        );
+        assert_eq!(
+            typed_variant_label(&Asset::SoundWave(SoundWaveData::empty())),
+            "SoundWave"
+        );
+        assert_eq!(
+            typed_variant_label(&Asset::StaticMesh(StaticMeshData::empty())),
+            "StaticMesh"
+        );
+        assert_eq!(
+            typed_variant_label(&Asset::SkeletalMesh(SkeletalMeshData::empty())),
+            "SkeletalMesh"
+        );
+    }
+
+    #[test]
     fn vector_compact() {
         assert_eq!(
             fmt_vector(&FVector {
