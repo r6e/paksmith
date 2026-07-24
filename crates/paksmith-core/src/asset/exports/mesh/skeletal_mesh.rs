@@ -1562,6 +1562,31 @@ pub(crate) fn read_typed(
                             &sections,
                             &mut header.lod,
                         )?;
+                    } else if bulk.element_count > 0 {
+                        // External payload (`.ubulk` / end-of-file tier), #650:
+                        // resolve it and decode the SAME SerializeStreamedData
+                        // blob layout as the inline case, from payload offset 0
+                        // (the oracle wraps `bulk.Data` in a fresh reader).
+                        // Static-mesh policy parity: no resolver (header-only
+                        // parse) or an unresolvable payload is an ERROR — never
+                        // an empty-geometry typed mesh.
+                        let Some(resolver) = ctx.bulk_resolver.as_ref() else {
+                            return Err(PaksmithError::UnsupportedFeature {
+                                context: "non-inlined skeletal LOD bulk data without a bulk \
+                                          resolver (header-only parse)"
+                                    .to_string(),
+                            });
+                        };
+                        let payload = resolver.resolve(&bulk, asset_path)?;
+                        let sections = header.lod.sections.clone();
+                        read_streamed_data(
+                            &mut std::io::Cursor::new(payload.bytes.as_slice()),
+                            ctx,
+                            asset_path,
+                            b_has_vertex_colors,
+                            &sections,
+                            &mut header.lod,
+                        )?;
                     }
                     if bulk.element_count > 0 {
                         skip_availability_info(
@@ -5169,25 +5194,40 @@ mod tests {
         }
     }
 
-    /// A non-inlined (bulk) LOD (`bInlined=0`) with the section/bone block PRESENT
-    /// now PARSES: `read_typed` reads the `FByteBulkData` header and (since
-    /// `element_count > 0`) skips the byte-exact `SerializeAvailabilityInfo`, then
-    /// continues iterating. The bulk LOD's geometry stays EMPTY (the streamed data
-    /// is in the external `.ubulk` / not captured), but its sections/bones are
-    /// present. A mixed inline (LOD[0]) + bulk (LOD[1]) mesh parses instead of
-    /// degrading to `UnsupportedFeature` (PR5b's behavior).
+    /// #650 (c): a mixed inline (LOD[0]) + external-bulk (LOD[1]) mesh now
+    /// decodes BOTH LODs' geometry — the bulk LOD's blob is resolved from the
+    /// companion `.ubulk` instead of parsing to silently-empty geometry.
+    #[cfg(feature = "__test_utils")]
     #[test]
-    fn read_typed_non_inlined_bulk_lod_parses() {
-        let ctx = lod_typed_ctx(
+    fn read_typed_mixed_inline_and_bulk_lods_both_decode() {
+        use std::sync::Arc;
+
+        use crate::asset::bulk_data::BulkDataResolver;
+
+        let mut blob = Vec::new();
+        push_streamed_blob(&mut blob);
+        let resolver = Arc::new(BulkDataResolver::new_for_test_with_ubulk(
+            Vec::<u8>::new(),
+            0,
+            0,
+            blob.clone(),
+        ));
+        let mut ctx = lod_typed_ctx(
             &["None", "Mat0", "Root", "Hip"],
             MATERIAL_SHADER_MAP_ID_SERIALIZATION,
         );
+        ctx.bulk_resolver = Some(resolver);
+
         let mut payload =
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
         payload.extend_from_slice(&2i32.to_le_bytes()); // LODModels count = 2
         push_inlined_lod(&mut payload, &[10, 11], None); // LOD[0]: inlined geometry
-        push_non_inlined_lod(&mut payload, &[20, 21]); // LOD[1]: bulk (empty geometry)
+        push_non_inlined_lod_external_ubulk(
+            &mut payload,
+            &[20, 21],
+            u32::try_from(blob.len()).unwrap(),
+        ); // LOD[1]: external bulk
         push_lod_tail(&mut payload, 0);
 
         let (asset, _bulk) =
@@ -5195,36 +5235,26 @@ mod tests {
         let Asset::SkeletalMesh(data) = asset else {
             panic!("expected Asset::SkeletalMesh, got {asset:?}");
         };
-        assert_eq!(
-            data.lods.len(),
-            2,
-            "both the inlined and the bulk LOD must be iterated"
-        );
+        assert_eq!(data.lods.len(), 2);
 
         // LOD[0]: inlined → geometry populated.
         assert_eq!(data.lods[0].bone_map, vec![10u16, 11]);
-        assert_eq!(
-            data.lods[0].indices,
-            vec![0u32, 1, 2],
-            "LOD[0] indices parsed"
-        );
-        assert_eq!(data.lods[0].positions.len(), 2, "LOD[0] positions parsed");
+        assert_eq!(data.lods[0].indices, vec![0u32, 1, 2]);
+        assert_eq!(data.lods[0].positions.len(), 2);
 
-        // LOD[1]: bulk → geometry EMPTY, but sections/bones present.
+        // LOD[1]: external bulk → geometry RESOLVED (no longer empty).
         assert_eq!(data.lods[1].bone_map, vec![20u16, 21]);
-        assert_eq!(data.lods[1].sections.len(), 1, "bulk LOD sections present");
+        assert_eq!(data.lods[1].sections.len(), 1);
+        assert_eq!(data.lods[1].required_bones, vec![5u16, 7]);
         assert_eq!(
-            data.lods[1].required_bones,
-            vec![5u16, 7],
-            "bulk LOD bones present"
+            data.lods[1].indices,
+            vec![0u32, 1, 2],
+            "bulk LOD indices resolved from .ubulk (#650)"
         );
-        assert!(
-            data.lods[1].positions.is_empty(),
-            "bulk LOD geometry stays empty (external .ubulk not captured)"
-        );
-        assert!(
-            data.lods[1].indices.is_empty(),
-            "bulk LOD indices stay empty"
+        assert_eq!(
+            data.lods[1].positions.len(),
+            2,
+            "bulk LOD positions resolved from .ubulk"
         );
     }
 
@@ -5234,7 +5264,127 @@ mod tests {
     /// decodes geometry from `bulk.Data` (a temp archive over the payload), THEN
     /// reads `SerializeAvailabilityInfo` off the main archive — so the payload blob
     /// sits between the bulk header and the availability-info block.
+    /// Append a non-inlined LOD whose `FByteBulkData` points at the companion
+    /// `.ubulk` (`BULKDATA_PayloadInSeperateFile`, offset 0, size = blob len):
+    /// header-only in-stream; the geometry blob lives in the resolver's
+    /// `.ubulk`. Availability-info block follows (element_count = 1 > 0).
+    /// Gated like its only consumers (the resolver-backed tests) so the
+    /// no-feature package build doesn't see it dead.
+    #[cfg(feature = "__test_utils")]
+    fn push_non_inlined_lod_external_ubulk(buf: &mut Vec<u8>, bone_map: &[u16], blob_len: u32) {
+        // Header (block present, bInlined = 0).
+        buf.extend_from_slice(&[0x00u8, 0x00]); // strip flags
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut = 0
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bInlined = 0
+        push_u16_array(buf, &[5, 7]); // RequiredBones
+        buf.extend_from_slice(&1i32.to_le_bytes()); // Sections count
+        push_one_section(buf, bone_map);
+        push_u16_array(buf, &[3, 4]); // ActiveBoneIndices
+        buf.extend_from_slice(&0u32.to_le_bytes()); // BuffersSize
+
+        // FByteBulkData header: PayloadInSeperateFile (1 << 8) → `.ubulk`.
+        buf.extend_from_slice(&0x0000_0100u32.to_le_bytes()); // BulkDataFlags
+        buf.extend_from_slice(&1i32.to_le_bytes()); // ElementCount = 1
+        buf.extend_from_slice(&blob_len.to_le_bytes()); // SizeOnDisk = blob len
+        buf.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile = 0
+
+        // SerializeAvailabilityInfo (53 bytes for lod_typed_ctx).
+        buf.extend_from_slice(&[0xAAu8; 49]);
+        buf.extend_from_slice(&0i32.to_le_bytes()); // SkinWeightProfiles count = 0
+    }
+
+    /// #650 (c): an external-`.ubulk` bulk LOD now RESOLVES its geometry via
+    /// `ctx.bulk_resolver` — the same `SerializeStreamedData` blob layout as
+    /// the inline case, fetched from the companion file — instead of parsing
+    /// to a typed mesh with silently-empty geometry.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_typed_bulk_lod_resolves_external_ubulk_geometry() {
+        use std::sync::Arc;
+
+        use crate::asset::bulk_data::BulkDataResolver;
+
+        let mut blob = Vec::new();
+        push_streamed_blob(&mut blob);
+        let resolver = Arc::new(BulkDataResolver::new_for_test_with_ubulk(
+            Vec::<u8>::new(),
+            0,
+            0,
+            blob.clone(),
+        ));
+        let mut ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        ctx.bulk_resolver = Some(resolver);
+
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
+        push_non_inlined_lod_external_ubulk(
+            &mut payload,
+            &[20, 21],
+            u32::try_from(blob.len()).unwrap(),
+        );
+        push_lod_tail(&mut payload, 0);
+
+        let (asset, _bulk) =
+            read_typed(&payload, &ctx, "Mesh.uasset").expect("external-ubulk bulk LOD parse");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(data.lods.len(), 1);
+        assert_eq!(data.lods[0].bone_map, vec![20u16, 21]);
+        assert_eq!(
+            data.lods[0].indices,
+            vec![0u32, 1, 2],
+            "indices decoded from the RESOLVED .ubulk payload"
+        );
+        assert_eq!(
+            data.lods[0].positions.len(),
+            2,
+            "positions decoded from the resolved payload"
+        );
+    }
+
+    /// #650 (c): without a bulk resolver on the context, an external bulk LOD
+    /// with a non-empty payload is REJECTED (static-mesh policy parity:
+    /// "never an empty-geometry typed mesh") instead of silently parsing
+    /// with empty geometry.
+    #[test]
+    fn read_typed_bulk_lod_without_resolver_is_unsupported() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
+        push_non_inlined_lod(&mut payload, &[20, 21]);
+        push_lod_tail(&mut payload, 0);
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset")
+            .expect_err("external bulk LOD without a resolver must be rejected");
+        assert!(
+            matches!(err, PaksmithError::UnsupportedFeature { ref context }
+                if context.contains("without a bulk resolver")),
+            "got {err:?}"
+        );
+    }
+
     fn push_non_inlined_lod_with_inline_payload(buf: &mut Vec<u8>, bone_map: &[u16]) {
+        push_non_inlined_lod_with_inline_payload_full(buf, bone_map, 0);
+    }
+
+    /// Like [`push_non_inlined_lod_with_inline_payload`] with `extra_av_bytes`
+    /// junk appended after the availability-info block (desync injection).
+    fn push_non_inlined_lod_with_inline_payload_full(
+        buf: &mut Vec<u8>,
+        bone_map: &[u16],
+        extra_av_bytes: usize,
+    ) {
         // Header (block present, bInlined = 0).
         buf.extend_from_slice(&[0x00u8, 0x00]); // strip flags: not AV-stripped, class=0
         buf.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut = 0
@@ -5261,6 +5411,7 @@ mod tests {
         // push_non_inlined_lod_full's doc): constant 49 + profiles count 0.
         buf.extend_from_slice(&[0xAAu8; 49]);
         buf.extend_from_slice(&0i32.to_le_bytes()); // SkinWeightProfiles count = 0
+        buf.extend(std::iter::repeat_n(0xAAu8, extra_av_bytes)); // desync injection
     }
 
     /// #563: a non-inlined LOD whose `FByteBulkData` carries an INLINE payload now
@@ -5354,7 +5505,10 @@ mod tests {
         payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
         payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
         // 8 extra availability-info bytes → the cursor over-runs into the tail.
-        push_non_inlined_lod_full(&mut payload, &[20, 21], 1, 8);
+        // (Inline-payload variant: the external-header path now requires a
+        // resolver — #650 — and this test pins the av-skip alignment, which is
+        // identical across both bulk sub-paths.)
+        push_non_inlined_lod_with_inline_payload_full(&mut payload, &[20, 21], 8);
         push_lod_tail(&mut payload, 0);
 
         let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
