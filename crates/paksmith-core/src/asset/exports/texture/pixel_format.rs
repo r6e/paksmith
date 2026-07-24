@@ -402,10 +402,15 @@ pub(crate) fn decode_mip(
 ///
 /// Each slice is decoded **independently** via [`decode_mip`]: a
 /// block-compressed slice is a standalone block-aligned image, so small
-/// mips (e.g. a 2×2 face occupying one 4×4 block row) never straddle a
-/// block boundary. (CUE4Parse's BC7-via-detex path instead folds depth
-/// into height — `sizeY * sizeZ` — which block-misaligns exactly those
-/// small mips; deliberately not ported.)
+/// mips (e.g. a 2×2 face occupying one full 4×4 block) never straddle a
+/// block boundary. (CUE4Parse instead folds the slice count into the
+/// mip's height up front — `FTexturePlatformData` ctor, `SizeY *=
+/// GetNumSlices()` for cube/volume owners — which multiplies the
+/// *unaligned* per-slice height and so block-misaligns small mips of
+/// every block-compressed format; its BC7 decoder entry points `Align(4)`
+/// the dims before their own `sizeY * sizeZ` fold, trading the
+/// misalignment for silent pad inflation instead. Neither fold is
+/// ported.)
 ///
 /// # Errors
 /// - [`PaksmithError::Internal`] on `slices == 0` (caller misuse — the
@@ -437,10 +442,12 @@ pub(crate) fn decode_texture_slab(
     // Composite cap FIRST: the total strip must fit the same 1 GiB decode
     // ceiling a single mip is held to. `checked_mul` degrades a u32
     // height×slices overflow into the same rejection (never wraps into a
-    // small "valid" height).
-    let composite_height = height.checked_mul(slices);
-    let within_cap = composite_height.and_then(|h| decoded_rgba_bytes_within_cap(width, h));
-    if within_cap.is_none() {
+    // small "valid" height). Binding the concrete values here proves them
+    // for the allocation and the returned dims below.
+    let Some((composite_height, total_rgba_bytes)) = height
+        .checked_mul(slices)
+        .and_then(|h| decoded_rgba_bytes_within_cap(width, h).map(|bytes| (h, bytes)))
+    else {
         let attempted = u64::from(width)
             .checked_mul(u64::from(height))
             .and_then(|p| p.checked_mul(u64::from(slices)))
@@ -452,7 +459,7 @@ pub(crate) fn decode_texture_slab(
                 cap: MAX_DECODED_TEXTURE_BYTES,
             },
         ));
-    }
+    };
 
     if slices == 1 {
         return decode_mip(format, encoded, width, height, is_normal_map, asset_path);
@@ -491,10 +498,9 @@ pub(crate) fn decode_texture_slab(
     // posture as decode_mip's output buffer.
     #[allow(
         clippy::cast_possible_truncation,
-        reason = "within_cap is validated <= MAX_DECODED_TEXTURE_BYTES (1 GiB) < usize::MAX above"
+        reason = "total_rgba_bytes is validated <= MAX_DECODED_TEXTURE_BYTES (1 GiB) < usize::MAX above"
     )]
-    let total_bytes = within_cap.unwrap_or(0) as usize;
-    let mut rgba = Vec::with_capacity(total_bytes);
+    let mut rgba = Vec::with_capacity(total_rgba_bytes as usize);
     for i in 0..slices as usize {
         let slice = &encoded[i * per_slice..(i + 1) * per_slice];
         let decoded = decode_mip(format, slice, width, height, is_normal_map, asset_path)?;
@@ -503,8 +509,7 @@ pub(crate) fn decode_texture_slab(
 
     Ok(DecodedTexture {
         width,
-        // `composite_height` is Some — the cap check above rejected None.
-        height: composite_height.unwrap_or(0),
+        height: composite_height,
         rgba,
     })
 }

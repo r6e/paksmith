@@ -18,7 +18,7 @@
 //!    `OptData`/`CPUCopy` sub-records, and the `FTexture2DMipMap[]`
 //!    mip chain.
 //!
-//! **3e-3 scope: segments 1–3 in full.** [`read_from`] decodes the
+//! **3e-3 scope: segments 1–3 in full.** [`read_from_kind`] decodes the
 //! tagged-property stream, then the segment-2 entry
 //! ([`read_segment2_entry`]): the strip flags, owner `bCooked` (asserted
 //! cooked — paksmith's domain), and the `bSerializeMipData` gate. It then
@@ -37,7 +37,7 @@
 //! `bCooked` (UE4 only) + an `FByteBulkData` payload record (present iff
 //! `bSerializeMipData`) + the mip's `SizeX`/`SizeY`/`SizeZ`. The per-mip
 //! dimensions land in [`Texture2DData::mips`]; the `FByteBulkData` records
-//! are returned as [`read_from`]'s second tuple element. `read_payloads`
+//! are returned as [`read_from_kind`]'s second tuple element. `read_payloads`
 //! surfaces them keyed by export index and `read_from_inner` stores them in
 //! `Package` (3e-3b), so the mip bytes (which live in
 //! `.uasset`/`.uexp`/`.ubulk`) resolve lazily via
@@ -126,13 +126,15 @@ const CPU_COPY_FIXED_HEADER_BYTES: u64 = 14;
 // reads it). The in-source tests below pin the cap via the
 // `TextureDimensionExceeded { cap }` field instead.
 
-/// Parse a `UTexture2D` export payload into [`Texture2DData`].
+/// Parse a `UTexture2D`-family export payload into [`Texture2DData`],
+/// tagged with the texture class family `kind`.
 ///
 /// `payload` is the export's `serial_size`-bounded byte slice. Decoded:
 /// segment 1 (tagged properties), the **segment-2 entry** (`UTexture` /
-/// `UTexture2D` `FStripDataFlags` + owner `bCooked` + `bSerializeMipData`),
-/// the **platform-data key** (`DeserializeCookedPlatformData`'s leading
-/// `pixelFormatName` `FName` + version-gated `skipOffset` `i64`/`i32`), the **full**
+/// subclass `FStripDataFlags` + owner `bCooked` + (2D only)
+/// `bSerializeMipData`), the **platform-data key**
+/// (`DeserializeCookedPlatformData`'s leading `pixelFormatName` `FName` +
+/// version-gated `skipOffset` `i64`/`i32`), the **full**
 /// `FTexturePlatformData` (version-gated stripped-data prefix, `SizeX`,
 /// `SizeY`, `PackedData`, `PixelFormat`, conditional `OptData` / `CPUCopy`,
 /// `FirstMipToSerialize`, mip-count prefix; 3e-2), and the
@@ -143,6 +145,16 @@ const CPU_COPY_FIXED_HEADER_BYTES: u64 = 14;
 /// is serialized (the common case); when `bSerializeMipData` is false
 /// (UE 5.3+) no per-mip bulk data is on the wire, so the records vector is
 /// empty. See the module docs.
+///
+/// The wire is shared across `UTexture2D` and its cube/array/volume
+/// siblings with ONE difference: only the 2D class reads
+/// `bSerializeMipData` on UE 5.3+ (CUE4Parse `UTexture2D.cs:54-58` reads
+/// the bool inside the `bCooked` branch; `UTextureCube.cs:41`,
+/// `UTexture2DArray.cs:30`, and `UVolumeTexture.cs:24` call
+/// `DeserializeCookedPlatformData(Ar)` with the flag defaulted `true`).
+/// The sibling classes' UE3-era legacy branches (`UTextureCube`'s
+/// pre-`RENDERING_REFACTOR` block) sit below paksmith's UE 4.13+ asset
+/// floor and are not modeled.
 ///
 /// # Errors
 /// - Any tagged-property fault from the nested [`read_properties`] read.
@@ -159,23 +171,6 @@ const CPU_COPY_FIXED_HEADER_BYTES: u64 = 14;
 ///   over-cap field.
 /// - [`AssetParseFault::UnexpectedEof`] / FString faults from the
 ///   header reads.
-pub(crate) fn read_from(
-    payload: &[u8],
-    ctx: &AssetContext,
-    asset_path: &str,
-) -> crate::Result<(Texture2DData, Vec<FByteBulkData>)> {
-    read_from_kind(payload, ctx, asset_path, TextureKind::TwoD)
-}
-
-/// [`read_from`] parameterized by the texture class family. The wire is
-/// shared across `UTexture2D` and its cube/array/volume siblings with ONE
-/// difference: only the 2D class reads `bSerializeMipData` on UE 5.3+
-/// (CUE4Parse `UTexture2D.cs:44-48` reads the bool; `UTextureCube.cs:41`,
-/// `UTexture2DArray.cs:29`, and `UVolumeTexture.cs:23` call
-/// `DeserializeCookedPlatformData(Ar)` with the flag defaulted `true`).
-/// The sibling classes' UE3-era legacy branches (`UTextureCube`'s
-/// pre-`RENDERING_REFACTOR` block) sit below paksmith's UE 4.13+ asset
-/// floor and are not modeled.
 pub(crate) fn read_from_kind(
     payload: &[u8],
     ctx: &AssetContext,
@@ -737,7 +732,7 @@ fn eof(asset_path: &str, field: AssetWireField) -> PaksmithError {
 }
 
 /// Registry-compatible shim ([`crate::asset::exports::dispatch::TypedReaderFn`]).
-/// Wraps [`read_from`]'s [`Texture2DData`] in the typed
+/// Wraps [`read_from_kind`]'s [`Texture2DData`] in the typed
 /// [`Asset::Texture2D`] variant and surfaces the per-mip
 /// [`FByteBulkData`] records (3e-3) as the tuple's second element — the
 /// dispatch caller stores them in `Package` so the mip bytes resolve
@@ -750,8 +745,7 @@ pub(crate) fn read_typed(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<(Asset, Vec<FByteBulkData>)> {
-    let (data, bulk_records) = read_from(payload, ctx, asset_path)?;
-    Ok((Asset::Texture2D(data), bulk_records))
+    read_typed_kind(payload, ctx, asset_path, TextureKind::TwoD)
 }
 
 /// `TypedReaderFn` for `UTextureCube` (#648).
@@ -1005,13 +999,24 @@ mod tests {
         }
     }
 
+    /// Test-local shorthand for the plain-2D parse — the production entry
+    /// points are [`read_from_kind`] (dispatchers pass an explicit kind)
+    /// and the `read_typed*` shims; only tests want the TwoD default.
+    fn read_from(
+        payload: &[u8],
+        ctx: &AssetContext,
+        asset_path: &str,
+    ) -> crate::Result<(Texture2DData, Vec<FByteBulkData>)> {
+        read_from_kind(payload, ctx, asset_path, TextureKind::TwoD)
+    }
+
     /// Append the SIBLING-class (`UTextureCube` / `UTexture2DArray` /
     /// `UVolumeTexture`) segment-2 entry + platform-data key. Identical to
     /// [`write_segment2_entry`] except `bSerializeMipData` is NEVER on the
     /// wire — CUE4Parse's sibling `Deserialize` bodies call
     /// `DeserializeCookedPlatformData(Ar)` with the flag defaulted, with no
     /// `Ar.Game >= GAME_UE5_3` read (`UTextureCube.cs:41`,
-    /// `UTexture2DArray.cs:29`, `UVolumeTexture.cs:23`).
+    /// `UTexture2DArray.cs:30`, `UVolumeTexture.cs:24`).
     fn write_sibling_entry(buf: &mut Vec<u8>, ctx: &AssetContext) {
         write_entry(buf, STRIP_FLAG_EDITOR_DATA, 1, None);
         write_pd_key(buf, ctx);
@@ -1045,14 +1050,20 @@ mod tests {
     }
 
     #[test]
-    fn read_from_defaults_to_the_two_d_kind() {
+    fn read_typed_defaults_to_the_two_d_kind() {
+        // The dispatch table's "Texture2D" entry must keep tagging TwoD —
+        // a swapped default would silently reroute every plain texture
+        // through the slice-composition path.
         let ctx = make_ctx(&[]);
         let mut buf = Vec::new();
         none(&mut buf);
         write_segment2_entry(&mut buf, &ctx);
         plain(&mut buf, &ctx, 64, 64, "PF_DXT5", &one_mip());
 
-        let (data, _) = read_from(&buf, &ctx, "t.uasset").unwrap();
+        let (asset, _) = read_typed(&buf, &ctx, "t.uasset").unwrap();
+        let Asset::Texture2D(data) = asset else {
+            panic!("expected Asset::Texture2D");
+        };
         assert_eq!(data.kind, TextureKind::TwoD);
     }
 

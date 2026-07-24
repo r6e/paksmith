@@ -693,17 +693,27 @@ impl SoundWaveData {
 /// layers, a volume's holds `SizeZ` depth slices. `#[non_exhaustive]`
 /// so `TextureCubeArray` (out of #648's scope) can land later without a
 /// breaking change.
+/// Serializes as the engine class name (`"Texture2D"`, `"TextureCube"`,
+/// `"Texture2DArray"`, `"VolumeTexture"`) — matching the `Asset` enum's
+/// engine-class-cased tag convention and the dispatch-table keys. These
+/// tokens are frozen into the CLI `inspect` JSON (schema_version 1), so
+/// the renames are load-bearing, not cosmetic (`"TwoD"` must never leak
+/// to the wire). Pinned by `texture_kind_serializes_as_engine_class_names`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub enum TextureKind {
     /// `UTexture2D` — a plain one-slice 2D texture (the Phase 3e baseline).
+    #[serde(rename = "Texture2D")]
     TwoD,
     /// `UTextureCube` — six faces stored as consecutive slices in each mip
     /// (`PackedData` slice count 6, bit 31 set).
+    #[serde(rename = "TextureCube")]
     Cube,
     /// `UTexture2DArray` — `SizeZ` independent 2D layers per mip.
+    #[serde(rename = "Texture2DArray")]
     Array,
     /// `UVolumeTexture` — `SizeZ` depth slices per mip.
+    #[serde(rename = "VolumeTexture")]
     Volume,
 }
 
@@ -957,6 +967,22 @@ impl AssetContext {
 #[cfg(all(test, feature = "__test_utils"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn texture_kind_serializes_as_engine_class_names() {
+        // These tokens flow verbatim into the CLI `inspect` JSON under
+        // schema_version 1 — once shipped they are frozen. The engine
+        // class names match the `Asset` tag convention and the dispatch
+        // keys; the Rust variant names (`TwoD` etc.) must never leak.
+        for (kind, token) in [
+            (TextureKind::TwoD, "\"Texture2D\""),
+            (TextureKind::Cube, "\"TextureCube\""),
+            (TextureKind::Array, "\"Texture2DArray\""),
+            (TextureKind::Volume, "\"VolumeTexture\""),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).expect("serialize"), token);
+        }
+    }
 
     #[test]
     fn asset_generic_clone_and_debug() {

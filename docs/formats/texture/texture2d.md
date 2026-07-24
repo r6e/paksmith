@@ -209,7 +209,7 @@ The sibling export classes — `UTextureCube`, `UTexture2DArray`,
 `FTexturePlatformData` per-format loop) with exactly **one wire
 divergence**: only `UTexture2D` reads the UE 5.3+ `bSerializeMipData`
 bool. The siblings' `Deserialize` bodies (CUE4Parse
-`UTextureCube.cs:41`, `UTexture2DArray.cs:29`, `UVolumeTexture.cs:23`)
+`UTextureCube.cs:41`, `UTexture2DArray.cs:30`, `UVolumeTexture.cs:24`)
 call `DeserializeCookedPlatformData(Ar)` with the flag defaulted
 `true`, so a sibling parser must NOT consume the bool even at object
 versions ≥ 1010. Their owner `bCooked` is read unconditionally (no
@@ -233,14 +233,29 @@ from the wire). Slice semantics per class:
 wire order, slice 0 on top — decoded per-slice (each slice is a
 standalone block-aligned image). Two deliberate divergences from
 CUE4Parse: (1) its `FTexturePlatformData` ctor multiplies every mip's
-`SizeY` by the top-level `GetNumSlices()` for cube/volume owners,
-which is wrong for lower volume mips (its own post-loop `PackedData`
-rewrite flags the inconsistency) — paksmith keeps wire values raw and
-uses the target mip's own `SizeZ`; (2) its BC7-via-detex path folds
-depth into height (`sizeY * sizeZ`) before block decode, which
-misaligns small mips that occupy partial block rows — paksmith
-decodes each slice independently. `TextureCubeArray` is not dispatched
+`SizeY` by the top-level `GetNumSlices()` for cube/volume owners —
+wrong for lower volume mips (whose depth has halved), and, because it
+multiplies the *unaligned* per-slice height, block-misaligning for
+small mips of every block-compressed format; the ctor then silently
+rewrites the volume's `PackedData` slice count from the normalized
+`Mips[0].SizeZ`, papering the inconsistency over. paksmith keeps wire
+values raw and uses the target mip's own `SizeZ`. (2) its BC7 decoder
+entry points `Align(4)` the dims before their own `sizeY * sizeZ`
+fold — avoiding the misalignment but silently inflating small slices
+with block padding. paksmith decodes each slice independently, so
+neither quirk applies. `TextureCubeArray` is not dispatched
 (out of #648's scope; falls through to the generic property bag).
+
+**CLI extract policy note**: registering these classes moves them from
+the Generic raw-copy fallback to the typed-conversion path, which — per
+the established typed-asset policy — fails the entry loudly on any
+export error instead of degrading to a raw copy. In particular, a
+legitimate cubemap whose 6-face composite exceeds the 1 GiB decode cap
+(faces above ~6688²) now fails extraction with
+`DecodedTextureBytesExceeded` where it previously extracted as a raw
+`.uasset`. This is the same fail-loud behavior a plain `Texture2D` has
+always had; re-run with the asset excluded, or extract it raw via a
+path filter, to recover the bytes.
 
 ### Stripped editor-only data
 

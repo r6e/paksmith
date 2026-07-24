@@ -9,12 +9,12 @@
 //! Phase 3e lands incrementally:
 //! - **3e-1**: routes the `Texture2D` class through dispatch and
 //!   decodes **segment 1** (tagged properties).
-//! - **3e-2** ([`texture2d::read_from`]): the **full**
+//! - **3e-2** ([`texture2d::read_from_kind`]): the **full**
 //!   `FTexturePlatformData` header — the version-gated stripped-data
 //!   prefix, `SizeX`, `SizeY`, `PackedData`, `PixelFormat` (3e-2a), then
 //!   the conditional `OptData` / `CPUCopy`, `FirstMipToSerialize`, and
 //!   the mip-count prefix (3e-2b) — into [`crate::asset::Texture2DData`].
-//! - **3e-3** ([`texture2d::read_from`], cont.): the **segment-2 entry**
+//! - **3e-3** ([`texture2d::read_from_kind`], cont.): the **segment-2 entry**
 //!   (`UTexture` / `UTexture2D` `FStripDataFlags` + owner `bCooked` +
 //!   `bSerializeMipData`) that precedes the platform data, then the
 //!   per-mip `FTexture2DMipMap` records — `bCooked` (UE4) + each mip's
@@ -38,7 +38,7 @@
 //!   linear float then tone-mapped (ACES + sRGB) to 8-bit. `PngHandler` (3e-8)
 //!   follows.
 
-//! - **3e-VT-a** ([`texture2d::read_from`], cont.): reads the trailing
+//! - **3e-VT-a** ([`texture2d::read_from_kind`], cont.): reads the trailing
 //!   `bIsVirtual` flag (UE 4.23+) so virtual textures are identified.
 //! - **3e-VT-b1** ([`virtual_textures`]): the structural parse of the
 //!   `FVirtualTextureBuiltData` blob (header, dispatch tables, layer formats)
@@ -290,8 +290,13 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
 ///   mip bytes for `mip_index` (e.g. a texture with `bSerializeMipData = false`).
 ///   [`classify_texture`] already screens these out, so a well-behaved GUI
 ///   caller never hits this path.
+/// - [`AssetParseFault::TextureSliceCountInvalid`](crate::error::AssetParseFault::TextureSliceCountInvalid)
+///   if the texture is multidim (cube/array/volume, #648) and its slice
+///   count is unusable (a non-6 cube `PackedData` count, or a zero mip
+///   `SizeZ`) — raised before any decode work.
 /// - Any decode error from the pixel-format decode layer
-///   (`pixel_format::decode_mip`) or the virtual-texture flatten
+///   (`pixel_format::decode_texture_slab`, which composes multidim slices
+///   and delegates each to `decode_mip`) or the virtual-texture flatten
 ///   (`flatten_virtual_texture`).
 pub fn decode_texture_mip(
     package: &Package,
@@ -404,8 +409,10 @@ pub fn decode_texture_mip(
 ///   each mip level (an array's `SizeZ` is its constant `ArraySize`).
 ///   Deliberately NOT the top-level `PackedData` count: CUE4Parse folds
 ///   `GetNumSlices()` into every mip's height, which is wrong for lower
-///   volume mips (its own `FTexturePlatformData` ctor flags the
-///   resulting `NumSlices` inconsistency). `SizeZ == 0` fails closed.
+///   volume mips (its own `FTexturePlatformData` ctor then silently
+///   REWRITES the volume's `PackedData` slice count from the normalized
+///   `Mips[0].SizeZ` — papering over the inconsistency, not flagging
+///   it). `SizeZ == 0` fails closed.
 pub(crate) fn export_slice_count(
     data: &Texture2DData,
     mip: &crate::asset::Texture2DMipMap,

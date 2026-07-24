@@ -75,6 +75,14 @@ impl ExtractJob<'_> {
             Ok(b) => b,
             Err(e) => return failed(entry_path, e),
         };
+        // A handler export error fails the entry with NO raw fallback —
+        // the deliberate typed-asset policy (unlike the locres path, which
+        // degrades to a raw copy): a typed asset that fails conversion is
+        // surfaced loudly rather than silently downgraded. Note the set of
+        // affected assets grows with each dispatch registration — #648
+        // extended it to cube/array/volume textures, so e.g. a cubemap
+        // whose 6-face composite exceeds the 1 GiB decode cap now fails
+        // here where it previously fell through to a raw copy as Generic.
         let bytes = match handler.export(&pkg.payloads[idx], bulk) {
             Ok(b) => b,
             Err(e) => return failed(entry_path, e),
