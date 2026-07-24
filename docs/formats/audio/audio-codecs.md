@@ -318,6 +318,42 @@ is an independent Phase 3+ deliverable.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline). The codec dispatch lands as part of the SoundWave reader work; per-codec decoders are independent Phase 3+ deliverables.
 
+### WEM (Wwise) — wontfix, documented (issue #647)
+
+WEM→OGG conversion was a Phase 3f follow-up (3f-8) predicated on WEM
+appearing in `USoundWave` format containers. The #647 demand check
+found the premise fails at both ends:
+
+- **No WEM ever reaches the `USoundWave` surface.** CUE4Parse's
+  format-container codec keys are PCM / ADPCM / BINKA / RADA / OPUS /
+  AT9 / OGG — never WEM. Its only `USoundWave`→WEM path is a
+  heuristic on the *uncooked* `RawData` branch (`!bCooked`), outside
+  paksmith's cooked-container parse surface entirely.
+- **Wwise replaces UE's audio pipeline.** Wwise-using games ship
+  audio as loose `.wem` / `.bnk` / `.pck` **raw pak entries** (under
+  `Content/WwiseAudio/`) and/or as `FByteBulkData` inside the Wwise
+  plugin's own UObject classes (`UAkMediaAssetData.DataChunks`,
+  `UAkAudioEvent` cooked data) — never through `USoundWave`.
+- **Paksmith's raw extract already provides the ecosystem-standard
+  handoff**: loose `.wem`/`.bnk` entries extract byte-exact
+  (`EntryClass::Raw`), which is exactly what vgmstream / ww2ogg
+  consume. CUE4Parse and FModel do the same on export — both emit
+  `.wem` verbatim (FModel's in-app *player* shells out to an auto-downloaded
+  vgmstream-cli for playback, underscoring that even it does not
+  convert WEM itself).
+- **The conversion is not a "header rewrite".** Wwise-Vorbis strips
+  the setup header's codebooks and references an external codebook
+  database; ww2ogg's actual pipeline is codebook restoration +
+  bit-level Vorbis header reconstruction + Ogg re-paging + a revorb
+  granule pass — and covers only the Vorbis subset of WEM (which
+  also carries Wwise-ADPCM/Opus/PCM/XMA). The earlier "just framing
+  rewrite" characterization in the Phase 3f plan was incorrect.
+
+If Wwise support is ever wanted, the correct unit of work is a
+`UAkMediaAsset` / `UAkAudioEvent` **typed reader** that surfaces the
+embedded bulk data as `.wem` (matching CUE4Parse/FModel behavior) —
+not a WEM→OGG converter on `USoundWave`.
+
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Sound/USoundWave.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`. CUE4Parse reads codec keys as plain `FName` values without enumerating the key strings; no per-codec reader files exist at this path.

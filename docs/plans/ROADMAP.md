@@ -192,8 +192,12 @@ BitWindow is a deprecated, inert non-codec).
   export of VT page tables is a 3e follow-up.
   (`phase-3e-texture-export.md`)
 - **3f** — `USoundWave` → WAV / OGG export. MVP: OGG/OPUS
-  passthrough + PCM-to-WAV. Follow-ups: ADPCM-to-WAV, WEM-to-OGG
-  via header rewrite. Proprietary codecs (BINKA/XMA2/AT9/OPUSNX)
+  passthrough + PCM-to-WAV. Follow-ups: ADPCM-to-WAV (shipped).
+  WEM-to-OGG: wontfix per the #647 demand check — WEM never reaches
+  the `USoundWave` surface (Wwise ships loose `.wem`/`.bnk` raw
+  entries, already extracted byte-exact, or `UAk*` plugin assets;
+  see `docs/formats/audio/audio-codecs.md` §WEM). Proprietary
+  codecs (BINKA/XMA2/AT9/OPUSNX)
   surface as raw passthrough via `RawSoundHandler` (full decode ships
   in Phase 8 via the SDK loader). (`phase-3f-audio-export.md`)
 - **3g** — `UStaticMesh` → glTF 2.0 export. Classic LOD path;
@@ -227,7 +231,7 @@ paksmith-core/src/
 │   ├── mod.rs              # FormatHandler trait, HandlerRegistry
 │   ├── texture.rs          # TextureAsset, DDS/BC decode, PNG export
 │   ├── mesh.rs             # MeshAsset, glTF writer
-│   ├── audio.rs            # SoundAsset, WEM/OGG/WAV export
+│   ├── audio.rs            # SoundAsset, OGG/WAV export
 │   └── data_table.rs       # DataTableAsset, CSV/JSON export
 ```
 
@@ -237,7 +241,11 @@ paksmith-core/src/
 - Each handler is stateless — receives asset data and optional bulk data, produces output bytes. No shared mutable state.
 - Texture decoding uses block compression algorithms (BC1-BC7). Consider wrapping an existing C library (e.g., `texture2ddecoder`) via FFI, or find a pure-Rust implementation. Pure Rust preferred but not at the cost of correctness.
 - glTF export via the `gltf` crate's builder API. One mesh per file initially; scene-level export later.
-- Audio: WEM (Wwise) is essentially OGG Vorbis with a custom header. The conversion is well-documented.
+- Audio: WEM (Wwise) conversion is wontfix (#647): the "custom header"
+  framing understated it (ww2ogg needs codebook restoration + bitstream
+  header rebuild + revorb), and no WEM reaches `USoundWave` anyway —
+  Wwise ships loose raw entries or `UAk*` plugin assets. See
+  `docs/formats/audio/audio-codecs.md` §WEM.
 - The HandlerRegistry dispatches based on asset class name from the export table. Handlers register themselves at startup.
 
 **Testing approach:**
