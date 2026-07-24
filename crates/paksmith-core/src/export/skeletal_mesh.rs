@@ -633,14 +633,15 @@ impl FormatHandler for GltfSkeletalMeshHandler {
 
     /// Accepts a `SkeletalMesh` carrying at least one LOD with geometry.
     ///
-    /// A `SkeletalMesh` with NO drawable LOD — e.g. one whose every LOD is
-    /// non-inlined/streaming-only, which parses to `Asset::SkeletalMesh` with
-    /// empty per-LOD positions — yields `supports() == false`. There is no
+    /// Since #650, non-inlined LODs resolve their streamed geometry through
+    /// the bulk resolver at parse time, so a real package's typed mesh
+    /// carries positions for every renderable LOD. A `SkeletalMesh` with NO
+    /// drawable LOD (every LOD audiovisual-stripped / `bIsLODCookedOut`, or
+    /// a hand-built value) still yields `supports() == false` with no
     /// cross-discriminant downgrade: such a mesh is NOT routed to
     /// [`GenericHandler`](crate::export::GenericHandler), and
     /// [`HandlerRegistry::find_handler`](crate::export::HandlerRegistry::find_handler)
-    /// simply returns `None`. Surfacing geometry-less skeletal meshes (e.g. via
-    /// the bulk LOD payload) is a future parser/walker concern.
+    /// simply returns `None`.
     fn supports(&self, asset: &Asset) -> bool {
         matches!(asset, Asset::SkeletalMesh(d) if d.lods.iter().any(|l| !l.positions.is_empty()))
     }

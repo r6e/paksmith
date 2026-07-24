@@ -150,10 +150,12 @@ pub enum Asset {
     /// A `USkeletalMesh` export. Phase 3h. Carries the segment-1 tagged
     /// properties, the `USkeletalMesh.Deserialize` prefix (`ImportedBounds`,
     /// material slot names, `bCooked`), and the reference skeleton (bone
-    /// hierarchy + bind pose), plus EVERY inlined LOD's sections + bone arrays
-    /// and per-vertex skin geometry (vertex/index/skin-weight buffers). A
-    /// non-inlined (out-of-line `FByteBulkData`) LOD is not yet supported (the
-    /// export degrades to a generic property bag). See [`SkeletalMeshData`].
+    /// hierarchy + bind pose), plus EVERY LOD's sections + bone arrays and
+    /// per-vertex skin geometry (vertex/index/skin-weight buffers) — inlined
+    /// LODs decode in-stream, non-inlined (external `FByteBulkData`) LODs
+    /// resolve their streamed blob through the bulk resolver (#650). A
+    /// resolver-less parse of a non-inlined LOD errors (→ generic property
+    /// bag) rather than yielding empty geometry. See [`SkeletalMeshData`].
     SkeletalMesh(SkeletalMeshData),
 }
 
@@ -290,18 +292,12 @@ impl StaticMeshLod {
     }
 }
 
-/// Parsed `USkeletalMesh` export — Phase 3h. Carries the reference skeleton
-/// (bone hierarchy + bind pose) plus the type scaffolding for the segment-2
-/// prefix (`materials`, `bounds`, `cooked`) and the per-LOD skin geometry.
-///
-/// # Scope
-///
-/// PR1 populates only `skeleton` (via the standalone `read_reference_skeleton`
-/// reader); the rest are declared here and populated by later 3h PRs: PR2 wires
-/// dispatch + the segment-2 prefix (`cooked`, `materials`, `bounds`); PR3 adds
-/// the `FSkelMeshSection` reader; PR4 fills `lods` with `LOD[0]`'s sections + bone
-/// arrays; PR5 adds the per-vertex skin geometry. The `empty()` sentinel makes
-/// the type constructible for the export `HandlerRegistry` discriminant.
+/// Parsed `USkeletalMesh` export — Phase 3h (complete). Carries the
+/// reference skeleton (bone hierarchy + bind pose), the segment-2 prefix
+/// (`materials`, `bounds`, `cooked`), and every LOD's sections, bone
+/// arrays, and per-vertex skin geometry (inlined or bulk-resolved, #650).
+/// The `empty()` sentinel makes the type constructible for the export
+/// `HandlerRegistry` discriminant.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SkeletalMeshData {
@@ -315,10 +311,11 @@ pub struct SkeletalMeshData {
     pub materials: Vec<String>,
     /// `ImportedBounds` — mesh-space bounding box + sphere.
     pub bounds: structs::bounds::FBoxSphereBounds,
-    /// Per-LOD records — one entry per inlined `LODModels[i]`, each with its
-    /// sections + bone arrays and per-vertex skin geometry. A non-inlined
-    /// (out-of-line `FByteBulkData`) LOD is not yet supported (the export
-    /// degrades to a generic property bag rather than producing a partial set).
+    /// Per-LOD records — one entry per `LODModels[i]`, each with its
+    /// sections + bone arrays and per-vertex skin geometry. Non-inlined
+    /// LODs resolve their streamed blob through the bulk resolver (#650);
+    /// only an audiovisual-stripped or `bIsLODCookedOut` LOD legitimately
+    /// carries no section/geometry block.
     pub lods: Vec<SkeletalMeshLod>,
 }
 
@@ -374,8 +371,8 @@ pub struct BoneInfo {
 
 /// Per-LOD skeletal geometry (Structure-of-Arrays). Fields declared here; PR3
 /// populates `sections`; PR4 populates the bone arrays (`active_bone_indices`,
-/// `required_bones`, `bone_map`); the vertex / index / skin-weight buffers are
-/// PR5. Phase 3h.
+/// `required_bones`, `bone_map`) plus the vertex / index / skin-weight
+/// buffers. Phase 3h.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 #[non_exhaustive]
 pub struct SkeletalMeshLod {

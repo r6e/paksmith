@@ -316,9 +316,9 @@ PR5c completes the skeletal-mesh **LOD wire traversal** (every cooked UE 4.24+ L
   in that payload, not an external `.ubulk`. `FByteBulkData::read_from_capturing_inline`
   returns those bytes and the LOD reader decodes them via `read_streamed_data`
   (the oracle's `SerializeStreamedData` over `bulk.Data`), then reads the
-  `SerializeAvailabilityInfo` block off the main archive. The external-`.ubulk`
-  case (the cooked norm) still leaves geometry empty (the payload is in a
-  separate file the typed reader does not stitch).
+  `SerializeAvailabilityInfo` block off the main archive. The
+  external-`.ubulk` case (the cooked norm) resolves the payload through the
+  context's bulk resolver and decodes the same blob (issue #650).
 - **Bone-map LOD-local→global remap** — each `FSkelMeshSection.BoneMap` is a
   LOD-local-to-global bone index table; the remap from LOD-local indices (used
   in skin-weight data) to skeleton-global indices (needed for glTF export) is
@@ -344,13 +344,18 @@ land on the next LOD.
 - **Inline payload present** (`ForceInlinePayload` etc.) → the geometry is
   DECODED from the captured payload via `read_streamed_data` (mirroring the
   oracle's `SerializeStreamedData` over `bulk.Data`).
-- **External `.ubulk`** (`PayloadAtEndOfFile` / separate-file, the cooked norm)
-  → geometry stays **empty**: the payload is in a separate file the typed reader
-  does not stitch. The LOD's sections/bones are still present.
+- **External `.ubulk`** (`PayloadAtEndOfFile` / separate-file, the cooked
+  norm) → the payload is fetched via the context's **bulk resolver** and
+  decoded with the same `read_streamed_data` from payload offset 0 (issue
+  #650, mirroring the oracle's fresh reader over `bulk.Data` and the
+  static-mesh path's in-place resolution). Static-mesh policy parity: a
+  resolver-less parse (header-only) or an unresolvable payload is an
+  `UnsupportedFeature`/typed error (→ `Generic`) — never an empty-geometry
+  typed mesh.
 
-Mixed inline/bulk meshes **parse** (inlined + inline-payload-bulk LODs carry
-geometry; external-`.ubulk` bulk LODs are consumed-but-empty) instead of
-degrading to `Generic`.
+Mixed inline/bulk meshes **parse with full geometry on every renderable
+LOD**; only audiovisual-stripped or `bIsLODCookedOut` LODs legitimately
+carry none.
 
 **The `element_count > 0` gate (UNVERIFIED):** CUE4Parse gates on
 `ElementCount > 0 && Data != null`, but `Data != null` is *file-resolvability*
@@ -731,22 +736,33 @@ See `docs/security/allocation-caps.md` for the broader policy.
 - `crates/paksmith-core/src/asset/exports/mesh/skeletal_mesh.rs` — `read_typed` (full cooked UE 4.24+ path: LOD loop + inlined-LOD streamed blob + post-loop tail + cursor-landing sentinel), `read_streamed_data` (the 10-item blob orchestration), `read_lod_post_loop_tail` (post-loop tail + sentinel), `read_static_lod_model` (LOD header → `LodHeader`), `read_skel_mesh_section_render` (per-section cooked record).
 - `crates/paksmith-core/src/asset/exports/mesh/skin_weights.rs` — `read_skin_weight_vertex_buffer` (LEGACY + NEW paths), `read_multisize_index_container`.
 
-**Status (PR5c, Phase 3h — LOD traversal complete for cooked UE 4.24+):** All inlined LODs' geometry is
+**Status (Phase 3h + #650 — geometry decode complete for cooked UE 4.24+):**
+Every renderable LOD's geometry is
 parsed: indices, positions, normals/tangents/UVs, per-vertex bone
-indices/weights, and vertex colors. Non-inlined (bulk) LODs are consumed
-(FByteBulkData header + SerializeAvailabilityInfo skip); their geometry is
-decoded when the bulk payload is **in-stream inline**, and left empty when it is
-an external `.ubulk` (not stitched). The LOD loop, the `BuffersSize` seek, the
-non-inlined bulk path (inline-payload decode + availability-info skip), the
+indices/weights, and vertex colors. Non-inlined (bulk) LODs decode from
+either payload source — in-stream inline payloads are captured directly;
+external `.ubulk` payloads resolve through the bulk resolver (#650) — and
+the `SerializeAvailabilityInfo` mirror is skipped byte-exactly. Cooked
+layouts BEFORE UE 4.24 remain fail-closed `UnsupportedFeature`s: the
+pre-`SplitModelAndRenderData` inline layout (UE 4.13-4.18) and the
+`SerializeRenderItem_Legacy` layout (UE 4.19-4.23) are documented wire
+formats with oracle support, tracked for future implementation under
+issue #650. The LOD loop, the `BuffersSize` seek, the
+non-inlined bulk path (both payload decodes + availability-info skip), the
 post-loop tail, and the cursor-landing sentinel are all implemented. The bone-map
 LOD-local→global remap is consumed by the glTF exporter (PR6; see the
 export-mapping section below). Both fixed-stride and variable-bones-per-vertex
 skin weights, and UE5 16-bit bone weights, are decoded. Non-empty
 `FSkinWeightProfilesData` parses (the map is skipped by the `BuffersSize` seek,
 not materialized — override weights unused by the exporter). Out of scope:
-**cloth** (`ClothVertexBuffer` / `ClothMappingDataLODs` are simulation data with
-no glTF representation; the cloth render mesh exports as ordinary skinned
-geometry), and animation (`UAnimSequence` → glTF `animations`, a future Phase-3i
+**cloth-surface export — resolved wontfix under issue #650**: the cloth
+render mesh already exports as ordinary skinned geometry;
+`ClothVertexBuffer` / `ClothMappingDataLODs` are simulation-deformation
+data with no glTF representation, the oracle itself never decodes the
+cloth deform buffer (CUE4Parse skips it via `SkipBulkArrayData`), and its
+conversion layer contains no cloth handling at all — there is no
+ecosystem-standard target to convert to. And animation (`UAnimSequence` →
+glTF `animations`, a future Phase-3i
 sub-phase blocked on UE/ACL animation-decompression — see issue #575).
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline) +
@@ -831,8 +847,10 @@ for the root in the bind pose, such vertices render at rest and stay glTF-valid.
 3h exports the mesh in its **bind pose** only. Out of scope for this phase,
 consistent with the design doc's *Out of scope* list: `UAnimSequence` animation
 tracks (→ glTF `animations`), morph targets (`UMorphTarget` blend shapes),
-sockets (per-bone attachment points), and cloth surfacing — cloth wire blocks
-are byte-skipped by the parser but not surfaced in the exported glTF.
+and sockets (per-bone attachment points). Cloth surfacing is resolved
+wontfix (issue #650): the cloth render mesh exports as ordinary skinned
+geometry; the byte-skipped cloth wire blocks are simulation data with no
+glTF target and no oracle decode.
 
 ## References
 

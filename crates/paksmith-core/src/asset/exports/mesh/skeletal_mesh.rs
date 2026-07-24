@@ -1331,19 +1331,23 @@ fn read_lod_post_loop_tail(
 /// whose block is absent
 /// (AV-stripped or cooked-out) leaves geometry empty and is not seeked. A
 /// **non-inlined** LOD with the block present (the external [`FByteBulkData`]
-/// bulk-streaming path) reads the `FByteBulkData` header (via
-/// [`FByteBulkData::read_from`], which consumes any inline payload too) and —
-/// when `element_count > 0` — skips a byte-exact [`skip_availability_info`] off
-/// the main archive to land on the next LOD. The bulk LOD's geometry stays
-/// **empty** (the streamed payload is in the external `.ubulk` / not captured);
-/// its sections/bones are populated. paksmith gates on `element_count > 0`
-/// alone — the wire-deterministic subset of CUE4Parse's
+/// bulk-streaming path) reads the `FByteBulkData` header, then decodes the
+/// streamed geometry blob from ONE of its two payload sources (#563/#650):
+/// an inline payload is captured in-stream; an external payload (`.ubulk` /
+/// end-of-file tier) is fetched via the context's bulk resolver — both feed
+/// the same [`read_streamed_data`] over the payload from offset 0. A
+/// resolver-less parse of a non-empty external payload errors
+/// (static-mesh policy parity — never an empty-geometry typed mesh). When
+/// `element_count > 0` the byte-exact [`skip_availability_info`] then runs
+/// off the main archive to land on the next LOD; paksmith gates on
+/// `element_count > 0` alone — the wire-deterministic subset of CUE4Parse's
 /// `ElementCount > 0 && Data != null` (the `&& Data != null` is
 /// file-resolvability, not wire) — guarded by the post-loop sentinel.
 /// After the loop, [`read_lod_post_loop_tail`] consumes the tail and asserts the
 /// cursor-landing sentinel. The second returned element — the export's
-/// [`FByteBulkData`] records — is always empty here (no out-of-line buffers are
-/// resolved yet).
+/// [`FByteBulkData`] records — is always empty (mesh buffers resolve
+/// in-place, mirroring the static-mesh path; nothing routes through
+/// `Package::bulk_data`).
 ///
 /// # Errors
 /// [`crate::PaksmithError`] from the tagged-property parse, the object-GUID
