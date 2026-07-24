@@ -154,8 +154,10 @@ pub enum Asset {
     /// per-vertex skin geometry (vertex/index/skin-weight buffers) — inlined
     /// LODs decode in-stream, non-inlined (external `FByteBulkData`) LODs
     /// resolve their streamed blob through the bulk resolver (#650). A
-    /// resolver-less parse of a non-inlined LOD errors (→ generic property
-    /// bag) rather than yielding empty geometry. See [`SkeletalMeshData`].
+    /// resolver-less parse of a non-inlined LOD with a non-empty
+    /// (`element_count > 0`) external payload errors (→ generic property
+    /// bag) rather than yielding empty geometry; an EMPTY bulk record
+    /// parses without a resolver. See [`SkeletalMeshData`].
     SkeletalMesh(SkeletalMeshData),
 }
 

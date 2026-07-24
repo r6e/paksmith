@@ -60,10 +60,9 @@ LOD-local→global remap is consumed at glTF-export time
 (PR6; see [glTF export mapping](#gltf-export-mapping-gltfskeletalmeshhandler-pr6)).
 Out of scope: **cloth**, resolved wontfix under #650 — see
 [Paksmith implementation](#paksmith-implementation) for the rationale.
-Non-empty
-`FSkinWeightProfilesData` no longer blocks the parse — the map is skipped by the
-`BuffersSize` seek (override skin weights unused by the glTF exporter), not
-materialized. **The LOD wire structure is fully traversed AND every
+Non-empty `FSkinWeightProfilesData` no longer blocks the parse — the map is
+skipped by the `BuffersSize` seek (override skin weights unused by the glTF
+exporter), not materialized. **The LOD wire structure is fully traversed AND every
 renderable LOD's geometry is decoded (cooked UE 4.24+); pre-4.24 cooked
 layouts remain fail-closed `UnsupportedFeature`s, tracked under #650.**
 
@@ -72,8 +71,8 @@ layouts remain fail-closed `UnsupportedFeature`s, tracked under #650.**
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | UE 4.0+ | `USkeletalMesh` + `FStaticLODModel` introduced. | `CUE4Parse/UE4/Assets/Exports/SkeletalMesh/USkeletalMesh.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| UE 4.16 (`FSkeletalMeshCustomVersion.SplitModelAndRenderData`) | Cooked LOD records split from editor LOD model; `bCooked` gate added at `USkeletalMesh.Deserialize` level. | Same[^1] |
-| UE 4.16 (`FSkeletalMeshCustomVersion.CombineSectionWithChunk`) | Section and chunk merged; `FSkelMeshChunk` only present pre-this version. | Same[^1] |
+| UE 4.13 (`FSkeletalMeshCustomVersion.CombineSectionWithChunk`) | Section and chunk merged; `FSkelMeshChunk` only present pre-this version. | Same[^1] |
+| UE 4.19 (`FSkeletalMeshCustomVersion.SplitModelAndRenderData`) | Cooked LOD records split from editor LOD model; `bCooked` gate added at `USkeletalMesh.Deserialize` level. | Same[^1] |
 | UE 4.20 (object version 504) | Skin-weight precision split; `bExtraBoneInfluences` variant. | Same[^1] |
 | UE 4.24 (`FAnimObjectVersion.IncreaseBoneIndexLimitPerChunk`) | `bUse16BitBoneIndex` added (in both `FSkelMeshSection` and `FSkinWeightVertexBuffer`). | Same[^1] |
 | UE 4.24 (`FRenderingObjectVersion ≥ MaterialShaderMapIdSerialization`) | `UseNewCookedFormat` boundary: cooked LODs switch from `SerializeRenderItem_Legacy` to `SerializeRenderItem` (`bIsLODCookedOut` + `bInlined` fields added to the LOD header). | Same[^1]; UEViewer `UnMesh4.cpp`[^2] |
@@ -159,9 +158,11 @@ reaches after the `bCooked` gate. Sources: CUE4Parse `FStaticLODModel.cs`
 (`SerializeRenderItem`) at the reference SHA[^1]; gildor UEViewer
 `UnMesh4.cpp`.[^2]
 
-Pre-4.24 cooked LODs (4.16–4.23) use a **separate** `SerializeRenderItem_Legacy`
-path — a different header with no `bIsLODCookedOut` or `bInlined` fields —
-and are not documented here. See the [4.24 format boundary](#ue424-new-cooked-format-boundary)
+Pre-4.24 cooked LODs use two earlier layouts — the pre-split inline
+`FStaticLODModel` (4.13–4.18, before `SplitModelAndRenderData`) and the
+**separate** `SerializeRenderItem_Legacy` path (4.19–4.23), whose header has
+no `bIsLODCookedOut` or `bInlined` fields — and are not documented here. See
+the [4.24 format boundary](#ue424-new-cooked-format-boundary)
 subsection below.
 
 `LODModels` = `i32` count (capped) + N × the record below.
@@ -192,7 +193,7 @@ discriminator is `FRenderingObjectVersion ≥ MaterialShaderMapIdSerialization`
 (a 4.24-era version constant). The `FSkeletalMeshCustomVersion` is identical
 across 4.23/4.24/4.25 and cannot be used to distinguish them.
 
-Below 4.24 (4.16–4.23), cooked LODs use `SerializeRenderItem_Legacy`, which
+Below 4.24 (4.19–4.23), cooked LODs use `SerializeRenderItem_Legacy`, which
 has no `bIsLODCookedOut` or `bInlined` fields. Feeding a legacy-cooked
 payload to the new-format reader mis-parses it; the strict `ReadBoolean`
 checks on `bIsLODCookedOut` and `bInlined` provide a natural backstop
@@ -352,7 +353,8 @@ land on the next LOD.
   static-mesh path's in-place resolution). Static-mesh policy parity: a
   resolver-less parse (header-only) or an unresolvable payload is an
   `UnsupportedFeature`/typed error (→ `Generic`) — never an empty-geometry
-  typed mesh.
+  typed mesh (though `lod.rs` places its guard earlier, before the
+  bulk-header read).
 
 Mixed inline/bulk meshes **parse with full geometry on every renderable
 LOD**; only audiovisual-stripped, `bIsLODCookedOut`, or empty-bulk
@@ -744,9 +746,8 @@ See `docs/security/allocation-caps.md` for the broader policy.
 - `crates/paksmith-core/src/asset/exports/mesh/skin_weights.rs` — `read_skin_weight_vertex_buffer` (LEGACY + NEW paths), `read_multisize_index_container`.
 
 **Status (Phase 3h + #650 — geometry decode complete for cooked UE 4.24+):**
-Every renderable LOD's geometry is
-parsed: indices, positions, normals/tangents/UVs, per-vertex bone
-indices/weights, and vertex colors. Non-inlined (bulk) LODs decode from
+Every renderable LOD's geometry is parsed: indices, positions,
+normals/tangents/UVs, per-vertex bone indices/weights, and vertex colors. Non-inlined (bulk) LODs decode from
 either payload source — in-stream inline payloads are captured directly;
 external `.ubulk` payloads resolve through the bulk resolver (#650) — and
 the `SerializeAvailabilityInfo` mirror is skipped byte-exactly. Cooked
@@ -768,9 +769,9 @@ render mesh already exports as ordinary skinned geometry;
 data with no glTF representation, the oracle itself never decodes the
 cloth deform buffer (CUE4Parse skips it via `SkipBulkArrayData`), and its
 conversion layer contains no cloth handling at all — there is no
-ecosystem-standard target to convert to. And animation (`UAnimSequence` →
-glTF `animations`, a future Phase-3i
-sub-phase blocked on UE/ACL animation-decompression — see issue #575).
+ecosystem-standard target to convert to. Animation (`UAnimSequence` → glTF
+`animations`) remains out of scope as well — a future Phase-3i sub-phase
+blocked on UE/ACL animation-decompression (see issue #575).
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline) +
 Phase 9 (3D Viewport).
