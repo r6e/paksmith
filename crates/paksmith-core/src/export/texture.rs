@@ -232,6 +232,10 @@ mod tests {
     use crate::asset::exports::texture::pixel_format::decode_mip;
     use crate::asset::property::bag::PropertyBag;
     use crate::asset::property::primitives::{Property, PropertyValue};
+    // Used only by the `__test_utils`-gated slice-composition tests; the
+    // no-feature build (CI's `cargo test -p paksmith-core --no-run` with
+    // -D warnings) would flag it unused without the matching gate.
+    #[cfg(feature = "__test_utils")]
     use crate::error::AssetParseFault;
     use crate::export::HandlerRegistry;
     use proptest::prelude::*;
