@@ -636,8 +636,9 @@ impl FormatHandler for GltfSkeletalMeshHandler {
     /// Since #650, non-inlined LODs resolve their streamed geometry through
     /// the bulk resolver at parse time, so a real package's typed mesh
     /// carries positions for every renderable LOD. A `SkeletalMesh` with NO
-    /// drawable LOD (every LOD audiovisual-stripped / `bIsLODCookedOut`, or
-    /// a hand-built value) still yields `supports() == false` with no
+    /// drawable LOD (every LOD audiovisual-stripped / `bIsLODCookedOut` /
+    /// an empty `element_count == 0` bulk record, or a hand-built value)
+    /// still yields `supports() == false` with no
     /// cross-discriminant downgrade: such a mesh is NOT routed to
     /// [`GenericHandler`](crate::export::GenericHandler), and
     /// [`HandlerRegistry::find_handler`](crate::export::HandlerRegistry::find_handler)
@@ -2248,9 +2249,11 @@ mod tests {
 
     /// A mesh with drawable geometry but an EMPTY reference skeleton is rejected
     /// with `UnsupportedFeature` — a zero-joint skin with JOINTS referencing
-    /// joint 0 is invalid glTF. (An all-bulk-LOD mesh parses to
-    /// `Asset::SkeletalMesh` with empty geometry; this guard covers the inverse
-    /// hazard where geometry is present but the skeleton is empty.)
+    /// joint 0 is invalid glTF. (The empty-GEOMETRY direction is `supports()
+    /// == false` — every LOD stripped, cooked-out, or an empty
+    /// `element_count == 0` bulk record — since #650 an all-bulk mesh decodes
+    /// its geometry or fails the parse; this guard covers the inverse hazard
+    /// where geometry is present but the skeleton is empty.)
     #[test]
     fn empty_skeleton_with_geometry_is_rejected() {
         let mut data = skinned_triangle_data();

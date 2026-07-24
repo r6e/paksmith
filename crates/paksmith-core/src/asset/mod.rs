@@ -313,9 +313,11 @@ pub struct SkeletalMeshData {
     pub bounds: structs::bounds::FBoxSphereBounds,
     /// Per-LOD records — one entry per `LODModels[i]`, each with its
     /// sections + bone arrays and per-vertex skin geometry. Non-inlined
-    /// LODs resolve their streamed blob through the bulk resolver (#650);
-    /// only an audiovisual-stripped or `bIsLODCookedOut` LOD legitimately
-    /// carries no section/geometry block.
+    /// LODs resolve their streamed blob through the bulk resolver (#650).
+    /// A LOD legitimately carries no geometry in three cases:
+    /// audiovisual-stripped and `bIsLODCookedOut` (both lack the whole
+    /// section block), or an EMPTY bulk record (`element_count == 0` —
+    /// sections present, geometry empty, no resolver needed).
     pub lods: Vec<SkeletalMeshLod>,
 }
 

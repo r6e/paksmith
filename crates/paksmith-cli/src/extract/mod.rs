@@ -83,6 +83,10 @@ impl ExtractJob<'_> {
         // extended it to cube/array/volume textures, so e.g. a cubemap
         // whose 6-face composite exceeds the 1 GiB decode cap now fails
         // here where it previously fell through to a raw copy as Generic.
+        // #650 moved external-bulk skeletal meshes into the set: their LOD
+        // geometry resolves at parse time, so meshes that previously carried
+        // empty geometry (no supporting handler → raw copy) now take the
+        // glTF path and any export error fails the entry here.
         let bytes = match handler.export(&pkg.payloads[idx], bulk) {
             Ok(b) => b,
             Err(e) => return failed(entry_path, e),
