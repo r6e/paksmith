@@ -81,11 +81,10 @@ pub(crate) fn run(
     detect: Option<&std::path::Path>,
 ) -> paksmith_core::Result<u8> {
     let ctx = crate::commands::key_resolve::resolve_pak_context(&args.pak, aes_key, game, detect)?;
-    let selector = if game.is_some() { "--game" } else { "--detect" };
     let usmap = crate::commands::mappings_resolve::resolve_usmap(
         args.mappings.as_deref(),
         ctx.mappings.as_ref(),
-        selector,
+        crate::commands::mappings_resolve::mappings_selector(game),
     )?;
     let reader = Arc::new(match &ctx.key {
         Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,

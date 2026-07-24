@@ -136,39 +136,43 @@ pub async fn resolve_pak_context(
         } else if detect.is_some() {
             tracing::debug!("--aes-key overrides --detect");
         }
+        // #651: an explicit key must not silently drop the selected
+        // profile's mappings (see the fn doc for the per-selector
+        // contract). No pak-footer read and no network on any
+        // `--aes-key` combination.
+        let mappings = if let Some(g) = game {
+            if detect.is_some() {
+                tracing::debug!("--game overrides --detect");
+            }
+            // HARD: same contract as keyed resolution — the named id
+            // must exist (store errors propagate; unknown id is
+            // `ProfileNotFound`).
+            let store = ProfileStore::load()?;
+            let cache = load_cache_lenient();
+            named_profile_mappings_in(&store, cache.as_ref(), g)?
+        } else if let Some(dir) = detect {
+            // Best-effort: detection is probabilistic, so store or
+            // detection problems degrade to no-mappings with a warning.
+            match ProfileStore::load() {
+                Ok(store) => {
+                    let cache = load_cache_lenient();
+                    detect_profile_mappings_in(&store, cache.as_ref(), dir)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "profile store unreadable; --aes-key set, continuing \
+                         without profile mappings"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         return Ok(PakOpenContext {
             key: Some(k.clone()),
-            // #651: an explicit key must not silently drop the selected
-            // profile's mappings (see the fn doc for the per-selector
-            // contract). No pak-footer read and no network on any
-            // `--aes-key` combination.
-            mappings: if let Some(g) = game {
-                // HARD: same contract as keyed resolution — the named id
-                // must exist (store errors propagate; unknown id is
-                // `ProfileNotFound`).
-                let store = ProfileStore::load()?;
-                let cache = load_cache_lenient();
-                named_profile_mappings(&store, cache.as_ref(), g)?
-            } else if let Some(dir) = detect {
-                // Best-effort: detection is probabilistic, so store or
-                // detection problems degrade to no-mappings with a warning.
-                match ProfileStore::load() {
-                    Ok(store) => {
-                        let cache = load_cache_lenient();
-                        detect_profile_mappings(&store, cache.as_ref(), dir)
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "profile store unreadable; --aes-key set, continuing \
-                             without profile mappings"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            },
+            mappings,
         });
     }
     // Effective profile id: --game (explicit) wins over --detect (auto).
@@ -284,7 +288,7 @@ fn unique_detect_id(mut matches: Vec<DetectMatch>, dir: &Path) -> crate::Result<
 /// [`MappingsSource`]); an unknown id is `ProfileNotFound`, exactly as
 /// in keyed resolution. No network — a registry-only id must already be
 /// cached (`profile fetch`).
-fn named_profile_mappings(
+fn named_profile_mappings_in(
     store: &ProfileStore,
     cache: Option<&RegistryCache>,
     id: &str,
@@ -302,7 +306,7 @@ fn named_profile_mappings(
 /// (store-parameterized, unit-testable): the unique `detect_in` match's
 /// mappings; anything else (zero or ambiguous matches) degrades to
 /// `None` with a warning.
-fn detect_profile_mappings(
+fn detect_profile_mappings_in(
     store: &ProfileStore,
     cache: Option<&RegistryCache>,
     dir: &Path,
@@ -490,14 +494,14 @@ mod tests {
     }
 
     #[test]
-    fn named_profile_mappings_local_hit_returns_source() {
+    fn named_profile_mappings_in_local_hit_returns_source() {
         // Kills the `-> Ok(None)` mutant and pins the #651 contract: an
         // explicit key must not drop the --game profile's mappings.
         let store = hero_store_with_detect(Some(crate::profile::MappingsSource::Path(
             "/maps/hero.usmap".into(),
         )));
         assert_eq!(
-            named_profile_mappings(&store, None, "hero").unwrap(),
+            named_profile_mappings_in(&store, None, "hero").unwrap(),
             Some(crate::profile::MappingsSource::Path(
                 "/maps/hero.usmap".into()
             ))
@@ -505,11 +509,11 @@ mod tests {
     }
 
     #[test]
-    fn named_profile_mappings_unknown_id_is_profile_not_found() {
+    fn named_profile_mappings_in_unknown_id_is_profile_not_found() {
         // A typo'd --game must be LOUD even with --aes-key set — never a
         // silent no-mappings run (R1 architect finding).
         let store = hero_store_with_detect(None);
-        let err = named_profile_mappings(&store, None, "absent");
+        let err = named_profile_mappings_in(&store, None, "absent");
         assert!(matches!(
             err,
             Err(PaksmithError::Profile {
@@ -519,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn named_profile_mappings_cached_registry_id_is_none() {
+    fn named_profile_mappings_in_cached_registry_id_is_none() {
         use crate::profile::registry::{RegistryDoc, RegistryProfile};
         // A cached registry id is a VALID selection; registry profiles
         // cannot carry mappings, so the answer is None — not an error.
@@ -537,20 +541,20 @@ mod tests {
             },
         };
         assert_eq!(
-            named_profile_mappings(&store, Some(&cache), "reg").unwrap(),
+            named_profile_mappings_in(&store, Some(&cache), "reg").unwrap(),
             None
         );
     }
 
     #[test]
-    fn detect_profile_mappings_unique_match() {
+    fn detect_profile_mappings_in_unique_match() {
         let game_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(game_dir.path().join("Game/Paks")).unwrap();
         let store = hero_store_with_detect(Some(crate::profile::MappingsSource::Path(
             "/maps/hero.usmap".into(),
         )));
         assert_eq!(
-            detect_profile_mappings(&store, None, game_dir.path()),
+            detect_profile_mappings_in(&store, None, game_dir.path()),
             Some(crate::profile::MappingsSource::Path(
                 "/maps/hero.usmap".into()
             )),
@@ -559,20 +563,20 @@ mod tests {
     }
 
     #[test]
-    fn detect_profile_mappings_no_match_is_none() {
+    fn detect_profile_mappings_in_no_match_is_none() {
         let empty_dir = tempfile::tempdir().unwrap();
         let store = hero_store_with_detect(Some(crate::profile::MappingsSource::Path(
             "/maps/hero.usmap".into(),
         )));
         assert_eq!(
-            detect_profile_mappings(&store, None, empty_dir.path()),
+            detect_profile_mappings_in(&store, None, empty_dir.path()),
             None,
             "zero detect matches degrade to None"
         );
     }
 
     #[test]
-    fn detect_profile_mappings_ambiguous_is_none() {
+    fn detect_profile_mappings_in_ambiguous_is_none() {
         let game_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(game_dir.path().join("Game/Paks")).unwrap();
         let mut store = hero_store_with_detect(Some(crate::profile::MappingsSource::Path(
@@ -582,7 +586,7 @@ mod tests {
         let hero = store.profiles["hero"].clone();
         let _ = store.profiles.insert("hero2".into(), hero);
         assert_eq!(
-            detect_profile_mappings(&store, None, game_dir.path()),
+            detect_profile_mappings_in(&store, None, game_dir.path()),
             None,
             "ambiguous detection degrades to None"
         );

@@ -38,7 +38,7 @@ fn encrypted_entries_pak() -> std::path::PathBuf {
 mod common;
 use common::FIXTURE_AES_KEY_HEX as AES_KEY_HEX;
 
-use common::{fixture_path, seed_hero_profile};
+use common::{fixture_path, seed_hero_profile, seed_hero_profile_with_detect};
 
 /// Pak whose single entry is an UNVERSIONED uasset (class `Hero`); pairs
 /// with `external_minimal_v0.usmap` (issue #651).
@@ -186,6 +186,37 @@ fn extract_broken_profile_mappings_errors_loudly() {
     assert!(
         stderr.contains("--game") && stderr.contains("broken.usmap"),
         "stderr must attribute the bad path to the profile selection: {stderr}"
+    );
+}
+
+#[test]
+fn extract_detect_broken_profile_mappings_blames_detect() {
+    // Selector attribution: a profile selected via --detect whose
+    // mappings path is broken must blame --detect, not --game (kills the
+    // always-"--game" direction of the selector helper).
+    let config_dir = tempdir().unwrap();
+    let game_dir = tempdir().unwrap();
+    fs::create_dir_all(game_dir.path().join("Game/Paks")).unwrap();
+    let out = tempdir().unwrap();
+    seed_hero_profile_with_detect(
+        config_dir.path(),
+        std::path::Path::new("/nonexistent/broken.usmap"),
+    );
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", config_dir.path())
+        .arg("extract")
+        .arg(unversioned_pak())
+        .arg("--detect")
+        .arg(game_dir.path())
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("--detect") && stderr.contains("broken.usmap"),
+        "stderr must attribute the bad path to --detect: {stderr}"
     );
 }
 

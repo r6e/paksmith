@@ -1,20 +1,9 @@
 #![allow(missing_docs)]
 
-use std::path::PathBuf;
-
-mod common;
 use std::process::Command;
 
-fn fixture_path(name: &str) -> PathBuf {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    PathBuf::from(manifest)
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("tests/fixtures")
-        .join(name)
-}
+mod common;
+use common::fixture_path;
 
 #[test]
 fn inspect_emits_valid_json_with_expected_fields() {

@@ -102,8 +102,8 @@ pub(crate) struct AddArgs {
     /// Engine version, e.g. 5.3
     #[arg(long)]
     pub(crate) engine_version: Option<String>,
-    /// `.usmap` mappings file this profile supplies to `--game`
-    /// consumers (inspect/extract) for unversioned assets.
+    /// `.usmap` mappings file this profile supplies when selected via
+    /// `--game`/`--detect` (inspect/extract) for unversioned assets.
     /// Stored as-given; absolute paths recommended.
     #[arg(long, value_name = "PATH")]
     pub(crate) mappings: Option<std::path::PathBuf>,

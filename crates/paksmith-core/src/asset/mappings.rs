@@ -478,7 +478,14 @@ impl Usmap {
     ///
     /// Defensive bounds:
     /// 1. Rejects non-regular-file paths (FIFOs / sockets / devices /
-    ///    directories) via `fs::metadata().is_file()`.
+    ///    directories) twice: an ADVISORY `fs::metadata().is_file()`
+    ///    pre-check before opening (rejects a stable FIFO path without
+    ///    ever blocking in `open`), then an AUTHORITATIVE
+    ///    `File::metadata()` fstat on the opened handle (race-free —
+    ///    the same file object the read uses). Residual: a path swapped
+    ///    for a FIFO in the stat→open race still blocks in `open`;
+    ///    that race is same-trust-domain (the invoking user's own
+    ///    profiles.toml / `--mappings` argument) and accepted.
     /// 2. Caps the read at [`Self::MAX_FILE_SIZE`] so an oversized
     ///    regular file fails fast instead of OOM-ing the process.
     ///
@@ -512,10 +519,28 @@ impl Usmap {
     /// without writing 128 MiB to a tempfile.
     fn from_path_with_cap(path: &std::path::Path, cap: u64) -> crate::Result<Self> {
         use std::io::Read;
-        // Open FIRST, then fstat the opened handle: a stat-then-open pair
-        // is a TOCTOU window in which the path can be swapped for a FIFO
-        // (whose open blocks forever — the read cap bounds size, not
-        // blocking). fstat targets the same file object the read will use.
+        // ADVISORY pre-check: opening a FIFO for reading blocks until a
+        // writer appears, so a stable FIFO path must be rejected BEFORE
+        // `open` (the read cap bounds size, not blocking). This stat is
+        // advisory only — the authoritative type/size check is the fstat
+        // on the opened handle below, which is race-free.
+        let pre = std::fs::metadata(path).map_err(|e| {
+            PaksmithError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to stat `{}`: {e}", path.display()),
+            ))
+        })?;
+        if !pre.is_file() {
+            return Err(PaksmithError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("`{}` is not a regular file", path.display()),
+            )));
+        }
+        // AUTHORITATIVE check: fstat the opened handle — the stat→open
+        // pair above is a TOCTOU window in which the path can be swapped;
+        // this metadata targets the same file object the read will use.
+        // (A raced swap to a FIFO still blocks in `open` — accepted, see
+        // `from_path`'s doc.)
         let file = std::fs::File::open(path).map_err(|e| {
             PaksmithError::Io(std::io::Error::new(
                 e.kind(),
@@ -2383,9 +2408,13 @@ mod tests {
 
     #[test]
     fn from_path_rejects_non_regular_file() {
-        // A directory path fails `is_file()` and surfaces as Io with
-        // `InvalidInput` kind. Same rejection covers FIFOs / sockets
-        // / devices on platforms where they exist.
+        // A directory path fails the ADVISORY pre-open `is_file()`
+        // check and surfaces as Io with `InvalidInput` kind, on every
+        // platform (Windows can't even open a directory — the pre-check
+        // keeps the error shape uniform). The same pre-open rejection
+        // covers FIFOs / sockets / devices where they exist — critical
+        // for FIFOs, whose `open` would block before any post-open
+        // check could fire.
         let dir = std::env::temp_dir();
         let err = Usmap::from_path(&dir)
             .expect_err("non-regular-file path must be rejected before any read");

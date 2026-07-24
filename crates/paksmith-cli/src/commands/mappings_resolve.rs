@@ -43,6 +43,15 @@ fn load_from_profile(
     })
 }
 
+/// The flag that picked the profile, for load-failure attribution:
+/// `--game` when set, else `--detect`. (A profile can only have been
+/// selected by one of the two — `resolve_pak_context` yields
+/// `mappings: None` when neither is given, so `resolve_usmap` never
+/// reads the selector in that case.)
+pub(crate) fn mappings_selector(game: Option<&str>) -> &'static str {
+    if game.is_some() { "--game" } else { "--detect" }
+}
+
 /// Resolve the effective usmap: explicit `--mappings` wins over the
 /// profile source; `None` when neither is present. `selector` names the
 /// flag that picked the profile, for load-failure attribution.
