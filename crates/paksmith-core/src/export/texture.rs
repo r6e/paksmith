@@ -11,7 +11,7 @@
 //! stores `mips` and the parallel bulk records as the **serialized** mips
 //! re-indexed from 0 (the stripped top mips are absent), so the handler renders
 //! the first serialized mip — `bulk.first()` for the bytes and `mips[0]` for the
-//! decode dimensions (via [`selected_mip_dimensions`]). Reading `mips[0]` (NOT
+//! decode record (via [`selected_mip_record`]). Reading `mips[0]` (NOT
 //! the top-level `size_x`/`size_y`, which are the original top mip and mismatch
 //! when `first_mip_to_serialize > 0`) keeps the dimensions in lockstep with the
 //! bytes — both index 0.
@@ -26,6 +26,7 @@
 use crate::PaksmithError;
 use crate::asset::Asset;
 use crate::asset::Texture2DData;
+use crate::asset::Texture2DMipMap;
 use crate::asset::exports::texture::pixel_format::{PixelFormat, decode_texture_slab};
 use crate::asset::exports::texture::virtual_textures::flatten_virtual_texture;
 use crate::asset::exports::texture::{export_slice_count, has_enum, property_bool};
@@ -118,8 +119,8 @@ impl FormatHandler for PngHandler {
         // Standard mip chain. The driver passes the export's resolved bulk
         // records; `mips` and the records are the serialized mips re-indexed
         // from 0, so the first serialized mip (the one we render) is index 0 in
-        // both — `bulk.first()` for the bytes, `mips[0]` for the dimensions (via
-        // selected_mip_dimensions), kept in lockstep. An empty slice means no
+        // both — `bulk.first()` for the bytes, `mips[0]` for the record (via
+        // selected_mip_record), kept in lockstep. An empty slice means no
         // serialized mip data (e.g. a UE5.3+ texture with
         // `bSerializeMipData = false`, whose pixels live in the editor-only
         // derived-data cache); a correct caller skips such textures.
@@ -129,21 +130,25 @@ impl FormatHandler for PngHandler {
                 .to_string(),
         })?;
 
-        let (width, height) = selected_mip_dimensions(data)?;
+        // ONE record drives the bytes' interpretation end-to-end: the
+        // decode dimensions and the slice count both come from the same
+        // `Texture2DMipMap` that corresponds to `bulk.first()`'s bytes —
+        // per-mip slice sizing (array/volume SizeZ) can never desync from
+        // the dims.
+        let mip_record = selected_mip_record(data)?;
         let format = PixelFormat::from_name(&data.pixel_format);
 
         // Multidim textures (cube/array/volume, #648): the mip's bulk bytes
         // are `slices` consecutive images; compose them into one vertical
         // strip PNG (cube = 6 faces, array/volume = the mip's SizeZ). A
         // TwoD texture yields `slices == 1` — the plain single-mip decode.
-        // (`data.mips` is non-empty: selected_mip_dimensions just proved it.)
-        let slices = export_slice_count(data, &data.mips[0], "<texture mip>")?;
+        let slices = export_slice_count(data, mip_record, "<texture mip>")?;
 
         let decoded = decode_texture_slab(
             &format,
             &mip.bytes,
-            width,
-            height,
+            mip_record.size_x,
+            mip_record.size_y,
             slices,
             is_normal_map,
             "<texture mip>",
@@ -159,22 +164,22 @@ impl FormatHandler for PngHandler {
     }
 }
 
-/// The dimensions of the exported mip — the first **serialized** mip,
+/// The record of the exported mip — the first **serialized** mip,
 /// `mips[0]`, which is what the handler renders (`bulk.first()`). The texture
 /// reader stores `mips` and the parallel bulk records as the serialized mips
 /// **re-indexed from 0** (the stripped top mips are absent), so the
 /// first-serialized mip is index 0 in both `mips` and `bulk`, and reading
-/// `mips[0]` keeps the dimensions in lockstep with `bulk.first()`'s bytes.
+/// `mips[0]` keeps the record in lockstep with `bulk.first()`'s bytes.
 /// (`first_mip_to_serialize` is the *absolute* index of that mip in the original
-/// chain — NOT an index into the re-indexed `mips`.) Errors if the texture
-/// carries no mip records.
-fn selected_mip_dimensions(data: &Texture2DData) -> crate::Result<(u32, u32)> {
-    data.mips
-        .first()
-        .map(|mip| (mip.size_x, mip.size_y))
-        .ok_or_else(|| PaksmithError::Internal {
-            context: "PngHandler: texture has no mip records to export".to_string(),
-        })
+/// chain — NOT an index into the re-indexed `mips`.) Returning the whole
+/// record makes it the single source for the decode dimensions AND the
+/// slice count (`export_slice_count` is per-mip for array/volume SizeZ),
+/// so the two can never be computed from different mips. Errors if the
+/// texture carries no mip records.
+fn selected_mip_record(data: &Texture2DData) -> crate::Result<&Texture2DMipMap> {
+    data.mips.first().ok_or_else(|| PaksmithError::Internal {
+        context: "PngHandler: texture has no mip records to export".to_string(),
+    })
 }
 
 /// Whether the texture's PNG should be tagged sRGB. HDR formats are already
@@ -332,8 +337,13 @@ mod tests {
 
     // ===== mip selection =====
 
+    /// `(size_x, size_y)` of a mip record — test-side shorthand.
+    fn dims(m: &Texture2DMipMap) -> (u32, u32) {
+        (m.size_x, m.size_y)
+    }
+
     #[test]
-    fn selected_mip_dimensions_is_always_the_first_serialized_mip() {
+    fn selected_mip_record_is_always_the_first_serialized_mip() {
         // The handler renders the first serialized mip — index 0 in the
         // re-indexed `mips`. `first_mip_to_serialize` is the ABSOLUTE index of
         // that mip in the original chain, NOT a re-indexed one, so it must not
@@ -341,19 +351,19 @@ mod tests {
         let mut t = texture("PF_DXT5", vec![]);
         t.mips = vec![mip(64, 64), mip(32, 32), mip(16, 16)];
         t.first_mip_to_serialize = 1;
-        assert_eq!(selected_mip_dimensions(&t).unwrap(), (64, 64));
+        assert_eq!(dims(selected_mip_record(&t).unwrap()), (64, 64));
         t.first_mip_to_serialize = 99;
-        assert_eq!(selected_mip_dimensions(&t).unwrap(), (64, 64));
+        assert_eq!(dims(selected_mip_record(&t).unwrap()), (64, 64));
         t.first_mip_to_serialize = -5;
-        assert_eq!(selected_mip_dimensions(&t).unwrap(), (64, 64));
+        assert_eq!(dims(selected_mip_record(&t).unwrap()), (64, 64));
     }
 
     #[test]
-    fn selected_mip_dimensions_errors_without_mips() {
+    fn selected_mip_record_errors_without_mips() {
         let mut t = texture("PF_DXT5", vec![]);
         t.mips = vec![];
         assert!(matches!(
-            selected_mip_dimensions(&t),
+            selected_mip_record(&t),
             Err(PaksmithError::Internal { .. })
         ));
     }
@@ -368,7 +378,7 @@ mod tests {
         t.size_x = 8;
         t.size_y = 8;
         t.mips = vec![mip(4, 4)];
-        let (w, h) = selected_mip_dimensions(&t).unwrap();
+        let (w, h) = dims(selected_mip_record(&t).unwrap());
         assert_eq!((w, h), (4, 4));
         let decoded = decode_mip(&PixelFormat::Bc3, &SOLID_RED_DXT5, w, h, false, "t")
             .expect("mips[0] 4×4 → the 16-byte block decodes");
@@ -627,7 +637,7 @@ mod tests {
     /// test is too). `mips[0]` is 4×4 while the top-level dims are 8×8; a 16-byte
     /// BC3 block is exactly one 4×4 block, so reading (4,4) decodes but reading
     /// (8,8) would demand 64 bytes and fail. Strict discriminant against a
-    /// `selected_mip_dimensions(data)` → `(data.size_x, data.size_y)` substitution.
+    /// `selected_mip_record(data)` → top-level-dims substitution.
     #[cfg(feature = "__test_utils")]
     #[test]
     fn export_reads_first_mip_dims_not_top_level() {

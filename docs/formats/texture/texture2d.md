@@ -209,7 +209,10 @@ Implemented via issue #648. The sibling export classes — `UTextureCube`, `UTex
 `FTexturePlatformData` per-format loop) with exactly **one wire
 divergence**: only `UTexture2D` reads the UE 5.3+ `bSerializeMipData`
 bool. The siblings' `Deserialize` bodies (CUE4Parse
-`UTextureCube.cs:41`, `UTexture2DArray.cs:30`, `UVolumeTexture.cs:24`)
+`UTextureCube.cs:41`, `UTexture2DArray.cs:30`, `UVolumeTexture.cs:24` —
+all line cites in this section are pinned to CUE4Parse commit
+`b26351d`, the rev they were verified against; symbols may move in
+later revs)
 call `DeserializeCookedPlatformData(Ar)` with the flag defaulted
 `true`, so a sibling parser must NOT consume the bool even at object
 versions ≥ 1010. Their owner `bCooked` is read unconditionally (no

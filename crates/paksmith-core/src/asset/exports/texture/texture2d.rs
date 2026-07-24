@@ -151,7 +151,8 @@ const CPU_COPY_FIXED_HEADER_BYTES: u64 = 14;
 /// `bSerializeMipData` on UE 5.3+ (CUE4Parse `UTexture2D.cs:54-58` reads
 /// the bool inside the `bCooked` branch; `UTextureCube.cs:41`,
 /// `UTexture2DArray.cs:30`, and `UVolumeTexture.cs:24` call
-/// `DeserializeCookedPlatformData(Ar)` with the flag defaulted `true`).
+/// `DeserializeCookedPlatformData(Ar)` with the flag defaulted `true`;
+/// line cites pinned to CUE4Parse commit `b26351d`).
 /// The sibling classes' UE3-era legacy branches (`UTextureCube`'s
 /// pre-`RENDERING_REFACTOR` block) sit below paksmith's UE 4.13+ asset
 /// floor and are not modeled.
