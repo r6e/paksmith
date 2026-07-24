@@ -4952,6 +4952,9 @@ pub enum LocresStringFault {
     LengthOverflow,
     /// Length (absolute value, ×2 for UTF-16) exceeds remaining bytes.
     LengthExceedsFile,
+    /// Length exceeds the per-string cap
+    /// (`MAX_LOCRES_STRING_LEN = 65_536`), before allocation.
+    LengthExceedsCap,
     /// The final character was not the required null terminator.
     MissingNullTerminator,
 }
@@ -4961,6 +4964,7 @@ impl fmt::Display for LocresStringFault {
         let s = match self {
             Self::LengthOverflow => "length is i32::MIN",
             Self::LengthExceedsFile => "length exceeds remaining bytes",
+            Self::LengthExceedsCap => "length exceeds the 65536-unit cap",
             Self::MissingNullTerminator => "missing null terminator",
         };
         f.write_str(s)

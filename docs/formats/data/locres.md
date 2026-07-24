@@ -326,6 +326,12 @@ parser bugs / DoS vectors, not format-spec violations.
   call before reading entries. A conservative parser-side cap of
   `2^20 = 1_048_576` per field comfortably exceeds any production
   `.locres` while bounding the worst-case allocation request.
+- **Per-`FString` length cap.** Each `FString`'s length prefix is an
+  independent allocation driver (the `Vec<u16>` / `String` for one
+  namespace/key/localized string). Paksmith caps it at
+  `65_536` code units/bytes (matching the pak index reader's
+  `FSTRING_MAX_LEN`) BEFORE allocating — bounding the per-string
+  allocation independently of the surrounding file size.
 - **`StringIndex` bounds-check.** Each `StringIndex` MUST be
   validated as `0 <= idx < NumStrings` before indexing. The oracle's
   own check is **upper-bound only** (`NumStrings > idx`): a NEGATIVE

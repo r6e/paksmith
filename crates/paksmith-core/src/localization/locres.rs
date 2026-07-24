@@ -61,6 +61,15 @@ pub const MAX_LOCRES_COUNT: usize = 1_048_576;
 /// bounds check in `docs/formats/data/locres.md`).
 const MIN_STRINGS_OFFSET: usize = 25;
 
+/// Maximum length (in code units for UTF-16, bytes for ANSI, both
+/// including the terminator) accepted for one `FString`. Mirrors the
+/// pak index reader's `FSTRING_MAX_LEN`; comfortably exceeds any real
+/// localization string while capping an attacker-controlled length
+/// prefix before the `Vec<u16>` / `String` allocation (a `take` still
+/// bounds the read against the file, but this bounds the ALLOCATION
+/// independently of file size).
+const MAX_LOCRES_STRING_LEN: usize = 65_536;
+
 /// `ELocResVersion` — the version byte after the magic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -401,6 +410,9 @@ impl Cursor<'_> {
             // 32-bit targets; `take` bounds the read against the file
             // (an over-long string surfaces as its structured EOF).
             let chars = len.unsigned_abs() as usize;
+            if chars > MAX_LOCRES_STRING_LEN {
+                return Err(string_fault(LocresStringFault::LengthExceedsCap));
+            }
             let byte_len = chars
                 .checked_mul(2)
                 .ok_or_else(|| string_fault(LocresStringFault::LengthExceedsFile))?;
@@ -418,6 +430,9 @@ impl Cursor<'_> {
             let byte_len = len as usize;
             if byte_len == 0 {
                 return Ok(String::new());
+            }
+            if byte_len > MAX_LOCRES_STRING_LEN {
+                return Err(string_fault(LocresStringFault::LengthExceedsCap));
             }
             let raw = self.take(byte_len, field)?;
             if raw.last() != Some(&0) {
@@ -781,6 +796,65 @@ mod tests {
         let r = LocresResource::parse(&b).expect("empty namespace parses");
         assert_eq!(r.namespaces[0].namespace, "");
         assert!(r.namespaces[0].entries.is_empty());
+    }
+
+    /// An FString of EXACTLY the cap length is accepted — pins the `>`
+    /// boundary in both branches (a `>=` mutant would reject the cap).
+    /// #646.
+    #[test]
+    fn fstring_at_cap_accepted() {
+        // UTF-16: MAX code units = (MAX-1) 'a' + terminator.
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u32.to_le_bytes()); // v0 namespace count
+        let cap = i32::try_from(MAX_LOCRES_STRING_LEN).unwrap();
+        b.extend_from_slice(&(-cap).to_le_bytes());
+        for _ in 0..MAX_LOCRES_STRING_LEN - 1 {
+            b.extend_from_slice(&0x0061u16.to_le_bytes());
+        }
+        b.extend_from_slice(&0u16.to_le_bytes()); // terminator
+        b.extend_from_slice(&0u32.to_le_bytes()); // key count 0
+        let r = LocresResource::parse(&b).expect("exactly-cap UTF-16 string parses");
+        assert_eq!(r.namespaces[0].namespace.len(), MAX_LOCRES_STRING_LEN - 1);
+
+        // ANSI: MAX bytes = (MAX-1) 'a' + terminator.
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&cap.to_le_bytes());
+        b.extend_from_slice(&vec![b'a'; MAX_LOCRES_STRING_LEN - 1]);
+        b.push(0); // terminator
+        b.extend_from_slice(&0u32.to_le_bytes());
+        let r = LocresResource::parse(&b).expect("exactly-cap ANSI string parses");
+        assert_eq!(r.namespaces[0].namespace.len(), MAX_LOCRES_STRING_LEN - 1);
+    }
+
+    /// An FString length above the per-string cap is rejected BEFORE
+    /// any allocation — checked ahead of both the file-bounds `take`
+    /// and the `checked_mul`, so it fires even though the crafted file
+    /// is tiny. Both ANSI and UTF-16. #646.
+    #[test]
+    fn fstring_over_cap_rejected_before_alloc() {
+        let over = i32::try_from(MAX_LOCRES_STRING_LEN + 1).unwrap();
+        for len in [over, -over] {
+            let mut b = Vec::new();
+            b.extend_from_slice(&1u32.to_le_bytes()); // v0 namespace count
+            b.extend_from_slice(&len.to_le_bytes()); // namespace length
+            // No payload bytes: the cap must reject before `take` even
+            // looks for them.
+            b.extend_from_slice(&0u32.to_le_bytes());
+            let err = LocresResource::parse(&b).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PaksmithError::LocresParse {
+                        fault: LocresParseFault::MalformedString {
+                            detail: LocresStringFault::LengthExceedsCap,
+                            ..
+                        },
+                    }
+                ),
+                "len {len} must hit the cap, got {err:?}"
+            );
+        }
     }
 
     /// An FString whose length runs past the file fails closed (via the
