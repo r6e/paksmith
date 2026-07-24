@@ -1,6 +1,6 @@
 [package]
 name = "paksmith-gui"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -18,7 +18,7 @@ iced = { version = "0.14", features = ["tokio", "image-without-codecs", "canvas"
 # Windows/Linux: menu built but not attached (no iced 0.14 window-handle API).
 muda = "0.19.3"
 # Phase 6: core library for container I/O and asset parsing.
-paksmith-core = { path = "../paksmith-core", version = "0.1" }
+paksmith-core = { path = "../paksmith-core", version = "0.2.0" }
 # Phase 7d: audio-output backend for the audio player. `default-features = false`
 # drops rodio's decoder stack — paksmith-core decodes to i16 PCM, rodio only
 # plays raw samples via SamplesBuffer. See workspace Cargo.toml for the feature
@@ -50,7 +50,7 @@ tokio = { workspace = true }
 # Phase 7b Task 3: enable __test_utils so tests can build synthetic texture
 # Packages via paksmith_core::testing::uasset. Normal `cargo build` is
 # unaffected; this feature is only active during test compilation.
-paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
+paksmith-core = { path = "../paksmith-core", version = "0.2.0", features = ["__test_utils"] }
 
 [lints]
 workspace = true
