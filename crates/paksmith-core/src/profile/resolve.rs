@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::container::pak::PakReader;
 use crate::error::ProfileFault;
+use crate::profile::MappingsSource;
 use crate::profile::cache::RegistryCache;
 use crate::profile::config::{RegistryConfig, ensure_key_matches_registry};
 use crate::profile::detection::rules_match;
@@ -60,25 +61,73 @@ pub(crate) fn now_unix() -> crate::Result<u64> {
         })
 }
 
+/// Everything a caller needs to open and decode a pak selected via
+/// `--aes-key` / `--game` / `--detect`: the AES key (if any) plus the
+/// selected profile's mappings source (if any) — issue #651.
+#[derive(Clone, Debug)]
+pub struct PakOpenContext {
+    /// Resolved AES key: explicit `--aes-key` wins; otherwise the
+    /// profile's key store via footer-GUID lookup. `None` when no
+    /// selector produced one.
+    pub key: Option<AesKey>,
+    /// The selected profile's mappings source. `None` when no profile
+    /// was selected, the profile carries none, or the profile came from
+    /// the remote registry (registry profiles cannot carry mappings —
+    /// see [`MappingsSource`]). Call sites give an explicit
+    /// `--mappings` argument precedence over this.
+    pub mappings: Option<MappingsSource>,
+}
+
 /// Resolve the AES key for a pak: `--aes-key` (wins) > `--game` (explicit id) >
 /// `--detect` (auto-detect from an install dir). `None` when no selector is set.
 ///
-/// This fn is `async` so the GUI can `.await` it inside `iced::Task::perform`
-/// (Iced runs on tokio — a `block_on` there would panic). The CLI wraps it in
-/// its existing synchronous `block_on`.
+/// Thin delegate over [`resolve_pak_context`] that keeps the pre-#651
+/// key-only signature for callers that don't consume mappings (the GUI
+/// open flow can migrate to the context form as a follow-up).
+///
+/// # Errors
+///
+/// See [`resolve_pak_context`].
 pub async fn resolve_pak_key(
     path: &Path,
     aes_key: Option<&AesKey>,
     game: Option<&str>,
     detect: Option<&Path>,
 ) -> crate::Result<Option<AesKey>> {
+    Ok(resolve_pak_context(path, aes_key, game, detect).await?.key)
+}
+
+/// Resolve the full [`PakOpenContext`] (key + profile mappings source).
+///
+/// Key precedence is unchanged from the pre-#651 `resolve_pak_key`:
+/// `--aes-key` (wins) > `--game` (explicit id) > `--detect`. The
+/// mappings source is the selected profile's `mappings` field — and it
+/// is resolved even when `--aes-key` short-circuits the key lookup: an
+/// explicit key must not silently drop the profile's mappings. In that
+/// combination the lookup is LOCAL-store-only and best-effort (warn +
+/// `None` on store/detection failure), preserving the pre-#651
+/// guarantee that `--aes-key` alone never touches the pak footer or the
+/// network and never fails on profile problems.
+///
+/// This fn is `async` so the GUI can `.await` it inside `iced::Task::perform`
+/// (Iced runs on tokio — a `block_on` there would panic). The CLI wraps it in
+/// its existing synchronous `block_on`.
+pub async fn resolve_pak_context(
+    path: &Path,
+    aes_key: Option<&AesKey>,
+    game: Option<&str>,
+    detect: Option<&Path>,
+) -> crate::Result<PakOpenContext> {
     if let Some(k) = aes_key {
         if game.is_some() {
             tracing::debug!("--aes-key overrides --game");
         } else if detect.is_some() {
             tracing::debug!("--aes-key overrides --detect");
         }
-        return Ok(Some(k.clone()));
+        return Ok(PakOpenContext {
+            key: Some(k.clone()),
+            mappings: mappings_for_explicit_key(game, detect),
+        });
     }
     // Effective profile id: --game (explicit) wins over --detect (auto).
     let id: String = if let Some(g) = game {
@@ -117,7 +166,10 @@ pub async fn resolve_pak_key(
             }
         }
     } else {
-        return Ok(None);
+        return Ok(PakOpenContext {
+            key: None,
+            mappings: None,
+        });
     };
     let id = id.as_str();
 
@@ -126,7 +178,10 @@ pub async fn resolve_pak_key(
 
     // 1. Local profiles.toml wins — no network ever when the id is local.
     if let Some(profile) = store.profiles.get(id) {
-        return resolve_within(&profile.keys, id, pak_guid);
+        return Ok(PakOpenContext {
+            key: resolve_within(&profile.keys, id, pak_guid)?,
+            mappings: profile.mappings.clone(),
+        });
     }
 
     // 2. Determine whether the cache is fresh enough to skip a fetch.
@@ -160,12 +215,69 @@ pub async fn resolve_pak_key(
     //    local first (already handled above, so local always misses here), then
     //    the cache.
     match resolve_profile_layered(&store, cache.as_ref(), id) {
-        Some(ResolvedProfile::Local(p)) => resolve_within(&p.keys, id, pak_guid),
-        Some(ResolvedProfile::Registry(p)) => resolve_within(&p.keys, id, pak_guid),
+        Some(ResolvedProfile::Local(p)) => Ok(PakOpenContext {
+            key: resolve_within(&p.keys, id, pak_guid)?,
+            mappings: p.mappings.clone(),
+        }),
+        // Registry profiles cannot carry mappings (`RegistryProfile` has
+        // no such field — see `MappingsSource`'s registry note).
+        Some(ResolvedProfile::Registry(p)) => Ok(PakOpenContext {
+            key: resolve_within(&p.keys, id, pak_guid)?,
+            mappings: None,
+        }),
         None => Err(PaksmithError::Profile {
             fault: ProfileFault::ProfileNotFound { id: id.to_string() },
         }),
     }
+}
+
+/// Best-effort profile-mappings lookup for the `--aes-key` short-circuit
+/// path: LOCAL store only (registry profiles carry no mappings, so the
+/// network fetch would be pointless), and every failure degrades to
+/// `None` with a warning — pre-#651, `--aes-key` never failed on profile
+/// problems, and the KEY is already in hand.
+fn mappings_for_explicit_key(game: Option<&str>, detect: Option<&Path>) -> Option<MappingsSource> {
+    let id: String = if let Some(g) = game {
+        g.to_string()
+    } else if let Some(dir) = detect {
+        match detect_matches(dir) {
+            Ok(mut matches) if matches.len() == 1 => matches.remove(0).id,
+            Ok(matches) => {
+                tracing::warn!(
+                    dir = %dir.display(),
+                    matches = matches.len(),
+                    "--detect found no unique profile; --aes-key set, continuing \
+                     without profile mappings"
+                );
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "--detect failed; --aes-key set, continuing without profile mappings"
+                );
+                return None;
+            }
+        }
+    } else {
+        return None;
+    };
+    match ProfileStore::load() {
+        Ok(store) => profile_mappings_in(&store, &id),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "profile store unreadable; --aes-key set, continuing without \
+                 profile mappings"
+            );
+            None
+        }
+    }
+}
+
+/// Pure: the LOCAL store's mappings source for `id`, if any.
+pub(crate) fn profile_mappings_in(store: &ProfileStore, id: &str) -> Option<MappingsSource> {
+    store.profiles.get(id).and_then(|p| p.mappings.clone())
 }
 
 /// Fetch the registry and wrap the result in a [`RegistryCache`].
@@ -305,6 +417,50 @@ mod tests {
     use crate::profile::detection::DetectRules;
 
     #[test]
+    fn profile_mappings_in_returns_local_source() {
+        let mut store = ProfileStore::default();
+        let _ = store.profiles.insert(
+            "hero".into(),
+            GameProfile {
+                name: "Hero".into(),
+                engine_version: None,
+                keys: BTreeMap::new(),
+                detect: None,
+                mappings: Some(crate::profile::MappingsSource::Path(
+                    "/maps/hero.usmap".into(),
+                )),
+            },
+        );
+        assert_eq!(
+            profile_mappings_in(&store, "hero"),
+            Some(crate::profile::MappingsSource::Path(
+                "/maps/hero.usmap".into()
+            ))
+        );
+        assert_eq!(
+            profile_mappings_in(&store, "absent"),
+            None,
+            "unknown id is None, not an error"
+        );
+    }
+
+    #[test]
+    fn profile_mappings_in_none_when_profile_has_no_mappings() {
+        let mut store = ProfileStore::default();
+        let _ = store.profiles.insert(
+            "plain".into(),
+            GameProfile {
+                name: "Plain".into(),
+                engine_version: None,
+                keys: BTreeMap::new(),
+                detect: None,
+                mappings: None,
+            },
+        );
+        assert_eq!(profile_mappings_in(&store, "plain"), None);
+    }
+
+    #[test]
     fn detect_in_local_marker_matches() {
         let game = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(game.path().join("Game/Paks")).unwrap();
@@ -319,6 +475,7 @@ mod tests {
                     require_paths: vec!["Game/Paks".into()],
                     contains: vec![],
                 }),
+                mappings: None,
             },
         );
         let got = detect_in(&store, None, game.path());
@@ -343,6 +500,7 @@ mod tests {
                 engine_version: None,
                 keys: BTreeMap::new(),
                 detect: Some(rules.clone()),
+                mappings: None,
             },
         );
         let cache = RegistryCache {
@@ -400,6 +558,7 @@ mod tests {
                 engine_version: None,
                 keys: BTreeMap::new(),
                 detect: None,
+                mappings: None,
             },
         );
         let _ = store.profiles.insert(
@@ -409,6 +568,7 @@ mod tests {
                 engine_version: None,
                 keys: BTreeMap::new(),
                 detect: None,
+                mappings: None,
             },
         );
         let cache = RegistryCache {

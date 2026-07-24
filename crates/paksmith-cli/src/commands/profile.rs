@@ -164,6 +164,7 @@ fn add(a: &AddArgs) -> paksmith_core::Result<u8> {
             engine_version: a.engine_version.clone(),
             keys: BTreeMap::new(),
             detect: None,
+            mappings: None,
         },
     );
     store.save()?;

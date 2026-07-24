@@ -124,7 +124,9 @@ pub use localization::{LocresEntry, LocresNamespace, LocresResource, LocresVersi
 // encryption keys and resolve pak-GUID → AesKey lookups. `resolve_key` is
 // the pure resolution function; disk I/O (Task 3) and key-testing (Task 4)
 // land in the `profile::store` and `profile::key_test` sub-modules.
-pub use profile::{GameProfile, KeyGuid, KeyGuidHexError, ProfileStore, display_guid, resolve_key};
+pub use profile::{
+    GameProfile, KeyGuid, KeyGuidHexError, MappingsSource, ProfileStore, display_guid, resolve_key,
+};
 // Phase 5c: registry config.
 pub use profile::config::RegistryConfig;
 // Phase 5c Task 4: registry document model.
