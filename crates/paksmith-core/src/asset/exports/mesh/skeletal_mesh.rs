@@ -1306,7 +1306,9 @@ fn read_lod_post_loop_tail(
 /// After `bCooked`, the cooked `LODModels` array is gated on the **UE4.24
 /// new-cooked-format boundary** (`FRenderingObjectVersion >=
 /// MaterialShaderMapIdSerialization`): a present-and-below version is the
-/// distinct `SerializeRenderItem_Legacy` header (UE4.16–4.23) → returns
+/// distinct `SerializeRenderItem_Legacy` header (UE4.19–4.23; this is the
+/// skeletal-LOD `SplitModelAndRenderData` split, NOT the UE4.16 split-asset
+/// `.uexp` cooking split) → returns
 /// [`crate::PaksmithError::UnsupportedFeature`]; an absent version (unversioned
 /// package — the shipping-game norm) proceeds, relying on the strict `bool32`
 /// reads + the section reader's caps as the natural backstop against a
@@ -1454,7 +1456,7 @@ pub(crate) fn read_typed(
     let mut lods = Vec::new();
     if cooked {
         // UE4.24 new-cooked-format gate (oracle: SerializeRenderItem is the cooked
-        // FStaticLODModel layout ONLY for Game >= UE4.24; 4.16-4.23 cooked is the
+        // FStaticLODModel layout ONLY for Game >= UE4.24; 4.19-4.23 cooked is the
         // distinct SerializeRenderItem_Legacy header). It determines the LOD
         // FORMAT, so it only matters when LODs are actually read — kept inside the
         // `cooked` block so a non-cooked mesh isn't rejected for a pre-4.24
@@ -5459,6 +5461,7 @@ mod tests {
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
         payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
+        // element_count = 1, aligned availability block
         push_non_inlined_lod_with_inline_payload(&mut payload, &[20, 21], 1, 0);
         push_lod_tail(&mut payload, 0);
 
@@ -5498,6 +5501,7 @@ mod tests {
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
         payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
+        // element_count = 0 → NO availability block follows
         push_non_inlined_lod_with_inline_payload(&mut payload, &[20, 21], 0, 0);
         push_lod_tail(&mut payload, 0);
 
@@ -5566,10 +5570,10 @@ mod tests {
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
         payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
-        // 8 extra availability-info bytes → the cursor over-runs into the tail.
-        // (Inline-payload variant: the external-header path now requires a
-        // resolver — #650 — and this test pins the av-skip alignment, which is
-        // identical across both bulk sub-paths.)
+        // element_count = 1; 8 extra availability-info bytes → the cursor
+        // over-runs into the tail. (Inline-payload variant: the
+        // external-header path now requires a resolver — #650 — and this test
+        // pins the av-skip alignment, identical across both bulk sub-paths.)
         push_non_inlined_lod_with_inline_payload(&mut payload, &[20, 21], 1, 8);
         push_lod_tail(&mut payload, 0);
 
