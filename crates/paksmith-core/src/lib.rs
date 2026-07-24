@@ -216,6 +216,7 @@ mod send_sync_assertions {
         assert_send_sync::<crate::asset::DataTableRow>();
         assert_send_sync::<crate::asset::Texture2DData>();
         assert_send_sync::<crate::asset::Texture2DMipMap>();
+        assert_send_sync::<crate::asset::TextureKind>();
         assert_send_sync::<crate::asset::SoundWaveData>();
         assert_send_sync::<crate::asset::StreamedAudioData>();
         assert_send_sync::<crate::asset::StreamedAudioChunk>();

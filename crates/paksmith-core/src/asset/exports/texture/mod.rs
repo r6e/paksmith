@@ -86,8 +86,11 @@ pub struct DecodedTextureRgba {
 pub struct TextureInfo {
     /// Index into `Package.payloads` of the `Asset::Texture2D` export.
     pub export_idx: usize,
-    /// Serialized mip dimensions in wire order (index 0 = top serialized mip).
-    /// For virtual textures this is `[(width, height)]` (one entry, full res).
+    /// Decoded mip dimensions in wire order (index 0 = top serialized mip),
+    /// always the size [`decode_texture_mip`] actually produces: for a
+    /// multidim texture (cube/array/volume, #648) each entry is the
+    /// COMPOSITE strip `(width, height × slices)`, and for virtual textures
+    /// it is `[(width, height)]` (one entry, the flattened bitmap).
     pub mips: Vec<(u32, u32)>,
     /// Human-readable pixel format label (`data.pixel_format` for standard
     /// textures; `vt.layer_types[0]` for virtual textures).
@@ -221,21 +224,24 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
             // guards hand-assembled or future uncapped inputs, keeping
             // classify⟂decode agreement explicit.)
             // For a multidim texture (#648) the decoded image is the
-            // COMPOSITE strip (height × slices), so screen with the same
-            // product `decode_texture_slab` enforces. An invalid slice
-            // count (bad cube PackedData, zero SizeZ) also declassifies —
-            // every decode of that mip would fail.
-            if !data.mips.iter().all(|m| {
-                export_slice_count(data, m, "<classify>")
-                    .ok()
-                    .and_then(|slices| {
-                        let h = m.size_y.checked_mul(slices)?;
-                        pixel_format::decoded_rgba_bytes_within_cap(m.size_x, h)
-                    })
-                    .is_some()
-            }) {
-                return None;
-            }
+            // COMPOSITE strip (height × slices), so both the cap screen and
+            // the advertised dims use the same product `decode_texture_slab`
+            // produces — keeping the reported size in lockstep with the
+            // decode, as the VT branch above documents. An invalid slice
+            // count (bad cube PackedData, zero SizeZ) or an over-cap /
+            // overflowing composite declassifies — every decode of that mip
+            // would fail.
+            let composite_mips: Option<Vec<(u32, u32)>> = data
+                .mips
+                .iter()
+                .map(|m| {
+                    let slices = export_slice_count(data, m, "<classify>").ok()?;
+                    let h = m.size_y.checked_mul(slices)?;
+                    let _within = pixel_format::decoded_rgba_bytes_within_cap(m.size_x, h)?;
+                    Some((m.size_x, h))
+                })
+                .collect();
+            let composite_mips = composite_mips?;
 
             // Every reported mip is decodable: `read_mip_records` gates the
             // per-mip `FByteBulkData` push on the texture-level
@@ -248,10 +254,9 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
             // truncating the list to the bulk-record count would be a no-op.
             // The `bulk_data[idx].len() == data.mips.len()` invariant is pinned
             // by `decodable_texture_has_one_bulk_record_per_mip`.
-            let mips = data.mips.iter().map(|m| (m.size_x, m.size_y)).collect();
             Some(TextureInfo {
                 export_idx,
-                mips,
+                mips: composite_mips,
                 format_label: data.pixel_format.clone(),
                 is_normal_map,
             })
@@ -546,6 +551,37 @@ mod tests {
             !info.is_normal_map,
             "fixture has no CompressionSettings property"
         );
+    }
+
+    #[test]
+    fn classify_texture_reports_composite_strip_dims_for_multidim() {
+        // A cube's decode yields the 6-face vertical strip, so the GUI's
+        // advertised mip dims must be the COMPOSITE (w, h×slices) — the
+        // same lockstep-with-decode invariant the VT path documents.
+        let fixture = build_minimal_with_decodable_texture2d();
+        let mut pkg = parse_pkg(&fixture.bytes);
+        {
+            let d = sole_texture2d_mut(&mut pkg);
+            d.kind = TextureKind::Cube;
+            d.num_slices = 6;
+            d.is_cubemap = true;
+        }
+        let info = classify_texture(&pkg).expect("cube classifies");
+        assert_eq!(info.mips[0], (4, 24), "6 faces × 4 rows stacked");
+    }
+
+    #[test]
+    fn classify_texture_none_for_an_invalid_multidim_slice_count() {
+        // A cube whose PackedData count is not 6 can never decode — it must
+        // declassify (None), keeping classify⟂decode agreement.
+        let fixture = build_minimal_with_decodable_texture2d();
+        let mut pkg = parse_pkg(&fixture.bytes);
+        {
+            let d = sole_texture2d_mut(&mut pkg);
+            d.kind = TextureKind::Cube;
+            d.num_slices = 5;
+        }
+        assert!(classify_texture(&pkg).is_none());
     }
 
     #[test]
