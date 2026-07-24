@@ -254,8 +254,11 @@ legitimate cubemap whose 6-face composite exceeds the 1 GiB decode cap
 (faces above ~6688²) now fails extraction with
 `DecodedTextureBytesExceeded` where it previously extracted as a raw
 `.uasset`. This is the same fail-loud behavior a plain `Texture2D` has
-always had; re-run with the asset excluded, or extract it raw via a
-path filter, to recover the bytes.
+always had. Excluding the asset via `--filter` keeps the rest of the
+batch green; in-tool recovery of a failing typed asset's raw bytes is
+not currently supported (`.uasset` entries route to the typed path
+unconditionally, and the `.uexp`/`.ubulk` companions carrying the mip
+bytes are never emitted standalone).
 
 ### Stripped editor-only data
 
