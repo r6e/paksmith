@@ -35,6 +35,9 @@
 //!   (`25 <= offset < file_len`) before seeking, stage-2 (offset must
 //!   not overlap the namespace table) after parsing it. CUE4Parse
 //!   seeks blindly.
+//! - Invalid UTF-16 (unpaired surrogates) and embedded NULs before the
+//!   terminator fail closed — the oracle keeps raw units. UE emits
+//!   neither, so this only rejects corruption; matches the pak reader.
 
 use byteorder::{ByteOrder, LittleEndian};
 
@@ -421,7 +424,13 @@ impl Cursor<'_> {
             if units.last() != Some(&0) {
                 return Err(string_fault(LocresStringFault::MissingNullTerminator));
             }
-            Ok(String::from_utf16_lossy(&units[..units.len() - 1]))
+            let body = &units[..units.len() - 1];
+            if body.contains(&0) {
+                return Err(string_fault(LocresStringFault::EmbeddedNull));
+            }
+            // Strict decode (fail closed on invalid UTF-16), matching the
+            // pak index reader — a lossy replace would hide corruption.
+            String::from_utf16(body).map_err(|_| string_fault(LocresStringFault::InvalidUtf16))
         } else {
             // `len == 0` (empty string) lands here — no terminator on
             // the wire. Positive lengths read `len` ANSI bytes + a
@@ -438,10 +447,11 @@ impl Cursor<'_> {
             if raw.last() != Some(&0) {
                 return Err(string_fault(LocresStringFault::MissingNullTerminator));
             }
-            Ok(raw[..raw.len() - 1]
-                .iter()
-                .map(|&b| char::from(b))
-                .collect())
+            let body = &raw[..raw.len() - 1];
+            if body.contains(&0) {
+                return Err(string_fault(LocresStringFault::EmbeddedNull));
+            }
+            Ok(body.iter().map(|&b| char::from(b)).collect())
         }
     }
 }
@@ -882,6 +892,63 @@ mod tests {
             LocresResource::parse(&b).is_err(),
             "over-long UTF-16 must fault"
         );
+    }
+
+    /// Fail-closed encoding checks: invalid UTF-16 (unpaired surrogate)
+    /// and an embedded NUL before the terminator (both branches) are
+    /// structured faults, not lossy replacements. #646.
+    #[test]
+    fn fstring_invalid_encoding_and_embedded_null_fail_closed() {
+        // Unpaired high surrogate 0xD800 + terminator.
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&(-2i32).to_le_bytes());
+        b.extend_from_slice(&0xD800u16.to_le_bytes());
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            LocresResource::parse(&b).unwrap_err(),
+            PaksmithError::LocresParse {
+                fault: LocresParseFault::MalformedString {
+                    detail: LocresStringFault::InvalidUtf16,
+                    ..
+                },
+            }
+        ));
+
+        // UTF-16 with an embedded NUL: 'a', 0, terminator → -3 units.
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&(-3i32).to_le_bytes());
+        b.extend_from_slice(&0x0061u16.to_le_bytes());
+        b.extend_from_slice(&0u16.to_le_bytes()); // embedded
+        b.extend_from_slice(&0u16.to_le_bytes()); // terminator
+        b.extend_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            LocresResource::parse(&b).unwrap_err(),
+            PaksmithError::LocresParse {
+                fault: LocresParseFault::MalformedString {
+                    detail: LocresStringFault::EmbeddedNull,
+                    ..
+                },
+            }
+        ));
+
+        // ANSI with an embedded NUL: 'a', 0, terminator → len 3.
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&3i32.to_le_bytes());
+        b.extend_from_slice(b"a\0\0");
+        b.extend_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            LocresResource::parse(&b).unwrap_err(),
+            PaksmithError::LocresParse {
+                fault: LocresParseFault::MalformedString {
+                    detail: LocresStringFault::EmbeddedNull,
+                    ..
+                },
+            }
+        ));
     }
 
     /// UTF-16 strings (negative FString length) round-trip; a missing

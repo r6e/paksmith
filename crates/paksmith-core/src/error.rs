@@ -4955,6 +4955,14 @@ pub enum LocresStringFault {
     /// Length exceeds the per-string cap
     /// (`MAX_LOCRES_STRING_LEN = 65_536`), before allocation.
     LengthExceedsCap,
+    /// A `0` code unit / byte appears before the terminator. UE never
+    /// emits embedded NULs; paksmith fails closed (the oracle would
+    /// keep them).
+    EmbeddedNull,
+    /// The UTF-16 body is not valid Unicode (an unpaired surrogate).
+    /// Paksmith fails closed rather than lossy-replacing, matching the
+    /// pak index reader (the oracle stores the raw units).
+    InvalidUtf16,
     /// The final character was not the required null terminator.
     MissingNullTerminator,
 }
@@ -4965,6 +4973,8 @@ impl fmt::Display for LocresStringFault {
             Self::LengthOverflow => "length is i32::MIN",
             Self::LengthExceedsFile => "length exceeds remaining bytes",
             Self::LengthExceedsCap => "length exceeds the 65536-unit cap",
+            Self::EmbeddedNull => "embedded null before the terminator",
+            Self::InvalidUtf16 => "invalid UTF-16 (unpaired surrogate)",
             Self::MissingNullTerminator => "missing null terminator",
         };
         f.write_str(s)
