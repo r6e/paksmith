@@ -243,19 +243,6 @@ impl TileOffsetData {
 }
 
 impl VirtualTextureData {
-    /// `Width / TileSize`, rounded up (CUE4Parse `GetWidthInTiles`). `0` when
-    /// `tile_size == 0` (CUE4Parse would divide by zero).
-    #[must_use]
-    pub(crate) fn width_in_tiles(&self) -> u32 {
-        divide_round_up(self.width, self.tile_size)
-    }
-
-    /// `Height / TileSize`, rounded up (CUE4Parse `GetHeightInTiles`).
-    #[must_use]
-    pub(crate) fn height_in_tiles(&self) -> u32 {
-        divide_round_up(self.height, self.tile_size)
-    }
-
     /// `TileSize + 2 * TileBorderSize` — the tile edge including its sampling
     /// border (CUE4Parse `GetPhysicalTileSize`). Saturating (the border is an
     /// untrusted `u32`).
@@ -282,24 +269,38 @@ impl VirtualTextureData {
     /// CUE4Parse `GetChunkIndex_Legacy(tileIndex)` — the chunk bucket whose
     /// `[TileIndexPerChunk[i], TileIndexPerChunk[i+1])` range contains
     /// `tile_index`; defaults to the last chunk.
+    ///
+    /// CUE4Parse scans the ranges linearly. This runs **once per grid cell**
+    /// on the legacy flatten path, and the linear scan is the one per-cell
+    /// cost the decode-work cap doesn't tally — with the 256-chunk record
+    /// budget a crafted legacy VT could force `grid cells × 255` range
+    /// compares (#649 security review). The range semantics require the
+    /// fencepost table to be non-decreasing with `chunks.len() + 1` entries
+    /// (genuine cooked content always has exactly that); for such tables
+    /// `partition_point` finds the same bucket in O(log n). Two malformed
+    /// shapes diverge from the oracle's linear scan: a NON-monotonic table
+    /// (unspecified-but-in-bounds bucket), and a monotonic-but-TRUNCATED
+    /// table (fewer than `chunks.len() + 1` fenceposts — the old loop's
+    /// missing-`get(i+1)` break defaulted to the last chunk where this
+    /// search can pick an earlier bucket at or past the last fencepost).
+    /// Both land in the
+    /// same checked byte-range slicing downstream, so each divergence is
+    /// behavioral on malformed input only, never a safety difference.
     fn chunk_index_legacy(&self, tile_index: u32) -> usize {
         let max = self.chunks.len().saturating_sub(1);
-        if let Some(&last) = self.tile_index_per_chunk.last()
-            && tile_index <= last
-        {
-            for i in 0..max {
-                let (Some(&lo), Some(&hi)) = (
-                    self.tile_index_per_chunk.get(i),
-                    self.tile_index_per_chunk.get(i + 1),
-                ) else {
-                    break;
-                };
-                if tile_index >= lo && tile_index < hi {
-                    return i;
-                }
-            }
-        }
-        max
+        // Number of fenceposts <= tile_index; the containing range starts
+        // at the previous one. Below-first (count 0) falls back to the
+        // last chunk, and past-last clamps to it via `.min(max)` (count ==
+        // len, and a well-formed table has `chunks.len() + 1` fenceposts,
+        // so `len - 1 >= max`) — matching the oracle's loop, which finds
+        // no range in either case and returns `max`. No separate
+        // `tile_index <= last` early-out: it would be indistinguishable
+        // from the clamp on every WELL-FORMED input (an equivalent-mutant
+        // construct); truncated tables are the divergence documented above.
+        self.tile_index_per_chunk
+            .partition_point(|&f| f <= tile_index)
+            .checked_sub(1)
+            .map_or(max, |bucket| bucket.min(max))
     }
 
     /// CUE4Parse `GetTileIndex_Legacy(vLevel, vAddress)` —
@@ -407,19 +408,38 @@ impl VirtualTextureData {
 
     /// CUE4Parse `GetTileOffsetData(level)` reduced to the grid extents the
     /// flatten needs (`width`/`height` in tiles + `max_address`). Legacy:
-    /// computed from the per-mip tile-index table; UE5.0+: read from
-    /// `tile_offset_data[level]`. `None` on an out-of-range access.
+    /// computed from the texture dims + per-mip tile-index table; UE5.0+:
+    /// read from `tile_offset_data[level]`. `None` on an out-of-range access.
+    ///
+    /// **Legacy divergence from the oracle (#649, deliberate).** CUE4Parse's
+    /// `GetTileOffsetData` synthesizes EVERY legacy level's grid from the
+    /// mip-0 tile counts (`GetWidthInTiles()`), then its decoder corrects the
+    /// bitmap size downstream by dividing by `2^level` — its own comment
+    /// concedes the synthesis doesn't know whether the mip is tiled. Its
+    /// `MaxAddress` is likewise the raw fencepost span, which counts
+    /// tileIndex SLOTS (one per layer per address) and so over-counts the
+    /// Morton address bound by `NumLayers` (its render loop tolerates the
+    /// excess via per-address validity checks). paksmith computes the real
+    /// per-level extents up front: pixel dims halve per level (floored at 1,
+    /// shift-safe past level 31), tiles are `ceil(dim / tile_size)`, and the
+    /// span divides by `num_layers` ROUNDED UP (divisor floored at 1 — a
+    /// zero layer count parses): `tile_index_legacy` accepts any address
+    /// with `base + addr·layers < next`, so a span that isn't a multiple of
+    /// `num_layers` still addresses a partial-tail slot — flooring would
+    /// silently skip that valid tile (which the oracle's over-counting
+    /// loop renders). Ceil is a no-op for well-formed spans (exact
+    /// multiples). Downstream needs no correction factor.
     fn tile_grid_for(&self, level: usize) -> Option<TileGrid> {
         if self.is_legacy_data() {
-            // CUE4Parse: MaxAddress = max(TileIndexPerMip[min(level + 1, NumMips)]
-            // - TileIndexPerMip[level], 1).
             let level_start = *self.tile_index_per_mip.get(level)?;
             let next = (level + 1).min(self.num_mips as usize);
             let next_start = *self.tile_index_per_mip.get(next)?;
+            let span = next_start.saturating_sub(level_start);
+            let addresses = span.div_ceil(self.num_layers.max(1));
             Some(TileGrid {
-                width: self.width_in_tiles(),
-                height: self.height_in_tiles(),
-                max_address: next_start.saturating_sub(level_start).max(1),
+                width: divide_round_up(level_pixel_dim(self.width, level), self.tile_size),
+                height: divide_round_up(level_pixel_dim(self.height, level), self.tile_size),
+                max_address: addresses.max(1),
             })
         } else {
             let tod = self.tile_offset_data.get(level)?;
@@ -480,22 +500,17 @@ impl VirtualTextureData {
     /// decode emits — by construction, not by a separately-maintained formula.
     ///
     /// Returns `Err(UnsupportedFeature)` for every cause the flatten rejects
-    /// *before producing pixels*, each with its own message: legacy (UE4) data,
-    /// a zero tile size, no cap-fitting `min_level`, a missing tile grid, an
+    /// *before producing pixels*, each with its own message: a zero tile
+    /// size, no cap-fitting `min_level`, a missing tile grid, an
     /// over-65536-tile grid axis, a zero grid dimension, or a dimension/size
-    /// overflow. It does NOT apply the flatten's further *per-tile* sizing
+    /// overflow. Legacy (UE4) VTs flatten like UE5 ones (#649) — the
+    /// addressing dispatch lives in `tile_grid_for` / `tile_data`. It does
+    /// NOT apply the flatten's further *per-tile* sizing
     /// checks — the decode-work cap and the per-tile encoded-size-overflow guard
     /// (the deliberate classify⟂decode fidelity line documented on
     /// [`min_level`](Self::min_level)) — so a VT this accepts can still fail the
     /// decode cleanly on one of those, but always cleanly: never an OOM.
     pub(super) fn flatten_geometry(&self) -> crate::Result<FlattenGeometry> {
-        // Legacy (UE4) VTs are not renderable; reject up front so the flatten —
-        // and the `classify_texture` gate that shares this — never offers them.
-        if self.is_legacy_data() {
-            return Err(vt_unsupported(
-                "legacy (UE4) virtual textures are not yet renderable; UE5.0+ virtual textures render",
-            ));
-        }
         // A zero tile size is malformed (CUE4Parse divides by it in
         // GetWidthInTiles). Reject it up front: it would otherwise zero both DoS
         // caps below (`tile_size² == 0` → `min_level`'s bitmap-bytes and the
@@ -534,13 +549,20 @@ impl VirtualTextureData {
             ));
         }
 
-        // Bitmap dims = tile grid × tile size. CUE4Parse's legacy bitmap-shrink
-        // factor fires for legacy data or a single-tile grid (maxLevel == 0); for
-        // well-formed UE5.0+ content it is always 1, so paksmith omits it. (A
-        // malformed UE5 VT with a 1×1 grid AND MaxAddress > 1 could trip CUE4Parse's
-        // shrink; paksmith would instead emit a larger zero-padded bitmap — a safe,
-        // deliberate divergence on malformed input, never an OOB.) `min_level`
-        // already proved width·height·tile_size²·4 ≤ the cap, so the products fit.
+        // Bitmap dims = tile grid × tile size. CUE4Parse applies a post-hoc
+        // bitmap-shrink factor (divide by 2^level, and ONLY when the level's
+        // MaxAddress > 1) to correct its legacy mip-0 grid synthesis;
+        // paksmith's `tile_grid_for` computes exact per-level grids up front
+        // (#649), so no correction factor exists here. Output-dims nuance vs
+        // the oracle for deep legacy levels: paksmith emits whole tiles
+        // (ceil((W>>L)/T)·T — cooked tile padding visible), where the
+        // oracle's shrink (when it fires) emits the cropped (ceil(W/T)·T)>>L.
+        // Content agrees on the overlap; classify⟂decode dims agree by
+        // construction either way. (A malformed UE5 VT with a 1×1 grid AND MaxAddress > 1 could
+        // trip CUE4Parse's shrink; paksmith would instead emit a larger
+        // zero-padded bitmap — a safe, deliberate divergence on malformed
+        // input, never an OOB.) `min_level` already proved
+        // width·height·tile_size²·4 ≤ the cap, so the products fit.
         let (Some(bitmap_w), Some(bitmap_h)) = (
             grid.width.checked_mul(self.tile_size),
             grid.height.checked_mul(self.tile_size),
@@ -675,18 +697,18 @@ fn vt_unsupported(context: &str) -> PaksmithError {
     }
 }
 
-/// Flatten a UE5.0+ virtual texture's layer-0 tiles into one tightly-packed
+/// Flatten a virtual texture's layer-0 tiles into one tightly-packed
 /// RGBA8 [`DecodedTexture`] (3e-VT-c2 — port of CUE4Parse
-/// `TextureDecoder.DecodeVT`).
+/// `TextureDecoder.DecodeVT`; both the UE 5.0+ and, per #649, the legacy
+/// UE4 dispatch paths).
 ///
 /// `bulk` is the export's resolved bulk records; a chunk's tile payload is
 /// `bulk[chunk.bulk_record_index]`. Tiles are decoded at the highest-resolution
 /// mip level whose bitmap fits the decode cap, border-stripped, and stitched
 /// into their Z-order grid positions.
 ///
-/// **Scope.** Renders **layer 0** only (compositing deferred). **UE5.0+ only** —
-/// legacy (UE4) VTs return [`PaksmithError::UnsupportedFeature`]. The deprecated
-/// `ZippedGPU` / `Crunch` codecs are unsupported.
+/// **Scope.** Renders **layer 0** only (compositing deferred). The
+/// deprecated `ZippedGPU` / `Crunch` codecs are unsupported.
 ///
 /// **Safety.** Every per-tile read is `packedOutputSize` bytes (trusted —
 /// derived from the layer format and the fixed physical tile size) sliced with
@@ -696,7 +718,7 @@ fn vt_unsupported(context: &str) -> PaksmithError {
 /// zero-tile-size and per-axis tile-count rejections.
 ///
 /// # Errors
-/// [`PaksmithError::UnsupportedFeature`] for a legacy VT, a missing/undecodable
+/// [`PaksmithError::UnsupportedFeature`] for a missing/undecodable
 /// layer-0 format, a VT too large to decode at any level, or a deprecated codec;
 /// plus any [`decode_mip`] fault on a tile's bytes.
 pub(crate) fn flatten_virtual_texture(
@@ -704,7 +726,7 @@ pub(crate) fn flatten_virtual_texture(
     bulk: &[BulkData],
     is_normal_map: bool,
 ) -> crate::Result<DecodedTexture> {
-    // Output-bitmap geometry: legacy rejection, the cap-fitting `min_level`, its
+    // Output-bitmap geometry: the cap-fitting `min_level`, its
     // tile grid, and the bitmap dimensions/size — the single source of truth
     // `classify_texture` also reads, so classify⟂decode dimensions agree by
     // construction. (See `flatten_geometry` for each rejection cause.)
@@ -984,6 +1006,25 @@ fn fill_tile(
             }
         }
     }
+}
+
+/// A texture axis's pixel extent at mip `level`: halved per level, floored
+/// at 1 (the standard mip chain) — EXCEPT a zero base, which stays 0 so a
+/// malformed zero-dimension legacy VT produces a zero-axis grid and hits
+/// `flatten_geometry`'s zero-dimension rejection, exactly like the UE5
+/// path (fail-closed, not floored into a renderable 1×N grid). Shift-safe:
+/// a `level` past the bit width (possible — `level` is bounded by the
+/// fencepost-array length, up to `MAX_VT_ARRAY_ENTRIES`, not by 32)
+/// degrades to the 1-pixel floor instead of a debug-panic shift. #649.
+fn level_pixel_dim(base: u32, level: usize) -> u32 {
+    if base == 0 {
+        return 0;
+    }
+    u32::try_from(level)
+        .ok()
+        .and_then(|l| base.checked_shr(l))
+        .unwrap_or(0)
+        .max(1)
 }
 
 /// `numerator / denominator` rounded up (CUE4Parse `DivideAndRoundUp`). `0`
@@ -1288,6 +1329,63 @@ pub(crate) fn read_from(
         layer_fallback_colors,
         chunks,
     })
+}
+
+/// Shared renderable-VT test fixture (#649): a single-tile (1×1 px,
+/// 1-px tile, no border) RawGPU `PF_B8G8R8A8` VT of either dispatch era,
+/// whose chunk reads bulk record 0. Consumed by the public-API
+/// success-path tests in `asset/exports/texture/mod.rs` and
+/// `export/texture.rs` — ONE definition so the two cannot drift. Gated
+/// exactly like its consumers (their test mods both require
+/// `__test_utils`), so it never exists unused in a non-test build.
+///
+/// `width`/`height` are set to 1 and pinned by
+/// `renderable_vt_fixture_pins_fields`; `tile_border_size` is deliberately
+/// OMITTED (its `Default` of 0 is the wanted value — an explicit `0` would
+/// be equivalent-mutant bait for the delete-field genus, see MEMORY).
+#[cfg(all(test, feature = "__test_utils"))]
+pub(crate) mod test_fixtures {
+    use super::{LayerCodec, TileOffsetData, VirtualTextureData, VirtualTextureDataChunk};
+
+    pub(crate) fn renderable_vt(legacy: bool) -> VirtualTextureData {
+        let chunk = VirtualTextureDataChunk {
+            bulk_data_hash: None,
+            size_in_bytes: 4,
+            codec_payload_size: 0,
+            layer_codecs: vec![LayerCodec {
+                codec_type: 4, // RawGPU
+                codec_payload_offset: 0,
+            }],
+            bulk_record_index: 0,
+        };
+        let mut vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            width: 1,
+            height: 1,
+            tile_size: 1,
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![chunk],
+            ..Default::default()
+        };
+        if legacy {
+            vt.tile_index_per_mip = vec![0, 1];
+            vt.tile_index_per_chunk = vec![0, 1];
+            vt.tile_offset_in_chunk = vec![0]; // non-empty → legacy dispatch
+        } else {
+            vt.tile_data_offset_per_layer = vec![4];
+            vt.base_offset_per_mip = vec![0];
+            vt.chunk_index_per_mip = vec![0];
+            vt.tile_offset_data = vec![TileOffsetData {
+                width: 1,
+                height: 1,
+                max_address: 1,
+                addresses: vec![0],
+                offsets: vec![0],
+            }];
+        }
+        vt
+    }
 }
 
 #[cfg(test)]
@@ -2057,27 +2155,40 @@ mod tests {
 
     #[test]
     fn grid_helpers_round_up_and_border() {
+        // Non-pow2 width rounds UP to a whole tile (ceil(100/32) = 4);
+        // exercised through the legacy grid path (level 0 = full dims).
         let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
             width: 100,
             height: 64,
             tile_size: 32,
             tile_border_size: 4,
+            tile_index_per_mip: vec![0, 8],
+            tile_offset_in_chunk: vec![0],
             ..Default::default()
         };
-        assert_eq!(vt.width_in_tiles(), 4); // ceil(100 / 32)
-        assert_eq!(vt.height_in_tiles(), 2); // 64 / 32
+        let grid = vt.tile_grid_for(0).unwrap();
+        assert_eq!((grid.width, grid.height), (4, 2));
         assert_eq!(vt.physical_tile_size(), 40); // 32 + 2 * 4
     }
 
     #[test]
     fn grid_helpers_zero_tile_size_is_safe() {
+        // `divide_round_up` yields 0 on a zero tile size (CUE4Parse would
+        // divide by zero); the zero-dim grid is then rejected by
+        // `flatten_geometry`'s zero-axis check.
         let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
             width: 100,
             tile_size: 0,
+            tile_index_per_mip: vec![0, 8],
+            tile_offset_in_chunk: vec![0],
             ..Default::default()
         };
-        assert_eq!(vt.width_in_tiles(), 0); // no divide-by-zero
-        assert_eq!(vt.height_in_tiles(), 0);
+        let grid = vt.tile_grid_for(0).unwrap();
+        assert_eq!((grid.width, grid.height), (0, 0)); // no divide-by-zero
     }
 
     #[test]
@@ -2150,6 +2261,176 @@ mod tests {
         // level 1: min(level+1, NumMips) = min(2,2) = 2 → TileIndexPerMip[2]=5;
         // 5 - TileIndexPerMip[1]=4 → 1.
         assert_eq!(vt.tile_grid_for(1).unwrap().max_address, 1);
+    }
+
+    /// Fixture pin for `test_fixtures::renderable_vt` (every non-default
+    /// field, both eras) — the delete-field mutant genus survives on any
+    /// hardcoded field no test reads (MEMORY: test helpers with hardcoded
+    /// fields need pin-tests).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn renderable_vt_fixture_pins_fields() {
+        for legacy in [false, true] {
+            let vt = test_fixtures::renderable_vt(legacy);
+            assert_eq!(vt.num_layers, 1, "legacy: {legacy}");
+            assert_eq!(vt.num_mips, 1);
+            assert_eq!((vt.width, vt.height), (1, 1));
+            assert_eq!(vt.tile_size, 1);
+            assert_eq!(vt.tile_border_size, 0, "Default — field omitted");
+            assert_eq!(vt.layer_types, vec!["PF_B8G8R8A8".to_string()]);
+            assert_eq!(vt.chunks.len(), 1);
+            let chunk = &vt.chunks[0];
+            assert_eq!(chunk.size_in_bytes, 4);
+            assert_eq!(chunk.codec_payload_size, 0);
+            assert_eq!(chunk.bulk_record_index, 0);
+            assert_eq!(chunk.layer_codecs.len(), 1);
+            assert_eq!(chunk.layer_codecs[0].codec_type, 4);
+            if legacy {
+                assert!(vt.is_legacy_data());
+                assert_eq!(vt.tile_index_per_mip, vec![0, 1]);
+                assert_eq!(vt.tile_index_per_chunk, vec![0, 1]);
+                assert_eq!(vt.tile_offset_in_chunk, vec![0]);
+            } else {
+                assert!(!vt.is_legacy_data());
+                assert_eq!(vt.tile_data_offset_per_layer, vec![4]);
+                assert_eq!(vt.base_offset_per_mip, vec![0]);
+                assert_eq!(vt.chunk_index_per_mip, vec![0]);
+                assert_eq!(vt.tile_offset_data.len(), 1);
+                let tod = &vt.tile_offset_data[0];
+                assert_eq!((tod.width, tod.height, tod.max_address), (1, 1, 1));
+                assert_eq!(
+                    (tod.addresses.as_slice(), tod.offsets.as_slice()),
+                    (&[0][..], &[0][..])
+                );
+            }
+        }
+    }
+
+    // --- #649 exact per-level legacy grids; divergence rationale on
+    // `tile_grid_for`. ---
+
+    #[test]
+    fn tile_grid_for_legacy_uses_per_level_tile_counts() {
+        // 128×64 pixels, 32-px tiles, 3 mips. Per-level pixel dims halve
+        // (min 1); tiles = ceil(dim / tile_size).
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 3,
+            width: 128,
+            height: 64,
+            tile_size: 32,
+            tile_index_per_mip: vec![0, 8, 10, 11],
+            tile_offset_in_chunk: vec![0], // non-empty → legacy
+            ..Default::default()
+        };
+        // level 0: 128×64 px → 4×2 tiles, span 8.
+        assert_eq!(
+            vt.tile_grid_for(0),
+            Some(TileGrid {
+                width: 4,
+                height: 2,
+                max_address: 8,
+            }),
+        );
+        // level 1: 64×32 px → 2×1 tiles (NOT the mip-0 4×2), span 2.
+        assert_eq!(
+            vt.tile_grid_for(1),
+            Some(TileGrid {
+                width: 2,
+                height: 1,
+                max_address: 2,
+            }),
+        );
+        // level 2: 32×16 px → 1×1 tiles (16 px rounds up to one tile), span 1.
+        assert_eq!(
+            vt.tile_grid_for(2),
+            Some(TileGrid {
+                width: 1,
+                height: 1,
+                max_address: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn tile_grid_for_legacy_divides_the_span_by_num_layers() {
+        // The fencepost span counts tileIndex SLOTS (one per layer per
+        // address); the Morton address bound is ceil(span / num_layers)
+        // (a partial tail still addresses a slot). CUE4Parse
+        // uses the raw span (its render loop tolerates the over-count);
+        // paksmith bounds exactly.
+        let mut vt = VirtualTextureData {
+            num_layers: 2,
+            num_mips: 1,
+            width: 64,
+            height: 64,
+            tile_size: 32,
+            tile_index_per_mip: vec![0, 8],
+            tile_offset_in_chunk: vec![0],
+            ..Default::default()
+        };
+        assert_eq!(vt.tile_grid_for(0).unwrap().max_address, 4);
+
+        // A non-multiple span still addresses a partial-tail slot
+        // (tile_index_legacy: base + addr·layers < next admits addr 2 for
+        // span 5, layers 2) — the bound must round UP, not floor it away
+        // (Copilot round 2).
+        vt.tile_index_per_mip = vec![0, 5];
+        assert_eq!(vt.tile_grid_for(0).unwrap().max_address, 3);
+
+        // A (parseable) zero layer count must not divide by zero — treat the
+        // divisor as 1 defensively.
+        vt.num_layers = 0;
+        vt.tile_index_per_mip = vec![0, 8];
+        assert_eq!(vt.tile_grid_for(0).unwrap().max_address, 8);
+    }
+
+    #[test]
+    fn zero_dimension_legacy_vt_fails_closed() {
+        // A 0-width (or 0-height) legacy VT must produce a zero-axis grid
+        // and hit flatten_geometry's zero-dimension rejection — matching
+        // the UE5 path — NOT get floored into a renderable 1×N grid
+        // (Copilot round 1). Pins level_pixel_dim's zero-base guard.
+        for (w, h) in [(0u32, 64u32), (64, 0)] {
+            let vt = VirtualTextureData {
+                num_layers: 1,
+                num_mips: 1,
+                width: w,
+                height: h,
+                tile_size: 32,
+                tile_index_per_mip: vec![0, 4],
+                tile_offset_in_chunk: vec![0],
+                ..Default::default()
+            };
+            let grid = vt.tile_grid_for(0).expect("grid resolves");
+            assert_eq!(grid.width.min(grid.height), 0, "{w}x{h}: zero axis");
+            let err = vt.flatten_geometry().expect_err("zero-dim rejected");
+            assert!(
+                matches!(err, PaksmithError::UnsupportedFeature { ref context }
+                    if context.contains("zero dimension")),
+                "{w}x{h}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tile_grid_for_legacy_survives_a_shift_past_31_levels() {
+        // `width >> level` with level ≥ 32 is UB-adjacent (debug panic) if
+        // written as a bare shift; the per-level dims must degrade to the
+        // 1-pixel floor instead. 40 fencepost entries → levels up to 39 are
+        // scannable.
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 40,
+            width: 1024,
+            height: 1024,
+            tile_size: 32,
+            tile_index_per_mip: (0..=40u32).collect(),
+            tile_offset_in_chunk: vec![0],
+            ..Default::default()
+        };
+        let grid = vt.tile_grid_for(35).expect("level 35 resolves");
+        assert_eq!((grid.width, grid.height), (1, 1));
     }
 
     #[test]
@@ -2291,21 +2572,46 @@ mod tests {
         );
     }
 
+    /// Legacy twin of [`morton_grid_vt`]: 2×2 grid of 1×1-pixel tiles, one
+    /// RawGPU `PF_B8G8R8A8` chunk. Tile addressing via the legacy fencepost
+    /// arrays: `tile_offset_in_chunk[tileIndex]` is the byte offset, the
+    /// last tile's end comes from the chunk's `size_in_bytes`.
+    fn legacy_morton_grid_vt() -> (VirtualTextureData, Vec<BulkData>) {
+        let mut chunk = vt_chunk_codec(VT_CODEC_RAW_GPU);
+        chunk.size_in_bytes = 16;
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            width: 2,
+            height: 2,
+            tile_size: 1,
+            tile_border_size: 0,
+            tile_index_per_mip: vec![0, 4],
+            tile_index_per_chunk: vec![0, 4],
+            tile_offset_in_chunk: vec![0, 4, 8, 12],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![chunk],
+            ..Default::default()
+        };
+        let payload = vec![
+            0, 0, 255, 255, // addr 0 → red   (wire B,G,R,A)
+            0, 255, 0, 255, // addr 1 → green
+            255, 0, 0, 255, // addr 2 → blue
+            255, 255, 255, 255, // addr 3 → white
+        ];
+        (vt, vec![raw_bulk(payload)])
+    }
+
     #[test]
-    fn flatten_geometry_rejects_legacy_vt() {
-        // Legacy (UE4) VTs are not renderable; `flatten_geometry` must refuse
-        // them up front so `classify_texture` (which gates on it via `.ok()`)
-        // never offers an undecodable Texture view — the unit-level companion to
-        // `classify_texture_legacy_virtual_is_none`.
-        let vt = legacy_vt(1, vec![0, 64], 128);
+    fn flatten_geometry_accepts_legacy_vt() {
+        // #649: legacy (UE4) VTs render. `flatten_geometry` yields the same
+        // kind of geometry the UE5 path gets — `classify_texture` (gating on
+        // it via `.ok()`) therefore offers legacy VTs automatically.
+        let (vt, _) = legacy_morton_grid_vt();
         assert!(vt.is_legacy_data(), "fixture must be legacy");
-        let err = vt
-            .flatten_geometry()
-            .expect_err("a legacy VT must be rejected");
-        assert!(
-            matches!(err, PaksmithError::UnsupportedFeature { ref context } if context.contains("legacy")),
-            "legacy rejection must name the cause, got {err:?}",
-        );
+        let geom = vt.flatten_geometry().expect("legacy VT yields geometry");
+        assert_eq!(geom.level, 0);
+        assert_eq!((geom.bitmap_w, geom.bitmap_h), (2, 2));
     }
 
     #[test]
@@ -2457,12 +2763,241 @@ mod tests {
     }
 
     #[test]
-    fn flatten_rejects_legacy_vt() {
-        let vt = legacy_vt(1, vec![0, 64], 128); // non-empty tile_offset_in_chunk → legacy
-        assert!(matches!(
-            flatten_virtual_texture(&vt, &[], false),
-            Err(PaksmithError::UnsupportedFeature { .. })
-        ));
+    fn flatten_legacy_rawgpu_morton_places_tiles_by_z_order() {
+        // #649: the legacy addressing path (fencepost arrays → per-tile byte
+        // ranges) drives the same Morton placement as UE5.
+        let (vt, bulk) = legacy_morton_grid_vt();
+        let out = flatten_virtual_texture(&vt, &bulk, false).expect("legacy flatten");
+        assert_eq!((out.width, out.height), (2, 2));
+        assert_eq!(&out.rgba[0..4], &[255, 0, 0, 255], "(0,0) red");
+        assert_eq!(&out.rgba[4..8], &[0, 255, 0, 255], "(1,0) green");
+        assert_eq!(&out.rgba[8..12], &[0, 0, 255, 255], "(0,1) blue");
+        assert_eq!(&out.rgba[12..16], &[255, 255, 255, 255], "(1,1) white");
+    }
+
+    #[test]
+    fn flatten_legacy_non_pow2_grid_renders_the_morton_corner() {
+        // Discriminating non-pow2 case (R1 general finding): on a 3×3 grid
+        // the far corner (2,2) has Morton address 12 — Morton space leaves
+        // gaps at 5/7/10/11 — so rendering it needs max_address ≥ 13, i.e.
+        // a fencepost span of 13, NOT the dense 3×3 = 9 tile count. A
+        // regression deriving max_address from width·height would blank
+        // this corner while passing every pow2-grid test.
+        let mut chunk = vt_chunk_codec(VT_CODEC_RAW_GPU);
+        chunk.size_in_bytes = 52; // 13 slots × 4 bytes
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            width: 3,
+            height: 3,
+            tile_size: 1,
+            tile_border_size: 0,
+            tile_index_per_mip: vec![0, 13],
+            tile_index_per_chunk: vec![0, 13],
+            tile_offset_in_chunk: (0..13u32).map(|i| i * 4).collect(),
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![chunk],
+            ..Default::default()
+        };
+        // Slot payloads: address N holds byte value N in all 4 channels.
+        let payload: Vec<u8> = (0..13u8).flat_map(|i| [i; 4]).collect();
+        let out = flatten_virtual_texture(&vt, &[raw_bulk(payload)], false).expect("flatten");
+        assert_eq!((out.width, out.height), (3, 3));
+        // Corner (2,2) = Morton address 12; row-major offset (2·3 + 2)·4.
+        let off = (2 * 3 + 2) * 4;
+        assert_eq!(
+            &out.rgba[off..off + 4],
+            &[12, 12, 12, 12],
+            "(2,2) renders slot 12 — the span-derived bound admits it"
+        );
+    }
+
+    #[test]
+    fn flatten_legacy_multi_layer_reads_layer_zero() {
+        // Two layers: tileIndex slots stride 2 per address; layer 0 of
+        // address N sits at offsets[2N]. The flatten renders layer 0 only.
+        let mut chunk = vt_chunk_codec(VT_CODEC_RAW_GPU);
+        chunk.size_in_bytes = 32;
+        chunk.layer_codecs.push(LayerCodec {
+            codec_type: VT_CODEC_RAW_GPU,
+            codec_payload_offset: 0,
+        });
+        let vt = VirtualTextureData {
+            num_layers: 2,
+            num_mips: 1,
+            width: 2,
+            height: 2,
+            tile_size: 1,
+            tile_border_size: 0,
+            tile_index_per_mip: vec![0, 8],
+            tile_index_per_chunk: vec![0, 8],
+            tile_offset_in_chunk: vec![0, 4, 8, 12, 16, 20, 24, 28],
+            layer_types: vec!["PF_B8G8R8A8".to_string(), "PF_B8G8R8A8".to_string()],
+            chunks: vec![chunk],
+            ..Default::default()
+        };
+        // Layer-0 payloads at 0/8/16/24 (colors); layer-1 slots zeroed.
+        let mut payload = vec![0u8; 32];
+        payload[0..4].copy_from_slice(&[0, 0, 255, 255]); // addr 0 red
+        payload[8..12].copy_from_slice(&[0, 255, 0, 255]); // addr 1 green
+        payload[16..20].copy_from_slice(&[255, 0, 0, 255]); // addr 2 blue
+        payload[24..28].copy_from_slice(&[255, 255, 255, 255]); // addr 3 white
+        let out = flatten_virtual_texture(&vt, &[raw_bulk(payload)], false).expect("flatten");
+        assert_eq!(&out.rgba[0..4], &[255, 0, 0, 255], "(0,0) red");
+        assert_eq!(&out.rgba[12..16], &[255, 255, 255, 255], "(1,1) white");
+    }
+
+    #[test]
+    fn flatten_legacy_strips_tile_border() {
+        // Legacy twin of `flatten_strips_tile_border`: 2×2-px tile with a
+        // 1-px border (physical 4×4); the flatten copies the interior only.
+        let mut chunk = vt_chunk_codec(VT_CODEC_RAW_GPU);
+        chunk.size_in_bytes = 64;
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            width: 2,
+            height: 2,
+            tile_size: 2,
+            tile_border_size: 1,
+            tile_index_per_mip: vec![0, 1],
+            tile_index_per_chunk: vec![0, 1],
+            tile_offset_in_chunk: vec![0],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![chunk],
+            ..Default::default()
+        };
+        let mut tile = vec![0u8; 64];
+        let mut put = |x: usize, y: usize, bgra: [u8; 4]| {
+            let off = (y * 4 + x) * 4;
+            tile[off..off + 4].copy_from_slice(&bgra);
+        };
+        put(1, 1, [0, 0, 255, 255]); // → output (0,0) red
+        put(2, 2, [255, 255, 255, 255]); // → output (1,1) white
+        let out = flatten_virtual_texture(&vt, &[raw_bulk(tile)], false).expect("flatten");
+        assert_eq!((out.width, out.height), (2, 2));
+        assert_eq!(&out.rgba[0..4], &[255, 0, 0, 255], "(0,0) = interior (1,1)");
+        assert_eq!(
+            &out.rgba[12..16],
+            &[255, 255, 255, 255],
+            "(1,1) = interior (2,2)"
+        );
+    }
+
+    #[test]
+    fn flatten_legacy_special_fill_codec() {
+        // Constant-fill codecs need no payload BYTES on the legacy path, but
+        // the tile must still span a non-zero byte range: paksmith declares
+        // a zero-span tile "no data" before codec dispatch (per
+        // `GetTileData`'s data model; the oracle's DECODER diverges — see
+        // the zero-span test below). Span 0..4 (chunk size 4) with an
+        // empty payload: the fill never reads it.
+        let mut chunk = vt_chunk_codec(VT_CODEC_WHITE);
+        chunk.size_in_bytes = 4;
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            width: 1,
+            height: 1,
+            tile_size: 1,
+            tile_border_size: 0,
+            tile_index_per_mip: vec![0, 1],
+            tile_index_per_chunk: vec![0, 1],
+            tile_offset_in_chunk: vec![0],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![chunk],
+            ..Default::default()
+        };
+        let out = flatten_virtual_texture(&vt, &[raw_bulk(Vec::new())], false).expect("flatten");
+        assert_eq!((out.width, out.height), (1, 1));
+        assert_eq!(&out.rgba[0..4], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn flatten_legacy_zero_span_tile_is_skipped_even_for_fill_codecs() {
+        // Parity with `GetTileData`'s no-data contract (zero span = no
+        // tile), and a DELIBERATE divergence from CUE4Parse's decoder,
+        // which never checks the span: it would raw-copy the chunk's
+        // first packedOutputSize bytes (fill codecs included — its DecodeVT
+        // has no fill special-case). paksmith skips the cell BEFORE codec
+        // dispatch — even a WHITE-codec chunk renders it transparent black.
+        let mut chunk = vt_chunk_codec(VT_CODEC_WHITE);
+        chunk.size_in_bytes = 0; // next fencepost == offset → zero span
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            width: 1,
+            height: 1,
+            tile_size: 1,
+            tile_border_size: 0,
+            tile_index_per_mip: vec![0, 1],
+            tile_index_per_chunk: vec![0, 1],
+            tile_offset_in_chunk: vec![0],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![chunk],
+            ..Default::default()
+        };
+        let out = flatten_virtual_texture(&vt, &[raw_bulk(Vec::new())], false).expect("flatten");
+        assert_eq!(&out.rgba[0..4], &[0, 0, 0, 0], "zero-span tile skipped");
+    }
+
+    #[test]
+    fn legacy_vt_parses_and_flattens_end_to_end_pre_4_27() {
+        // #649 wire-to-pixels: a UE 4.26-era legacy blob (u16 codec payload
+        // offsets — the one intra-legacy wire delta) parses through
+        // `read_from` and flattens to the expected pixel. 1×1 px, 1-px tile,
+        // one RawGPU chunk holding a single red B8G8R8A8 tile.
+        let mut b = fixed_header_prefix(1, 1, 0);
+        b.extend_from_slice(&1u32.to_le_bytes()); // NumMips
+        b.extend_from_slice(&1u32.to_le_bytes()); // Width
+        b.extend_from_slice(&1u32.to_le_bytes()); // Height
+        push_array(&mut b, &[0, 1]); // TileIndexPerChunk
+        push_array(&mut b, &[0, 1]); // TileIndexPerMip
+        push_array(&mut b, &[0]); // TileOffsetInChunk (non-empty → legacy)
+        write_fstring(&mut b, "PF_B8G8R8A8"); // LayerTypes[0]
+        // Chunks: TArray count 1; UE4 chunk = no hash, SizeInBytes,
+        // CodecPayloadSize, per-layer { codec u8, payload offset u16 }, bulk.
+        b.extend_from_slice(&1i32.to_le_bytes());
+        b.extend_from_slice(&4u32.to_le_bytes()); // SizeInBytes (one 4-byte tile)
+        b.extend_from_slice(&0u32.to_le_bytes()); // CodecPayloadSize
+        b.push(VT_CODEC_RAW_GPU);
+        b.extend_from_slice(&0u16.to_le_bytes()); // CodecPayloadOffset (u16: pre-4.27)
+        push_byte_bulk_data(&mut b);
+
+        // Object version 521 = the UE 4.26-era proxy (below the 522 gate
+        // that widens codec payload offsets to u32).
+        let ctx = make_ctx_with_version(521, None);
+        let mut cur = Cursor::new(b.as_slice());
+        let mut records = Vec::new();
+        let vt = read_from(&mut cur, &ctx, "vt.uasset", &mut records).expect("legacy parse");
+        assert!(vt.is_legacy_data());
+        assert_eq!(vt.chunks.len(), 1);
+        assert_eq!(records.len(), 1, "one chunk bulk record");
+        assert_eq!(cur.position(), b.len() as u64, "whole blob consumed");
+
+        let bulk = vec![raw_bulk(vec![0, 0, 255, 255])]; // B,G,R,A → red
+        let out = flatten_virtual_texture(&vt, &bulk, false).expect("legacy flatten");
+        assert_eq!((out.width, out.height), (1, 1));
+        assert_eq!(&out.rgba[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn min_level_scans_legacy_levels() {
+        // Legacy per-level grids shrink, so `min_level` can pick a deeper
+        // level when level 0's bitmap exceeds the decode cap. 49152² px at
+        // 16384-px tiles: level 0 (3×3 tiles) and level 1 (2×2) blow the
+        // 1 GiB RGBA8 cap; level 2 (1×1 → 16384² × 4 = 1 GiB) fits exactly.
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 3,
+            width: 49152,
+            height: 49152,
+            tile_size: 16384,
+            tile_index_per_mip: vec![0, 9, 13, 14],
+            tile_offset_in_chunk: vec![0],
+            ..Default::default()
+        };
+        assert_eq!(vt.min_level(), Some(2));
     }
 
     #[test]

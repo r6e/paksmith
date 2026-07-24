@@ -53,18 +53,19 @@ pixel bytes themselves are out of scope for this format doc (see
 [`pixel-formats.md`](pixel-formats.md) for the per-format decode
 reference).
 
-**Paksmith parser status: `partial`** (the blob parses fully; tile
-flatten-to-PNG is not implemented). Phase 3e-VT-a reads
+**Paksmith parser status: `complete`** (blob parse + page-table
+flatten-to-PNG, both eras). Phase 3e-VT-a reads
 the trailing `bIsVirtual` flag on `UTexture2D`; 3e-VT-b1 parses the blob's
 structural fields (the fixed header, both dispatch paths, the
 `FVirtualTextureTileOffsetData` sub-records, `LayerTypes`, and UE5.0+
 `LayerFallbackColors`); 3e-VT-b2 parses the `FVirtualTextureDataChunk[]` records
 (SHA prefix, sizes, per-layer codec, and each chunk's `FByteBulkData` routed
-through the per-export bulk resolver). The whole blob now parses into
-`Texture2DData::virtual_texture`. Still pending: the page-table flatten to
-pixels (3e-VT-c). Virtual Textures are far less common in cooked content than
-standard streaming `Texture2D`, so paksmith deferred them past the initial
-mip-chain support.
+through the per-export bulk resolver) into `Texture2DData::virtual_texture`.
+3e-VT-c flattens the page table to a single RGBA8 bitmap (layer 0, the
+highest-resolution mip level whose decode fits the 1 GiB cap), consumed by
+`PngHandler`, `classify_texture`/`decode_texture_mip`, and the GUI viewer —
+for **both** the UE 5.0+ `TileOffsetData` path and, per issue #649, the
+legacy (UE 4.23-4.27) fencepost-array path.
 
 ## Versions
 
@@ -238,8 +239,58 @@ Both dispatch paths exist in parallel on the wire for UE 5.0+ content.
 The chosen path at runtime is determined by `IsLegacyData()`:
 `TileOffsetInChunk == null || TileOffsetInChunk.Length > 0` means
 legacy; otherwise the UE5.0+ `TileOffsetData[]` is the active path.
+(The `null` arm is defensive C# — the three legacy arrays are
+unconditionally serialized in both eras, so the discriminator reduces
+to the data-presence test `Length > 0`, which is exactly paksmith's
+`is_legacy_data`.)
 Pre-UE-5 content always uses the legacy path (the UE5.0+ fields aren't
-serialized).
+serialized). Both paths flatten (issue #649); the discriminator is the
+data-presence test above, never the archive version — a UE5-versioned
+asset carrying non-empty legacy arrays takes the legacy path, matching
+the oracle.
+
+Two deliberate paksmith divergences from CUE4Parse on the legacy path
+(this section's claims were verified against CUE4Parse commit
+`b26351d` — newer than the `cf74fc32` pin the rest of this doc was
+originally verified at. Between the two revs the two serialization
+sources — `FVirtualTextureBuiltData.cs`, `FVirtualTextureDataChunk.cs`
+— are semantically unchanged (comment/qualifier-only diffs), while
+`TextureDecoder.cs` gained unrelated codec work; every decoder
+behavior cited in this section was verified at `b26351d` directly):
+
+- **Per-level grids, computed exactly.** CUE4Parse's
+  `GetTileOffsetData` synthesizes every legacy level's grid from the
+  MIP-0 tile counts and corrects the bitmap downstream by dividing by
+  `2^level` (its own comment concedes the synthesis doesn't know
+  whether the mip is tiled). paksmith computes each level's pixel dims
+  (halved per level, floored at 1) and tile counts up front; no
+  correction factor exists downstream.
+- **Exact Morton address bound.** CUE4Parse's synthesized `MaxAddress`
+  is the raw `TileIndexPerMip` fencepost span, which counts tileIndex
+  SLOTS (one per layer per address) and over-counts the address bound
+  by `NumLayers`; its render loop tolerates the excess via per-address
+  validity checks. paksmith divides the span by `NumLayers` rounded UP
+  (divisor floored at 1 — a zero layer count parses): a span that is
+  not an exact multiple still addresses a partial-tail slot per
+  `GetTileIndex_Legacy`'s `base + addr·NumLayers < next` bound, which
+  the oracle's over-counting loop renders — flooring would skip it.
+  Ceil is a no-op for well-formed (exact-multiple) spans.
+
+Two precision notes on the oracle's shrink: it fires only when the
+level's `MaxAddress > 1`, and — because it divides the mip-0-sized
+bitmap — its deep-level output is *cropped* (`(ceil(W/T)·T) >> L`)
+where paksmith emits *whole tiles* (`ceil((W>>L)/T)·T`, cooked tile
+padding visible). Content agrees on the overlap; only the padding
+differs, and paksmith's classify/decode dims agree by construction.
+
+Zero-span tiles: paksmith treats a legacy tile whose offset span is
+zero as "no data" and skips it **before** codec dispatch — parity with
+`GetTileData`'s data model, but a **deliberate divergence from
+CUE4Parse's decoder**, which never checks the span: its `DecodeVT`
+would raw-copy the chunk's first `packedOutputSize` bytes for such a
+tile (and has no constant-fill special case at all — Black/White/Flat
+fall into the same raw-copy branch). paksmith renders the cell
+transparent black, even for a fill codec.
 
 ### Codec-payload offset width (4.27 boundary)
 
@@ -289,9 +340,8 @@ arrays would over-allocate without this cap.
 
 ### Implementation hardening (recommended for any parser)
 
-A virtual-texture reader (paksmith parses VT structure in
-`asset/exports/texture/virtual_textures.rs`; tile flatten-to-PNG is
-deferred) MUST:
+A virtual-texture reader (paksmith's parse + flatten live in
+`asset/exports/texture/virtual_textures.rs`) MUST:
 
 - **Cap `NumLayers`** at the engine-asserted 8. CUE4Parse uses `Debug.Assert` (no runtime check in release); paksmith MUST validate `NumLayers <= 8` and reject larger values to bound the fixed-length `LayerTypes` and `LayerFallbackColors` array allocations.
 - **Verify all `i32` count prefixes are non-negative** before allocating the counted arrays. The 8 outer counted arrays plus the 2 inner counted arrays inside each `FVirtualTextureTileOffsetData` are all `i32` on wire; negative values cast to `usize` produce `usize::MAX`-adjacent allocations. Per-array byte-budget: `4 × count` for the `u32[]` arrays; per `FVirtualTextureTileOffsetData` the budget is `12 + 4 + 4 × addresses_count + 4 + 4 × offsets_count = 20 + 4 × (addresses_count + offsets_count)` bytes (12-byte fixed header + 2 separate `i32` count prefixes + per-entry `u32` for each array).
@@ -332,7 +382,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 the `VirtualTextures` feature; UE5 always). When set, the blob is parsed into
 `Texture2DData::virtual_texture` (`Option<Box<VirtualTextureData>>`);
 `Texture2DData::is_virtual()` queries it, and `crate::export::PngHandler`
-reports virtual textures as not-yet-renderable.
+flattens virtual textures to a PNG via `flatten_virtual_texture`.
 
 **Blob parser module (`asset/exports/texture/virtual_textures.rs`):** `read_from`
 parses the **full** blob — the structural fields (header, dispatch tables,
@@ -349,8 +399,9 @@ cap-bounded (`MAX_VT_LAYERS = 8`, `MAX_VT_ARRAY_ENTRIES`,
 mip + chunk records would overflow the per-export cap fails loud (→ `Generic`)
 rather than silently dropping its bulk records.
 
-**Status:** `partial` — the whole `FVirtualTextureBuiltData` blob parses
-(3e-VT-a/b1/b2); the page-table flatten to PNG (3e-VT-c) is pending.
+**Status:** `complete` — the whole `FVirtualTextureBuiltData` blob parses
+(3e-VT-a/b1/b2) and the page-table flatten to PNG ships for both dispatch
+paths (3e-VT-c; legacy via issue #649).
 
 **Phase plan:** `docs/plans/phase-3e-texture-export.md` milestone 3e-VT.
 

@@ -8536,11 +8536,11 @@ mod tests {
     #[test]
     fn unsupported_feature_display_includes_context() {
         let err = PaksmithError::UnsupportedFeature {
-            context: "virtual textures are not yet renderable".to_string(),
+            context: "virtual texture has a zero tile size".to_string(),
         };
         assert_eq!(
             format!("{err}"),
-            "unsupported feature: virtual textures are not yet renderable"
+            "unsupported feature: virtual texture has a zero tile size"
         );
     }
 

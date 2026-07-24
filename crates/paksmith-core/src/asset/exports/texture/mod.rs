@@ -143,8 +143,9 @@ pub struct TextureInfo {
 /// - Virtual textures: a single entry holding the *flattened* bitmap
 ///   dimensions the decode produces — the highest-resolution mip level whose
 ///   RGBA8 image fits the decode cap (`grid_tiles × tile_size`), which can be
-///   smaller than the logical `(vt.width, vt.height)`. Legacy (UE4) VTs and
-///   VTs with no cap-fitting level are not decodable and yield `None`.
+///   smaller than the logical `(vt.width, vt.height)`. VTs with no
+///   cap-fitting level are not decodable and yield `None`; legacy (UE4)
+///   VTs classify and decode like UE 5.0+ ones (#649).
 ///
 /// Returns `None` if no matching (decodable) texture export is found.
 pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
@@ -177,8 +178,8 @@ pub fn classify_texture(package: &Package) -> Option<TextureInfo> {
                 }
                 // `flatten_geometry` is the *same* helper the decode uses to size
                 // its output bitmap: it rejects (via `.ok()? → None`) every VT the
-                // flatten would reject before producing pixels — legacy (UE4) data
-                // (which `flatten` deterministically refuses), a zero tile size, or
+                // flatten would reject before producing pixels — a zero tile
+                // size, or
                 // no cap-fitting `min_level` — and otherwise yields the exact
                 // `(width, height)` the decode emits: the flattened bitmap of the
                 // highest-resolution level whose RGBA8 image fits the decode cap
@@ -712,7 +713,7 @@ mod tests {
             // min_level bitmap (grid 2×2 tiles × tile_size 4 = 8×8) so a dims test
             // that asserts the bitmap size fails against any code that reports the
             // logical `(width, height)` instead. (For a UE5.0+ VT `width`/`height`
-            // drive only the legacy `width_in_tiles` path, unused here, so a value
+            // drive only the legacy grid path, unused here, so a value
             // independent of the grid is well-formed.)
             width: 16,
             height: 16,
@@ -753,6 +754,38 @@ mod tests {
             Some(0),
             "the helper grid must yield a cap-fitting level so the VT classifies as decodable"
         );
+    }
+
+    /// decode_texture_mip success path for virtual textures of BOTH eras
+    /// (#649 / R1 architect recommendation): the public API returns real
+    /// pixels, not just guard errors. The tile's 4 wire bytes are the
+    /// package buffer's first 4 (B,G,R,A) — asserted via the swizzle so the
+    /// test is self-anchoring against the fixture's actual bytes. One
+    /// looped #[test] (not a helper called by two tests): a helper fn is
+    /// replace-with-() mutant bait that would vacuously pass both callers.
+    #[test]
+    fn decode_texture_mip_flattens_virtual_textures_of_both_eras() {
+        use crate::asset::exports::texture::virtual_textures::test_fixtures::renderable_vt;
+        for legacy in [false, true] {
+            let mut pkg = pkg_with_virtual_texture("PF_B8G8R8A8");
+            sole_texture2d_mut(&mut pkg).virtual_texture = Some(Box::new(renderable_vt(legacy)));
+            let info = classify_texture(&pkg).expect("renderable VT classifies");
+            assert_eq!(info.mips, vec![(1, 1)], "legacy: {legacy}");
+
+            let decoded = decode_texture_mip(&pkg, info.export_idx, 0).expect("VT decodes");
+            assert_eq!((decoded.width, decoded.height), (1, 1));
+            // The chunk reads bulk record 0 — resolve it the same way the
+            // decode did, so the expected pixel self-anchors to the fixture.
+            let bulk = pkg
+                .resolve_bulk_for_export(info.export_idx)
+                .expect("bulk resolves");
+            let src = &bulk[0].bytes[0..4]; // wire B,G,R,A
+            assert_eq!(
+                decoded.rgba,
+                vec![src[2], src[1], src[0], src[3]],
+                "pixel = swizzled tile bytes (legacy: {legacy})"
+            );
+        }
     }
 
     /// Parse the decodable fixture, then promote its `Texture2D` payload to a
@@ -848,26 +881,28 @@ mod tests {
     }
 
     #[test]
-    fn classify_texture_legacy_virtual_is_none() {
-        // `flatten_virtual_texture` deterministically rejects legacy (UE4) VTs
-        // (they are not yet renderable). classify must not offer a Texture view
-        // for one — otherwise the GUI promotes a tab whose decode always fails.
-        // A non-empty `tile_offset_in_chunk` marks the VT as legacy
-        // (`is_legacy_data`), which `flatten_geometry` refuses up front.
+    fn classify_texture_legacy_virtual_is_some() {
+        // #649: legacy (UE4) VTs render through the same flatten, so classify
+        // offers them. The legacy grid comes from the texture dims + the
+        // per-mip fencepost table: 16×16 px at 4-px tiles → 4×4 tiles →
+        // a 16×16 flattened bitmap (vs the UE5 fixture's 8×8 from its
+        // TileOffsetData grid — asserting the dims pins WHICH path ran).
         let mut pkg = pkg_with_virtual_texture("PF_DXT1");
-        assert!(
-            classify_texture(&pkg).is_some(),
-            "the UE5.0+ fixture VT must classify before being made legacy"
-        );
-        sole_texture2d_mut(&mut pkg)
-            .virtual_texture
-            .as_deref_mut()
-            .expect("pkg_with_virtual_texture promoted a VT")
-            .tile_offset_in_chunk = vec![0];
+        {
+            let vt = sole_texture2d_mut(&mut pkg)
+                .virtual_texture
+                .as_deref_mut()
+                .expect("pkg_with_virtual_texture promoted a VT");
+            vt.tile_offset_in_chunk = vec![0]; // non-empty → legacy dispatch
+            vt.tile_index_per_mip = vec![0, 1];
+            vt.num_layers = 1;
+        }
 
-        assert!(
-            classify_texture(&pkg).is_none(),
-            "a legacy (UE4) virtual texture must yield None — its decode always fails"
+        let info = classify_texture(&pkg).expect("a legacy VT classifies (#649)");
+        assert_eq!(
+            info.mips,
+            vec![(16, 16)],
+            "legacy bitmap dims come from the per-level legacy grid"
         );
     }
 

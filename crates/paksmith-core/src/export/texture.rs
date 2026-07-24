@@ -457,6 +457,25 @@ mod tests {
         }
     }
 
+    // ===== #649: virtual-texture success paths through export() =====
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn export_emits_a_real_png_for_both_virtual_texture_eras() {
+        use crate::asset::exports::texture::virtual_textures::test_fixtures::renderable_vt;
+        for legacy in [false, true] {
+            let mut data = texture("PF_B8G8R8A8", vec![]);
+            data.virtual_texture = Some(Box::new(renderable_vt(legacy)));
+            let bulk = inline_bulk(vec![0, 0, 255, 255]); // B,G,R,A → red
+            let png = PngHandler::default()
+                .export(&Asset::Texture2D(data), std::slice::from_ref(&bulk))
+                .unwrap_or_else(|e| panic!("VT export (legacy: {legacy}): {e}"));
+            let (w, h, rgba) = decode_png(&png);
+            assert_eq!((w, h), (1, 1), "legacy: {legacy}");
+            assert_eq!(&rgba[0..4], &[255, 0, 0, 255], "legacy: {legacy}");
+        }
+    }
+
     // ===== #648: multidim slice composition through export() =====
 
     /// Decode a PNG's pixels + dimensions (test-side inverse of `encode_png`).
