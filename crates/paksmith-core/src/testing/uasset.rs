@@ -550,7 +550,10 @@ pub fn cooked_decodable_texture2d_body() -> Vec<u8> {
 /// Feed to [`build_minimal_with_texture_class`] with `"TextureCube"`. #648.
 #[must_use]
 pub fn cooked_decodable_cube_body() -> Vec<u8> {
-    cooked_texture_body_raw(4, 96, 96, 6 | (1u32 << 31), 1)
+    // PackedData 0x8000_0006 = slice count 6 | cubemap bit 31, written as
+    // one literal: `6 | (1 << 31)` invites the equivalent `|`→`^` mutant
+    // (disjoint bits) — see MEMORY's disjoint-bit OR-mask class.
+    cooked_texture_body_raw(4, 96, 96, 0x8000_0006, 1)
 }
 
 /// A cooked `UTexture2DArray` body: 4×4 `PF_DXT5`, 3 layers (`PackedData`
@@ -2691,6 +2694,65 @@ pub fn build_minimal_licensee_engine_version() -> MinimalPackage {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// Builder pins for the #648 multidim fixture bodies. In-source because
+    /// `cargo-mutants` excludes the `texture_integration` capstone (it lives
+    /// in `paksmith-core-tests`): a body replaced wholesale (`vec![]`) or a
+    /// mutated `PackedData`/`SizeZ`/slab literal must fail HERE, not only in
+    /// the integration crate. Each body is parsed through the real pipeline
+    /// and its kind-relevant wire fields + resolved slab length asserted.
+    #[test]
+    fn multidim_fixture_bodies_parse_with_pinned_slice_fields() {
+        for (class, body, num_slices, is_cubemap, size_z, slab_len) in [
+            (
+                "TextureCube",
+                cooked_decodable_cube_body(),
+                6u32,
+                true,
+                1u32,
+                96usize,
+            ),
+            (
+                "Texture2DArray",
+                cooked_decodable_array_body(),
+                3,
+                false,
+                3,
+                48,
+            ),
+            (
+                "VolumeTexture",
+                cooked_decodable_volume_body(),
+                2,
+                false,
+                2,
+                32,
+            ),
+        ] {
+            let pkg = build_minimal_with_texture_class(class, body);
+            let parsed = crate::asset::Package::read_from(&pkg.bytes, None, None, "tex.uasset")
+                .unwrap_or_else(|e| panic!("{class} fixture must parse: {e}"));
+            match &parsed.payloads[1] {
+                crate::asset::Asset::Texture2D(data) => {
+                    assert_eq!(data.num_slices, num_slices, "{class} PackedData count");
+                    assert_eq!(data.is_cubemap, is_cubemap, "{class} PackedData bit 31");
+                    assert_eq!(data.pixel_format, "PF_DXT5", "{class}");
+                    assert_eq!(data.mips.len(), 1, "{class}");
+                    assert_eq!(data.mips[0].size_z, size_z, "{class} mip SizeZ");
+                    assert_eq!(
+                        (data.mips[0].size_x, data.mips[0].size_y),
+                        (4, 4),
+                        "{class}"
+                    );
+                }
+                other => panic!("{class}: expected Asset::Texture2D, got {other:?}"),
+            }
+            let resolved = parsed
+                .resolve_bulk_for_export(1)
+                .unwrap_or_else(|e| panic!("{class} slab must resolve: {e}"));
+            assert_eq!(resolved[0].bytes.len(), slab_len, "{class} slab length");
+        }
+    }
 
     /// Builder pin for `build_minimal_with_decodable_texture2d` /
     /// `cooked_decodable_texture2d_body`. In-source because `cargo-mutants`
