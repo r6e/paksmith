@@ -81,6 +81,25 @@ fn class_dispatch_init() -> HashMap<&'static str, TypedReaderFn> {
         crate::asset::exports::texture::texture2d::read_typed,
     );
 
+    // #648: the three multidim texture classes. They share UTexture2D's
+    // wire shape (same segment-2 entry minus the UE 5.3+ bSerializeMipData
+    // flag, same FTexturePlatformData) and produce the same
+    // `Asset::Texture2D` variant, tagged via `Texture2DData::kind` so the
+    // export layer can slice faces/layers/depth. `TextureCubeArray` is out
+    // of scope (pinned as a dispatch miss in the tests below).
+    let _ = table.insert(
+        "TextureCube",
+        crate::asset::exports::texture::texture2d::read_typed_cube,
+    );
+    let _ = table.insert(
+        "Texture2DArray",
+        crate::asset::exports::texture::texture2d::read_typed_array,
+    );
+    let _ = table.insert(
+        "VolumeTexture",
+        crate::asset::exports::texture::texture2d::read_typed_volume,
+    );
+
     // Phase 3f: USoundWave. 3f-1 routes the class through dispatch and
     // captures segment 1 (the USoundBase tagged-property settings); the
     // binary header (Flags + per-codec audio buffers) lands in 3f-2+. The
@@ -124,15 +143,19 @@ mod tests {
     #[test]
     fn dispatch_registers_data_table_texture2d_sound_wave_and_mesh_classes() {
         // Phase 3d registered the two DataTable class names; 3e-1 added
-        // Texture2D; 3f-1 added SoundWave; 3g1 added StaticMesh; 3h-PR2 adds
-        // SkeletalMesh. This count grows with each table-population PR.
-        assert_eq!(class_dispatch().len(), 6);
+        // Texture2D; 3f-1 added SoundWave; 3g1 added StaticMesh; 3h-PR2 added
+        // SkeletalMesh; #648 adds the three multidim texture classes. This
+        // count grows with each table-population PR.
+        assert_eq!(class_dispatch().len(), 9);
         assert!(class_dispatch().contains_key("DataTable"));
         assert!(class_dispatch().contains_key("CompositeDataTable"));
         assert!(class_dispatch().contains_key("Texture2D"));
         assert!(class_dispatch().contains_key("SoundWave"));
         assert!(class_dispatch().contains_key("StaticMesh"));
         assert!(class_dispatch().contains_key("SkeletalMesh"));
+        assert!(class_dispatch().contains_key("TextureCube"));
+        assert!(class_dispatch().contains_key("Texture2DArray"));
+        assert!(class_dispatch().contains_key("VolumeTexture"));
     }
 
     #[test]
@@ -147,6 +170,12 @@ mod tests {
         assert!(class_dispatch().get("SoundWave").is_some());
         assert!(class_dispatch().get("StaticMesh").is_some());
         assert!(class_dispatch().get("SkeletalMesh").is_some());
+        assert!(class_dispatch().get("TextureCube").is_some());
+        assert!(class_dispatch().get("Texture2DArray").is_some());
+        assert!(class_dispatch().get("VolumeTexture").is_some());
+        // TextureCubeArray exists in the engine but is out of #648's scope —
+        // pinned as a MISS so adding it later is a visible dispatch change.
+        assert!(class_dispatch().get("TextureCubeArray").is_none());
         assert!(class_dispatch().get("AnyUnknownClass").is_none());
     }
 

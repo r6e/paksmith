@@ -58,7 +58,8 @@ use crate::asset::property::{read_object_guid_tail, read_properties};
 use crate::asset::version::{VER_UE5_DATA_RESOURCES, VER_UE5_SCRIPT_SERIALIZATION_OFFSET};
 use crate::asset::wire::{STRIP_FLAG_EDITOR_DATA, read_strip_data_flags};
 use crate::asset::{
-    Asset, AssetContext, Texture2DData, Texture2DMipMap, read_asset_fstring, skip_asset_bytes,
+    Asset, AssetContext, Texture2DData, Texture2DMipMap, TextureKind, read_asset_fstring,
+    skip_asset_bytes,
 };
 use crate::error::{AssetParseFault, AssetWireField};
 
@@ -163,6 +164,24 @@ pub(crate) fn read_from(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<(Texture2DData, Vec<FByteBulkData>)> {
+    read_from_kind(payload, ctx, asset_path, TextureKind::TwoD)
+}
+
+/// [`read_from`] parameterized by the texture class family. The wire is
+/// shared across `UTexture2D` and its cube/array/volume siblings with ONE
+/// difference: only the 2D class reads `bSerializeMipData` on UE 5.3+
+/// (CUE4Parse `UTexture2D.cs:44-48` reads the bool; `UTextureCube.cs:41`,
+/// `UTexture2DArray.cs:29`, and `UVolumeTexture.cs:23` call
+/// `DeserializeCookedPlatformData(Ar)` with the flag defaulted `true`).
+/// The sibling classes' UE3-era legacy branches (`UTextureCube`'s
+/// pre-`RENDERING_REFACTOR` block) sit below paksmith's UE 4.13+ asset
+/// floor and are not modeled.
+pub(crate) fn read_from_kind(
+    payload: &[u8],
+    ctx: &AssetContext,
+    asset_path: &str,
+    kind: TextureKind,
+) -> crate::Result<(Texture2DData, Vec<FByteBulkData>)> {
     let mut cur = Cursor::new(payload);
     let total_len = payload.len() as u64;
 
@@ -175,9 +194,10 @@ pub(crate) fn read_from(
     let properties = read_properties(&mut cur, ctx, 0, total_len, asset_path)?;
     let _object_guid = read_object_guid_tail(&mut cur, total_len, asset_path)?;
 
-    // Segment-2 entry: UTexture/UTexture2D FStripDataFlags + owner
-    // bCooked + bSerializeMipData, preceding the FTexturePlatformData.
-    let serialize_mip_data = read_segment2_entry(&mut cur, ctx, asset_path)?;
+    // Segment-2 entry: UTexture/subclass FStripDataFlags + owner
+    // bCooked + (2D only) bSerializeMipData, preceding the
+    // FTexturePlatformData.
+    let serialize_mip_data = read_segment2_entry(&mut cur, ctx, asset_path, kind)?;
 
     // DeserializeCookedPlatformData's leading key: the running-platform
     // `pixelFormatName` (FName) + `skipOffset` (i64/i32) that wrap the
@@ -232,6 +252,7 @@ pub(crate) fn read_from(
 
     let data = Texture2DData {
         properties: PropertyBag::Tree { properties },
+        kind,
         size_x: header.size_x,
         size_y: header.size_y,
         pixel_format: header.pixel_format,
@@ -286,6 +307,7 @@ fn read_segment2_entry(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,
     asset_path: &str,
+    kind: TextureKind,
 ) -> crate::Result<bool> {
     // (1) UTexture-base FStripDataFlags. Cooked ⟹ editor data stripped.
     let (global_strip, _class_strip) =
@@ -306,9 +328,13 @@ fn read_segment2_entry(
     }
 
     // (4) bSerializeMipData (UE 5.3+ proxy; default true below it).
-    let serialize_mip_data = if ctx
-        .version
-        .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
+    // ONLY the 2D class carries the flag on the wire — the cube/array/
+    // volume Deserialize bodies never read it (CUE4Parse threads the
+    // default `true` into DeserializeCookedPlatformData for them).
+    let serialize_mip_data = if kind == TextureKind::TwoD
+        && ctx
+            .version
+            .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
     {
         read_owner_bool(cur, asset_path, AssetWireField::TextureSerializeMipData)?
     } else {
@@ -728,6 +754,43 @@ pub(crate) fn read_typed(
     Ok((Asset::Texture2D(data), bulk_records))
 }
 
+/// `TypedReaderFn` for `UTextureCube` (#648).
+pub(crate) fn read_typed_cube(
+    payload: &[u8],
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<(Asset, Vec<FByteBulkData>)> {
+    read_typed_kind(payload, ctx, asset_path, TextureKind::Cube)
+}
+
+/// `TypedReaderFn` for `UTexture2DArray` (#648).
+pub(crate) fn read_typed_array(
+    payload: &[u8],
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<(Asset, Vec<FByteBulkData>)> {
+    read_typed_kind(payload, ctx, asset_path, TextureKind::Array)
+}
+
+/// `TypedReaderFn` for `UVolumeTexture` (#648).
+pub(crate) fn read_typed_volume(
+    payload: &[u8],
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<(Asset, Vec<FByteBulkData>)> {
+    read_typed_kind(payload, ctx, asset_path, TextureKind::Volume)
+}
+
+fn read_typed_kind(
+    payload: &[u8],
+    ctx: &AssetContext,
+    asset_path: &str,
+    kind: TextureKind,
+) -> crate::Result<(Asset, Vec<FByteBulkData>)> {
+    let (data, bulk_records) = read_from_kind(payload, ctx, asset_path, kind)?;
+    Ok((Asset::Texture2D(data), bulk_records))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -940,6 +1003,95 @@ mod tests {
             PropertyBag::Tree { properties } => properties,
             other => panic!("expected Tree, got {other:?}"),
         }
+    }
+
+    /// Append the SIBLING-class (`UTextureCube` / `UTexture2DArray` /
+    /// `UVolumeTexture`) segment-2 entry + platform-data key. Identical to
+    /// [`write_segment2_entry`] except `bSerializeMipData` is NEVER on the
+    /// wire — CUE4Parse's sibling `Deserialize` bodies call
+    /// `DeserializeCookedPlatformData(Ar)` with the flag defaulted, with no
+    /// `Ar.Game >= GAME_UE5_3` read (`UTextureCube.cs:41`,
+    /// `UTexture2DArray.cs:29`, `UVolumeTexture.cs:23`).
+    fn write_sibling_entry(buf: &mut Vec<u8>, ctx: &AssetContext) {
+        write_entry(buf, STRIP_FLAG_EDITOR_DATA, 1, None);
+        write_pd_key(buf, ctx);
+    }
+
+    // --- #648: multidim texture kinds (cube / array / volume) ---
+
+    #[test]
+    fn sibling_kinds_parse_the_shared_wire_shape_and_tag_the_kind() {
+        // UE4-era wire: the sibling entry is byte-identical to UTexture2D's
+        // (bSerializeMipData only ever exists on the UE 5.3+ 2D wire), so the
+        // same body must parse under every kind, differing ONLY in the tag.
+        let ctx = make_ctx(&[]);
+        let mut buf = Vec::new();
+        none(&mut buf);
+        write_segment2_entry(&mut buf, &ctx);
+        plain(&mut buf, &ctx, 64, 64, "PF_DXT5", &one_mip());
+
+        for kind in [
+            TextureKind::TwoD,
+            TextureKind::Cube,
+            TextureKind::Array,
+            TextureKind::Volume,
+        ] {
+            let (data, records) = read_from_kind(&buf, &ctx, "t.uasset", kind)
+                .unwrap_or_else(|e| panic!("{kind:?} failed: {e}"));
+            assert_eq!(data.kind, kind);
+            assert_eq!(data.size_x, 64);
+            assert_eq!(records.len(), 1, "{kind:?} collects the mip record");
+        }
+    }
+
+    #[test]
+    fn read_from_defaults_to_the_two_d_kind() {
+        let ctx = make_ctx(&[]);
+        let mut buf = Vec::new();
+        none(&mut buf);
+        write_segment2_entry(&mut buf, &ctx);
+        plain(&mut buf, &ctx, 64, 64, "PF_DXT5", &one_mip());
+
+        let (data, _) = read_from(&buf, &ctx, "t.uasset").unwrap();
+        assert_eq!(data.kind, TextureKind::TwoD);
+    }
+
+    #[test]
+    fn ue5_3_siblings_never_read_serialize_mip_data() {
+        // Object version 1010 (the UE 5.3 proxy that makes the 2D reader
+        // consume bSerializeMipData). The sibling wire does NOT carry the
+        // flag — a body without it must parse as a sibling AND still collect
+        // per-mip bulk records (siblings always serialize mip data).
+        let ctx = make_ctx_with_version(522, Some(VER_UE5_SCRIPT_SERIALIZATION_OFFSET));
+        let mut buf = Vec::new();
+        none(&mut buf);
+        write_sibling_entry(&mut buf, &ctx);
+        // UE 5.2+ stripped-data prefix: bUsingDerivedData = 0 + 15 skipped.
+        buf.push(0x00u8);
+        buf.extend_from_slice(&[0xFFu8; 15]);
+        plain(&mut buf, &ctx, 64, 64, "PF_DXT5", &one_mip());
+
+        for kind in [TextureKind::Cube, TextureKind::Array, TextureKind::Volume] {
+            let (data, records) = read_from_kind(&buf, &ctx, "t.uasset", kind)
+                .unwrap_or_else(|e| panic!("{kind:?} failed: {e}"));
+            assert_eq!(data.kind, kind);
+            assert_eq!(
+                records.len(),
+                1,
+                "{kind:?} must treat bSerializeMipData as true"
+            );
+        }
+
+        // Asymmetry pin: the SAME sibling body parsed as TwoD desyncs — the
+        // 2D reader consumes the platform-data key's FName index as the
+        // missing flag and lands the pixelFormatName read on `None` bytes.
+        let err = read_from_kind(&buf, &ctx, "t.uasset", TextureKind::TwoD)
+            .expect_err("2D kind must consume a bSerializeMipData flag at 1010");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no cooked platform data"),
+            "desync surfaces as the None-pixel-format reject, got: {msg}"
+        );
     }
 
     #[test]
