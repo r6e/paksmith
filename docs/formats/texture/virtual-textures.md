@@ -269,8 +269,12 @@ behavior cited in this section was verified at `b26351d` directly):
   is the raw `TileIndexPerMip` fencepost span, which counts tileIndex
   SLOTS (one per layer per address) and over-counts the address bound
   by `NumLayers`; its render loop tolerates the excess via per-address
-  validity checks. paksmith divides the span by `NumLayers` (divisor
-  floored at 1 — a zero layer count parses).
+  validity checks. paksmith divides the span by `NumLayers` rounded UP
+  (divisor floored at 1 — a zero layer count parses): a span that is
+  not an exact multiple still addresses a partial-tail slot per
+  `GetTileIndex_Legacy`'s `base + addr·NumLayers < next` bound, which
+  the oracle's over-counting loop renders — flooring would skip it.
+  Ceil is a no-op for well-formed (exact-multiple) spans.
 
 Two precision notes on the oracle's shrink: it fires only when the
 level's `MaxAddress > 1`, and — because it divides the mip-0-sized

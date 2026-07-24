@@ -422,15 +422,20 @@ impl VirtualTextureData {
     /// excess via per-address validity checks). paksmith computes the real
     /// per-level extents up front: pixel dims halve per level (floored at 1,
     /// shift-safe past level 31), tiles are `ceil(dim / tile_size)`, and the
-    /// span is divided by `num_layers` (divisor floored at 1 — a zero layer
-    /// count parses). Downstream needs no correction factor.
+    /// span divides by `num_layers` ROUNDED UP (divisor floored at 1 — a
+    /// zero layer count parses): `tile_index_legacy` accepts any address
+    /// with `base + addr·layers < next`, so a span that isn't a multiple of
+    /// `num_layers` still addresses a partial-tail slot — flooring would
+    /// silently skip that valid tile (which the oracle's over-counting
+    /// loop renders). Ceil is a no-op for well-formed spans (exact
+    /// multiples). Downstream needs no correction factor.
     fn tile_grid_for(&self, level: usize) -> Option<TileGrid> {
         if self.is_legacy_data() {
             let level_start = *self.tile_index_per_mip.get(level)?;
             let next = (level + 1).min(self.num_mips as usize);
             let next_start = *self.tile_index_per_mip.get(next)?;
             let span = next_start.saturating_sub(level_start);
-            let addresses = span / self.num_layers.max(1);
+            let addresses = span.div_ceil(self.num_layers.max(1));
             Some(TileGrid {
                 width: divide_round_up(level_pixel_dim(self.width, level), self.tile_size),
                 height: divide_round_up(level_pixel_dim(self.height, level), self.tile_size),
@@ -2350,7 +2355,8 @@ mod tests {
     #[test]
     fn tile_grid_for_legacy_divides_the_span_by_num_layers() {
         // The fencepost span counts tileIndex SLOTS (one per layer per
-        // address); the Morton address bound is span / num_layers. CUE4Parse
+        // address); the Morton address bound is ceil(span / num_layers)
+        // (a partial tail still addresses a slot). CUE4Parse
         // uses the raw span (its render loop tolerates the over-count);
         // paksmith bounds exactly.
         let mut vt = VirtualTextureData {
@@ -2365,9 +2371,17 @@ mod tests {
         };
         assert_eq!(vt.tile_grid_for(0).unwrap().max_address, 4);
 
+        // A non-multiple span still addresses a partial-tail slot
+        // (tile_index_legacy: base + addr·layers < next admits addr 2 for
+        // span 5, layers 2) — the bound must round UP, not floor it away
+        // (Copilot round 2).
+        vt.tile_index_per_mip = vec![0, 5];
+        assert_eq!(vt.tile_grid_for(0).unwrap().max_address, 3);
+
         // A (parseable) zero layer count must not divide by zero — treat the
         // divisor as 1 defensively.
         vt.num_layers = 0;
+        vt.tile_index_per_mip = vec![0, 8];
         assert_eq!(vt.tile_grid_for(0).unwrap().max_address, 8);
     }
 
