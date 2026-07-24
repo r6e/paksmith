@@ -248,7 +248,11 @@ the oracle.
 Two deliberate paksmith divergences from CUE4Parse on the legacy path
 (this section's claims were verified against CUE4Parse commit
 `b26351d` — newer than the `cf74fc32` pin the rest of this doc was
-originally verified at; the VT sources are unchanged between the two):
+originally verified at. Between the two revs the two serialization
+sources — `FVirtualTextureBuiltData.cs`, `FVirtualTextureDataChunk.cs`
+— are semantically unchanged (comment/qualifier-only diffs), while
+`TextureDecoder.cs` gained unrelated codec work; every decoder
+behavior cited in this section was verified at `b26351d` directly):
 
 - **Per-level grids, computed exactly.** CUE4Parse's
   `GetTileOffsetData` synthesizes every legacy level's grid from the
