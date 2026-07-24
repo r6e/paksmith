@@ -883,9 +883,22 @@ pub fn write_minimal_pak_with_uasset(path: &Path) -> anyhow::Result<()> {
         bytes: uasset_bytes,
         ..
     } = build_minimal_ue4_27();
+    // In-pak entries can use either the `Content/` or `Game/` root
+    // prefix; `Game/` mirrors how UE writes paths in cooked builds
+    // (the project's mount root). Every other fixture in this
+    // generator uses `Content/...`; this one uses `Game/...` so
+    // Task 15's integration test exercises the alternate convention
+    // before real-game paks land.
+    write_single_entry_pak(path, "Game/Maps/Demo.uasset", &uasset_bytes)
+}
 
-    // Atomic write via .tmp + rename, mirroring `write_fixture`'s
-    // crash-safety pattern.
+/// Write a V8B pak holding exactly one entry, with the atomic
+/// `.tmp` + rename crash-safety pattern and a repak re-open self-test
+/// (entry count + path round-trip) — fail loudly at generation time
+/// rather than burying a bug in a downstream integration test. Shared
+/// by [`write_minimal_pak_with_uasset`] and
+/// [`write_minimal_pak_with_unversioned_uasset`].
+fn write_single_entry_pak(path: &Path, entry: &str, bytes: &[u8]) -> anyhow::Result<()> {
     let tmp = path.with_file_name(format!(
         "{}.tmp",
         path.file_name()
@@ -896,14 +909,8 @@ pub fn write_minimal_pak_with_uasset(path: &Path) -> anyhow::Result<()> {
         let file = File::create(&tmp)?;
         let mut writer =
             PakBuilder::new().writer(file, Version::V8B, super::MOUNT_POINT.to_string(), None);
-        // In-pak entries can use either the `Content/` or `Game/` root
-        // prefix; `Game/` mirrors how UE writes paths in cooked builds
-        // (the project's mount root). Every other fixture in this
-        // generator uses `Content/...`; this one uses `Game/...` so
-        // Task 15's integration test exercises the alternate convention
-        // before real-game paks land.
         writer
-            .write_file("Game/Maps/Demo.uasset", false, &uasset_bytes)
+            .write_file(entry, false, bytes)
             .map_err(|e| anyhow::anyhow!("repak write_file: {e}"))?;
         // `write_index` consumes the writer and returns the inner File;
         // `let _` drops it here, closing the file before the rename.
@@ -913,11 +920,6 @@ pub fn write_minimal_pak_with_uasset(path: &Path) -> anyhow::Result<()> {
     }
     fs::rename(&tmp, path)?;
 
-    // Self-test: re-open via repak's reader and assert structural facts.
-    // Mirrors `write_minimal_ue4_27`'s parser cross-check pattern — if
-    // the just-written pak fails to parse, or its single entry's name
-    // doesn't round-trip, fail loudly at generation time rather than
-    // burying the bug in a downstream integration test.
     let mut reader_file = File::open(path)?;
     let pak_reader = PakBuilder::new()
         .reader(&mut reader_file)
@@ -930,8 +932,8 @@ pub fn write_minimal_pak_with_uasset(path: &Path) -> anyhow::Result<()> {
         files.len()
     );
     anyhow::ensure!(
-        files[0] == "Game/Maps/Demo.uasset",
-        "expected entry path 'Game/Maps/Demo.uasset', got '{}'",
+        files[0] == entry,
+        "expected entry path '{entry}', got '{}'",
         files[0]
     );
     Ok(())
@@ -1121,45 +1123,7 @@ pub fn write_minimal_pak_with_uptnl(path: &Path) -> anyhow::Result<()> {
 /// the pak wrapper.
 pub fn write_minimal_pak_with_unversioned_uasset(path: &Path) -> anyhow::Result<()> {
     let uasset_bytes = paksmith_core::testing::usmap::build_minimal_unversioned_uasset_bytes();
-
-    // Atomic write via .tmp + rename, mirroring `write_minimal_pak_with_uasset`.
-    let tmp = path.with_file_name(format!(
-        "{}.tmp",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow::anyhow!("path has no filename: {}", path.display()))?
-    ));
-    {
-        let file = File::create(&tmp)?;
-        let mut writer =
-            PakBuilder::new().writer(file, Version::V8B, super::MOUNT_POINT.to_string(), None);
-        writer
-            .write_file("Game/Heroes/Hero.uasset", false, &uasset_bytes)
-            .map_err(|e| anyhow::anyhow!("repak write_file: {e}"))?;
-        let _ = writer
-            .write_index()
-            .map_err(|e| anyhow::anyhow!("repak write_index: {e}"))?;
-    }
-    fs::rename(&tmp, path)?;
-
-    // Self-test: re-open via repak's reader and assert structural facts.
-    let mut reader_file = File::open(path)?;
-    let pak_reader = PakBuilder::new()
-        .reader(&mut reader_file)
-        .map_err(|e| anyhow::anyhow!("repak reader: {e}"))?;
-    let files = pak_reader.files();
-    anyhow::ensure!(
-        files.len() == 1,
-        "expected 1 entry in {}, got {}",
-        path.display(),
-        files.len()
-    );
-    anyhow::ensure!(
-        files[0] == "Game/Heroes/Hero.uasset",
-        "expected entry path 'Game/Heroes/Hero.uasset', got '{}'",
-        files[0]
-    );
-    Ok(())
+    write_single_entry_pak(path, "Game/Heroes/Hero.uasset", &uasset_bytes)
 }
 
 /// Verify the split-form fixture against `unreal_asset`'s two-reader

@@ -77,7 +77,7 @@ async fn run_inner(
     manual_key: Option<AesKey>,
     game: Option<String>,
 ) -> Result<LoadedArchive, OpenError> {
-    // #651 follow-up seam: switch to `resolve_pak_context` to also get the
+    // Issue #706 seam: switch to `resolve_pak_context` to also get the
     // profile's `MappingsSource`, load it once here, and carry the parsed
     // `Arc<Usmap>` in `LoadedArchive` for the asset/export tasks.
     let resolved_key = paksmith_core::profile::resolve::resolve_pak_key(

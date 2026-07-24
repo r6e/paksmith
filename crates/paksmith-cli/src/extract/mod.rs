@@ -35,9 +35,8 @@ pub(crate) struct ExtractJob<'a> {
     pub(crate) registry: &'a HandlerRegistry,
     pub(crate) cfg: &'a ExtractConfig,
     /// Effective `.usmap` mappings (explicit `--mappings` or the
-    /// `--game` profile's source — #651). ONE parsed usmap shared
-    /// across all rayon workers; `read_from_reader` takes it by
-    /// `&Arc`, so per-entry cost is a refcount bump, not a clone.
+    /// selected profile's source — #651), shared across all workers
+    /// (see `Package::read_from_reader` for the `&Arc` rationale).
     pub(crate) mappings: Option<Arc<Usmap>>,
 }
 

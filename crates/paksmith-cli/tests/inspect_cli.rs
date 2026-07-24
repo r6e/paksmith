@@ -1,6 +1,8 @@
 #![allow(missing_docs)]
 
 use std::path::PathBuf;
+
+mod common;
 use std::process::Command;
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -212,25 +214,13 @@ fn inspect_mappings_nonexistent_file_errors() {
 /// asset decodes to a property tree instead of exiting 2 with
 /// `UnversionedWithoutMappings`.
 #[test]
-#[allow(
-    clippy::unnecessary_debug_formatting,
-    reason = "Debug formatting of the path IS the TOML string encoding: it \
-              quotes and backslash-escapes (Windows paths) exactly as a TOML \
-              basic string requires; .display() would emit invalid TOML"
-)]
 fn inspect_game_profile_supplies_mappings() {
     let pak = fixture_path("real_v8b_unversioned.pak");
     assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
     let usmap = fixture_path("external_minimal_v0.usmap");
 
     let config_dir = tempfile::tempdir().unwrap();
-    let dir = config_dir.path().join("paksmith");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("profiles.toml"),
-        format!("[profiles.hero]\nname = \"Hero\"\nmappings = {{ path = {usmap:?} }}\n"),
-    )
-    .unwrap();
+    common::seed_hero_profile(config_dir.path(), &usmap);
 
     let output = Command::new(env!("CARGO_BIN_EXE_paksmith"))
         .env("PAKSMITH_CONFIG_DIR", config_dir.path())

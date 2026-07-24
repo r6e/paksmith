@@ -38,43 +38,17 @@ fn encrypted_entries_pak() -> std::path::PathBuf {
 mod common;
 use common::FIXTURE_AES_KEY_HEX as AES_KEY_HEX;
 
+use common::{fixture_path, seed_hero_profile};
+
 /// Pak whose single entry is an UNVERSIONED uasset (class `Hero`); pairs
 /// with `external_minimal_v0.usmap` (issue #651).
 fn unversioned_pak() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("tests/fixtures/real_v8b_unversioned.pak")
+    fixture_path("real_v8b_unversioned.pak")
 }
 
 /// The `.usmap` fixture carrying the `Hero { Health, Speed }` schema.
 fn hero_usmap() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("tests/fixtures/external_minimal_v0.usmap")
-}
-
-/// Seed `$PAKSMITH_CONFIG_DIR/paksmith/profiles.toml` with a `hero`
-/// profile whose mappings source is `usmap_path`.
-#[allow(
-    clippy::unnecessary_debug_formatting,
-    reason = "Debug formatting of the path IS the TOML string encoding: it \
-              quotes and backslash-escapes (Windows paths) exactly as a TOML \
-              basic string requires; .display() would emit invalid TOML"
-)]
-fn seed_hero_profile(config_dir: &std::path::Path, usmap_path: &std::path::Path) {
-    let dir = config_dir.join("paksmith");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("profiles.toml"),
-        format!("[profiles.hero]\nname = \"Hero\"\nmappings = {{ path = {usmap_path:?} }}\n"),
-    )
-    .unwrap();
+    fixture_path("external_minimal_v0.usmap")
 }
 
 #[test]
@@ -212,6 +186,53 @@ fn extract_broken_profile_mappings_errors_loudly() {
     assert!(
         stderr.contains("--game") && stderr.contains("broken.usmap"),
         "stderr must attribute the bad path to the profile selection: {stderr}"
+    );
+}
+
+#[test]
+fn extract_aes_key_with_game_profile_keeps_mappings() {
+    // #651: --aes-key short-circuits the KEY lookup but must NOT drop the
+    // --game profile's mappings — the unversioned entry still decodes.
+    // (The key is unused: the fixture pak is unencrypted.)
+    let config_dir = tempdir().unwrap();
+    let out = tempdir().unwrap();
+    seed_hero_profile(config_dir.path(), &hero_usmap());
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", config_dir.path())
+        .args(["--format", "json", "--aes-key", AES_KEY_HEX, "extract"])
+        .arg(unversioned_pak())
+        .args(["--game", "hero"])
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["counts"]["failed"].as_u64().unwrap(), 0);
+}
+
+#[test]
+fn extract_aes_key_with_unknown_game_still_exits_2() {
+    // #651 (R1 architect finding): --game keeps its hard contract even
+    // with --aes-key set — a typo'd id must NOT silently produce a
+    // no-mappings run.
+    let config_dir = tempdir().unwrap();
+    let out = tempdir().unwrap();
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", config_dir.path())
+        .args(["--aes-key", AES_KEY_HEX, "extract"])
+        .arg(unversioned_pak())
+        .args(["--game", "nope"])
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("nope"),
+        "stderr must name the unknown profile id: {stderr}"
     );
 }
 

@@ -3,8 +3,9 @@ use std::path::Path;
 use paksmith_core::AesKey;
 use paksmith_core::profile::resolve::PakOpenContext;
 
-/// CLI-side resolution: block_on the async core orchestration so the four
-/// container commands keep a synchronous call site.
+/// CLI-side key-only resolution: block_on the async core orchestration
+/// so `list`/`search` (which never consume mappings) keep a synchronous
+/// call site; `inspect`/`extract` use [`resolve_pak_context`] below.
 pub(crate) fn resolve_pak_key(
     path: &Path,
     aes_key: Option<&AesKey>,

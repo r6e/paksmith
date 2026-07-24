@@ -512,7 +512,17 @@ impl Usmap {
     /// without writing 128 MiB to a tempfile.
     fn from_path_with_cap(path: &std::path::Path, cap: u64) -> crate::Result<Self> {
         use std::io::Read;
-        let metadata = std::fs::metadata(path).map_err(|e| {
+        // Open FIRST, then fstat the opened handle: a stat-then-open pair
+        // is a TOCTOU window in which the path can be swapped for a FIFO
+        // (whose open blocks forever — the read cap bounds size, not
+        // blocking). fstat targets the same file object the read will use.
+        let file = std::fs::File::open(path).map_err(|e| {
+            PaksmithError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to open `{}`: {e}", path.display()),
+            ))
+        })?;
+        let metadata = file.metadata().map_err(|e| {
             PaksmithError::Io(std::io::Error::new(
                 e.kind(),
                 format!("failed to stat `{}`: {e}", path.display()),
@@ -528,21 +538,12 @@ impl Usmap {
         // `_ = …` discards the byte count from `read_to_end`; the cap
         // check below uses `buf.len()`, not the returned value, so a
         // named binding would falsely imply downstream use.
-        let _ = std::fs::File::open(path)
-            .map_err(|e| {
-                PaksmithError::Io(std::io::Error::new(
-                    e.kind(),
-                    format!("failed to open `{}`: {e}", path.display()),
-                ))
-            })?
-            .take(cap + 1)
-            .read_to_end(&mut buf)
-            .map_err(|e| {
-                PaksmithError::Io(std::io::Error::new(
-                    e.kind(),
-                    format!("failed to read `{}`: {e}", path.display()),
-                ))
-            })?;
+        let _ = file.take(cap + 1).read_to_end(&mut buf).map_err(|e| {
+            PaksmithError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to read `{}`: {e}", path.display()),
+            ))
+        })?;
         if buf.len() as u64 > cap {
             return Err(PaksmithError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,

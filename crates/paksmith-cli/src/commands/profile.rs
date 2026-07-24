@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 use clap::{Args, Subcommand};
 
 use paksmith_core::error::ProfileFault;
-use paksmith_core::{AesKey, GameProfile, KeyGuid, PaksmithError, ProfileStore, display_guid};
+use paksmith_core::{
+    AesKey, GameProfile, KeyGuid, MappingsSource, PaksmithError, ProfileStore, display_guid,
+};
 
 use crate::output::OutputFormat;
 
@@ -101,7 +103,7 @@ pub(crate) struct AddArgs {
     #[arg(long)]
     pub(crate) engine_version: Option<String>,
     /// `.usmap` mappings file this profile supplies to `--game`
-    /// consumers (inspect/extract) for unversioned assets (#651).
+    /// consumers (inspect/extract) for unversioned assets.
     /// Stored as-given; absolute paths recommended.
     #[arg(long, value_name = "PATH")]
     pub(crate) mappings: Option<std::path::PathBuf>,
@@ -169,7 +171,7 @@ fn add(a: &AddArgs) -> paksmith_core::Result<u8> {
             engine_version: a.engine_version.clone(),
             keys: BTreeMap::new(),
             detect: None,
-            mappings: a.mappings.clone().map(paksmith_core::MappingsSource::Path),
+            mappings: a.mappings.clone().map(MappingsSource::Path),
         },
     );
     store.save()?;
@@ -233,7 +235,7 @@ fn show(a: &ShowArgs) -> paksmith_core::Result<u8> {
     );
     match &p.mappings {
         // Not key material — safe to show unredacted.
-        Some(paksmith_core::MappingsSource::Path(path)) => {
+        Some(MappingsSource::Path(path)) => {
             println!("mappings: {}", path.display());
         }
         None => println!("mappings: -"),

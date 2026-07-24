@@ -17,7 +17,9 @@
 //!
 //! Pass `--mappings <file.usmap>` to decode `.usmap`-driven
 //! unversioned assets that would otherwise reject with
-//! `UnversionedWithoutMappings`.
+//! `UnversionedWithoutMappings` — or select a mappings-bearing profile
+//! with `--game`/`--detect` (an explicit `--mappings` wins; see
+//! `commands::mappings_resolve`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,7 +41,8 @@ pub(crate) struct InspectArgs {
     /// Optional `.usmap` mappings file. Required for assets whose
     /// `PKG_UnversionedProperties` flag is set (UE 4.25+ cooked
     /// content; common in both UE4 and UE5 shipping games).
-    /// Versioned (tagged-property) assets parse without it.
+    /// Versioned (tagged-property) assets parse without it. Wins over
+    /// the mappings source of a `--game`/`--detect`-selected profile.
     #[arg(long, value_name = "PATH")]
     pub(crate) mappings: Option<PathBuf>,
     /// Emit only the value at this dotted path (e.g. `summary.guid`,
@@ -57,7 +60,7 @@ pub(crate) struct InspectArgs {
 ///
 /// Resolves the pak-open context (key + any profile mappings source),
 /// loads the effective usmap (explicit `--mappings` wins — see
-/// [`crate::commands::mappings_arg`]), parses the package, then
+/// [`crate::commands::mappings_resolve`]), parses the package, then
 /// delegates all output assembly — format resolution, `--export`
 /// selection, `--path` drilling, and the `--format table` human tree
 /// view — to [`crate::inspect::emit`].
@@ -69,9 +72,11 @@ pub(crate) fn run(
     detect: Option<&std::path::Path>,
 ) -> paksmith_core::Result<()> {
     let ctx = crate::commands::key_resolve::resolve_pak_context(&args.pak, aes_key, game, detect)?;
-    let usmap = crate::commands::mappings_arg::resolve_usmap(
+    let selector = if game.is_some() { "--game" } else { "--detect" };
+    let usmap = crate::commands::mappings_resolve::resolve_usmap(
         args.mappings.as_deref(),
         ctx.mappings.as_ref(),
+        selector,
     )?;
     let reader = Arc::new(match &ctx.key {
         Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
