@@ -275,11 +275,16 @@ impl VirtualTextureData {
     /// cost the decode-work cap doesn't tally — with the 256-chunk record
     /// budget a crafted legacy VT could force `grid cells × 255` range
     /// compares (#649 security review). The range semantics require the
-    /// fencepost table to be non-decreasing, so `partition_point` finds the
-    /// same bucket in O(log n). For a crafted NON-monotonic table the two
-    /// searches can pick different buckets — both land in the same checked
-    /// byte-range slicing downstream, so the divergence is behavioral on
-    /// malformed input only, never a safety difference.
+    /// fencepost table to be non-decreasing with `chunks.len() + 1` entries
+    /// (genuine cooked content always has exactly that); for such tables
+    /// `partition_point` finds the same bucket in O(log n). Two malformed
+    /// shapes diverge from the oracle's linear scan: a NON-monotonic table
+    /// (unspecified-but-in-bounds bucket), and a monotonic-but-TRUNCATED
+    /// table (fewer than `chunks.len() + 1` fenceposts — the old loop's
+    /// missing-`get(i+1)` break defaulted to the last chunk where this
+    /// search can pick an earlier bucket at `t == last`). Both land in the
+    /// same checked byte-range slicing downstream, so each divergence is
+    /// behavioral on malformed input only, never a safety difference.
     fn chunk_index_legacy(&self, tile_index: u32) -> usize {
         let max = self.chunks.len().saturating_sub(1);
         let fences = &self.tile_index_per_chunk;
