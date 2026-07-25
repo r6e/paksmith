@@ -94,6 +94,14 @@ List the entries in a pak archive:
 cargo run -p paksmith-cli -- list path/to/archive.pak
 ```
 
+With a profile that records `pak_paths` glob patterns (`paksmith profile add
+hero --name Hero --pak-path '/games/hero/Paks/*.pak'`), the path argument can be
+omitted — every matching archive is listed, with per-entry `source` provenance:
+
+```sh
+cargo run -p paksmith-cli -- --game hero list
+```
+
 `paksmith list` auto-detects whether stdout is a terminal — emits a human-readable
 table (with color; set `NO_COLOR` to disable) interactively, JSON when piped or
 redirected. Override with `--format table` or `--format json`. `--quiet` silences
