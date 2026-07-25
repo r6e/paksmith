@@ -168,6 +168,22 @@ pub fn make_ctx_with_version(ue4: i32, ue5: Option<i32>) -> AssetContext {
     make_ctx_with_version_and_names(ue4, ue5, &["None"])
 }
 
+/// [`make_ctx_with_version`] plus an out-of-band engine-version hint
+/// (#656) — for gates that only a profile's declared version can
+/// disambiguate (e.g. `bSerializeMipData` at object version 1009,
+/// where UE 5.2 and 5.3 are wire-identical).
+///
+/// # Panics
+///
+/// If `engine` is not a parseable `major.minor[.patch]` string — a
+/// test-authoring error, not a runtime condition.
+#[must_use]
+pub fn make_ctx_with_version_and_engine(ue4: i32, ue5: Option<i32>, engine: &str) -> AssetContext {
+    let hint = crate::asset::UeVersion::parse_lenient(engine);
+    assert!(hint.is_some(), "test hint must parse: {engine:?}");
+    make_ctx_with_version(ue4, ue5).with_engine_version_hint(hint)
+}
+
 /// [`make_ctx_with_version`] with a caller-supplied name table — for
 /// version-gated wire shapes whose tests need real FName resolution
 /// (e.g. the UE5 ≥ 1011 property-tag forms, #643). Index 0 MUST be

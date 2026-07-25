@@ -28,6 +28,7 @@ use serde::Serialize;
 pub mod bulk_data;
 pub mod custom_version;
 pub mod data_resource;
+pub mod engine_hint;
 pub mod engine_version;
 pub mod export_table;
 pub(crate) mod exports;
@@ -45,6 +46,7 @@ pub mod version;
 pub mod wire;
 
 pub use custom_version::{CustomVersion, CustomVersionContainer};
+pub use engine_hint::UeVersion;
 pub use engine_version::EngineVersion;
 pub use export_table::{ExportTable, ObjectExport};
 pub use exports::mesh::section::MeshSection;
@@ -931,6 +933,23 @@ pub struct AssetContext {
     /// [`bulk_data::FByteBulkData::read_from_ctx`]. `Arc` so context
     /// clones are refcount-cheap.
     pub(crate) data_resources: std::sync::Arc<[crate::asset::data_resource::FObjectDataResource]>,
+    /// Out-of-band engine version supplied by a game profile (#656).
+    ///
+    /// Some wire gates are ENGINE-version gates that the package's own
+    /// object versions only approximate — most concretely UE 5.2 and
+    /// 5.3 both serialize object version 1009, yet only 5.3 writes
+    /// `bSerializeMipData` in a `UTexture2D`'s cooked entry. When a
+    /// profile declares the version, the affected gates consult this;
+    /// with `None` they keep their established object-version proxy
+    /// (paksmith's shipped default), so an unhinted parse is
+    /// byte-for-byte what it was before this field existed.
+    ///
+    /// REFINES, never restricts: a hint can only disambiguate a gate
+    /// the wire leaves ambiguous, never raise paksmith's UE 4.13+ asset
+    /// floor or reject a package the unhinted path accepts. Defaults
+    /// `None` from [`AssetContext::new`]; set on the
+    /// `Package::read_from*` path from the caller's profile.
+    pub engine_version_hint: Option<engine_hint::UeVersion>,
 }
 
 impl AssetContext {
@@ -961,7 +980,24 @@ impl AssetContext {
             // Default: classic inline bulk headers. Only the real
             // `Package::read_from*` path parses a data-resource table. #642.
             data_resources: std::sync::Arc::from(Vec::new()),
+            // Default: no out-of-band hint — every gate keeps its
+            // object-version proxy, so an unhinted parse is unchanged
+            // from pre-#656. Set from the caller's profile on the
+            // `Package::read_from*` path. #656.
+            engine_version_hint: None,
         }
+    }
+
+    /// Attach an out-of-band engine-version hint (issue #656).
+    ///
+    /// Builder form because [`AssetContext`] is `#[non_exhaustive]`:
+    /// external callers (and the `Package::read_from*` path) set the
+    /// hint without a struct literal and without widening `new`'s
+    /// six-parameter signature.
+    #[must_use]
+    pub fn with_engine_version_hint(mut self, hint: Option<engine_hint::UeVersion>) -> Self {
+        self.engine_version_hint = hint;
+        self
     }
 }
 

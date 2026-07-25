@@ -710,6 +710,7 @@ mod tests {
             bulk_resolver: None,
             soft_object_paths_indexed: false,
             data_resources: std::sync::Arc::from(Vec::new()),
+            engine_version_hint: None,
         }
     }
 
