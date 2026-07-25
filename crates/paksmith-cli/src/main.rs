@@ -5,6 +5,7 @@ mod extract;
 mod inspect;
 mod output;
 mod path_util;
+mod profile_paks;
 mod search;
 
 use std::io;
