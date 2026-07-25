@@ -4,7 +4,7 @@ use std::io::{self, Write};
 
 use serde::Serialize;
 
-use crate::output::{ResolvedFormat, serde_json_to_io};
+use crate::output::{ResolvedFormat, sanitize_for_display, serde_json_to_io};
 
 #[derive(Debug, Clone)]
 pub(crate) enum EntryOutcome {
@@ -146,8 +146,8 @@ impl ExtractSummary {
                     writeln!(
                         w,
                         "  FAILED {}: {}",
-                        crate::output::sanitize_for_display(&f.entry),
-                        crate::output::sanitize_for_display(&f.error)
+                        sanitize_for_display(&f.entry),
+                        sanitize_for_display(&f.error)
                     )?;
                 }
                 Ok(())
@@ -187,9 +187,9 @@ mod tests {
     }
 
     /// Hostile control chars in a FAILED entry's path or error text
-    /// must not reach the terminal through the table summary — the
-    /// whole line routes through `sanitize_for_display` (a dropped
-    /// wrapper call at the write site would fail this).
+    /// must not reach the terminal through the table summary — each
+    /// field routes through `sanitize_for_display` independently (a
+    /// dropped wrapper call on either field would fail this).
     #[test]
     fn table_failed_lines_are_control_char_free() {
         let s = ExtractSummary::from_outcomes(
@@ -202,8 +202,7 @@ mod tests {
             }],
         );
         let mut buf = Vec::new();
-        s.render(crate::output::ResolvedFormat::Table, &mut buf)
-            .unwrap();
+        s.render(ResolvedFormat::Table, &mut buf).unwrap();
         let rendered = String::from_utf8(buf).unwrap();
         assert!(
             !rendered.contains('\u{1b}')

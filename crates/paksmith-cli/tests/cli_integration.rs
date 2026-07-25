@@ -250,7 +250,8 @@ fn list_garbage_input_file_exits_with_error() {
 }
 
 /// `--filter zzz` with zero matches must produce exit 0 and a valid
-/// JSON empty array (`[]`), NOT an error. Issue #31's coverage gap:
+/// JSON envelope with an empty `entries` array, NOT an error. Issue
+/// #31's coverage gap:
 /// today this behavior is unspecified — a future "error if filter
 /// matches nothing" change would compile silently.
 #[test]
