@@ -27,8 +27,8 @@ pub(crate) struct ExtractArgs {
     /// archive is extracted. Archives mount in sorted path order, and a
     /// virtual path present in several archives extracts from the LAST
     /// one only, matching UE's conventional alphabetical mount order
-    /// where later mounts override (as community references like FModel
-    /// document it); shadowed copies are skipped, not collisions.
+    /// where later mounts override; shadowed copies are skipped, not
+    /// collisions.
     pub(crate) pak: Option<PathBuf>,
 
     /// Output directory (created if absent).

@@ -206,25 +206,6 @@ mod tests {
     /// field routes through `sanitize_for_display` independently (a
     /// dropped wrapper call on either field would fail this).
     #[test]
-    fn table_header_sanitizes_discovered_pak_label() {
-        // In profile-paks mode `pak` carries glob-DISCOVERED filenames;
-        // a hostile archive name must not reach the terminal raw.
-        let s = ExtractSummary::from_outcomes(
-            "evil\u{1b}[31m.pak, ok.pak".into(),
-            "out".into(),
-            false,
-            vec![],
-        );
-        let mut buf = Vec::new();
-        s.render(ResolvedFormat::Table, &mut buf).unwrap();
-        let rendered = String::from_utf8(buf).unwrap();
-        assert!(
-            !rendered.contains('\u{1b}') && rendered.contains('\u{FFFD}'),
-            "escape neutralized in the extracted-from header: {rendered:?}"
-        );
-    }
-
-    #[test]
     fn table_failed_lines_are_control_char_free() {
         let s = ExtractSummary::from_outcomes(
             "Game.pak".into(),
@@ -247,6 +228,26 @@ mod tests {
         assert!(
             rendered.contains("FAILED") && rendered.contains('\u{FFFD}'),
             "the failure stays visible with replacement marks: {rendered:?}"
+        );
+    }
+
+    /// In profile-paks mode `pak` carries glob-DISCOVERED filenames,
+    /// not user-typed argv — a hostile archive name must not reach the
+    /// terminal raw through the `extracted from` header.
+    #[test]
+    fn table_header_sanitizes_discovered_pak_label() {
+        let s = ExtractSummary::from_outcomes(
+            "evil\u{1b}[31m.pak, ok.pak".into(),
+            "out".into(),
+            false,
+            vec![],
+        );
+        let mut buf = Vec::new();
+        s.render(ResolvedFormat::Table, &mut buf).unwrap();
+        let rendered = String::from_utf8(buf).unwrap();
+        assert!(
+            !rendered.contains('\u{1b}') && rendered.contains('\u{FFFD}'),
+            "escape neutralized in the extracted-from header: {rendered:?}"
         );
     }
 
