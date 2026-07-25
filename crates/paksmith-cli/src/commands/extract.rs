@@ -22,8 +22,11 @@ pub(crate) use crate::extract::select::{AudioFormat, DataTableFormat, FormatPref
 
 #[derive(Args)]
 pub(crate) struct ExtractArgs {
-    /// Path to the .pak file.
-    pub(crate) pak: PathBuf,
+    /// Path to the .pak file. Optional when `--game`/`--detect` selects
+    /// a profile with `pak_paths` patterns (#655) — then every matching
+    /// archive is extracted (lexicographic order; within-run output
+    /// collisions follow the same `--overwrite` rules as on-disk ones).
+    pub(crate) pak: Option<PathBuf>,
 
     /// Output directory (created if absent).
     #[arg(short, long)]
@@ -79,21 +82,8 @@ pub(crate) fn run(
     detect: Option<&std::path::Path>,
     quiet: bool,
 ) -> paksmith_core::Result<u8> {
-    let ctx = crate::commands::key_resolve::resolve_pak_context(&args.pak, aes_key, game, detect)?;
-    let usmap = crate::commands::mappings_resolve::resolve_usmap(
-        args.mappings.as_deref(),
-        ctx.mappings.as_ref(),
-        crate::commands::mappings_resolve::mappings_selector(game),
-    )?;
-    let reader = paksmith_core::container::open(&args.pak, ctx.key.as_ref())?;
-
+    let sources = crate::profile_paks::resolve_pak_sources(args.pak.as_deref(), game, detect)?;
     let pattern = crate::path_util::compile_opt_glob_arg("--filter", args.filter.as_deref())?;
-
-    let entries: Vec<String> = reader
-        .entries()
-        .filter(|e| pattern.as_ref().is_none_or(|pat| pat.matches(e.path())))
-        .map(|e| e.path().to_string())
-        .collect();
 
     let registry = HandlerRegistry::all_default_handlers();
     let cfg = ExtractConfig {
@@ -107,45 +97,76 @@ pub(crate) fn run(
             locres: args.locres_format,
         },
     };
-    let job = ExtractJob {
-        reader: Arc::clone(&reader),
-        registry: &registry,
-        cfg: &cfg,
-        mappings: usmap,
-    };
+    // One outcome stream across every source archive (a single archive
+    // for an explicit path). Paks run sequentially in expansion order
+    // (sorted — see `profile_paks`); within-run output collisions hit
+    // the same create_new/--overwrite rules as pre-existing files.
+    let mut all_outcomes = Vec::new();
+    for pak in &sources {
+        let ctx = crate::commands::key_resolve::resolve_pak_context(pak, aes_key, game, detect)?;
+        let usmap = crate::commands::mappings_resolve::resolve_usmap(
+            args.mappings.as_deref(),
+            ctx.mappings.as_ref(),
+            crate::commands::mappings_resolve::mappings_selector(game),
+        )?;
+        let reader = paksmith_core::container::open(pak, ctx.key.as_ref())?;
 
-    // FIX 6: hide progress when stderr is not a TTY (e.g. CI, piped output) so
-    // non-interactive callers get clean stderr without ANSI escape sequences.
-    // --quiet hides it even on a TTY: the bar is advisory chatter (#652).
-    let target = if show_progress(std::io::stderr().is_terminal(), quiet) {
-        indicatif::ProgressDrawTarget::stderr()
-    } else {
-        indicatif::ProgressDrawTarget::hidden()
-    };
-    let progress = ProgressBar::with_draw_target(Some(entries.len() as u64), target);
-    progress.set_style(
-        ProgressStyle::with_template("{bar:40} {pos}/{len} {msg}")
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
-    );
+        let entries: Vec<String> = reader
+            .entries()
+            .filter(|e| pattern.as_ref().is_none_or(|pat| pat.matches(e.path())))
+            .map(|e| e.path().to_string())
+            .collect();
 
-    let outcomes = match args.jobs {
-        Some(n) => {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(n as usize)
-                .build()
-                .map_err(|e| PaksmithError::InvalidArgument {
-                    arg: "--jobs",
-                    reason: e.to_string(),
-                })?;
-            pool.install(|| job.run_with_progress(&entries, &progress))
-        }
-        None => job.run_with_progress(&entries, &progress),
-    };
+        let job = ExtractJob {
+            reader: Arc::clone(&reader),
+            registry: &registry,
+            cfg: &cfg,
+            mappings: usmap,
+        };
+
+        // FIX 6: hide progress when stderr is not a TTY (e.g. CI, piped
+        // output) so non-interactive callers get clean stderr without ANSI
+        // escape sequences. --quiet hides it even on a TTY: the bar is
+        // advisory chatter (#652).
+        let target = if show_progress(std::io::stderr().is_terminal(), quiet) {
+            indicatif::ProgressDrawTarget::stderr()
+        } else {
+            indicatif::ProgressDrawTarget::hidden()
+        };
+        let progress = ProgressBar::with_draw_target(Some(entries.len() as u64), target);
+        progress.set_style(
+            ProgressStyle::with_template("{bar:40} {pos}/{len} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_bar()),
+        );
+
+        let outcomes = match args.jobs {
+            Some(n) => {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(n as usize)
+                    .build()
+                    .map_err(|e| PaksmithError::InvalidArgument {
+                        arg: "--jobs",
+                        reason: e.to_string(),
+                    })?;
+                pool.install(|| job.run_with_progress(&entries, &progress))
+            }
+            None => job.run_with_progress(&entries, &progress),
+        };
+        all_outcomes.extend(outcomes);
+    }
+
+    // Explicit-path invocations keep the pre-#655 label (the one path);
+    // profile-paks runs label the summary with every source archive.
+    let source_label = sources
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     let summary = ExtractSummary::from_outcomes(
-        args.pak.display().to_string(),
+        source_label,
         args.output.display().to_string(),
         args.dry_run,
-        outcomes,
+        all_outcomes,
     );
 
     let resolved = format.resolve();

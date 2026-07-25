@@ -100,6 +100,12 @@ struct EntryRow<'a> {
     compressed_size: u64,
     compressed: bool,
     encrypted: bool,
+    /// Which archive the entry came from — present ONLY in profile-paks
+    /// mode (#655: no explicit pak path, entries may span archives).
+    /// Additive-optional: explicit-path invocations emit byte-identical
+    /// output to pre-#655, so ENTRIES_SCHEMA_VERSION stays 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
 }
 
 pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
@@ -126,6 +132,7 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
                         compressed_size: e.compressed_size(),
                         compressed: e.is_compressed(),
                         encrypted: e.is_encrypted(),
+                        source: None,
                     })
                     .collect(),
             };
@@ -167,6 +174,67 @@ fn styling_enabled(no_color: Option<std::ffi::OsString>) -> bool {
 /// tests render with `enforce_styling()` — which would override a
 /// `force_no_tty()`-based gate but cannot conjure styles that were
 /// never attached.
+/// Multi-archive variant of [`print_entries`] for profile-paks mode
+/// (#655): entries grouped by source archive.
+///
+/// JSON keeps the same `{schema_version, entries}` envelope with each
+/// row carrying an additive `source` key (the archive path, display
+/// form). Table mode prints a `pak: <path>` header line before each
+/// group's table. Explicit-path invocations never route here, so their
+/// output is byte-identical to pre-#655.
+pub(crate) fn print_entries_grouped(
+    groups: &[(std::path::PathBuf, Vec<EntryMetadata>)],
+    format: ResolvedFormat,
+) -> io::Result<()> {
+    let stdout = io::stdout();
+    let stdout_lock = stdout.lock();
+    let mut out = io::BufWriter::new(stdout_lock);
+    match format {
+        ResolvedFormat::Json => {
+            let sources: Vec<String> = groups
+                .iter()
+                .map(|(p, _)| p.display().to_string())
+                .collect();
+            let envelope = EntriesOutput {
+                schema_version: ENTRIES_SCHEMA_VERSION,
+                entries: groups
+                    .iter()
+                    .zip(&sources)
+                    .flat_map(|((_, entries), src)| {
+                        entries.iter().map(move |e| EntryRow {
+                            path: e.path(),
+                            size: e.uncompressed_size(),
+                            compressed_size: e.compressed_size(),
+                            compressed: e.is_compressed(),
+                            encrypted: e.is_encrypted(),
+                            source: Some(src.as_str()),
+                        })
+                    })
+                    .collect(),
+            };
+            serde_json::to_writer_pretty(&mut out, &envelope).map_err(serde_json_to_io)?;
+            writeln!(out)?;
+        }
+        ResolvedFormat::Table => {
+            let styled = styling_enabled(std::env::var_os("NO_COLOR"));
+            for (i, (pak, entries)) in groups.iter().enumerate() {
+                if i > 0 {
+                    writeln!(out)?;
+                }
+                writeln!(
+                    out,
+                    "pak: {}",
+                    sanitize_for_display(&pak.display().to_string())
+                )?;
+                let table = build_entries_table(entries, styled);
+                write!(out, "{table}")?;
+            }
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
 // `unused_results` allow: comfy-table's builder returns `&mut Table`
 // for chaining; discarding is the documented call shape.
 #[allow(unused_results)]

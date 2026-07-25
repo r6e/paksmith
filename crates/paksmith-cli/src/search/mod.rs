@@ -218,7 +218,7 @@ mod predicate_tests {
     fn args() -> crate::commands::search::SearchArgs {
         // Build via the public fields; all-None/empty = match-all.
         crate::commands::search::SearchArgs {
-            pak: std::path::PathBuf::new(),
+            pak: Some(std::path::PathBuf::new()),
             r#type: vec![],
             filter: None,
             name: None,

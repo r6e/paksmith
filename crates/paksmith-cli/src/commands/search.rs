@@ -13,8 +13,10 @@ use crate::search::Predicates;
 
 #[derive(Args)]
 pub(crate) struct SearchArgs {
-    /// Path to the .pak file.
-    pub(crate) pak: PathBuf,
+    /// Path to the .pak file. Optional when `--game`/`--detect` selects
+    /// a profile with `pak_paths` patterns (#655) — then every matching
+    /// archive is searched.
+    pub(crate) pak: Option<PathBuf>,
 
     /// Match entries whose file extension is any of these (repeatable,
     /// case-insensitive, no leading dot). e.g. `--type uasset --type umap`.
@@ -54,12 +56,22 @@ pub(crate) fn run(
     let predicates = Predicates::from_args(args)
         .map_err(|(arg, reason)| PaksmithError::InvalidArgument { arg, reason })?;
 
-    let key = crate::commands::key_resolve::resolve_pak_key(&args.pak, aes_key, game, detect)?;
-    let reader = paksmith_core::container::open(&args.pak, key.as_ref())?;
-    let matches: Vec<_> = reader.entries().filter(|e| predicates.matches(e)).collect();
+    let sources = crate::profile_paks::resolve_pak_sources(args.pak.as_deref(), game, detect)?;
+    let mut groups = Vec::with_capacity(sources.len());
+    for pak in sources {
+        let key = crate::commands::key_resolve::resolve_pak_key(&pak, aes_key, game, detect)?;
+        let reader = paksmith_core::container::open(&pak, key.as_ref())?;
+        let matches: Vec<_> = reader.entries().filter(|e| predicates.matches(e)).collect();
+        groups.push((pak, matches));
+    }
 
     let resolved = format.resolve();
     crate::output::note_auto_resolved_to_json(format, resolved, quiet);
-    crate::output::print_entries(&matches, resolved)?;
+    if args.pak.is_some() {
+        // Explicit-path invocation: byte-identical output to pre-#655.
+        crate::output::print_entries(&groups[0].1, resolved)?;
+    } else {
+        crate::output::print_entries_grouped(&groups, resolved)?;
+    }
     Ok(())
 }

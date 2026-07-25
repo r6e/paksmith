@@ -32,10 +32,19 @@ use crate::output::OutputFormat;
 
 #[derive(Args)]
 pub(crate) struct InspectArgs {
-    /// Path to the .pak file.
-    pub(crate) pak: PathBuf,
-    /// Virtual path of the asset within the archive.
-    pub(crate) asset: String,
+    /// Path to the .pak file — or, when this is the ONLY positional and
+    /// `--game`/`--detect` selects a profile with `pak_paths` (#655),
+    /// the asset virtual path itself: the asset is then located across
+    /// the profile's archives (ambiguity is an error). Clap cannot put
+    /// an optional positional before a required one, so the single
+    /// positional does double duty (the `git diff [commit] [path]`
+    /// pattern).
+    #[arg(value_name = "PAK|ASSET")]
+    pub(crate) pak_or_asset: String,
+    /// Virtual path of the asset within the archive. Omit it to use the
+    /// profile-paks form (single positional = the asset).
+    #[arg(value_name = "ASSET")]
+    pub(crate) asset: Option<String>,
     /// Optional `.usmap` mappings file. Required for assets whose
     /// `PKG_UnversionedProperties` flag is set (UE 4.25+ cooked
     /// content; common in both UE4 and UE5 shipping games).
@@ -70,13 +79,64 @@ pub(crate) fn run(
     detect: Option<&std::path::Path>,
     quiet: bool,
 ) -> paksmith_core::Result<()> {
-    let ctx = crate::commands::key_resolve::resolve_pak_context(&args.pak, aes_key, game, detect)?;
+    // Two positionals = pak + asset (pre-#655 shape, byte-identical
+    // behavior); one positional = the asset, sourced via profile paks.
+    let (explicit_pak, asset): (Option<PathBuf>, &str) = match args.asset.as_deref() {
+        Some(a) => (Some(PathBuf::from(&args.pak_or_asset)), a),
+        None => (None, args.pak_or_asset.as_str()),
+    };
+    let sources = crate::profile_paks::resolve_pak_sources(explicit_pak.as_deref(), game, detect)?;
+    let pak = select_containing_pak(sources, asset, aes_key, game, detect)?;
+    let ctx = crate::commands::key_resolve::resolve_pak_context(&pak, aes_key, game, detect)?;
     let usmap = crate::commands::mappings_resolve::resolve_usmap(
         args.mappings.as_deref(),
         ctx.mappings.as_ref(),
         crate::commands::mappings_resolve::mappings_selector(game),
     )?;
-    let reader = paksmith_core::container::open(&args.pak, ctx.key.as_ref())?;
-    let pkg = Package::read_from_reader(&reader, &args.asset, usmap.as_ref())?;
+    let reader = paksmith_core::container::open(&pak, ctx.key.as_ref())?;
+    let pkg = Package::read_from_reader(&reader, asset, usmap.as_ref())?;
     crate::inspect::emit(&pkg, args, format, quiet)
+}
+
+/// The single archive containing `asset`. One source (an explicit pak
+/// path) passes through untouched — the subsequent read reports a
+/// missing asset exactly as pre-#655. Across a profile's archives the
+/// policy is fail-closed: found in none is `EntryNotFound`, found in
+/// several is an error naming them (pass an explicit path to pick one).
+fn select_containing_pak(
+    sources: Vec<PathBuf>,
+    asset: &str,
+    aes_key: Option<&AesKey>,
+    game: Option<&str>,
+    detect: Option<&std::path::Path>,
+) -> paksmith_core::Result<PathBuf> {
+    if sources.len() == 1 {
+        let mut sources = sources;
+        return Ok(sources.remove(0));
+    }
+    let mut containing = Vec::new();
+    for pak in sources {
+        let key = crate::commands::key_resolve::resolve_pak_key(&pak, aes_key, game, detect)?;
+        let reader = paksmith_core::container::open(&pak, key.as_ref())?;
+        if reader.entries().any(|e| e.path() == asset) {
+            containing.push(pak);
+        }
+    }
+    match containing.len() {
+        1 => Ok(containing.remove(0)),
+        0 => Err(paksmith_core::PaksmithError::EntryNotFound {
+            path: asset.to_string(),
+        }),
+        _ => Err(paksmith_core::PaksmithError::InvalidArgument {
+            arg: "asset",
+            reason: format!(
+                "`{asset}` exists in multiple archives ({}); pass an explicit pak path",
+                containing
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }),
+    }
 }

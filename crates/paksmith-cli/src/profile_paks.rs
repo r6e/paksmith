@@ -26,13 +26,11 @@ pub(crate) fn resolve_pak_sources(
     game: Option<&str>,
     detect: Option<&Path>,
 ) -> paksmith_core::Result<Vec<PathBuf>> {
-    match explicit {
-        Some(p) => Ok(vec![p.to_path_buf()]),
-        None => {
-            let sel = paksmith_core::profile::resolve::profile_pak_patterns(game, detect)?;
-            expand_patterns(&sel.id, &sel.patterns, detect)
-        }
+    if let Some(p) = explicit {
+        return Ok(vec![p.to_path_buf()]);
     }
+    let sel = paksmith_core::profile::resolve::profile_pak_patterns(game, detect)?;
+    expand_patterns(&sel.id, &sel.patterns, detect)
 }
 
 /// Expand profile `pak_paths` glob patterns into existing archive files.
