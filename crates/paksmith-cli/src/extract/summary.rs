@@ -136,7 +136,17 @@ impl ExtractSummary {
                 writeln!(w, "  skipped companion: {}", self.counts.skipped_companion)?;
                 writeln!(w, "  failed:            {}", self.counts.failed)?;
                 for f in &self.failures {
-                    writeln!(w, "  FAILED {}: {}", f.entry, f.error)?;
+                    // Both the entry path AND the error text can embed
+                    // hostile pak/asset strings (error Displays quote the
+                    // asset path) — sanitize the whole line for the TTY.
+                    writeln!(
+                        w,
+                        "{}",
+                        crate::output::sanitize_for_display(&format!(
+                            "  FAILED {}: {}",
+                            f.entry, f.error
+                        ))
+                    )?;
                 }
                 Ok(())
             }

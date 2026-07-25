@@ -32,11 +32,7 @@ pub(crate) fn run(
         None => PakReader::open(&args.path)?,
     };
 
-    let pattern = args
-        .filter
-        .as_deref()
-        .map(|p| crate::path_util::compile_glob_arg("--filter", p))
-        .transpose()?;
+    let pattern = crate::path_util::compile_opt_glob_arg("--filter", args.filter.as_deref())?;
     let filtered: Vec<_> = reader
         .entries()
         .filter(|e| pattern.as_ref().is_none_or(|pat| pat.matches(e.path())))

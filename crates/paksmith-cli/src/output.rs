@@ -201,7 +201,7 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
     ]);
     for entry in entries {
         table.add_row(vec![
-            Cell::new(sanitize_for_tty(entry.path())),
+            Cell::new(sanitize_for_display(entry.path())),
             Cell::new(format_size(entry.uncompressed_size())),
             flag_cell(entry.is_compressed(), Color::Green),
             flag_cell(entry.is_encrypted(), Color::Yellow),
@@ -211,13 +211,23 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
 }
 
 /// Replace control characters (C0 incl. ESC/BEL/CR, DEL, and C1 incl.
-/// the U+009B CSI) with U+FFFD before an untrusted pak path reaches the
-/// terminal. The core FString parser guarantees valid non-NUL Unicode —
-/// it does NOT strip controls, so a hostile pak can embed OSC/CSI
-/// sequences (title rewrites, screen clears, output-hiding) in an entry
-/// path. No legitimate virtual path contains control characters. The
-/// JSON path needs no equivalent: serde_json escapes controls.
-fn sanitize_for_tty(path: &str) -> std::borrow::Cow<'_, str> {
+/// the U+009B CSI) with U+FFFD in an untrusted pak string bound for
+/// human display. Keyed to the table FORMAT, not TTY-ness — a piped
+/// table gets paged into a terminal later. The core FString parser
+/// guarantees valid non-NUL Unicode — it does NOT strip controls, so a
+/// hostile pak can embed OSC/CSI sequences (title rewrites, screen
+/// clears, output-hiding). No legitimate virtual path contains control
+/// characters.
+///
+/// Consumers: the list/search entries table (here) and extract's
+/// summary FAILED lines. The remaining same-class surface — inspect's
+/// table tree renderer — is tracked as issue #708 (many call sites;
+/// its own pass). The JSON path deliberately has no equivalent — NOT
+/// because serde escapes everything (it escapes C0 only; DEL and C1
+/// incl. U+009B pass through as raw UTF-8) but because JSON is the
+/// machine interface: exact path bytes are the round-tripping
+/// contract, and machine consumers don't interpret terminal controls.
+pub(crate) fn sanitize_for_display(path: &str) -> std::borrow::Cow<'_, str> {
     if path.chars().any(char::is_control) {
         std::borrow::Cow::Owned(
             path.chars()
@@ -348,14 +358,20 @@ mod table_style_tests {
         );
         // The harmless residue stays visible — only the control bytes
         // are stripped, so the user can still SEE something was there.
-        assert!(plain.contains("]0;pwned"));
+        assert!(
+            plain.contains("]0;pwned"),
+            "non-control residue must stay visible: {plain:?}"
+        );
 
         // Styled: the table's own ANSI is present, but the hostile BEL /
         // C1-CSI still cannot survive.
         let mut styled_table = build_entries_table(&hostile, true);
         let _ = styled_table.enforce_styling();
         let styled = styled_table.to_string();
-        assert!(!styled.contains('\u{7}') && !styled.contains('\u{9b}'));
+        assert!(
+            !styled.contains('\u{7}') && !styled.contains('\u{9b}'),
+            "hostile BEL/CSI must not survive styled rendering: {styled:?}"
+        );
     }
 
     /// no-color.org contract, full polarity: absent or empty → styled;
