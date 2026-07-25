@@ -282,7 +282,8 @@ pub struct ProfilePaks {
 /// #655): which profile, and which `pak_paths` patterns.
 ///
 /// No network, ever — a registry-only id must already be cached
-/// (`profile fetch`), and since [`RegistryProfile`] cannot carry
+/// (`profile fetch`), and since
+/// [`crate::profile::registry::RegistryProfile`] cannot carry
 /// `pak_paths` (see [`MappingsSource`]'s registry note) a fetch could
 /// never help: registry-sourced selections always fault as
 /// [`ProfileFault::NoPakPaths`]. Precedence mirrors
@@ -761,24 +762,16 @@ mod tests {
         assert_eq!(profile_mappings_in(&store, "plain"), None);
     }
 
-    /// Store with one `hero` profile carrying pak_paths patterns (and
-    /// detect rules so the --detect legs can select it).
+    /// Store with one `hero` profile carrying pak_paths patterns —
+    /// delegates to `hero_store_with_detect` so the detect rules the
+    /// --detect legs depend on live in exactly one place.
     fn hero_store_with_pak_paths(patterns: Vec<String>) -> ProfileStore {
-        let mut store = ProfileStore::default();
-        let _ = store.profiles.insert(
-            "hero".into(),
-            GameProfile {
-                name: "Hero".into(),
-                engine_version: None,
-                keys: BTreeMap::new(),
-                detect: Some(DetectRules {
-                    require_paths: vec!["Game/Paks".into()],
-                    contains: vec![],
-                }),
-                mappings: None,
-                pak_paths: patterns,
-            },
-        );
+        let mut store = hero_store_with_detect(None);
+        store
+            .profiles
+            .get_mut("hero")
+            .expect("hero_store_with_detect inserts it")
+            .pak_paths = patterns;
         store
     }
 

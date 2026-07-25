@@ -160,7 +160,9 @@ pub struct GameProfile {
     /// Absolute patterns stand alone; relative patterns resolve against
     /// the `--detect` install dir at expansion time. Serialized as a
     /// TOML string array; an empty list is omitted so pre-#655 stores
-    /// stay byte-stable.
+    /// stay byte-stable. (A pre-#655 binary reads such a store fine —
+    /// unknown keys are ignored — but if it re-SAVES the store it drops
+    /// this field; same class as every field added after first ship.)
     ///
     /// Local-store only, NOT on [`registry::RegistryProfile`], for the
     /// same reason as [`MappingsSource`] (see its registry note) plus

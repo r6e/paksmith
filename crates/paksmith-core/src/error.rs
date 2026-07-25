@@ -1190,7 +1190,10 @@ pub enum ProfileFault {
     /// profile-paks invocation (no explicit pak path) cannot proceed.
     /// Registry-sourced profiles always fault here — `RegistryProfile`
     /// carries no such field.
-    #[error("profile `{id}` has no pak_paths patterns")]
+    #[error(
+        "profile `{id}` has no pak_paths patterns; add them with `paksmith profile add \
+         --pak-path <GLOB>` (registry profiles cannot carry patterns — use a local profile)"
+    )]
     NoPakPaths {
         /// Profile id.
         id: String,
