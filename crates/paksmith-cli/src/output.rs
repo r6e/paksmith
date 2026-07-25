@@ -68,6 +68,26 @@ pub(crate) fn serde_json_to_io(e: serde_json::Error) -> io::Error {
         .map_or_else(|| io::Error::other(e.to_string()), io::Error::from)
 }
 
+/// `list`/`search` JSON schema version (#652). COMMAND-SHARED on
+/// purpose, unlike `inspect`/`extract`'s command-local versions: both
+/// commands emit the same `EntryRow` shape through the same
+/// `print_entries` writer, so the schema IS shared — versioning it
+/// twice would let the numbers drift apart while describing identical
+/// bytes. Bump when `EntryRow` or the envelope shape changes.
+const ENTRIES_SCHEMA_VERSION: u32 = 1;
+
+/// The `{"schema_version": 1, "entries": [...]}` envelope for
+/// `list`/`search` JSON (SPEC: "JSON output is stable and structured").
+/// A NAMED `entries` key rather than inspect's `#[serde(flatten)]`
+/// trick — an array cannot flatten into an object. `schema_version` is
+/// declared first so serde emits it first (raw-byte ordering is pinned
+/// by `list_and_search_json_carry_schema_version_envelope`).
+#[derive(Serialize)]
+struct EntriesOutput<'a> {
+    schema_version: u32,
+    entries: Vec<EntryRow<'a>>,
+}
+
 #[derive(Serialize)]
 struct EntryRow<'a> {
     path: &'a str,
@@ -105,11 +125,15 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
                     encrypted: e.is_encrypted(),
                 })
                 .collect();
+            let envelope = EntriesOutput {
+                schema_version: ENTRIES_SCHEMA_VERSION,
+                entries: rows,
+            };
             // Stream directly to stdout instead of building the full string in
             // memory. serde_json wraps the underlying io::Error; the helper
             // surfaces its kind so callers can distinguish BrokenPipe from
             // real errors.
-            serde_json::to_writer_pretty(&mut out, &rows).map_err(serde_json_to_io)?;
+            serde_json::to_writer_pretty(&mut out, &envelope).map_err(serde_json_to_io)?;
             writeln!(out)?;
         }
         ResolvedFormat::Table => {

@@ -49,7 +49,7 @@ fn search_filter_matches_full_path_glob() {
         .assert()
         .success();
     let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
-    let arr = v.as_array().unwrap();
+    let arr = v["entries"].as_array().unwrap();
     assert_eq!(
         arr.len(),
         2,
@@ -75,7 +75,7 @@ fn search_filter_ands_with_other_predicates() {
         .assert()
         .success();
     let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
-    let arr = v.as_array().unwrap();
+    let arr = v["entries"].as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["path"], "Content/Subdir/Deep/nested.uasset");
 }
@@ -106,7 +106,7 @@ fn search_no_predicates_lists_all_as_json() {
         .success();
     let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert!(
-        v.as_array().is_some_and(|a| !a.is_empty()),
+        v["entries"].as_array().is_some_and(|a| !a.is_empty()),
         "expected non-empty JSON array"
     );
 }
@@ -122,11 +122,11 @@ fn search_type_filters_to_extension() {
         .success();
     let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert!(
-        !v.as_array().unwrap().is_empty(),
+        !v["entries"].as_array().unwrap().is_empty(),
         "--type uasset should match at least one entry in the fixture"
     );
     // Every returned entry's path ends with .uasset (case-insensitive).
-    for e in v.as_array().unwrap() {
+    for e in v["entries"].as_array().unwrap() {
         let p = e["path"].as_str().unwrap().to_ascii_lowercase();
         assert!(
             p.ends_with(".uasset"),
@@ -145,7 +145,7 @@ fn search_zero_match_is_exit_0_empty_array() {
         .assert()
         .success(); // zero matches is NOT an error
     let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
-    assert_eq!(v.as_array().unwrap().len(), 0);
+    assert_eq!(v["entries"].as_array().unwrap().len(), 0);
 }
 
 #[test]
@@ -198,7 +198,7 @@ fn search_regex_matches_subpath() {
         .assert()
         .success();
     let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
-    let arr = v.as_array().unwrap();
+    let arr = v["entries"].as_array().unwrap();
     assert_eq!(arr.len(), 1, "expected exactly 1 match");
     assert_eq!(
         arr[0]["path"].as_str().unwrap(),
@@ -218,7 +218,7 @@ fn search_min_size_filters_out_small_entries() {
         .success();
     let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(
-        v.as_array().unwrap().len(),
+        v["entries"].as_array().unwrap().len(),
         3,
         "--min-size 1 should match all entries"
     );
@@ -236,7 +236,7 @@ fn search_min_size_huge_returns_none() {
         .success();
     let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(
-        v.as_array().unwrap().len(),
+        v["entries"].as_array().unwrap().len(),
         0,
         "--min-size 999999999 should match no entries"
     );
@@ -253,7 +253,7 @@ fn search_max_size_filters_out_large_entries() {
         .assert()
         .success();
     let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
-    let arr = v.as_array().unwrap();
+    let arr = v["entries"].as_array().unwrap();
     assert_eq!(arr.len(), 1, "--max-size 14 should match exactly 1 entry");
     assert_eq!(arr[0]["path"].as_str().unwrap(), "Content/a.uasset");
 }

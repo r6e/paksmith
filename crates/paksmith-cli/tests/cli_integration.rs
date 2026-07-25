@@ -15,6 +15,40 @@ fn fixture_path(name: &str) -> String {
 }
 
 #[test]
+fn list_and_search_json_carry_schema_version_envelope() {
+    // #652 (c): list/search JSON is `{"schema_version": 1, "entries": [...]}`
+    // — the envelope extract/inspect already adopted (SPEC: "JSON output is
+    // stable and structured"). schema_version is FIRST in the raw bytes
+    // (declaration-order pin, matching inspect's contract), and the two
+    // commands share one schema constant deliberately: they emit the same
+    // EntryRow shape through the same writer.
+    for cmd_name in ["list", "search"] {
+        let mut cmd = Command::cargo_bin("paksmith").unwrap();
+        cmd.args([
+            cmd_name,
+            &fixture_path("minimal_v6.pak"),
+            "--format",
+            "json",
+        ]);
+        let output = cmd.output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(v["schema_version"], 1, "{cmd_name}: schema_version = 1");
+        assert_eq!(
+            v["entries"].as_array().unwrap().len(),
+            5,
+            "{cmd_name}: entries array under the envelope"
+        );
+        let sv = stdout.find("\"schema_version\"").unwrap();
+        let en = stdout.find("\"entries\"").unwrap();
+        assert!(
+            sv < en,
+            "{cmd_name}: schema_version must precede entries in the raw bytes"
+        );
+    }
+}
+
+#[test]
 fn list_json_output() {
     let mut cmd = Command::cargo_bin("paksmith").unwrap();
     cmd.args(["list", &fixture_path("minimal_v6.pak"), "--format", "json"]);
@@ -23,7 +57,7 @@ fn list_json_output() {
     let stdout = String::from_utf8(output.stdout).unwrap();
 
     let entries: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let arr = entries.as_array().unwrap();
+    let arr = entries["entries"].as_array().unwrap();
     assert_eq!(arr.len(), 5);
 
     let paths: Vec<&str> = arr.iter().map(|e| e["path"].as_str().unwrap()).collect();
@@ -58,7 +92,7 @@ fn list_format_auto_resolves_to_json_when_piped() {
 
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout).expect("auto format should produce JSON when not a TTY");
-    assert_eq!(parsed.as_array().unwrap().len(), 5);
+    assert_eq!(parsed["entries"].as_array().unwrap().len(), 5);
 }
 
 #[test]
@@ -77,7 +111,7 @@ fn list_with_filter() {
     let stdout = String::from_utf8(output.stdout).unwrap();
 
     let entries: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let arr = entries.as_array().unwrap();
+    let arr = entries["entries"].as_array().unwrap();
     assert_eq!(arr.len(), 2); // hero.uasset and bgm.uasset, not level01.umap
 }
 
@@ -165,7 +199,7 @@ fn list_filter_zero_matches_returns_empty_array() {
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .expect("zero-match filter must produce parseable JSON, not error text");
     assert_eq!(
-        parsed.as_array().unwrap().len(),
+        parsed["entries"].as_array().unwrap().len(),
         0,
         "zero-match filter must produce an empty JSON array"
     );
@@ -185,7 +219,7 @@ fn list_json_output_schema_pins_all_fields() {
     assert!(output.status.success(), "list --format json must succeed");
     let stdout = String::from_utf8(output.stdout).unwrap();
     let entries: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let arr = entries.as_array().unwrap();
+    let arr = entries["entries"].as_array().unwrap();
     assert!(!arr.is_empty(), "fixture must have at least one entry");
 
     let first = &arr[0];
