@@ -142,6 +142,10 @@ fn bulk_resolution_fires_companion_loader_through_dyn_reader() {
 /// `EntryNotFound` — never a generic `Io` error — through the dyn
 /// handle, for both `read_entry` and `read_entry_to`. This is the
 /// identity `read_from_reader`'s companion detection relies on.
+///
+/// Pins the in-file reference implementation, not a production reader —
+/// `PakReader`'s identity is pinned in `pak_integration.rs`. The value
+/// here is an executable contract for out-of-crate implementors.
 #[test]
 fn absent_path_surfaces_entry_not_found_through_dyn_reader() {
     let reader = dyn_map_reader();
@@ -160,7 +164,9 @@ fn absent_path_surfaces_entry_not_found_through_dyn_reader() {
         matches!(err, PaksmithError::EntryNotFound { .. }),
         "read_entry_to on an absent path must surface EntryNotFound, got {err:?}"
     );
-    assert!(sink.is_empty(), "nothing may be written for an absent path");
+    // Deliberately NOT asserting `sink.is_empty()` — the trait doesn't
+    // promise the writer is untouched on error (see the matching note
+    // in pak_integration.rs); pinning it here would overspecify.
 }
 
 /// Acceptance (a): the `container::open` factory opens a real pak as
