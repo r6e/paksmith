@@ -64,7 +64,7 @@ fn search_filter_matches_full_path_glob() {
 }
 
 #[test]
-fn search_filter_ands_with_other_predicates() {
+fn search_filter_composes_with_other_predicates() {
     // Predicates AND-compose: a deep filter + --type narrows to the one
     // nested uasset.
     let assert = Command::cargo_bin("paksmith")

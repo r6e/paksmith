@@ -49,6 +49,65 @@ fn list_and_search_json_carry_schema_version_envelope() {
 }
 
 #[test]
+fn quiet_suppresses_auto_json_note() {
+    // #652 (a): the piped-auto note is advisory chatter; --quiet silences
+    // it. Without --quiet it still fires (pinned here so the note can't
+    // silently vanish).
+    let loud = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["list", &fixture_path("minimal_v6.pak")])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8(loud.stderr).unwrap().contains("note:"),
+        "piped auto-format must emit the advisory note without --quiet"
+    );
+
+    let quiet = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--quiet", "list", &fixture_path("minimal_v6.pak")])
+        .output()
+        .unwrap();
+    assert!(quiet.status.success());
+    assert_eq!(
+        String::from_utf8(quiet.stderr).unwrap(),
+        "",
+        "--quiet must silence the advisory note"
+    );
+}
+
+#[test]
+fn quiet_conflicts_with_verbose() {
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args([
+            "--quiet",
+            "--verbose",
+            "list",
+            &fixture_path("minimal_v6.pak"),
+        ])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn quiet_keeps_error_prefix() {
+    // Errors are NOT advisory chatter — they survive --quiet.
+    let out = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--quiet", "list", "/nonexistent/nope.pak"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .starts_with("paksmith: error: "),
+        "errors must survive --quiet"
+    );
+}
+
+#[test]
 fn list_json_output() {
     let mut cmd = Command::cargo_bin("paksmith").unwrap();
     cmd.args(["list", &fixture_path("minimal_v6.pak"), "--format", "json"]);

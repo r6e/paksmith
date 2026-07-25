@@ -54,6 +54,7 @@ pub(crate) fn emit(
     pkg: &Package,
     args: &InspectArgs,
     format: OutputFormat,
+    quiet: bool,
 ) -> paksmith_core::Result<()> {
     // Whether the caller asked for table EXPLICITLY (`--format table`).
     // This is intentionally the UNRESOLVED format: the `--path` rejection
@@ -101,13 +102,9 @@ pub(crate) fn emit(
     let resolved = format.resolve();
 
     // Advisory note on stderr when `--format auto` resolves (no `--path`,
-    // which always forces JSON). Mirrors `list`'s note so users aren't
-    // surprised the format changed from what they saw interactively.
-    if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
-        eprintln!(
-            "note: stdout is not a terminal — emitting JSON. Pass --format table to force table output."
-        );
-    }
+    // which always forces JSON) — the shared list/search note, --quiet
+    // aware (#652 deduped the previously-inlined copy).
+    crate::output::note_auto_resolved_to_json(format, resolved, quiet);
 
     match resolved {
         ResolvedFormat::Table => render_table(pkg, export_idx),

@@ -25,6 +25,7 @@ pub(crate) fn run(
     aes_key: Option<&AesKey>,
     game: Option<&str>,
     detect: Option<&std::path::Path>,
+    quiet: bool,
 ) -> paksmith_core::Result<()> {
     let key = crate::commands::key_resolve::resolve_pak_key(&args.path, aes_key, game, detect)?;
     let reader = match &key {
@@ -46,7 +47,7 @@ pub(crate) fn run(
     };
 
     let resolved = format.resolve();
-    crate::output::note_auto_resolved_to_json(format, resolved);
+    crate::output::note_auto_resolved_to_json(format, resolved, quiet);
     crate::output::print_entries(&filtered, resolved)?;
     Ok(())
 }

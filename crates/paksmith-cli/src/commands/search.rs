@@ -51,6 +51,7 @@ pub(crate) fn run(
     aes_key: Option<&AesKey>,
     game: Option<&str>,
     detect: Option<&std::path::Path>,
+    quiet: bool,
 ) -> paksmith_core::Result<()> {
     let predicates = Predicates::from_args(args)
         .map_err(|(arg, reason)| PaksmithError::InvalidArgument { arg, reason })?;
@@ -63,7 +64,7 @@ pub(crate) fn run(
     let matches: Vec<_> = reader.entries().filter(|e| predicates.matches(e)).collect();
 
     let resolved = format.resolve();
-    crate::output::note_auto_resolved_to_json(format, resolved);
+    crate::output::note_auto_resolved_to_json(format, resolved, quiet);
     crate::output::print_entries(&matches, resolved)?;
     Ok(())
 }

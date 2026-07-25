@@ -45,8 +45,13 @@ pub(crate) enum ResolvedFormat {
 
 /// Emit a one-line stderr note when `--format auto` silently resolved to JSON
 /// (stdout isn't a TTY), so users piping into head/jq aren't surprised.
-pub(crate) fn note_auto_resolved_to_json(format: OutputFormat, resolved: ResolvedFormat) {
-    if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
+/// `--quiet` (#652) suppresses it — it is advisory chatter, not an error.
+pub(crate) fn note_auto_resolved_to_json(
+    format: OutputFormat,
+    resolved: ResolvedFormat,
+    quiet: bool,
+) {
+    if !quiet && matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
         eprintln!(
             "note: stdout is not a terminal — emitting JSON. Pass --format table to force table output."
         );

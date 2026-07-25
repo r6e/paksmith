@@ -70,6 +70,7 @@ pub(crate) fn run(
     aes_key: Option<&AesKey>,
     game: Option<&str>,
     detect: Option<&std::path::Path>,
+    quiet: bool,
 ) -> paksmith_core::Result<()> {
     let ctx = crate::commands::key_resolve::resolve_pak_context(&args.pak, aes_key, game, detect)?;
     let usmap = crate::commands::mappings_resolve::resolve_usmap(
@@ -82,5 +83,5 @@ pub(crate) fn run(
         None => PakReader::open(&args.pak)?,
     });
     let pkg = Package::read_from_reader(&reader, &args.asset, usmap.as_ref())?;
-    crate::inspect::emit(&pkg, args, format)
+    crate::inspect::emit(&pkg, args, format, quiet)
 }

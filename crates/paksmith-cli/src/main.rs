@@ -50,6 +50,13 @@ struct Cli {
     /// `RUST_LOG=paksmith_core::container::pak=trace`.
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Quiet mode: error-level logging only, and no advisory notes
+    /// (e.g. the piped-auto "emitting JSON" note). Errors still print.
+    /// If `RUST_LOG` is set, it takes precedence (same contract as
+    /// `--verbose`).
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    quiet: bool,
 }
 
 /// Drive an async future to completion on a new current-thread tokio runtime.
@@ -83,8 +90,15 @@ fn main() -> ExitCode {
     // (e.g. `RUST_LOG=paksmith_core::container::pak=trace`) without
     // recompiling. Falls through to the --verbose-derived default
     // when RUST_LOG is unset or unparsable — issue #140.
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(if cli.verbose { "debug" } else { "warn" }));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(if cli.quiet {
+            "error"
+        } else if cli.verbose {
+            "debug"
+        } else {
+            "warn"
+        })
+    });
 
     // `try_init` instead of `init` so a host that has already wired up a
     // global subscriber (e.g. a future embed-paksmith-as-a-library scenario)
@@ -105,6 +119,7 @@ fn main() -> ExitCode {
                 key.as_ref(),
                 cli.game.as_deref(),
                 cli.detect.as_deref(),
+                cli.quiet,
             )
         });
     match result {
