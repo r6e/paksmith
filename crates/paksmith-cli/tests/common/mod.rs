@@ -29,42 +29,39 @@ pub fn fixture_path(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
-/// Seed `$PAKSMITH_CONFIG_DIR/paksmith/profiles.toml` with a `hero`
-/// profile whose mappings source is `usmap_path` (#651 tests).
+/// Shared writer for the `hero` profile seeders: `extra` is appended
+/// verbatim after the `[profiles.hero]` table (pass `""` for none).
 #[allow(
     clippy::unnecessary_debug_formatting,
     reason = "Debug formatting of the path IS the TOML string encoding: it \
               quotes and backslash-escapes (Windows paths) exactly as a TOML \
               basic string requires; .display() would emit invalid TOML"
 )]
-pub fn seed_hero_profile(config_dir: &std::path::Path, usmap_path: &std::path::Path) {
-    let dir = config_dir.join("paksmith");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("profiles.toml"),
-        format!("[profiles.hero]\nname = \"Hero\"\nmappings = {{ path = {usmap_path:?} }}\n"),
-    )
-    .unwrap();
-}
-
-/// Like [`seed_hero_profile`] but the profile also carries detect rules
-/// requiring `Game/Paks` under the scanned directory — for `--detect`
-/// selector-attribution tests.
-#[allow(
-    clippy::unnecessary_debug_formatting,
-    reason = "Debug formatting of the path IS the TOML string encoding: it \
-              quotes and backslash-escapes (Windows paths) exactly as a TOML \
-              basic string requires; .display() would emit invalid TOML"
-)]
-pub fn seed_hero_profile_with_detect(config_dir: &std::path::Path, usmap_path: &std::path::Path) {
+fn write_hero_profile(config_dir: &std::path::Path, usmap_path: &std::path::Path, extra: &str) {
     let dir = config_dir.join("paksmith");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("profiles.toml"),
         format!(
-            "[profiles.hero]\nname = \"Hero\"\nmappings = {{ path = {usmap_path:?} }}\n\n\
-             [profiles.hero.detect]\nrequire_paths = [\"Game/Paks\"]\ncontains = []\n"
+            "[profiles.hero]\nname = \"Hero\"\nmappings = {{ path = {usmap_path:?} }}\n{extra}"
         ),
     )
     .unwrap();
+}
+
+/// Seed `$PAKSMITH_CONFIG_DIR/paksmith/profiles.toml` with a `hero`
+/// profile whose mappings source is `usmap_path` (#651 tests).
+pub fn seed_hero_profile(config_dir: &std::path::Path, usmap_path: &std::path::Path) {
+    write_hero_profile(config_dir, usmap_path, "");
+}
+
+/// Like [`seed_hero_profile`] but the profile also carries detect rules
+/// requiring `Game/Paks` under the scanned directory — for `--detect`
+/// selector-attribution tests.
+pub fn seed_hero_profile_with_detect(config_dir: &std::path::Path, usmap_path: &std::path::Path) {
+    write_hero_profile(
+        config_dir,
+        usmap_path,
+        "\n[profiles.hero.detect]\nrequire_paths = [\"Game/Paks\"]\ncontains = []\n",
+    );
 }
