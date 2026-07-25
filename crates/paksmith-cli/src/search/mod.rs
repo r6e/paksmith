@@ -217,8 +217,11 @@ mod predicate_tests {
 
     fn args() -> crate::commands::search::SearchArgs {
         // Build via the public fields; all-None/empty = match-all.
+        // `pak: None` on purpose: `Predicates::from_args` never reads
+        // it, and a Some(empty path) would read as an explicit — if
+        // meaningless — pak selection rather than the neutral case.
         crate::commands::search::SearchArgs {
-            pak: std::path::PathBuf::new(),
+            pak: None,
             r#type: vec![],
             filter: None,
             name: None,

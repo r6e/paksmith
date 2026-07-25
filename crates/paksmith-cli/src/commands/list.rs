@@ -8,8 +8,10 @@ use crate::output::OutputFormat;
 
 #[derive(Args)]
 pub(crate) struct ListArgs {
-    /// Path to .pak file
-    pub(crate) path: PathBuf,
+    /// Path to .pak file. Optional when `--game`/`--detect` selects a
+    /// profile with `pak_paths` patterns — then every matching archive
+    /// is listed.
+    pub(crate) path: Option<PathBuf>,
 
     /// Filter entries by glob pattern
     #[arg(long)]
@@ -24,17 +26,14 @@ pub(crate) fn run(
     detect: Option<&std::path::Path>,
     quiet: bool,
 ) -> paksmith_core::Result<()> {
-    let key = crate::commands::key_resolve::resolve_pak_key(&args.path, aes_key, game, detect)?;
-    let reader = paksmith_core::container::open(&args.path, key.as_ref())?;
-
+    let sources = crate::profile_paks::resolve_pak_sources(args.path.as_deref(), game, detect)?;
     let pattern = crate::path_util::compile_opt_glob_arg("--filter", args.filter.as_deref())?;
-    let filtered: Vec<_> = reader
-        .entries()
-        .filter(|e| pattern.as_ref().is_none_or(|pat| pat.matches(e.path())))
-        .collect();
+    let groups = crate::profile_paks::collect_entry_groups(sources, aes_key, game, detect, |e| {
+        pattern.as_ref().is_none_or(|pat| pat.matches(e.path()))
+    })?;
 
     let resolved = format.resolve();
     crate::output::note_auto_resolved_to_json(format, resolved, quiet);
-    crate::output::print_entries(&filtered, resolved)?;
+    crate::output::print_entry_groups(&groups, args.path.is_some(), resolved)?;
     Ok(())
 }

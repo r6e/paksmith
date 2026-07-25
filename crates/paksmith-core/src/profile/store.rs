@@ -150,6 +150,7 @@ mod tests {
                 keys,
                 detect: None,
                 mappings: None,
+                pak_paths: Vec::new(),
             },
         );
         ProfileStore { profiles }

@@ -78,7 +78,10 @@ pub(crate) fn serde_json_to_io(e: serde_json::Error) -> io::Error {
 /// commands emit the same `EntryRow` shape through the same
 /// `print_entries` writer, so the schema IS shared — versioning it
 /// twice would let the numbers drift apart while describing identical
-/// bytes. Bump when `EntryRow` or the envelope shape changes.
+/// bytes. Bump on a BREAKING change to `EntryRow` or the envelope.
+/// Additive optional keys that never appear in a pre-existing output
+/// mode do not bump — see `EntryRow::source` (#655), absent from every
+/// explicit-path invocation.
 const ENTRIES_SCHEMA_VERSION: u32 = 1;
 
 /// The `{"schema_version": 1, "entries": [...]}` envelope for
@@ -100,9 +103,28 @@ struct EntryRow<'a> {
     compressed_size: u64,
     compressed: bool,
     encrypted: bool,
+    /// Which archive the entry came from — present ONLY in profile-paks
+    /// mode (#655: no explicit pak path, entries may span archives).
+    /// Additive-optional: explicit-path invocations emit byte-identical
+    /// output to pre-#655, so ENTRIES_SCHEMA_VERSION stays 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
 }
 
-pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
+impl<'a> EntryRow<'a> {
+    fn new(e: &'a EntryMetadata, source: Option<&'a str>) -> Self {
+        Self {
+            path: e.path(),
+            size: e.uncompressed_size(),
+            compressed_size: e.compressed_size(),
+            compressed: e.is_compressed(),
+            encrypted: e.is_encrypted(),
+            source,
+        }
+    }
+}
+
+fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
     let stdout = io::stdout();
     let stdout_lock = stdout.lock();
     // Wrap stdout in a `BufWriter` so per-entry writes coalesce into
@@ -118,16 +140,7 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
         ResolvedFormat::Json => {
             let envelope = EntriesOutput {
                 schema_version: ENTRIES_SCHEMA_VERSION,
-                entries: entries
-                    .iter()
-                    .map(|e| EntryRow {
-                        path: e.path(),
-                        size: e.uncompressed_size(),
-                        compressed_size: e.compressed_size(),
-                        compressed: e.is_compressed(),
-                        encrypted: e.is_encrypted(),
-                    })
-                    .collect(),
+                entries: entries.iter().map(|e| EntryRow::new(e, None)).collect(),
             };
             // Stream directly to stdout instead of building the full string in
             // memory. serde_json wraps the underlying io::Error; the helper
@@ -154,6 +167,92 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
 /// unit-pinned here. `print_entries` wires in the real env read.
 fn styling_enabled(no_color: Option<std::ffi::OsString>) -> bool {
     no_color.is_none_or(|v| v.is_empty())
+}
+
+/// Route entry output for a command that may span archives (#655):
+/// a single explicit-path source keeps the pre-#655 writer (and its
+/// byte-identical output); anything else renders grouped. The slice
+/// pattern also removes the `groups[0]` index the commands carried.
+pub(crate) fn print_entry_groups(
+    groups: &[(std::path::PathBuf, Vec<EntryMetadata>)],
+    explicit_path: bool,
+    format: ResolvedFormat,
+) -> io::Result<()> {
+    match groups {
+        // Explicit-path invocation: byte-identical output to pre-#655.
+        [(_, entries)] if explicit_path => print_entries(entries, format),
+        _ => print_entries_grouped(groups, format),
+    }
+}
+
+/// Multi-archive variant of [`print_entries`] for profile-paks mode
+/// (#655): entries grouped by source archive.
+///
+/// JSON keeps the same `{schema_version, entries}` envelope with each
+/// row carrying an additive `source` key (the archive path, display
+/// form). Table mode is rendered by [`render_entry_groups`]. Explicit-
+/// path invocations never route here, so their output is byte-identical
+/// to pre-#655.
+fn print_entries_grouped(
+    groups: &[(std::path::PathBuf, Vec<EntryMetadata>)],
+    format: ResolvedFormat,
+) -> io::Result<()> {
+    let stdout = io::stdout();
+    let stdout_lock = stdout.lock();
+    let mut out = io::BufWriter::new(stdout_lock);
+    match format {
+        ResolvedFormat::Json => {
+            // Owned display strings must outlive the rows that
+            // borrow them — this vec exists for the lifetime, not
+            // for iteration convenience.
+            let sources: Vec<String> = groups
+                .iter()
+                .map(|(p, _)| p.display().to_string())
+                .collect();
+            let envelope = EntriesOutput {
+                schema_version: ENTRIES_SCHEMA_VERSION,
+                entries: groups
+                    .iter()
+                    .zip(&sources)
+                    .flat_map(|((_, entries), src)| {
+                        entries
+                            .iter()
+                            .map(move |e| EntryRow::new(e, Some(src.as_str())))
+                    })
+                    .collect(),
+            };
+            serde_json::to_writer_pretty(&mut out, &envelope).map_err(serde_json_to_io)?;
+            writeln!(out)?;
+        }
+        ResolvedFormat::Table => {
+            let styled = styling_enabled(std::env::var_os("NO_COLOR"));
+            write!(out, "{}", render_entry_groups(groups, styled))?;
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Pure renderer for the grouped TABLE view: one sanitized
+/// `pak: <path>` header per group, that group's table (newline-
+/// terminated), and a blank line between groups. Split from the writer
+/// so the frame is unit-pinned — a black-box test cannot see the
+/// styling decision, and the integration suites only exercise JSON.
+fn render_entry_groups(groups: &[(std::path::PathBuf, Vec<EntryMetadata>)], style: bool) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for (i, (pak, entries)) in groups.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let _ = writeln!(
+            out,
+            "pak: {}",
+            sanitize_for_display(&pak.display().to_string())
+        );
+        let _ = writeln!(out, "{}", build_entries_table(entries, style));
+    }
+    out
 }
 
 /// Build the `list`/`search` entries table (SPEC Design Principles:
@@ -267,6 +366,63 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} GiB", bytes as f64 / GIB as f64)
     } else {
         format!("{:.1} TiB", bytes as f64 / TIB as f64)
+    }
+}
+
+#[cfg(test)]
+mod grouped_render_tests {
+    use paksmith_core::container::{EntryFlags, EntryMetadata};
+
+    use super::*;
+
+    fn one_entry(path: &str) -> Vec<EntryMetadata> {
+        vec![EntryMetadata::new(path.into(), 10, 20, EntryFlags::NONE)]
+    }
+
+    /// The grouped frame: one `pak:` header per group, each table
+    /// newline-terminated, ONE blank line between groups, and the whole
+    /// render ends with a newline. (The integration suites only
+    /// exercise JSON; this is the sole pin on the table frame.)
+    #[test]
+    fn grouped_frame_headers_separator_and_trailing_newline() {
+        let groups = vec![
+            (
+                std::path::PathBuf::from("/a/base.pak"),
+                one_entry("Game/a.txt"),
+            ),
+            (
+                std::path::PathBuf::from("/a/patch.pak"),
+                one_entry("Game/b.txt"),
+            ),
+        ];
+        let out = render_entry_groups(&groups, false);
+        assert!(out.starts_with("pak: /a/base.pak\n"), "first header: {out}");
+        assert!(
+            out.contains("\n\npak: /a/patch.pak\n"),
+            "one blank line between groups: {out}"
+        );
+        assert!(out.ends_with('\n'), "newline-terminated: {out:?}");
+        assert!(
+            !out.ends_with("\n\n"),
+            "no trailing blank line after the last group: {out:?}"
+        );
+        assert_eq!(out.matches("pak: ").count(), 2, "one header per group");
+    }
+
+    /// A hostile pak path (C0 controls from a crafted store/dir name)
+    /// is neutralized in the human header, same policy as entry paths.
+    #[test]
+    fn grouped_header_sanitizes_control_chars() {
+        let groups = vec![(
+            std::path::PathBuf::from("/a/evil\x1b[31m.pak"),
+            one_entry("Game/a.txt"),
+        )];
+        let out = render_entry_groups(&groups, false);
+        assert!(
+            !out.contains('\x1b'),
+            "escape byte must not reach the terminal: {out:?}"
+        );
+        assert!(out.contains('\u{FFFD}'), "replacement char instead: {out}");
     }
 }
 

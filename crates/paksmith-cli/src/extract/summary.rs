@@ -54,9 +54,20 @@ pub(crate) struct FailureRecord {
 #[derive(Debug, Serialize)]
 pub(crate) struct ExtractSummary {
     /// Schema version for forward-compatibility. Consumers may check this
-    /// before parsing; currently always 1.
+    /// before parsing; currently always 1. Additive optional keys that
+    /// never appear in a pre-existing output mode (`sources`, #655) do
+    /// not bump.
     pub(crate) schema_version: u32,
+    /// Source archive label. Explicit-path runs: the one path,
+    /// unchanged from pre-#655. Profile-paks runs: every source
+    /// archive, comma-joined — HUMAN display only (", " is a legal
+    /// path substring); machine consumers use `sources`.
     pub(crate) pak: String,
+    /// The source archives, one element per path — present only in
+    /// profile-paks mode (#655); the machine-readable counterpart of
+    /// the joined `pak` label.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) sources: Vec<String>,
     pub(crate) output_dir: String,
     pub(crate) dry_run: bool,
     pub(crate) counts: Counts,
@@ -109,6 +120,7 @@ impl ExtractSummary {
         outputs.sort_by(|a, b| a.entry.cmp(&b.entry));
         failures.sort_by(|a, b| a.entry.cmp(&b.entry));
         Self {
+            sources: Vec::new(),
             schema_version: 1,
             pak,
             output_dir,
@@ -130,7 +142,10 @@ impl ExtractSummary {
                 writeln!(w)
             }
             ResolvedFormat::Table => {
-                writeln!(w, "extracted from {}", self.pak)?;
+                // In profile-paks mode `pak` carries glob-DISCOVERED
+                // filenames, not user-typed argv — same trust class as
+                // list/search's grouped header, same neutralization.
+                writeln!(w, "extracted from {}", sanitize_for_display(&self.pak))?;
                 writeln!(w, "  converted:         {}", self.counts.converted)?;
                 writeln!(w, "  raw copied:        {}", self.counts.raw_copied)?;
                 writeln!(w, "  skipped companion: {}", self.counts.skipped_companion)?;
@@ -213,6 +228,26 @@ mod tests {
         assert!(
             rendered.contains("FAILED") && rendered.contains('\u{FFFD}'),
             "the failure stays visible with replacement marks: {rendered:?}"
+        );
+    }
+
+    /// In profile-paks mode `pak` carries glob-DISCOVERED filenames,
+    /// not user-typed argv — a hostile archive name must not reach the
+    /// terminal raw through the `extracted from` header.
+    #[test]
+    fn table_header_sanitizes_discovered_pak_label() {
+        let s = ExtractSummary::from_outcomes(
+            "evil\u{1b}[31m.pak, ok.pak".into(),
+            "out".into(),
+            false,
+            vec![],
+        );
+        let mut buf = Vec::new();
+        s.render(ResolvedFormat::Table, &mut buf).unwrap();
+        let rendered = String::from_utf8(buf).unwrap();
+        assert!(
+            !rendered.contains('\u{1b}') && rendered.contains('\u{FFFD}'),
+            "escape neutralized in the extracted-from header: {rendered:?}"
         );
     }
 

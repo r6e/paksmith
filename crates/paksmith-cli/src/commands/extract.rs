@@ -1,4 +1,4 @@
-//! `paksmith extract <pak> -o <dir>` — batch export pak contents.
+//! `paksmith extract [pak] -o <dir>` — batch export pak contents.
 
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -22,8 +22,14 @@ pub(crate) use crate::extract::select::{AudioFormat, DataTableFormat, FormatPref
 
 #[derive(Args)]
 pub(crate) struct ExtractArgs {
-    /// Path to the .pak file.
-    pub(crate) pak: PathBuf,
+    /// Path to the .pak file. Optional when `--game`/`--detect` selects
+    /// a profile with `pak_paths` patterns — then every matching
+    /// archive is extracted. Archives mount in sorted path order, and a
+    /// virtual path present in several archives extracts from the LAST
+    /// one only, matching UE's conventional alphabetical mount order
+    /// where later mounts override; shadowed copies are skipped, not
+    /// collisions.
+    pub(crate) pak: Option<PathBuf>,
 
     /// Output directory (created if absent).
     #[arg(short, long)]
@@ -79,21 +85,8 @@ pub(crate) fn run(
     detect: Option<&std::path::Path>,
     quiet: bool,
 ) -> paksmith_core::Result<u8> {
-    let ctx = crate::commands::key_resolve::resolve_pak_context(&args.pak, aes_key, game, detect)?;
-    let usmap = crate::commands::mappings_resolve::resolve_usmap(
-        args.mappings.as_deref(),
-        ctx.mappings.as_ref(),
-        crate::commands::mappings_resolve::mappings_selector(game),
-    )?;
-    let reader = paksmith_core::container::open(&args.pak, ctx.key.as_ref())?;
-
+    let sources = crate::profile_paks::resolve_pak_sources(args.pak.as_deref(), game, detect)?;
     let pattern = crate::path_util::compile_opt_glob_arg("--filter", args.filter.as_deref())?;
-
-    let entries: Vec<String> = reader
-        .entries()
-        .filter(|e| pattern.as_ref().is_none_or(|pat| pat.matches(e.path())))
-        .map(|e| e.path().to_string())
-        .collect();
 
     let registry = HandlerRegistry::all_default_handlers();
     let cfg = ExtractConfig {
@@ -107,46 +100,71 @@ pub(crate) fn run(
             locres: args.locres_format,
         },
     };
-    let job = ExtractJob {
-        reader: Arc::clone(&reader),
-        registry: &registry,
-        cfg: &cfg,
-        mappings: usmap,
-    };
+    let opened = open_and_collect(
+        &sources,
+        args.mappings.as_deref(),
+        aes_key,
+        game,
+        detect,
+        pattern.as_ref(),
+    )?;
+    let winning = winning_entries(&opened.entry_lists);
 
-    // FIX 6: hide progress when stderr is not a TTY (e.g. CI, piped output) so
-    // non-interactive callers get clean stderr without ANSI escape sequences.
-    // --quiet hides it even on a TTY: the bar is advisory chatter (#652).
+    // FIX 6: hide progress when stderr is not a TTY (e.g. CI, piped
+    // output) so non-interactive callers get clean stderr without ANSI
+    // escape sequences. --quiet hides it even on a TTY: the bar is
+    // advisory chatter (#652). One bar spans every archive.
     let target = if show_progress(std::io::stderr().is_terminal(), quiet) {
         indicatif::ProgressDrawTarget::stderr()
     } else {
         indicatif::ProgressDrawTarget::hidden()
     };
-    let progress = ProgressBar::with_draw_target(Some(entries.len() as u64), target);
+    let total: u64 = winning.iter().map(|v| v.len() as u64).sum();
+    let progress = ProgressBar::with_draw_target(Some(total), target);
     progress.set_style(
         ProgressStyle::with_template("{bar:40} {pos}/{len} {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
-
-    let outcomes = match args.jobs {
-        Some(n) => {
-            let pool = rayon::ThreadPoolBuilder::new()
+    let pool = args
+        .jobs
+        .map(|n| {
+            rayon::ThreadPoolBuilder::new()
                 .num_threads(n as usize)
                 .build()
                 .map_err(|e| PaksmithError::InvalidArgument {
                     arg: "--jobs",
                     reason: e.to_string(),
-                })?;
-            pool.install(|| job.run_with_progress(&entries, &progress))
-        }
-        None => job.run_with_progress(&entries, &progress),
-    };
-    let summary = ExtractSummary::from_outcomes(
-        args.pak.display().to_string(),
+                })
+        })
+        .transpose()?;
+
+    let mut all_outcomes = Vec::new();
+    for (reader, entries) in opened.readers.iter().zip(&winning) {
+        let job = ExtractJob {
+            reader: Arc::clone(reader),
+            registry: &registry,
+            cfg: &cfg,
+            mappings: opened.usmap.clone(),
+        };
+        let outcomes = match &pool {
+            Some(p) => p.install(|| job.run_with_progress(entries, &progress)),
+            None => job.run_with_progress(entries, &progress),
+        };
+        all_outcomes.extend(outcomes);
+    }
+
+    // Explicit-path invocations keep the pre-#655 label (the one path);
+    // profile-paks runs label the summary with every source archive and
+    // carry the machine-readable `sources` array.
+    let mut summary = ExtractSummary::from_outcomes(
+        crate::profile_paks::join_display(&sources),
         args.output.display().to_string(),
         args.dry_run,
-        outcomes,
+        all_outcomes,
     );
+    if args.pak.is_none() {
+        summary.sources = crate::profile_paks::display_all(&sources);
+    }
 
     let resolved = format.resolve();
     let stdout = io::stdout();
@@ -157,6 +175,87 @@ pub(crate) fn run(
     Ok(u8::from(summary.had_failures()))
 }
 
+/// Phase 1's yield: every source archive open, its filtered entry
+/// list, and the once-resolved usmap. Parallel vectors, index-aligned
+/// with the sorted `sources` order `winning_entries` decides by.
+struct OpenedSources {
+    usmap: Option<std::sync::Arc<paksmith_core::asset::Usmap>>,
+    readers: Vec<std::sync::Arc<dyn paksmith_core::container::ContainerReader>>,
+    entry_lists: Vec<Vec<String>>,
+}
+
+/// Phase 1 of a (possibly multi-archive) extract: resolve and open
+/// EVERY source, collecting its filtered entry list, before any writes.
+/// A bad archive (missing key, corrupt index) fails the whole run
+/// cleanly at exit 2 with nothing partial on disk, instead of
+/// discarding a half-finished run's summary. Every reader (open file
+/// handle + parsed index) is held simultaneously — the memory price of
+/// the all-open-before-write guarantee. Per-source context resolution
+/// repeats the store load / detection sweep (known cost — hoisting
+/// needs a batch core entry point); the usmap is profile-derived and
+/// pak-independent, so it is resolved and parsed exactly once.
+fn open_and_collect(
+    sources: &[std::path::PathBuf],
+    mappings_arg: Option<&std::path::Path>,
+    aes_key: Option<&AesKey>,
+    game: Option<&str>,
+    detect: Option<&std::path::Path>,
+    pattern: Option<&glob::Pattern>,
+) -> paksmith_core::Result<OpenedSources> {
+    let mut usmap = None;
+    let mut readers = Vec::with_capacity(sources.len());
+    let mut entry_lists = Vec::with_capacity(sources.len());
+    for (i, pak) in sources.iter().enumerate() {
+        let ctx = crate::commands::key_resolve::resolve_pak_context(pak, aes_key, game, detect)?;
+        if i == 0 {
+            usmap = crate::commands::mappings_resolve::resolve_usmap(
+                mappings_arg,
+                ctx.mappings.as_ref(),
+                crate::commands::mappings_resolve::mappings_selector(game),
+            )?;
+        }
+        let reader = paksmith_core::container::open(pak, ctx.key.as_ref())?;
+        let entries: Vec<String> = reader
+            .entries()
+            .filter(|e| pattern.is_none_or(|pat| pat.matches(e.path())))
+            .map(|e| e.path().to_string())
+            .collect();
+        readers.push(reader);
+        entry_lists.push(entries);
+    }
+    Ok(OpenedSources {
+        usmap,
+        readers,
+        entry_lists,
+    })
+}
+
+/// Phase 2's winner decision, pure: by UE convention (as community
+/// references like FModel document it) paks mount alphabetically and
+/// later mounts override, so a virtual path present in several archives
+/// extracts from the LAST source in sorted expansion order. Shadowed
+/// copies are simply not extracted — no spurious create_new failures,
+/// no order-dependent winner at the filesystem layer.
+fn winning_entries(entry_lists: &[Vec<String>]) -> Vec<Vec<String>> {
+    let mut winner: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (idx, entries) in entry_lists.iter().enumerate() {
+        for entry in entries {
+            let _ = winner.insert(entry.as_str(), idx);
+        }
+    }
+    entry_lists
+        .iter()
+        .enumerate()
+        .map(|(idx, entries)| {
+            entries
+                .iter()
+                .filter(|e| winner[e.as_str()] == idx)
+                .cloned()
+                .collect()
+        })
+        .collect()
+}
+
 /// Whether the extract progress bar draws: stderr must be a real TTY
 /// (piped/CI stderr stays clean) AND `--quiet` must be off (the bar is
 /// advisory chatter). Pure, like `styling_enabled`/`resolve_with_tty`
@@ -164,6 +263,38 @@ pub(crate) fn run(
 /// a TTY, so the `quiet` leg of this decision is observable only here.
 fn show_progress(stderr_is_tty: bool, quiet: bool) -> bool {
     stderr_is_tty && !quiet
+}
+
+#[cfg(test)]
+mod winner_tests {
+    use super::winning_entries;
+
+    fn lists(input: &[&[&str]]) -> Vec<Vec<String>> {
+        input
+            .iter()
+            .map(|l| l.iter().map(|s| (*s).to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn disjoint_lists_pass_through() {
+        let got = winning_entries(&lists(&[&["a", "b"], &["c"]]));
+        assert_eq!(got, lists(&[&["a", "b"], &["c"]]));
+    }
+
+    #[test]
+    fn duplicate_path_extracts_from_last_archive_only() {
+        // UE alphabetical-mount semantics: later archive wins; the
+        // shadowed copy is dropped from the earlier list entirely.
+        let got = winning_entries(&lists(&[&["shared", "base_only"], &["shared"]]));
+        assert_eq!(got, lists(&[&["base_only"], &["shared"]]));
+    }
+
+    #[test]
+    fn three_way_duplicate_keeps_only_the_final_copy() {
+        let got = winning_entries(&lists(&[&["x"], &["x"], &["x", "y"]]));
+        assert_eq!(got, lists(&[&[], &[], &["x", "y"]]));
+    }
 }
 
 #[cfg(test)]
