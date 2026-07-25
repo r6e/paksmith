@@ -531,8 +531,7 @@ mod tests {
 
             let usmap_bytes =
                 build_sparse_schema_usmap_bytes("Sparse", prop_count, &triples);
-            let usmap =
-            std::sync::Arc::new(Usmap::from_bytes(&usmap_bytes).expect("Usmap parse"));
+            let usmap = std::sync::Arc::new(Usmap::from_bytes(&usmap_bytes).expect("Usmap parse"));
 
             // FUnversionedHeader fragments addressing the sorted
             // slots. Cumulative-skip encoding: each fragment's
