@@ -4,8 +4,6 @@ use std::path::PathBuf;
 
 use paksmith_core::AesKey;
 use paksmith_core::PaksmithError;
-use paksmith_core::container::ContainerReader as _;
-use paksmith_core::container::pak::PakReader;
 
 use crate::state::archive::{EntryMeta, LoadedArchive, OpenError};
 use crate::state::tree::Tree;
@@ -105,15 +103,12 @@ async fn run_inner(
 /// present (`resolved_key.is_some()`) the same variant means *wrong key* →
 /// [`OpenError::Core`].
 fn build_loaded(path: PathBuf, resolved_key: Option<&AesKey>) -> Result<LoadedArchive, OpenError> {
-    let open_result = match resolved_key {
-        Some(k) => PakReader::open_with_key(&path, k.clone()),
-        None => PakReader::open(&path),
-    };
-
-    let reader = match open_result {
-        Ok(r) => std::sync::Arc::new(r),
+    // #654: the container-agnostic factory — the GUI never names a
+    // concrete reader type.
+    let reader = match paksmith_core::container::open(&path, resolved_key) {
+        Ok(r) => r,
         Err(PaksmithError::Decryption { .. }) if resolved_key.is_none() => {
-            // Encrypted pak, no key available → prompt the user.
+            // Encrypted archive, no key available → prompt the user.
             return Err(OpenError::Locked { path });
         }
         Err(e) => return Err(e.into()),
@@ -217,7 +212,6 @@ mod tests {
 
     #[tokio::test]
     async fn loaded_archive_retains_reader_for_entry_reads() {
-        use paksmith_core::container::ContainerReader as _;
         let path = fixture_path("real_v8b_uasset.pak");
         let loaded = run(path, None).await.unwrap();
         // The retained reader must be able to read an entry's bytes on demand.

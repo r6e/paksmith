@@ -9,8 +9,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use paksmith_core::AesKey;
 use paksmith_core::PaksmithError;
-use paksmith_core::container::ContainerReader;
-use paksmith_core::container::pak::PakReader;
 use paksmith_core::export::HandlerRegistry;
 
 use crate::extract::summary::ExtractSummary;
@@ -87,10 +85,7 @@ pub(crate) fn run(
         ctx.mappings.as_ref(),
         crate::commands::mappings_resolve::mappings_selector(game),
     )?;
-    let reader = Arc::new(match &ctx.key {
-        Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
-        None => PakReader::open(&args.pak)?,
-    });
+    let reader = paksmith_core::container::open(&args.pak, ctx.key.as_ref())?;
 
     let pattern = crate::path_util::compile_opt_glob_arg("--filter", args.filter.as_deref())?;
 

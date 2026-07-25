@@ -414,22 +414,21 @@ fn check_uexp_size(uexp_len: usize, asset_path: &str) -> crate::Result<()> {
 }
 
 /// Build a `BulkDataResolver` companion-loader closure that reads
-/// `companion_path` out of a `.pak` archive via the shared
-/// `Arc<PakReader>` handle. `EntryNotFound` from the pak layer maps
-/// to a typed `MissingCompanionFile { kind }` fault so callers see
-/// the bulk-data tier context (Ubulk / Uptnl) rather than an opaque
-/// "entry missing".
+/// `companion_path` out of any [`crate::container::ContainerReader`]
+/// via the shared `Arc<R>` handle. `EntryNotFound` from the container
+/// layer maps to a typed `MissingCompanionFile { kind }` fault so
+/// callers see the bulk-data tier context (Ubulk / Uptnl) rather than
+/// an opaque "entry missing".
 ///
 /// The returned closure satisfies the resolver's `Fn + Send + Sync +
 /// 'static` bounds: it closes only over its by-value arguments
-/// (`Arc<PakReader>`, two owned `String`s, `CompanionFileKind`).
-fn pak_companion_loader(
-    reader: Arc<crate::container::pak::PakReader>,
+/// (`Arc<R>`, two owned `String`s, `CompanionFileKind`).
+fn companion_loader<R: crate::container::ContainerReader + ?Sized + 'static>(
+    reader: Arc<R>,
     companion_path: String,
     asset_path: String,
     kind: CompanionFileKind,
 ) -> impl Fn() -> crate::Result<Vec<u8>> + Send + Sync + 'static {
-    use crate::container::ContainerReader;
     move || match reader.read_entry(&companion_path) {
         Ok(bytes) => Ok(bytes),
         Err(PaksmithError::EntryNotFound { .. }) => Err(PaksmithError::AssetParse {
@@ -489,9 +488,9 @@ impl Package {
         // If any 3e/3g/3h typed reader pushes a streaming-tier
         // record into `Package::bulk_data` and a downstream consumer
         // calls `resolve_bulk_for_export`, the stub loaders fire
-        // `MissingCompanionFile`. The pak entry point
-        // (`read_from_pak`) overrides both with real `Arc<PakReader>`-
-        // backed loaders.
+        // `MissingCompanionFile`. The container entry point
+        // (`read_from_reader`) overrides both with real
+        // `Arc<R>`-backed loaders.
         let ubulk_loader =
             missing_companion_loader(CompanionFileKind::Ubulk, asset_path.to_string());
         let uptnl_loader =
@@ -507,8 +506,8 @@ impl Package {
     }
 
     /// Internal entry point shared by [`Self::read_from`] (stub
-    /// loaders) and [`Self::read_from_pak`] (real
-    /// `Arc<PakReader>`-backed loaders). The loaders are baked into
+    /// loaders) and [`Self::read_from_reader`] (real
+    /// `Arc<R>`-backed loaders). The loaders are baked into
     /// the [`BulkDataResolver`] this constructs.
     #[allow(
         clippy::too_many_lines,
@@ -891,35 +890,39 @@ impl Package {
         Self::read_from_reader(&reader, virtual_path, mappings)
     }
 
-    /// Parse the UAsset at `virtual_path` from an already-open pak reader.
+    /// Parse the UAsset at `virtual_path` from an already-open
+    /// container reader.
     ///
-    /// Identical to [`Self::read_from_pak`] but reuses a caller-provided
-    /// `Arc<PakReader>` instead of opening (and re-parsing the index of)
-    /// the pak on every call. The real `Arc<PakReader>`-backed
-    /// `.ubulk` / `.uptnl` bulk loaders are wired exactly as in
-    /// `read_from_pak`, so streaming-tier bulk resolution works.
+    /// Generic over [`crate::container::ContainerReader`] (issue #654),
+    /// so ONE entry point serves `Arc<PakReader>`, the type-erased
+    /// `Arc<dyn ContainerReader>` the [`crate::container::open`]
+    /// factory returns (`?Sized` makes the unsized `dyn` type a legal
+    /// `R`), and any Phase 8 container. Everything this fn needs — the
+    /// `.uasset`/`.uexp` reads and the lazy `.ubulk`/`.uptnl` companion
+    /// loaders — is expressed through the trait's `read_entry`; nothing
+    /// here is pak-specific.
     ///
-    /// Batch callers (the CLI `extract` command, the future GUI) open the
-    /// pak once and share the `Arc` across worker threads (`PakReader` is
-    /// `Send + Sync`).
-    ///
-    /// Phase 8 (IoStore) will need its own parallel entry point — bulk-data
-    /// wiring is pak-specific, so the IoStore reader is not a refactor of
-    /// this function.
+    /// Identical to [`Self::read_from_pak`] but reuses the caller's
+    /// `Arc` instead of opening (and re-parsing the index of) the
+    /// container on every call. Batch callers (the CLI `extract`
+    /// command, the GUI) open once and share the `Arc` across worker
+    /// threads (`ContainerReader` is `Send + Sync` by supertrait).
     ///
     /// # Errors
-    /// Same as [`Self::read_from_pak`], minus the open step.
-    pub fn read_from_reader(
-        reader: &Arc<crate::container::pak::PakReader>,
+    /// Any [`PaksmithError`] from the container layer (find entry,
+    /// decompress) or the asset layer (parse). Companion semantics as in
+    /// [`Self::read_from_pak`]: a missing `.uexp` is silently treated as
+    /// a monolithic asset; missing `.ubulk` / `.uptnl` surface only if
+    /// bulk-data resolution actually needs them.
+    pub fn read_from_reader<R: crate::container::ContainerReader + ?Sized + 'static>(
+        reader: &Arc<R>,
         virtual_path: &str,
         mappings: Option<&Arc<Usmap>>,
     ) -> crate::Result<Self> {
-        use crate::container::ContainerReader;
-
         let uasset_bytes = reader.read_entry(virtual_path)?;
 
         // Look up the `.uexp` companion. Absence is normal for
-        // monolithic assets; any other error from the pak layer
+        // monolithic assets; any other error from the container layer
         // propagates.
         let uexp_path = derive_companion_path(virtual_path, ".uexp");
         let uexp_bytes = match reader.read_entry(&uexp_path) {
@@ -929,22 +932,20 @@ impl Package {
         };
 
         // Phase 3b: build the `.ubulk` / `.uptnl` loader closures via
-        // the shared `pak_companion_loader` helper. Each opens the
-        // respective companion on first matching-tier resolution
-        // (via `BulkDataResolver`'s `OnceLock` cache). `EntryNotFound`
-        // from the pak layer maps to the typed `MissingCompanionFile`
-        // fault so consumers get the bulk-data tier context (Ubulk /
-        // Uptnl), not an opaque "entry missing". Closures capture
-        // `Arc<PakReader>` clones (NOT `&reader`) to satisfy the
+        // the shared `companion_loader` helper (see its doc for the
+        // `EntryNotFound` -> `MissingCompanionFile` mapping). Each opens
+        // the respective companion on first matching-tier resolution
+        // (via `BulkDataResolver`'s `OnceLock` cache). Closures capture
+        // `Arc<R>` clones (NOT `&reader`) to satisfy the
         // `'static + Send + Sync` bounds the resolver imposes for
         // Phase 5 async / Phase 7 GUI thread crossings.
-        let ubulk_loader = pak_companion_loader(
+        let ubulk_loader = companion_loader(
             Arc::clone(reader),
             derive_companion_path(virtual_path, ".ubulk"),
             virtual_path.to_string(),
             CompanionFileKind::Ubulk,
         );
-        let uptnl_loader = pak_companion_loader(
+        let uptnl_loader = companion_loader(
             Arc::clone(reader),
             derive_companion_path(virtual_path, ".uptnl"),
             virtual_path.to_string(),

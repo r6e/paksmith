@@ -7,8 +7,6 @@ use std::path::PathBuf;
 use clap::Args;
 use paksmith_core::AesKey;
 use paksmith_core::PaksmithError;
-use paksmith_core::container::ContainerReader;
-use paksmith_core::container::pak::PakReader;
 
 use crate::output::OutputFormat;
 use crate::search::Predicates;
@@ -57,10 +55,7 @@ pub(crate) fn run(
         .map_err(|(arg, reason)| PaksmithError::InvalidArgument { arg, reason })?;
 
     let key = crate::commands::key_resolve::resolve_pak_key(&args.pak, aes_key, game, detect)?;
-    let reader = match &key {
-        Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
-        None => PakReader::open(&args.pak)?,
-    };
+    let reader = paksmith_core::container::open(&args.pak, key.as_ref())?;
     let matches: Vec<_> = reader.entries().filter(|e| predicates.matches(e)).collect();
 
     let resolved = format.resolve();

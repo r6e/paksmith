@@ -222,7 +222,7 @@ inventory and the doc-level status block.
 - `Package::read_from_pak<P: AsRef<Path>>(pak_path: P, virtual_path: &str, mappings: Option<&Arc<Usmap>>) -> Result<Self>` —
   pak-archive flow. Wraps `PakReader` in `Arc` and threads
   `Arc<PakReader>`-backed loader closures into the bulk-data
-  resolver via the `pak_companion_loader` helper.
+  resolver via the `companion_loader` helper.
 - `fn derive_companion_path(base: &str, new_ext: &str) -> String` —
   pub(super); helper used by both flows.
 

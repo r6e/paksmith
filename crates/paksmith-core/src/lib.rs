@@ -58,7 +58,8 @@ pub mod testing;
 // `AesKey` is a cross-cutting credential type (used by `PakReader::open_with_key`
 // today; Phase 5 will extend it to IoStore). Promoted to the crate root so callers
 // write `paksmith_core::AesKey`. `PakReader` is intentionally NOT promoted — it is a
-// format-specific type and lives at `container::pak::PakReader`.
+// format-specific type and lives at `container::pak::PakReader`. Frontends open
+// containers via `container::open` rather than naming the concrete reader.
 pub use container::pak::{AesKey, AesKeyHexError};
 pub use digest::Sha1Digest;
 pub use error::PaksmithError;

@@ -2394,14 +2394,16 @@ mod tests {
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
-    /// Returns a shared `Arc<PakReader>` opened from the real_v8b_uasset fixture.
+    /// Returns a shared `Arc<dyn ContainerReader>` opened from the
+    /// real_v8b_uasset fixture via the `container::open` factory.
     ///
     /// The reader is opened exactly once per test binary via `OnceLock`; every
     /// call clones the `Arc`, so 100+ `app_with_paths` calls pay only a single
     /// disk-open.
-    fn shared_test_reader() -> std::sync::Arc<paksmith_core::container::pak::PakReader> {
+    fn shared_test_reader() -> std::sync::Arc<dyn paksmith_core::container::ContainerReader> {
         use std::sync::{Arc, OnceLock};
-        static READER: OnceLock<Arc<paksmith_core::container::pak::PakReader>> = OnceLock::new();
+        static READER: OnceLock<Arc<dyn paksmith_core::container::ContainerReader>> =
+            OnceLock::new();
         READER
             .get_or_init(|| {
                 let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2410,10 +2412,7 @@ mod tests {
                     .parent()
                     .unwrap()
                     .join("tests/fixtures/real_v8b_uasset.pak");
-                Arc::new(
-                    paksmith_core::container::pak::PakReader::open(path)
-                        .expect("open fixture reader"),
-                )
+                paksmith_core::container::open(&path, None).expect("open fixture reader")
             })
             .clone()
     }

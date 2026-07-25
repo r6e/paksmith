@@ -4,8 +4,7 @@
 use std::sync::Arc;
 
 use paksmith_core::asset::Package;
-use paksmith_core::container::ContainerReader as _;
-use paksmith_core::container::pak::PakReader;
+use paksmith_core::container::ContainerReader;
 
 /// Maximum bytes retained from a streamed entry read for the Hex and Info views.
 ///
@@ -136,7 +135,7 @@ pub fn should_attempt_parse(path: &str) -> bool {
     clippy::unused_async,
     reason = "async required by iced Task::perform interface"
 )]
-pub async fn load(reader: Arc<PakReader>, path: String) -> AssetLoad {
+pub async fn load(reader: Arc<dyn ContainerReader>, path: String) -> AssetLoad {
     let mut w = CappedWriter::new(HEX_BYTES_CAP);
     let read_result = reader.read_entry_to(&path, &mut w);
     let truncated = w.overflowed();
@@ -318,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_parses_uasset_fixture() {
-        let reader = Arc::new(PakReader::open(fixture("real_v8b_uasset.pak")).unwrap());
+        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
         let out = load(reader, "Game/Maps/Demo.uasset".to_string()).await;
         assert!(!out.bytes.is_empty(), "raw bytes must be present");
         assert!(!out.truncated, "small fixture must not be truncated");
@@ -335,7 +334,7 @@ mod tests {
         // "not a UAsset" string.  A non-.uasset extension is used deliberately:
         // for a missing .uasset the old code also attempted a parse and returned a
         // core error, so that path wouldn't distinguish old from new behaviour.
-        let reader = Arc::new(PakReader::open(fixture("real_v8b_uasset.pak")).unwrap());
+        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
         let out = load(reader, "Game/Does/Not/Exist.bin".to_string()).await;
         assert!(out.bytes.is_empty(), "missing entry yields no bytes");
         assert!(out.parsed.is_err(), "missing entry must be a parse error");

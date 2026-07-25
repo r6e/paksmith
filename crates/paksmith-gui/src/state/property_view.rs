@@ -586,17 +586,15 @@ mod tests {
     use super::*;
     use paksmith_core::asset::property::primitives::PropertyValue;
     use std::collections::HashSet;
-    use std::sync::Arc;
 
     fn demo_package() -> paksmith_core::asset::Package {
-        use paksmith_core::container::pak::PakReader;
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .parent()
             .unwrap()
             .join("tests/fixtures/real_v8b_uasset.pak");
-        let reader = Arc::new(PakReader::open(p).unwrap());
+        let reader = paksmith_core::container::open(&p, None).unwrap();
         paksmith_core::asset::Package::read_from_reader(&reader, "Game/Maps/Demo.uasset", None)
             .unwrap()
     }

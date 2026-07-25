@@ -3,7 +3,9 @@
 //! The `.pak` reader (see [`pak`]) implements [`ContainerReader`]. The
 //! [`ContainerFormat::IoStore`] variant reserves the API surface for the
 //! Phase 8 IoStore reader; no [`ContainerReader`] implementor exists for
-//! it yet.
+//! it yet. [`open`] is the container-agnostic entry point — it returns
+//! `Arc<dyn ContainerReader>` so callers never name a concrete reader
+//! type.
 
 pub mod pak;
 
@@ -216,6 +218,9 @@ pub trait ContainerReader: Send + Sync {
     /// payload in memory, so multi-GiB cooked content is handled in
     /// bounded scratch buffers. See [`Self::read_entry`] for the
     /// convenience wrapper that collects to a `Vec<u8>`.
+    ///
+    /// The `EntryNotFound` error-identity contract documented on
+    /// [`Self::read_entry`] applies here identically.
     fn read_entry_to(&self, path: &str, writer: &mut dyn Write) -> crate::Result<u64>;
 
     /// Read raw bytes for a specific entry by path into an owned `Vec<u8>`.
@@ -232,6 +237,18 @@ pub trait ContainerReader: Send + Sync {
     ///
     /// See `paksmith_core::container::pak::PakReader::read_entry` for
     /// the canonical implementation.
+    ///
+    /// # Error identity contract
+    ///
+    /// A `path` not present in the archive MUST surface as
+    /// [`crate::PaksmithError::EntryNotFound`] — never a generic `Io`
+    /// error. Generic consumers distinguish "no such entry" from "read
+    /// failed" solely on this identity: `Package::read_from_reader`
+    /// treats `EntryNotFound` on the `.uexp` companion as "monolithic
+    /// asset, keep going" and maps it on `.ubulk`/`.uptnl` to the typed
+    /// `MissingCompanionFile` fault, while any other error aborts the
+    /// parse outright. An implementor that leaks `Io(NotFound)` instead
+    /// would turn every monolithic asset into a hard parse failure.
     fn read_entry(&self, path: &str) -> crate::Result<Vec<u8>>;
 
     /// The container format this reader handles.
@@ -249,3 +266,44 @@ pub trait ContainerReader: Send + Sync {
 const _: fn() = || {
     fn assert_dyn_compatible(_: &dyn ContainerReader) {}
 };
+
+/// Open a container archive as a type-erased [`ContainerReader`].
+///
+/// This is the container-agnostic seam every frontend uses instead of
+/// naming a concrete reader type (issue #654; ROADMAP: "command
+/// implementations never reference a specific container type").
+///
+/// Today this always constructs a [`pak::PakReader`]; Phase 8 adds
+/// format dispatch here (sniff `.pak` vs `.utoc`/IoStore) as a branch
+/// inside this ONE function, leaving every consumer untouched.
+///
+/// Delegates to [`pak::PakReader::open`] / [`pak::PakReader::open_with_key`],
+/// so their documented behaviors — the symlink defense-in-depth warning
+/// and the `Decryption { path }` diagnostic upgrade — are preserved by
+/// construction, and every [`crate::PaksmithError`] passes through
+/// unchanged (the GUI's Decryption→Locked key-prompt policy depends on
+/// the error identity surviving this seam).
+///
+/// Known residual pak-specific surfaces (Phase 8 must dispatch these
+/// too, not just this factory): the pre-open key-GUID probe
+/// [`pak::PakReader::read_footer_guid`] — consumed by both
+/// `profile::resolve::resolve_pak_context` and the CLI `profile test`
+/// command — and the key-verification path `profile::key_test::test_key`
+/// (`PakReader::open_with_key` + `verify_index`). IoStore stores the same
+/// key GUID in the `.utoc` header, so Phase 8 wants format-dispatching
+/// siblings for both probe shapes next to this factory.
+///
+/// # Errors
+///
+/// Exactly the constructor errors of the underlying reader — see
+/// [`pak::PakReader::open`].
+pub fn open(
+    path: &std::path::Path,
+    key: Option<&crate::AesKey>,
+) -> crate::Result<std::sync::Arc<dyn ContainerReader>> {
+    let reader = match key {
+        Some(k) => pak::PakReader::open_with_key(path, k.clone())?,
+        None => pak::PakReader::open(path)?,
+    };
+    Ok(std::sync::Arc::new(reader))
+}

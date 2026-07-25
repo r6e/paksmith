@@ -3,8 +3,6 @@ use std::path::PathBuf;
 use clap::Args;
 
 use paksmith_core::AesKey;
-use paksmith_core::container::ContainerReader;
-use paksmith_core::container::pak::PakReader;
 
 use crate::output::OutputFormat;
 
@@ -27,10 +25,7 @@ pub(crate) fn run(
     quiet: bool,
 ) -> paksmith_core::Result<()> {
     let key = crate::commands::key_resolve::resolve_pak_key(&args.path, aes_key, game, detect)?;
-    let reader = match &key {
-        Some(k) => PakReader::open_with_key(&args.path, k.clone())?,
-        None => PakReader::open(&args.path)?,
-    };
+    let reader = paksmith_core::container::open(&args.path, key.as_ref())?;
 
     let pattern = crate::path_util::compile_opt_glob_arg("--filter", args.filter.as_deref())?;
     let filtered: Vec<_> = reader
