@@ -107,6 +107,11 @@ pub(crate) struct AddArgs {
     /// Stored as-given; absolute paths recommended.
     #[arg(long, value_name = "PATH")]
     pub(crate) mappings: Option<std::path::PathBuf>,
+    /// Glob pattern locating this game's archives (repeatable, #655).
+    /// Absolute patterns stand alone; relative patterns resolve against
+    /// the `--detect` install dir at run time. Stored as-given.
+    #[arg(long = "pak-path", value_name = "GLOB")]
+    pub(crate) pak_paths: Vec<String>,
 }
 
 #[derive(Args)]
@@ -172,7 +177,7 @@ fn add(a: &AddArgs) -> paksmith_core::Result<u8> {
             keys: BTreeMap::new(),
             detect: None,
             mappings: a.mappings.clone().map(MappingsSource::Path),
-            pak_paths: Vec::new(),
+            pak_paths: a.pak_paths.clone(),
         },
     );
     store.save()?;
@@ -240,6 +245,15 @@ fn show(a: &ShowArgs) -> paksmith_core::Result<u8> {
             println!("mappings: {}", path.display());
         }
         None => println!("mappings: -"),
+    }
+    // Not key material — safe to show unredacted (mappings precedent).
+    if p.pak_paths.is_empty() {
+        println!("pak_paths: -");
+    } else {
+        println!("pak_paths:");
+        for pattern in &p.pak_paths {
+            println!("  {pattern}");
+        }
     }
     println!("keys:");
     for (guid, key) in &p.keys {

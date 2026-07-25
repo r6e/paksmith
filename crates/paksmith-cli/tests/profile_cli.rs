@@ -28,6 +28,58 @@ fn test_keypair() -> (SigningKey, String) {
 }
 
 #[test]
+fn add_with_pak_paths_shows_patterns() {
+    // #655: `profile add --pak-path <glob>` (repeatable) persists the
+    // patterns in order and `profile show` renders them unredacted
+    // (not key material — mappings precedent).
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args([
+            "profile",
+            "add",
+            "hero",
+            "--name",
+            "Hero",
+            "--pak-path",
+            "/games/hero/Paks/*.pak",
+            "--pak-path",
+            "Content/Paks/patch/*.pak",
+        ])
+        .assert()
+        .success();
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "hero"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("pak_paths:") && stdout.contains("/games/hero/Paks/*.pak"),
+        "show must render the patterns: {stdout}"
+    );
+    let first = stdout.find("/games/hero/Paks/*.pak").unwrap();
+    let second = stdout.find("Content/Paks/patch/*.pak").unwrap();
+    assert!(first < second, "patterns render in stored order: {stdout}");
+}
+
+#[test]
+fn show_without_pak_paths_renders_dash() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "plain", "--name", "Plain"])
+        .assert()
+        .success();
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "plain"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("pak_paths: -"),
+        "absent patterns render as a dash: {stdout}"
+    );
+}
+
+#[test]
 fn add_with_mappings_shows_source_path() {
     // #651: `profile add --mappings <path>` persists the source and
     // `profile show` renders it unredacted (it is not key material).
