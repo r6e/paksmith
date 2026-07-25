@@ -43,7 +43,7 @@ Core is the load-bearing crate. CLI and GUI are thin presentation-layer frontend
   - `container/iostore/` — IoStore container reader (planned, Phase 8)
 - `asset/` — UAsset deserialization. Structural header parser (`PackageSummary`, `NameTable`, `ImportTable`, `ExportTable`, `Package`, `AssetContext`) + the full property system (`asset/property/`: tagged-property iteration, primitives, containers, object refs, unversioned/`.usmap` schema-driven props), typed engine structs (`asset/structs/`, Phase 3c), `.uexp` companion stitching, `FByteBulkData` resolution (`bulk_data.rs`), and typed export readers (`asset/exports/`: texture, mesh, audio, data-table).
 - `export/` — format handlers implementing `FormatHandler` trait (Phase 3, shipped): PNG (texture), glTF (static + skeletal mesh), WAV/OGG (audio), CSV/JSON (data table), registered in a `HandlerRegistry`.
-- `profile/` — game profile management and registry (planned, Phase 5)
+- `profile/` — game profile management, key store, remote registry, detection, mappings sources (Phase 5, shipped)
 - `error.rs` — `PaksmithError` + typed fault sub-enums with wire-stable `Display` impls
 - `digest.rs` — `Sha1Digest` (byte-equality, NOT constant-time)
 - `testing/` — `__test_utils`-feature-gated test infrastructure (`v10` fixtures, `oom` injection seams)

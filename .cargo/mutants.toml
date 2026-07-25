@@ -160,9 +160,12 @@ exclude_re = [
     # (c) Env/IO resolution wrappers shared with the CLI. `now_unix` (a trivial
     # SystemTime read, in both core and the CLI), `load_cache_lenient`, the
     # `available_profiles`/`detect_matches` loaders, the GUI `available`, and
-    # `resolve_pak_key`'s store->cache->fetch->detect orchestration all read
-    # `PAKSMITH_CONFIG_DIR` / the network / a pak file. Their PURE inner logic
-    # (`available_in`, `detect_in`, `resolve_within`) is unit-tested; the
+    # the store->cache->fetch->detect orchestration — which #651 moved from
+    # `resolve_pak_key` into `resolve_pak_context` (`resolve_pak_key` is now a
+    # one-line delegate) — all read `PAKSMITH_CONFIG_DIR` / the network / a
+    # pak file. Their PURE inner logic (`available_in`, `detect_in`,
+    # `resolve_within`, `unique_detect_id`, `named_profile_mappings_in`,
+    # `detect_profile_mappings_in`, `profile_mappings_in`) is unit-tested; the
     # wrappers are exercised by the `paksmith-cli` integration suite, but
     # cargo-mutants scopes tests to the mutated package so those cross-crate
     # kills aren't credited — identical to the existing `ProfileStore::load` /
@@ -173,7 +176,7 @@ exclude_re = [
     'replace available_profiles -> .+ with Ok\(vec!\[\]\)',
     'replace detect_matches -> .+ with Ok\(vec!\[\]\)',
     'replace available -> Vec<ProfileChoice> with vec!\[\]',
-    '(delete ! in resolve_pak_key|delete match arm [01] in resolve_pak_key|replace && with \|\| in resolve_pak_key)',
+    '(delete ! in resolve_pak_(key|context)|delete match arm [01] in resolve_pak_(key|context)|replace && with \|\| in resolve_pak_(key|context))',
     #
     # (d) The open-pipeline Locked-detection guard on the detect-dir path
     # (`run_with_detect`). The no-key->Locked and wrong-key->Core paths are

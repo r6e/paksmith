@@ -1,18 +1,9 @@
 #![allow(missing_docs)]
 
-use std::path::PathBuf;
 use std::process::Command;
 
-fn fixture_path(name: &str) -> PathBuf {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    PathBuf::from(manifest)
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("tests/fixtures")
-        .join(name)
-}
+mod common;
+use common::fixture_path;
 
 #[test]
 fn inspect_emits_valid_json_with_expected_fields() {
@@ -204,6 +195,45 @@ fn inspect_mappings_nonexistent_file_errors() {
     assert!(
         stderr.contains("/nonexistent/path/Hero.usmap"),
         "stderr must include the offending path, got: {stderr}"
+    );
+}
+
+/// #651: a mappings-bearing profile selected via `--game` supplies the
+/// usmap to inspect with no explicit `--mappings` — the unversioned
+/// asset decodes to a property tree instead of exiting 2 with
+/// `UnversionedWithoutMappings`.
+#[test]
+fn inspect_game_profile_supplies_mappings() {
+    let pak = fixture_path("real_v8b_unversioned.pak");
+    assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
+    let usmap = fixture_path("external_minimal_v0.usmap");
+
+    let config_dir = tempfile::tempdir().unwrap();
+    common::seed_hero_profile(config_dir.path(), &usmap);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .env("PAKSMITH_CONFIG_DIR", config_dir.path())
+        .args([
+            "--format",
+            "json",
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Heroes/Hero.uasset",
+            "--game",
+            "hero",
+        ])
+        .output()
+        .expect("run paksmith inspect --game hero");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "profile mappings must decode the unversioned asset; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Health") && stdout.contains("Speed"),
+        "decoded unversioned properties must appear in the JSON: {stdout}"
     );
 }
 

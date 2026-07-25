@@ -110,6 +110,28 @@ impl KeyGuid {
     }
 }
 
+/// Where a profile's `.usmap` mappings come from (SPEC
+/// `GameProfile.mappings`, issue #651).
+///
+/// Currently only a local filesystem path. Registry-distributed usmap
+/// (fetching the file from the remote profile registry) is a planned
+/// follow-up — it needs a registry schema-version story first:
+/// [`registry::RegistryProfile`] is `deny_unknown_fields` AND the
+/// registry document is ed25519-signed, so any new field there
+/// invalidates every already-signed document. Adding a variant HERE
+/// stays additive for the local store (serde externally-tagged enums
+/// reject unknown variants on OLD binaries, so new variants ship with
+/// a store-format note).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MappingsSource {
+    /// A `.usmap` file on the local filesystem, serialized in TOML as
+    /// `mappings = { path = "…" }`. Relative paths resolve against the
+    /// process working directory; profiles are user-authored, so
+    /// absolute paths are recommended.
+    Path(std::path::PathBuf),
+}
+
 /// One game's stored keys + light metadata. The profile's id is the
 /// [`ProfileStore`] map key, not a field here.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -126,6 +148,12 @@ pub struct GameProfile {
     /// Optional auto-detection rules (matched against a game install dir).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detect: Option<detection::DetectRules>,
+    /// Optional `.usmap` mappings source, consumed when this profile is
+    /// selected (`--game`/`--detect`): supplies the schema data needed to
+    /// decode unversioned-property assets. An explicit `--mappings` on
+    /// the command line wins over this (issue #651).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mappings: Option<MappingsSource>,
 }
 
 /// The whole on-disk document.
@@ -256,6 +284,7 @@ mod tests {
                 engine_version: None,
                 keys: BTreeMap::new(),
                 detect: None,
+                mappings: None,
             },
         );
         let cache = RegistryCache {
@@ -401,6 +430,7 @@ mod tests {
             engine_version: None,
             keys,
             detect: None,
+            mappings: None,
         };
         assert_eq!(
             resolve_key(&p, Some(&missing)).unwrap().to_hex(),
@@ -420,6 +450,7 @@ mod tests {
             engine_version: None,
             keys,
             detect: None,
+            mappings: None,
         };
         // exact GUID hit
         assert_eq!(resolve_key(&p, Some(g.as_bytes())).unwrap().to_hex(), K1);
@@ -436,6 +467,7 @@ mod tests {
             engine_version: None,
             keys: BTreeMap::new(),
             detect: None,
+            mappings: None,
         };
         assert!(resolve_key(&p2, Some(g.as_bytes())).is_none());
         // I3: map has only a non-zero GUID key; pak_guid = None → zero-default
@@ -447,6 +479,7 @@ mod tests {
             engine_version: None,
             keys: only_nonzero_keys,
             detect: None,
+            mappings: None,
         };
         assert!(
             resolve_key(&p3, None).is_none(),
@@ -466,6 +499,7 @@ mod tests {
                 engine_version: Some("5.3".into()),
                 keys,
                 detect: None,
+                mappings: None,
             },
         );
         let store = ProfileStore { profiles };
@@ -483,6 +517,54 @@ mod tests {
     }
 
     #[test]
+    fn store_toml_roundtrip_includes_mappings_source() {
+        let mut profiles = BTreeMap::new();
+        let _ = profiles.insert(
+            "hero".to_string(),
+            GameProfile {
+                name: "Hero".into(),
+                engine_version: None,
+                keys: BTreeMap::new(),
+                detect: None,
+                mappings: Some(MappingsSource::Path("/maps/hero.usmap".into())),
+            },
+        );
+        let store = ProfileStore { profiles };
+        let text = toml::to_string_pretty(&store).unwrap();
+        assert!(
+            text.contains("path = ") && text.contains("hero.usmap"),
+            "mappings source serialized as a path table: {text}"
+        );
+        let back: ProfileStore = toml::from_str(&text).unwrap();
+        assert_eq!(
+            back.profiles["hero"].mappings,
+            Some(MappingsSource::Path("/maps/hero.usmap".into())),
+            "mappings source round-trips"
+        );
+    }
+
+    #[test]
+    fn store_without_mappings_key_still_loads() {
+        // Backward compat: pre-#651 stores have no `mappings` key.
+        let text = r#"
+[profiles.old]
+name = "Old Game"
+engine_version = "4.27"
+
+[profiles.old.keys]
+"#;
+        let back: ProfileStore = toml::from_str(text).unwrap();
+        assert_eq!(back.profiles["old"].mappings, None);
+        // And a store with the field serializes WITHOUT it when None —
+        // skip_serializing_if keeps old-shape documents stable.
+        let out = toml::to_string_pretty(&back).unwrap();
+        assert!(
+            !out.contains("mappings"),
+            "None mappings must not serialize: {out}"
+        );
+    }
+
+    #[test]
     fn key_serialized_as_lowercase_hex_not_debug() {
         // AesKey Debug is redacted; the store must contain the real hex, never "<redacted>".
         let mut keys = BTreeMap::new();
@@ -495,6 +577,7 @@ mod tests {
                 engine_version: None,
                 keys,
                 detect: None,
+                mappings: None,
             },
         );
         let text = toml::to_string_pretty(&ProfileStore { profiles }).unwrap();

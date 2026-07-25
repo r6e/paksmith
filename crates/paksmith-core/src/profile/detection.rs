@@ -313,6 +313,7 @@ mod tests {
                     substring: "Game".into(),
                 }],
             }),
+            mappings: None,
         };
         let text = toml::to_string_pretty(&p).unwrap();
         assert!(text.contains("require_paths"));
@@ -329,6 +330,7 @@ mod tests {
             engine_version: None,
             keys: BTreeMap::default(),
             detect: None,
+            mappings: None,
         };
         let text = toml::to_string_pretty(&p).unwrap();
         assert!(

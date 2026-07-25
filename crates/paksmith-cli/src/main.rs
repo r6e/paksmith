@@ -32,13 +32,16 @@ struct Cli {
     #[arg(long, global = true, value_name = "HEX")]
     aes_key: Option<String>,
 
-    /// Resolve the AES key from a stored profile id (see `paksmith profile`).
-    /// Ignored if `--aes-key` is also given (explicit key wins).
+    /// Resolve the AES key (and, for inspect/extract, the profile's
+    /// mappings) from a stored profile id (see `paksmith profile`). With
+    /// `--aes-key`, the explicit key wins but the profile still supplies
+    /// mappings — and the id must exist.
     #[arg(long, global = true, value_name = "ID")]
     game: Option<String>,
 
-    /// Auto-detect the game (and its key) from an install directory. Ignored if
-    /// `--aes-key` or `--game` is given.
+    /// Auto-detect the game (key + mappings) from an install directory.
+    /// `--game` wins over `--detect`; with `--aes-key`, detection is
+    /// best-effort and only supplies mappings.
     #[arg(long, global = true, value_name = "DIR")]
     detect: Option<std::path::PathBuf>,
 

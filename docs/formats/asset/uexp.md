@@ -143,9 +143,9 @@ per-export payload reader.
 **Status:** `complete`.
 
 **Public surface:**
-- `Package::read_from(uasset: &[u8], uexp: Option<&[u8]>, mappings: Option<&Usmap>, asset_path: &str) -> Result<Self>` —
+- `Package::read_from(uasset: &[u8], uexp: Option<&[u8]>, mappings: Option<&Arc<Usmap>>, asset_path: &str) -> Result<Self>` —
   caller supplies both halves; `uexp` is `None` for monolithic, `Some` for split.
-- `Package::read_from_pak(pak_path, virtual_path, mappings: Option<&Usmap>) -> Result<Self>` —
+- `Package::read_from_pak(pak_path, virtual_path, mappings: Option<&Arc<Usmap>>) -> Result<Self>` —
   convenience wrapper that resolves the `.uexp` companion via the pak
   reader (see [`companion-resolution.md`](companion-resolution.md)).
 

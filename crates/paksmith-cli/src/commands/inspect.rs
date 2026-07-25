@@ -17,17 +17,17 @@
 //!
 //! Pass `--mappings <file.usmap>` to decode `.usmap`-driven
 //! unversioned assets that would otherwise reject with
-//! `UnversionedWithoutMappings`.
+//! `UnversionedWithoutMappings` — or select a mappings-bearing profile
+//! with `--game`/`--detect` (an explicit `--mappings` wins; see
+//! `commands::mappings_resolve`).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
 
 use paksmith_core::AesKey;
-use paksmith_core::PaksmithError;
 use paksmith_core::asset::Package;
-use paksmith_core::asset::mappings::Usmap;
 use paksmith_core::container::pak::PakReader;
 
 use crate::output::OutputFormat;
@@ -41,7 +41,8 @@ pub(crate) struct InspectArgs {
     /// Optional `.usmap` mappings file. Required for assets whose
     /// `PKG_UnversionedProperties` flag is set (UE 4.25+ cooked
     /// content; common in both UE4 and UE5 shipping games).
-    /// Versioned (tagged-property) assets parse without it.
+    /// Versioned (tagged-property) assets parse without it. Wins over
+    /// the mappings source of a `--game`/`--detect`-selected profile.
     #[arg(long, value_name = "PATH")]
     pub(crate) mappings: Option<PathBuf>,
     /// Emit only the value at this dotted path (e.g. `summary.guid`,
@@ -55,22 +56,14 @@ pub(crate) struct InspectArgs {
     pub(crate) export: Option<String>,
 }
 
-/// Load a `.usmap` mappings file from disk via [`Usmap::from_path`],
-/// rewrapping the library's `PaksmithError::Io` / `MappingsParse` into
-/// `PaksmithError::InvalidArgument { arg: "--mappings", ... }` so the
-/// user gets the offending CLI arg name in the error message.
-fn load_mappings(path: &Path) -> paksmith_core::Result<Usmap> {
-    Usmap::from_path(path).map_err(|e| PaksmithError::InvalidArgument {
-        arg: "--mappings",
-        reason: e.to_string(),
-    })
-}
-
 /// Run the `inspect` subcommand.
 ///
-/// Loads any `--mappings`, parses the package, then delegates all output
-/// assembly — format resolution, `--export` selection, `--path` drilling,
-/// and the `--format table` human tree view — to [`crate::inspect::emit`].
+/// Resolves the pak-open context (key + any profile mappings source),
+/// loads the effective usmap (explicit `--mappings` wins — see
+/// [`crate::commands::mappings_resolve`]), parses the package, then
+/// delegates all output assembly — format resolution, `--export`
+/// selection, `--path` drilling, and the `--format table` human tree
+/// view — to [`crate::inspect::emit`].
 pub(crate) fn run(
     args: &InspectArgs,
     format: OutputFormat,
@@ -78,9 +71,13 @@ pub(crate) fn run(
     game: Option<&str>,
     detect: Option<&std::path::Path>,
 ) -> paksmith_core::Result<()> {
-    let usmap = args.mappings.as_deref().map(load_mappings).transpose()?;
-    let key = crate::commands::key_resolve::resolve_pak_key(&args.pak, aes_key, game, detect)?;
-    let reader = Arc::new(match &key {
+    let ctx = crate::commands::key_resolve::resolve_pak_context(&args.pak, aes_key, game, detect)?;
+    let usmap = crate::commands::mappings_resolve::resolve_usmap(
+        args.mappings.as_deref(),
+        ctx.mappings.as_ref(),
+        crate::commands::mappings_resolve::mappings_selector(game),
+    )?;
+    let reader = Arc::new(match &ctx.key {
         Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
         None => PakReader::open(&args.pak)?,
     });

@@ -26,8 +26,10 @@ mod tests {
     };
     use proptest::prelude::*;
 
-    fn hero_usmap() -> Usmap {
-        Usmap::from_bytes(&build_minimal_usmap_bytes()).expect("Usmap::from_bytes failed")
+    fn hero_usmap() -> std::sync::Arc<Usmap> {
+        std::sync::Arc::new(
+            Usmap::from_bytes(&build_minimal_usmap_bytes()).expect("Usmap::from_bytes failed"),
+        )
     }
 
     fn prop_tree(pkg: &Package) -> &[Property] {
@@ -157,7 +159,9 @@ mod tests {
     /// MapProperty pre-#639; now that Map/Set decode, 27 is the sentinel.)
     #[test]
     fn partial_tree_stops_on_unsupported_type_byte() {
-        let usmap = Usmap::from_bytes(&build_hero_usmap_bytes(27u8)).expect("Usmap parse");
+        let usmap = std::sync::Arc::new(
+            Usmap::from_bytes(&build_hero_usmap_bytes(27u8)).expect("Usmap parse"),
+        );
         let asset_bytes = build_minimal_unversioned_uasset_bytes();
         let pkg = Package::read_from(&asset_bytes, None, Some(&usmap), "test/Hero.uasset")
             .expect("Package::read_from should return partial tree, not Err");
@@ -191,7 +195,7 @@ mod tests {
     fn enum_property_decodes_in_range_ordinal() {
         let usmap_bytes =
             build_hero_usmap_with_enum_speed("HeroDifficulty", &["Easy", "Normal", "Hard"]);
-        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+        let usmap = std::sync::Arc::new(Usmap::from_bytes(&usmap_bytes).expect("Usmap parse"));
 
         let payload = fragment_health_and_u8_speed(0x01); // Speed = ordinal 1 → "Normal"
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27_unversioned("Hero", payload);
@@ -224,7 +228,7 @@ mod tests {
     fn enum_property_falls_back_on_out_of_range_ordinal() {
         let usmap_bytes =
             build_hero_usmap_with_enum_speed("HeroDifficulty", &["Easy", "Normal", "Hard"]);
-        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+        let usmap = std::sync::Arc::new(Usmap::from_bytes(&usmap_bytes).expect("Usmap parse"));
 
         // Ordinal 99 is past the end of the 3-value enum.
         let payload = fragment_health_and_u8_speed(0x63); // 99 → out of range
@@ -299,7 +303,7 @@ mod tests {
             4,
             &[(3u16, "Health", 2u8)], // IntProperty
         );
-        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+        let usmap = std::sync::Arc::new(Usmap::from_bytes(&usmap_bytes).expect("Usmap parse"));
 
         // Fragment: skip=3, value=1, is_last → first_num=3 covers slot 3.
         let mut payload: Vec<u8> = Vec::new();
@@ -337,7 +341,7 @@ mod tests {
                 (4u16, "Gamma", 2u8),
             ],
         );
-        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+        let usmap = std::sync::Arc::new(Usmap::from_bytes(&usmap_bytes).expect("Usmap parse"));
 
         // Three fragments: (skip=0, val=1), (skip=1, val=1), (skip=1, val=1, last)
         // → first_num = 0, 2, 4 in cumulative order.
@@ -400,7 +404,7 @@ mod tests {
                 (4u16, "Gamma", 2u8),
             ],
         );
-        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+        let usmap = std::sync::Arc::new(Usmap::from_bytes(&usmap_bytes).expect("Usmap parse"));
 
         let mut payload: Vec<u8> = Vec::new();
         payload.extend_from_slice(&fragment_bytes(0, 1, false));
@@ -442,7 +446,7 @@ mod tests {
     #[test]
     fn nested_struct_with_missing_schema_returns_partial_tree() {
         let usmap_bytes = build_hero_usmap_with_struct_speed("StatsBlock");
-        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+        let usmap = std::sync::Arc::new(Usmap::from_bytes(&usmap_bytes).expect("Usmap parse"));
 
         // Payload: fragment(value_num=2) + Health i32. No struct body
         // — the depth-1 error fires before reading the Struct slot's
@@ -527,7 +531,7 @@ mod tests {
 
             let usmap_bytes =
                 build_sparse_schema_usmap_bytes("Sparse", prop_count, &triples);
-            let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+            let usmap = std::sync::Arc::new(Usmap::from_bytes(&usmap_bytes).expect("Usmap parse"));
 
             // FUnversionedHeader fragments addressing the sorted
             // slots. Cumulative-skip encoding: each fragment's

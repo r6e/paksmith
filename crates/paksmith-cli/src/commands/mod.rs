@@ -3,6 +3,7 @@ pub(crate) mod extract;
 pub(crate) mod inspect;
 pub(crate) mod key_resolve;
 pub(crate) mod list;
+pub(crate) mod mappings_resolve;
 pub(crate) mod profile;
 pub(crate) mod search;
 

@@ -13,6 +13,7 @@ use indicatif::ProgressBar;
 use rayon::prelude::*;
 
 use paksmith_core::asset::Package;
+use paksmith_core::asset::mappings::Usmap;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::export::HandlerRegistry;
@@ -33,6 +34,10 @@ pub(crate) struct ExtractJob<'a> {
     pub(crate) reader: Arc<PakReader>,
     pub(crate) registry: &'a HandlerRegistry,
     pub(crate) cfg: &'a ExtractConfig,
+    /// Effective `.usmap` mappings (explicit `--mappings` or the
+    /// selected profile's source — #651), shared across all workers
+    /// (see `Package::read_from_reader` for the `&Arc` rationale).
+    pub(crate) mappings: Option<Arc<Usmap>>,
 }
 
 impl ExtractJob<'_> {
@@ -50,7 +55,8 @@ impl ExtractJob<'_> {
     }
 
     fn extract_asset(&self, entry_path: &str) -> EntryOutcome {
-        let pkg = match Package::read_from_reader(&self.reader, entry_path, None) {
+        let pkg = match Package::read_from_reader(&self.reader, entry_path, self.mappings.as_ref())
+        {
             Ok(p) => p,
             Err(e) => return failed(entry_path, e),
         };

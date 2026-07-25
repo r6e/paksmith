@@ -57,8 +57,9 @@ proptest! {
         bytes in arb_parser_input()
     ) {
         let usmap_bytes = build_empty_schema_usmap();
-        let usmap = Usmap::from_bytes(&usmap_bytes)
-            .expect("static minimal usmap must parse");
+        let usmap = std::sync::Arc::new(
+            Usmap::from_bytes(&usmap_bytes).expect("static minimal usmap must parse"),
+        );
         let _ = Package::read_from(&bytes, None, Some(&usmap), "fuzz.uasset");
     }
 }

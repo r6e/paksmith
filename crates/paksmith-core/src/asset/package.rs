@@ -481,7 +481,7 @@ impl Package {
     pub fn read_from(
         uasset: &[u8],
         uexp: Option<&[u8]>,
-        mappings: Option<&Usmap>,
+        mappings: Option<&Arc<Usmap>>,
         asset_path: &str,
     ) -> crate::Result<Self> {
         // Non-pak callers (unit tests, raw-byte ingest) have no
@@ -517,7 +517,7 @@ impl Package {
     fn read_from_inner<U, T>(
         uasset: &[u8],
         uexp: Option<&[u8]>,
-        mappings: Option<&Usmap>,
+        mappings: Option<&Arc<Usmap>>,
         asset_path: &str,
         ubulk_loader: U,
         uptnl_loader: T,
@@ -716,15 +716,17 @@ impl Package {
         // tagged-property iterator per export. Tables share the
         // Arcs owned by `Package` (#369) — refcount bumps replace
         // the previous deep-clone-twice pattern. The optional
-        // `Usmap` is `Arc`-wrapped once here so downstream clones
-        // of the context are refcount-cheap.
+        // `Usmap` arrives as `Option<&Arc<Usmap>>` (issue #651: batch
+        // extract shares ONE parsed usmap across all rayon workers —
+        // a by-ref `&Usmap` here forced a full deep clone per package
+        // read), so sharing is a refcount bump.
         let ctx = AssetContext {
             names: Arc::clone(&names),
             imports: Arc::clone(&imports),
             exports: Arc::clone(&exports),
             version: summary.version,
             custom_versions: Arc::new(summary.custom_versions.clone()),
-            mappings: mappings.map(|m| Arc::new(m.clone())),
+            mappings: mappings.map(Arc::clone),
             bulk_resolver: Some(Arc::clone(&resolver)),
             soft_object_paths_indexed: summary.soft_object_paths_indexed(),
             data_resources: Arc::clone(&data_resources),
@@ -879,7 +881,7 @@ impl Package {
     pub fn read_from_pak<P: AsRef<std::path::Path>>(
         pak_path: P,
         virtual_path: &str,
-        mappings: Option<&Usmap>,
+        mappings: Option<&Arc<Usmap>>,
     ) -> crate::Result<Self> {
         // Phase 3b: wrap `PakReader` in `Arc` so the companion-loader
         // closures can capture cloned refcounted handles. `PakReader`
@@ -910,7 +912,7 @@ impl Package {
     pub fn read_from_reader(
         reader: &Arc<crate::container::pak::PakReader>,
         virtual_path: &str,
-        mappings: Option<&Usmap>,
+        mappings: Option<&Arc<Usmap>>,
     ) -> crate::Result<Self> {
         use crate::container::ContainerReader;
 
@@ -1985,7 +1987,7 @@ mod tests {
         // dropping them would silently misparse unversioned assets
         // downstream.
         use crate::testing::usmap::build_minimal_usmap_bytes;
-        let usmap = Usmap::from_bytes(&build_minimal_usmap_bytes()).expect("Usmap parse");
+        let usmap = Arc::new(Usmap::from_bytes(&build_minimal_usmap_bytes()).expect("Usmap parse"));
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
         let pkg = Package::read_from(&bytes, None, Some(&usmap), "test.uasset").unwrap();
         let ctx = pkg.context();

@@ -149,6 +149,7 @@ mod tests {
                 engine_version: Some("5.3".into()),
                 keys,
                 detect: None,
+                mappings: None,
             },
         );
         ProfileStore { profiles }

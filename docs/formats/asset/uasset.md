@@ -75,7 +75,7 @@ across UE versions due to conditional reads; the canonical sequence (UE
 | → varies | variable | — | `custom_versions` | `FCustomVersion[]`[^3] | See [`primitive/fcustom-version.md`](../primitive/fcustom-version.md). |
 | → varies | 4 | LE | `total_header_size` | `i32` | Total byte length of the header region (everything before payloads). Capped at 256 MiB by paksmith. |
 | → varies | variable | — | `folder_name` | `FString`[^4] | Usually `"None"` for cooked content. |
-| → varies | 4 | LE | `package_flags` | `u32` | `EPackageFlags` mask. `PKG_FilterEditorOnly = 0x8000_0000` set for cooked. `PKG_UnversionedProperties = 0x2000` requires the caller to supply a `mappings: Option<&Usmap>` schema. |
+| → varies | 4 | LE | `package_flags` | `u32` | `EPackageFlags` mask. `PKG_FilterEditorOnly = 0x8000_0000` set for cooked. `PKG_UnversionedProperties = 0x2000` requires the caller to supply a `mappings: Option<&Arc<Usmap>>` schema. |
 | → varies | 4 | LE | `name_count` | `i32` | Number of rows in the name table. |
 | → varies | 4 | LE | `name_offset` | `i32` | Byte offset of the name-table region. |
 | (UE5 ≥ 1008) | 4 | LE | `soft_object_paths_count` | `Option<i32>` | UE5 1008+ only. |
@@ -311,7 +311,7 @@ policy.
     `unreal_asset` oracle's version enum ends at 1009.
   - **`PKG_UnversionedProperties` requires mappings.** Unversioned
     packages are decoded against a `.usmap` schema supplied via the
-    `mappings: Option<&Usmap>` parameter (Phase 2f's loader shipped).
+    `mappings: Option<&Arc<Usmap>>` parameter (Phase 2f's loader shipped).
     Parsing without mappings surfaces as
     `AssetParseFault::UnversionedWithoutMappings`. CUE4Parse and
     unreal_asset use the same mappings-driven approach.
@@ -343,7 +343,7 @@ covered in the planned property family docs under
 **Public surface:**
 - `pub struct Package` — `read_from(uasset, uexp, mappings, asset_path)`,
   `read_from_pak(pak_path, virtual_path, mappings)`, `context()`. The
-  `mappings: Option<&Usmap>` argument is the unversioned-property schema
+  `mappings: Option<&Arc<Usmap>>` argument is the unversioned-property schema
   loader (Phase 2f).
 - `pub struct PackageSummary` — every field above as `pub`.
 - `pub struct ObjectImport` — every field above as `pub`.

@@ -146,9 +146,11 @@ pub async fn load(reader: Arc<PakReader>, path: String) -> AssetLoad {
     let parsed = if let Some(e) = read_err {
         Err(e) // F2: surface the real read error
     } else if should_attempt_parse(&path) {
-        // `mappings = None`: 7a does not load `.usmap`. Unversioned assets that
-        // require a mapping return `UnversionedWithoutMappings`, surfaced here
-        // as a stringified parse error → Properties view shows the reason.
+        // `mappings = None`: the GUI does not load `.usmap` yet — issue
+        // #706 (see the seam note in `task/open.rs`). Unversioned assets
+        // that require a mapping return `UnversionedWithoutMappings`,
+        // surfaced here as a stringified parse error → Properties view
+        // shows the reason.
         Package::read_from_reader(&reader, &path, None)
             .map(std::sync::Arc::new)
             .map_err(|e| e.to_string())

@@ -214,12 +214,12 @@ coverage of the surface this doc claims, consistent with the
 inventory and the doc-level status block.
 
 **Public surface:**
-- `Package::read_from(uasset: &[u8], uexp: Option<&[u8]>, mappings: Option<&Usmap>, asset_path: &str) -> Result<Self>` —
+- `Package::read_from(uasset: &[u8], uexp: Option<&[u8]>, mappings: Option<&Arc<Usmap>>, asset_path: &str) -> Result<Self>` —
   in-memory flow with explicit buffers. The bulk-data resolver
   inside the resulting `Package` carries stub loaders that fire
   `MissingCompanionFile` on first matching-tier resolve — there's
   no companion source for the raw-bytes path.
-- `Package::read_from_pak<P: AsRef<Path>>(pak_path: P, virtual_path: &str, mappings: Option<&Usmap>) -> Result<Self>` —
+- `Package::read_from_pak<P: AsRef<Path>>(pak_path: P, virtual_path: &str, mappings: Option<&Arc<Usmap>>) -> Result<Self>` —
   pak-archive flow. Wraps `PakReader` in `Arc` and threads
   `Arc<PakReader>`-backed loader closures into the bulk-data
   resolver via the `pak_companion_loader` helper.
