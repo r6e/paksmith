@@ -275,7 +275,12 @@ mod tests {
 
     #[test]
     fn invalid_glob_syntax_is_invalid_argument() {
-        let err = expand_patterns("hero", &["/x/[".to_string()], None).unwrap_err();
+        // Built from a tempdir so the pattern is ABSOLUTE on every
+        // platform — `/x/[` is relative on Windows (no drive prefix)
+        // and would take the needs-`--detect` branch there instead.
+        let dir = tempfile::tempdir().unwrap();
+        let pat = dir.path().join("[").to_string_lossy().into_owned();
+        let err = expand_patterns("hero", &[pat], None).unwrap_err();
         assert!(
             matches!(
                 &err,

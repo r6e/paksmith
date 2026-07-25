@@ -207,6 +207,50 @@ fn extract_over_profile_paks_merges_summary() {
 }
 
 #[test]
+fn inspect_asset_absent_from_every_profile_archive_is_not_found() {
+    // Kills `delete match arm 0` in select_containing_pak: zero
+    // containing archives must surface EntryNotFound, not fall through
+    // to the multiple-archives ambiguity error.
+    let cfg = tempdir().unwrap();
+    let _install = seeded_install(cfg.path());
+    let out = paksmith(cfg.path())
+        .args(["--game", "hero", "inspect", "Game/Maps/Absent.uasset"])
+        .assert()
+        .failure()
+        .code(2);
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("Game/Maps/Absent.uasset") && !stderr.contains("multiple archives"),
+        "absent asset is not-found, never ambiguity: {stderr}"
+    );
+}
+
+#[test]
+fn single_archive_profile_mode_still_carries_source() {
+    // Kills `replace match guard explicit_path with true` in
+    // print_entry_groups: source presence is decided by MODE, not by
+    // archive count — a profile whose patterns match exactly one
+    // archive still emits per-row provenance.
+    let cfg = tempdir().unwrap();
+    let install = tempdir().unwrap();
+    let paks = install.path().join("Paks");
+    std::fs::create_dir_all(&paks).unwrap();
+    let _ = std::fs::copy(fixture("real_v8b_multi.pak"), paks.join("only.pak")).unwrap();
+    add_pak_path_profile(cfg.path(), "hero", &paks.join("*.pak").to_string_lossy());
+    let out = paksmith(cfg.path())
+        .args(["--game", "hero", "list", "--format", "json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let entries = doc["entries"].as_array().unwrap();
+    assert!(
+        !entries.is_empty() && entries.iter().all(|e| e["source"].is_string()),
+        "single-archive profile mode still attributes rows: {stdout}"
+    );
+}
+
+#[test]
 fn overlapping_archives_extract_without_spurious_failures() {
     // The UE base+patch layout: the same virtual path in two archives.
     // Pre-fix this produced a create_new per-entry failure (exit 1) for
