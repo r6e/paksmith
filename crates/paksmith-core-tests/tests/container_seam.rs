@@ -138,6 +138,31 @@ fn bulk_resolution_fires_companion_loader_through_dyn_reader() {
     );
 }
 
+/// The trait's `# Error identity contract`: an absent path surfaces as
+/// `EntryNotFound` — never a generic `Io` error — through the dyn
+/// handle, for both `read_entry` and `read_entry_to`. This is the
+/// identity `read_from_reader`'s companion detection relies on.
+#[test]
+fn absent_path_surfaces_entry_not_found_through_dyn_reader() {
+    let reader = dyn_map_reader();
+
+    let err = reader.read_entry("Game/Maps/Absent.uasset").unwrap_err();
+    assert!(
+        matches!(err, PaksmithError::EntryNotFound { .. }),
+        "read_entry on an absent path must surface EntryNotFound, got {err:?}"
+    );
+
+    let mut sink = Vec::new();
+    let err = reader
+        .read_entry_to("Game/Maps/Absent.uasset", &mut sink)
+        .unwrap_err();
+    assert!(
+        matches!(err, PaksmithError::EntryNotFound { .. }),
+        "read_entry_to on an absent path must surface EntryNotFound, got {err:?}"
+    );
+    assert!(sink.is_empty(), "nothing may be written for an absent path");
+}
+
 /// Acceptance (a): the `container::open` factory opens a real pak as
 /// `Arc<dyn ContainerReader>` with output identical to the direct
 /// constructor path.

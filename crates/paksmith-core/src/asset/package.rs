@@ -909,7 +909,11 @@ impl Package {
     /// threads (`ContainerReader` is `Send + Sync` by supertrait).
     ///
     /// # Errors
-    /// Same as [`Self::read_from_pak`], minus the open step.
+    /// Any [`PaksmithError`] from the container layer (find entry,
+    /// decompress) or the asset layer (parse). Companion semantics as in
+    /// [`Self::read_from_pak`]: a missing `.uexp` is silently treated as
+    /// a monolithic asset; missing `.ubulk` / `.uptnl` surface only if
+    /// bulk-data resolution actually needs them.
     pub fn read_from_reader<R: crate::container::ContainerReader + ?Sized + 'static>(
         reader: &Arc<R>,
         virtual_path: &str,
@@ -928,14 +932,12 @@ impl Package {
         };
 
         // Phase 3b: build the `.ubulk` / `.uptnl` loader closures via
-        // the shared `companion_loader` helper. Each opens the
-        // respective companion on first matching-tier resolution
-        // (via `BulkDataResolver`'s `OnceLock` cache). `EntryNotFound`
-        // from the container layer maps to the typed
-        // `MissingCompanionFile` fault so consumers get the bulk-data
-        // tier context (Ubulk / Uptnl), not an opaque "entry missing".
-        // Closures capture `Arc<R>` clones (NOT `&reader`) to satisfy
-        // the `'static + Send + Sync` bounds the resolver imposes for
+        // the shared `companion_loader` helper (see its doc for the
+        // `EntryNotFound` -> `MissingCompanionFile` mapping). Each opens
+        // the respective companion on first matching-tier resolution
+        // (via `BulkDataResolver`'s `OnceLock` cache). Closures capture
+        // `Arc<R>` clones (NOT `&reader`) to satisfy the
+        // `'static + Send + Sync` bounds the resolver imposes for
         // Phase 5 async / Phase 7 GUI thread crossings.
         let ubulk_loader = companion_loader(
             Arc::clone(reader),

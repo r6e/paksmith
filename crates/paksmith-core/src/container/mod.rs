@@ -288,8 +288,9 @@ const _: fn() = || {
 /// too, not just this factory): the pre-open key-GUID probe
 /// [`pak::PakReader::read_footer_guid`] — consumed by both
 /// `profile::resolve::resolve_pak_context` and the CLI `profile test`
-/// command — and the key-verification path in `profile`'s key test
-/// (`PakReader::open_with_key` + `verify_index`). IoStore stores the
+/// command — and the key-verification path
+/// `profile::key_test::test_key` (`PakReader::open_with_key` +
+/// `verify_index`). IoStore stores the
 /// same key GUID in the `.utoc` header, so Phase 8 wants
 /// format-dispatching siblings for both probe shapes next to this
 /// factory.
