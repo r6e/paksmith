@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use paksmith_core::container::pak::PakReader;
+use paksmith_core::container::ContainerReader;
 
 use crate::state::tree::Tree;
 
@@ -43,15 +43,17 @@ pub struct LoadedArchive {
     /// selected file. Directories have no entry here (they are synthetic nodes
     /// in the tree, not real archive entries).
     pub entries: BTreeMap<String, EntryMeta>,
-    /// The open pak reader, retained so asset tabs can read + parse entries on
-    /// demand. `Arc` so the async asset-load task can share it across the
-    /// `Task::perform` boundary (`PakReader` is `Send + Sync`).
-    pub reader: Arc<PakReader>,
+    /// The open container reader (type-erased — #654: the GUI never
+    /// names a concrete reader type), retained so asset tabs can read +
+    /// parse entries on demand. `Arc` so the async asset-load task can
+    /// share it across the `Task::perform` boundary (`ContainerReader`
+    /// is `Send + Sync` by supertrait).
+    pub reader: Arc<dyn ContainerReader>,
 }
 
-// `PakReader` does not implement `Debug`; format it as an opaque marker so
-// `LoadedArchive` (and therefore `Message`) keeps its `Debug` bound without
-// touching core.
+// `dyn ContainerReader` does not implement `Debug` (nor did the concrete
+// reader); format it as an opaque marker so `LoadedArchive` (and therefore
+// `Message`) keeps its `Debug` bound without touching core.
 impl std::fmt::Debug for LoadedArchive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoadedArchive")
@@ -60,7 +62,7 @@ impl std::fmt::Debug for LoadedArchive {
             .field("decrypted", &self.decrypted)
             .field("tree", &self.tree)
             .field("entries", &self.entries)
-            .field("reader", &"<PakReader>")
+            .field("reader", &"<ContainerReader>")
             .finish()
     }
 }
@@ -109,7 +111,7 @@ mod tests {
     async fn loaded_archive_debug_contains_struct_name_and_reader_sentinel() {
         // Kills `replace <impl std::fmt::Debug for LoadedArchive>::fmt -> std::fmt::Result
         // with Ok(Default::default())`: a no-op fmt would produce an empty string,
-        // not containing "LoadedArchive" or "<PakReader>".
+        // not containing "LoadedArchive" or "<ContainerReader>".
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -123,7 +125,7 @@ mod tests {
             "Debug must contain the struct name; got: {debug_str}"
         );
         assert!(
-            debug_str.contains("<PakReader>"),
+            debug_str.contains("<ContainerReader>"),
             "Debug must contain the reader sentinel; got: {debug_str}"
         );
     }

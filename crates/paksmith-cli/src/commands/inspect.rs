@@ -22,13 +22,11 @@
 //! `commands::mappings_resolve`).
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::Args;
 
 use paksmith_core::AesKey;
 use paksmith_core::asset::Package;
-use paksmith_core::container::pak::PakReader;
 
 use crate::output::OutputFormat;
 
@@ -78,10 +76,7 @@ pub(crate) fn run(
         ctx.mappings.as_ref(),
         crate::commands::mappings_resolve::mappings_selector(game),
     )?;
-    let reader = Arc::new(match &ctx.key {
-        Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
-        None => PakReader::open(&args.pak)?,
-    });
+    let reader = paksmith_core::container::open(&args.pak, ctx.key.as_ref())?;
     let pkg = Package::read_from_reader(&reader, &args.asset, usmap.as_ref())?;
     crate::inspect::emit(&pkg, args, format, quiet)
 }

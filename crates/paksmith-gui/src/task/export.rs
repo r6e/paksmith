@@ -10,8 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use paksmith_core::asset::Package;
-use paksmith_core::container::ContainerReader as _;
-use paksmith_core::container::pak::PakReader;
+use paksmith_core::container::ContainerReader;
 use paksmith_core::export::{ExportFormat, HandlerRegistry, available_formats, export_payload};
 
 use crate::state::export::{ExportChoice, default_export_filename};
@@ -21,7 +20,7 @@ use crate::state::export::{ExportChoice, default_export_filename};
 /// then offers Raw only). Builds `all_default_handlers()` so the offered formats
 /// match exactly what [`write_export`] can dispatch.
 #[allow(clippy::unused_async, reason = "async required by iced Task::perform")]
-pub async fn available(reader: Arc<PakReader>, path: String) -> Vec<ExportFormat> {
+pub async fn available(reader: Arc<dyn ContainerReader>, path: String) -> Vec<ExportFormat> {
     match Package::read_from_reader(&reader, &path, None) {
         Ok(pkg) => available_formats(&pkg, &HandlerRegistry::all_default_handlers()),
         Err(_) => Vec::new(),
@@ -42,7 +41,11 @@ pub enum ExportOutcome {
 /// Open a save dialog (default name from `src_path` + `choice`), then write the
 /// export to the chosen path. Untestable headlessly (the dialog); the work is
 /// [`write_export`].
-pub async fn run(reader: Arc<PakReader>, src_path: String, choice: ExportChoice) -> ExportOutcome {
+pub async fn run(
+    reader: Arc<dyn ContainerReader>,
+    src_path: String,
+    choice: ExportChoice,
+) -> ExportOutcome {
     let default_name = default_export_filename(&src_path, &choice);
     let Some(handle) = rfd::AsyncFileDialog::new()
         .set_file_name(default_name)
@@ -95,7 +98,7 @@ fn create_temp_exclusive(tmp: &Path) -> std::io::Result<std::fs::File> {
 /// `MoveFileExW` / `SetFileInformationByHandle`); per its docs only a *directory*
 /// `to` would error there, which a save-dialog file path never is.
 fn write_export(
-    reader: &Arc<PakReader>,
+    reader: &Arc<dyn ContainerReader>,
     src_path: &str,
     choice: &ExportChoice,
     dest: &Path,
@@ -124,7 +127,7 @@ fn write_export(
 /// parse** (it must not reuse `task::asset::load`, which caps at `HEX_BYTES_CAP`
 /// for the hex preview). Typed parses the package and runs the matching handler.
 fn write_payload_to(
-    reader: &Arc<PakReader>,
+    reader: &Arc<dyn ContainerReader>,
     src_path: &str,
     choice: &ExportChoice,
     mut file: std::fs::File,
@@ -190,7 +193,7 @@ mod tests {
 
     #[test]
     fn write_export_raw_writes_the_full_uncapped_entry() {
-        let reader = Arc::new(PakReader::open(fixture("real_v8b_uasset.pak")).unwrap());
+        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
         let path = "Game/Maps/Demo.uasset";
         let dest = tmp_dest("raw");
         write_export(&reader, path, &ExportChoice::Raw, &dest).expect("raw export");
@@ -209,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_export_typed_writes_handler_output() {
-        let reader = Arc::new(PakReader::open(fixture("real_v8b_uasset.pak")).unwrap());
+        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
         let path = "Game/Maps/Demo.uasset".to_string();
         // Discover a real format for this entry (also exercises `available`).
         let formats = available(reader.clone(), path.clone()).await;
@@ -237,7 +240,7 @@ mod tests {
     fn write_export_failure_leaves_destination_untouched() {
         // A failing export (non-existent source entry) must NOT clobber an
         // existing destination and must leave no `.part` temp behind.
-        let reader = Arc::new(PakReader::open(fixture("real_v8b_uasset.pak")).unwrap());
+        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
         let dest = tmp_dest("atomic");
         std::fs::write(&dest, b"ORIGINAL").unwrap();
         let err = write_export(
@@ -266,7 +269,7 @@ mod tests {
         // where `std::fs::rename` replaces an existing *file* destination
         // (MoveFileExW / SetFileInformationByHandle). Empirically refutes the
         // claim that rename errors when the destination exists.
-        let reader = Arc::new(PakReader::open(fixture("real_v8b_uasset.pak")).unwrap());
+        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
         let path = "Game/Maps/Demo.uasset";
         let dest = tmp_dest("overwrite");
         std::fs::write(&dest, b"STALE CONTENT").unwrap();
@@ -286,7 +289,7 @@ mod tests {
     fn write_export_leaves_unrelated_part_file_untouched() {
         // A pre-existing `<dest>.part` the user owns must never be truncated or
         // deleted: the temp name is process-unique, not a fixed `<dest>.part`.
-        let reader = Arc::new(PakReader::open(fixture("real_v8b_uasset.pak")).unwrap());
+        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
         let path = "Game/Maps/Demo.uasset";
         let dest = tmp_dest("unrelated");
         let mut legacy_part = dest.as_os_str().to_os_string();

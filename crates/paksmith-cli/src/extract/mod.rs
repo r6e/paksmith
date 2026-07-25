@@ -15,7 +15,6 @@ use rayon::prelude::*;
 use paksmith_core::asset::Package;
 use paksmith_core::asset::mappings::Usmap;
 use paksmith_core::container::ContainerReader;
-use paksmith_core::container::pak::PakReader;
 use paksmith_core::export::HandlerRegistry;
 
 use self::classify::{EntryClass, classify};
@@ -31,7 +30,9 @@ pub(crate) struct ExtractConfig {
 }
 
 pub(crate) struct ExtractJob<'a> {
-    pub(crate) reader: Arc<PakReader>,
+    /// Type-erased container handle (#654): the job never names a
+    /// concrete reader — everything it needs is on the trait.
+    pub(crate) reader: Arc<dyn ContainerReader>,
     pub(crate) registry: &'a HandlerRegistry,
     pub(crate) cfg: &'a ExtractConfig,
     /// Effective `.usmap` mappings (explicit `--mappings` or the
