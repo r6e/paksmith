@@ -142,50 +142,7 @@ pub async fn resolve_pak_context(
     detect: Option<&Path>,
 ) -> crate::Result<PakOpenContext> {
     if let Some(k) = aes_key {
-        if game.is_some() {
-            tracing::debug!("--aes-key overrides --game");
-        } else if detect.is_some() {
-            tracing::debug!("--aes-key overrides --detect");
-        }
-        // #651: an explicit key must not silently drop the selected
-        // profile's mappings (see the fn doc for the per-selector
-        // contract). No pak-footer read and no network on any
-        // `--aes-key` combination.
-        let inputs = if let Some(g) = game {
-            if detect.is_some() {
-                tracing::debug!("--game overrides --detect");
-            }
-            // HARD: same contract as keyed resolution — the named id
-            // must exist (store errors propagate; unknown id is
-            // `ProfileNotFound`).
-            let store = ProfileStore::load()?;
-            let cache = load_cache_lenient();
-            named_profile_inputs_in(&store, cache.as_ref(), g)?
-        } else if let Some(dir) = detect {
-            // Best-effort: detection is probabilistic, so store or
-            // detection problems degrade to no-mappings with a warning.
-            match ProfileStore::load() {
-                Ok(store) => {
-                    let cache = load_cache_lenient();
-                    detect_profile_inputs_in(&store, cache.as_ref(), dir)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "profile store unreadable; --aes-key set, continuing \
-                         without profile parse inputs"
-                    );
-                    ProfileParseInputs::default()
-                }
-            }
-        } else {
-            ProfileParseInputs::default()
-        };
-        return Ok(PakOpenContext {
-            key: Some(k.clone()),
-            mappings: inputs.mappings,
-            engine_version: inputs.engine_version,
-        });
+        return explicit_key_context(k, game, detect);
     }
     // Effective profile id: --game (explicit) wins over --detect (auto).
     let id: String = if let Some(g) = game {
@@ -395,6 +352,60 @@ fn unique_detect_id(mut matches: Vec<DetectMatch>, dir: &Path) -> crate::Result<
             },
         }),
     }
+}
+
+/// The `--aes-key` branch of [`resolve_pak_context`]: the explicit key
+/// wins, but the selected profile still supplies its parse inputs.
+///
+/// #651/#656: an explicit key must not silently drop the profile's
+/// mappings or engine version (see [`resolve_pak_context`]'s doc for
+/// the per-selector contract). No pak-footer read and no network on
+/// any `--aes-key` combination.
+fn explicit_key_context(
+    key: &AesKey,
+    game: Option<&str>,
+    detect: Option<&Path>,
+) -> crate::Result<PakOpenContext> {
+    if game.is_some() {
+        tracing::debug!("--aes-key overrides --game");
+    } else if detect.is_some() {
+        tracing::debug!("--aes-key overrides --detect");
+    }
+    let inputs = if let Some(g) = game {
+        if detect.is_some() {
+            tracing::debug!("--game overrides --detect");
+        }
+        // HARD: same contract as keyed resolution — the named id must
+        // exist (store errors propagate; unknown id is
+        // `ProfileNotFound`).
+        let store = ProfileStore::load()?;
+        let cache = load_cache_lenient();
+        named_profile_inputs_in(&store, cache.as_ref(), g)?
+    } else if let Some(dir) = detect {
+        // Best-effort: detection is probabilistic, so store or
+        // detection problems degrade to no inputs with a warning.
+        match ProfileStore::load() {
+            Ok(store) => {
+                let cache = load_cache_lenient();
+                detect_profile_inputs_in(&store, cache.as_ref(), dir)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "profile store unreadable; --aes-key set, continuing \
+                     without profile parse inputs"
+                );
+                ProfileParseInputs::default()
+            }
+        }
+    } else {
+        ProfileParseInputs::default()
+    };
+    Ok(PakOpenContext {
+        key: Some(key.clone()),
+        mappings: inputs.mappings,
+        engine_version: inputs.engine_version,
+    })
 }
 
 /// HARD `--game` mappings lookup for the `--aes-key` path (#651,
