@@ -104,8 +104,7 @@ async fn run_inner(
 /// [`OpenError::Core`].
 fn build_loaded(path: PathBuf, resolved_key: Option<&AesKey>) -> Result<LoadedArchive, OpenError> {
     // #654: the container-agnostic factory — the GUI never names a
-    // concrete reader type. It passes PaksmithError through unchanged,
-    // which the Locked-detection match below depends on.
+    // concrete reader type.
     let reader = match paksmith_core::container::open(&path, resolved_key) {
         Ok(r) => r,
         Err(PaksmithError::Decryption { .. }) if resolved_key.is_none() => {

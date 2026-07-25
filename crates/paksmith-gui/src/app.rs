@@ -2395,7 +2395,7 @@ mod tests {
     // ── helpers ───────────────────────────────────────────────────────────────
 
     /// Returns a shared `Arc<dyn ContainerReader>` opened from the
-    /// real_v8b_uasset fixture via the #654 `container::open` factory.
+    /// real_v8b_uasset fixture via the `container::open` factory.
     ///
     /// The reader is opened exactly once per test binary via `OnceLock`; every
     /// call clones the `Arc`, so 100+ `app_with_paths` calls pay only a single

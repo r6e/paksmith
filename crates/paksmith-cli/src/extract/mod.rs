@@ -30,8 +30,7 @@ pub(crate) struct ExtractConfig {
 }
 
 pub(crate) struct ExtractJob<'a> {
-    /// Type-erased container handle (#654): the job never names a
-    /// concrete reader — everything it needs is on the trait.
+    /// Type-erased container handle — any container format.
     pub(crate) reader: Arc<dyn ContainerReader>,
     pub(crate) registry: &'a HandlerRegistry,
     pub(crate) cfg: &'a ExtractConfig,
