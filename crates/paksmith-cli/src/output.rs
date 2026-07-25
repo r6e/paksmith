@@ -1,7 +1,7 @@
 use std::io::{self, IsTerminal, Write};
 
-use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL_CONDENSED;
+use comfy_table::{Attribute, Cell, Color, Table};
 use serde::Serialize;
 
 use paksmith_core::container::EntryMetadata;
@@ -113,32 +113,73 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
             writeln!(out)?;
         }
         ResolvedFormat::Table => {
-            let mut table = Table::new();
-            table.load_preset(UTF8_FULL_CONDENSED);
-            table.set_header(vec!["Path", "Size", "Compressed", "Encrypted"]);
-
-            for entry in entries {
-                table.add_row(vec![
-                    entry.path().to_string(),
-                    format_size(entry.uncompressed_size()),
-                    if entry.is_compressed() {
-                        "yes".into()
-                    } else {
-                        "no".into()
-                    },
-                    if entry.is_encrypted() {
-                        "yes".into()
-                    } else {
-                        "no".into()
-                    },
-                ]);
-            }
-
+            let table = build_entries_table(entries, !no_color_from(std::env::var_os("NO_COLOR")));
             writeln!(out, "{table}")?;
         }
     }
     out.flush()?;
     Ok(())
+}
+
+/// True iff the `NO_COLOR` convention (<https://no-color.org>) disables
+/// styling: the variable present with any NON-empty value. Pure —
+/// `print_entries` wires in the real env read.
+fn no_color_from(var: Option<std::ffi::OsString>) -> bool {
+    var.is_some_and(|v| !v.is_empty())
+}
+
+/// Build the `list`/`search` entries table (SPEC Design Principles:
+/// "column alignment and color when TTY-attached, plain when piped").
+///
+/// `style = true` attaches the colors/attributes; comfy-table then
+/// applies them ONLY when stdout is a TTY (`should_style`), so piped
+/// output stays plain with no extra gating here. `style = false`
+/// (the `NO_COLOR` path) builds plain cells outright, so not even a
+/// TTY gets ANSI. The split keeps the styling decision unit-testable:
+/// tests render with `enforce_styling()` — which would override a
+/// `force_no_tty()`-based gate but cannot conjure styles that were
+/// never attached.
+// `unused_results` allow: comfy-table's builder returns `&mut Table`
+// for chaining; discarding is the documented call shape.
+#[allow(unused_results)]
+fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
+    let header = |text: &str| {
+        if style {
+            Cell::new(text)
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan)
+        } else {
+            Cell::new(text)
+        }
+    };
+    // "yes" is the signal state in both flag columns; color it so the
+    // eye can scan a big table for encrypted/compressed entries.
+    let yes_no = |val: bool, yes_color: Color| {
+        if val {
+            let cell = Cell::new("yes");
+            if style { cell.fg(yes_color) } else { cell }
+        } else {
+            Cell::new("no")
+        }
+    };
+
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL_CONDENSED);
+    table.set_header(vec![
+        header("Path"),
+        header("Size"),
+        header("Compressed"),
+        header("Encrypted"),
+    ]);
+    for entry in entries {
+        table.add_row(vec![
+            Cell::new(entry.path()),
+            Cell::new(format_size(entry.uncompressed_size())),
+            yes_no(entry.is_compressed(), Color::Green),
+            yes_no(entry.is_encrypted(), Color::Yellow),
+        ]);
+    }
+    table
 }
 
 // `bytes as f64` loses precision past 2^53, but the output is `{:.1}`
@@ -169,6 +210,75 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} GiB", bytes as f64 / GIB as f64)
     } else {
         format!("{:.1} TiB", bytes as f64 / TIB as f64)
+    }
+}
+
+#[cfg(test)]
+mod table_style_tests {
+    use paksmith_core::container::{EntryFlags, EntryMetadata};
+
+    use super::*;
+
+    fn entries() -> Vec<EntryMetadata> {
+        vec![
+            EntryMetadata::new(
+                "Game/enc.uasset".into(),
+                10,
+                20,
+                EntryFlags::NONE.encrypted(),
+            ),
+            EntryMetadata::new(
+                "Game/comp.uasset".into(),
+                10,
+                20,
+                EntryFlags::NONE.compressed(),
+            ),
+            EntryMetadata::new("Game/plain.txt".into(), 10, 20, EntryFlags::NONE),
+        ]
+    }
+
+    /// `enforce_styling()` renders the attached styles even off-TTY, so
+    /// the test can observe the ANSI bytes the SPEC's "color when
+    /// TTY-attached" clause produces on a real terminal.
+    #[test]
+    fn styled_table_attaches_ansi_when_forced() {
+        let mut table = build_entries_table(&entries(), true);
+        let _ = table.enforce_styling();
+        let rendered = table.to_string();
+        assert!(
+            rendered.contains("\u{1b}["),
+            "styled table must carry ANSI escapes under enforce_styling: {rendered}"
+        );
+        // Header bold+cyan and at least one colored "yes" cell.
+        assert!(
+            rendered.contains("\u{1b}[1m"),
+            "header must be bold: {rendered}"
+        );
+    }
+
+    /// `style = false` (the NO_COLOR path) attaches nothing — even
+    /// `enforce_styling()` cannot conjure escapes that were never set.
+    #[test]
+    fn unstyled_table_has_no_ansi_even_when_forced() {
+        let mut table = build_entries_table(&entries(), false);
+        let _ = table.enforce_styling();
+        let rendered = table.to_string();
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "NO_COLOR table must be ANSI-free: {rendered}"
+        );
+        // Content survives unstyled.
+        assert!(rendered.contains("Game/enc.uasset") && rendered.contains("yes"));
+    }
+
+    /// no-color.org contract: present-and-non-empty disables; absent or
+    /// empty does not.
+    #[test]
+    fn no_color_env_contract() {
+        assert!(!no_color_from(None));
+        assert!(!no_color_from(Some("".into())));
+        assert!(no_color_from(Some("1".into())));
+        assert!(no_color_from(Some("anything".into())));
     }
 }
 
