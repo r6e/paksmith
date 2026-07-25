@@ -79,6 +79,7 @@ pub(crate) fn run(
     aes_key: Option<&AesKey>,
     game: Option<&str>,
     detect: Option<&std::path::Path>,
+    quiet: bool,
 ) -> paksmith_core::Result<u8> {
     let ctx = crate::commands::key_resolve::resolve_pak_context(&args.pak, aes_key, game, detect)?;
     let usmap = crate::commands::mappings_resolve::resolve_usmap(
@@ -91,15 +92,7 @@ pub(crate) fn run(
         None => PakReader::open(&args.pak)?,
     });
 
-    let pattern = match &args.filter {
-        Some(p) => Some(
-            glob::Pattern::new(p).map_err(|e| PaksmithError::InvalidArgument {
-                arg: "--filter",
-                reason: e.to_string(),
-            })?,
-        ),
-        None => None,
-    };
+    let pattern = crate::path_util::compile_opt_glob_arg("--filter", args.filter.as_deref())?;
 
     let entries: Vec<String> = reader
         .entries()
@@ -128,7 +121,8 @@ pub(crate) fn run(
 
     // FIX 6: hide progress when stderr is not a TTY (e.g. CI, piped output) so
     // non-interactive callers get clean stderr without ANSI escape sequences.
-    let target = if std::io::stderr().is_terminal() {
+    // --quiet hides it even on a TTY: the bar is advisory chatter (#652).
+    let target = if show_progress(std::io::stderr().is_terminal(), quiet) {
         indicatif::ProgressDrawTarget::stderr()
     } else {
         indicatif::ProgressDrawTarget::hidden()
@@ -166,4 +160,29 @@ pub(crate) fn run(
     out.flush()?;
 
     Ok(u8::from(summary.had_failures()))
+}
+
+/// Whether the extract progress bar draws: stderr must be a real TTY
+/// (piped/CI stderr stays clean) AND `--quiet` must be off (the bar is
+/// advisory chatter). Pure, like `styling_enabled`/`resolve_with_tty`
+/// and for the same reason: a black-box test's captured stderr is never
+/// a TTY, so the `quiet` leg of this decision is observable only here.
+fn show_progress(stderr_is_tty: bool, quiet: bool) -> bool {
+    stderr_is_tty && !quiet
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::show_progress;
+
+    /// All four quadrants — the `quiet` leg cannot be seen by any
+    /// integration test (captured stderr is never a TTY), so the full
+    /// truth table lives here.
+    #[test]
+    fn show_progress_truth_table() {
+        assert!(show_progress(true, false), "TTY, loud → bar");
+        assert!(!show_progress(true, true), "TTY, quiet → hidden");
+        assert!(!show_progress(false, false), "piped, loud → hidden");
+        assert!(!show_progress(false, true), "piped, quiet → hidden");
+    }
 }

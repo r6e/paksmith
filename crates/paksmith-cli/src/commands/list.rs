@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use clap::Args;
 
 use paksmith_core::AesKey;
-use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 
@@ -25,6 +24,7 @@ pub(crate) fn run(
     aes_key: Option<&AesKey>,
     game: Option<&str>,
     detect: Option<&std::path::Path>,
+    quiet: bool,
 ) -> paksmith_core::Result<()> {
     let key = crate::commands::key_resolve::resolve_pak_key(&args.path, aes_key, game, detect)?;
     let reader = match &key {
@@ -32,19 +32,14 @@ pub(crate) fn run(
         None => PakReader::open(&args.path)?,
     };
 
-    let filtered: Vec<_> = match &args.filter {
-        Some(pattern) => {
-            let pat = glob::Pattern::new(pattern).map_err(|e| PaksmithError::InvalidArgument {
-                arg: "--filter",
-                reason: e.to_string(),
-            })?;
-            reader.entries().filter(|e| pat.matches(e.path())).collect()
-        }
-        None => reader.entries().collect(),
-    };
+    let pattern = crate::path_util::compile_opt_glob_arg("--filter", args.filter.as_deref())?;
+    let filtered: Vec<_> = reader
+        .entries()
+        .filter(|e| pattern.as_ref().is_none_or(|pat| pat.matches(e.path())))
+        .collect();
 
     let resolved = format.resolve();
-    crate::output::note_auto_resolved_to_json(format, resolved);
+    crate::output::note_auto_resolved_to_json(format, resolved, quiet);
     crate::output::print_entries(&filtered, resolved)?;
     Ok(())
 }

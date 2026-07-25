@@ -38,12 +38,17 @@ impl Command {
         aes_key: Option<&AesKey>,
         game: Option<&str>,
         detect: Option<&Path>,
+        quiet: bool,
     ) -> paksmith_core::Result<u8> {
         match self {
-            Self::List(args) => list::run(args, format, aes_key, game, detect).map(|()| 0),
-            Self::Inspect(args) => inspect::run(args, format, aes_key, game, detect).map(|()| 0),
-            Self::Extract(args) => extract::run(args, format, aes_key, game, detect),
-            Self::Search(args) => search::run(args, format, aes_key, game, detect).map(|()| 0),
+            Self::List(args) => list::run(args, format, aes_key, game, detect, quiet).map(|()| 0),
+            Self::Inspect(args) => {
+                inspect::run(args, format, aes_key, game, detect, quiet).map(|()| 0)
+            }
+            Self::Extract(args) => extract::run(args, format, aes_key, game, detect, quiet),
+            Self::Search(args) => {
+                search::run(args, format, aes_key, game, detect, quiet).map(|()| 0)
+            }
             Self::Profile { cmd } => profile::run(cmd, format),
         }
     }

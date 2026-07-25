@@ -4,7 +4,7 @@ use std::io::{self, Write};
 
 use serde::Serialize;
 
-use crate::output::{ResolvedFormat, serde_json_to_io};
+use crate::output::{ResolvedFormat, sanitize_for_display, serde_json_to_io};
 
 #[derive(Debug, Clone)]
 pub(crate) enum EntryOutcome {
@@ -136,7 +136,19 @@ impl ExtractSummary {
                 writeln!(w, "  skipped companion: {}", self.counts.skipped_companion)?;
                 writeln!(w, "  failed:            {}", self.counts.failed)?;
                 for f in &self.failures {
-                    writeln!(w, "  FAILED {}: {}", f.entry, f.error)?;
+                    // Both the entry path AND the error text can embed
+                    // hostile pak/asset strings (error Displays quote the
+                    // asset path). Per-FIELD sanitization: equivalent to
+                    // whole-line on today's control-free literals, keeps
+                    // the per-field Cow fast path, and never feeds
+                    // trusted text (future styling escapes) to the
+                    // sanitizer.
+                    writeln!(
+                        w,
+                        "  FAILED {}: {}",
+                        sanitize_for_display(&f.entry),
+                        sanitize_for_display(&f.error)
+                    )?;
                 }
                 Ok(())
             }
@@ -172,6 +184,36 @@ mod tests {
                 },
             ],
         )
+    }
+
+    /// Hostile control chars in a FAILED entry's path or error text
+    /// must not reach the terminal through the table summary — each
+    /// field routes through `sanitize_for_display` independently (a
+    /// dropped wrapper call on either field would fail this).
+    #[test]
+    fn table_failed_lines_are_control_char_free() {
+        let s = ExtractSummary::from_outcomes(
+            "Game.pak".into(),
+            "out".into(),
+            false,
+            vec![EntryOutcome::Failed {
+                entry: "B\u{1b}]0;pwned\u{7}.uasset".into(),
+                error: "bad \u{9b}2J asset".into(),
+            }],
+        );
+        let mut buf = Vec::new();
+        s.render(ResolvedFormat::Table, &mut buf).unwrap();
+        let rendered = String::from_utf8(buf).unwrap();
+        assert!(
+            !rendered.contains('\u{1b}')
+                && !rendered.contains('\u{7}')
+                && !rendered.contains('\u{9b}'),
+            "control chars must be neutralized in the FAILED line: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("FAILED") && rendered.contains('\u{FFFD}'),
+            "the failure stays visible with replacement marks: {rendered:?}"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::io::{self, IsTerminal, Write};
 
-use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL_CONDENSED;
+use comfy_table::{Attribute, Cell, Color, Table};
 use serde::Serialize;
 
 use paksmith_core::container::EntryMetadata;
@@ -45,8 +45,13 @@ pub(crate) enum ResolvedFormat {
 
 /// Emit a one-line stderr note when `--format auto` silently resolved to JSON
 /// (stdout isn't a TTY), so users piping into head/jq aren't surprised.
-pub(crate) fn note_auto_resolved_to_json(format: OutputFormat, resolved: ResolvedFormat) {
-    if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
+/// `--quiet` (#652) suppresses it — it is advisory chatter, not an error.
+pub(crate) fn note_auto_resolved_to_json(
+    format: OutputFormat,
+    resolved: ResolvedFormat,
+    quiet: bool,
+) {
+    if !quiet && matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
         eprintln!(
             "note: stdout is not a terminal — emitting JSON. Pass --format table to force table output."
         );
@@ -68,6 +73,26 @@ pub(crate) fn serde_json_to_io(e: serde_json::Error) -> io::Error {
         .map_or_else(|| io::Error::other(e.to_string()), io::Error::from)
 }
 
+/// `list`/`search` JSON schema version (#652). COMMAND-SHARED on
+/// purpose, unlike `inspect`/`extract`'s command-local versions: both
+/// commands emit the same `EntryRow` shape through the same
+/// `print_entries` writer, so the schema IS shared — versioning it
+/// twice would let the numbers drift apart while describing identical
+/// bytes. Bump when `EntryRow` or the envelope shape changes.
+const ENTRIES_SCHEMA_VERSION: u32 = 1;
+
+/// The `{"schema_version": 1, "entries": [...]}` envelope for
+/// `list`/`search` JSON (SPEC: "JSON output is stable and structured").
+/// A NAMED `entries` key rather than inspect's `#[serde(flatten)]`
+/// trick — an array cannot flatten into an object. `schema_version` is
+/// declared first so serde emits it first (raw-byte ordering is pinned
+/// by `list_and_search_json_carry_schema_version_envelope`).
+#[derive(Serialize)]
+struct EntriesOutput<'a> {
+    schema_version: u32,
+    entries: Vec<EntryRow<'a>>,
+}
+
 #[derive(Serialize)]
 struct EntryRow<'a> {
     path: &'a str,
@@ -77,10 +102,6 @@ struct EntryRow<'a> {
     encrypted: bool,
 }
 
-// `unused_results` allow scoped to this function: comfy-table's
-// builder returns `&mut Table` for chaining; discarding is the
-// documented call shape.
-#[allow(unused_results)]
 pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
     let stdout = io::stdout();
     let stdout_lock = stdout.lock();
@@ -95,50 +116,127 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
     let mut out = io::BufWriter::new(stdout_lock);
     match format {
         ResolvedFormat::Json => {
-            let rows: Vec<EntryRow> = entries
-                .iter()
-                .map(|e| EntryRow {
-                    path: e.path(),
-                    size: e.uncompressed_size(),
-                    compressed_size: e.compressed_size(),
-                    compressed: e.is_compressed(),
-                    encrypted: e.is_encrypted(),
-                })
-                .collect();
+            let envelope = EntriesOutput {
+                schema_version: ENTRIES_SCHEMA_VERSION,
+                entries: entries
+                    .iter()
+                    .map(|e| EntryRow {
+                        path: e.path(),
+                        size: e.uncompressed_size(),
+                        compressed_size: e.compressed_size(),
+                        compressed: e.is_compressed(),
+                        encrypted: e.is_encrypted(),
+                    })
+                    .collect(),
+            };
             // Stream directly to stdout instead of building the full string in
             // memory. serde_json wraps the underlying io::Error; the helper
             // surfaces its kind so callers can distinguish BrokenPipe from
             // real errors.
-            serde_json::to_writer_pretty(&mut out, &rows).map_err(serde_json_to_io)?;
+            serde_json::to_writer_pretty(&mut out, &envelope).map_err(serde_json_to_io)?;
             writeln!(out)?;
         }
         ResolvedFormat::Table => {
-            let mut table = Table::new();
-            table.load_preset(UTF8_FULL_CONDENSED);
-            table.set_header(vec!["Path", "Size", "Compressed", "Encrypted"]);
-
-            for entry in entries {
-                table.add_row(vec![
-                    entry.path().to_string(),
-                    format_size(entry.uncompressed_size()),
-                    if entry.is_compressed() {
-                        "yes".into()
-                    } else {
-                        "no".into()
-                    },
-                    if entry.is_encrypted() {
-                        "yes".into()
-                    } else {
-                        "no".into()
-                    },
-                ]);
-            }
-
+            let table = build_entries_table(entries, styling_enabled(std::env::var_os("NO_COLOR")));
             writeln!(out, "{table}")?;
         }
     }
     out.flush()?;
     Ok(())
+}
+
+/// Whether to ATTACH styles to the entries table, per the `NO_COLOR`
+/// convention (<https://no-color.org>): enabled iff the variable is
+/// absent or present-but-empty. Pure and polarity-complete in ONE fn
+/// (like [`OutputFormat::resolve_with_tty`], and for the same reason):
+/// a black-box test cannot see this decision — comfy-table suppresses
+/// ANSI off-TTY whichever way it goes — so the whole contract is
+/// unit-pinned here. `print_entries` wires in the real env read.
+fn styling_enabled(no_color: Option<std::ffi::OsString>) -> bool {
+    no_color.is_none_or(|v| v.is_empty())
+}
+
+/// Build the `list`/`search` entries table (SPEC Design Principles:
+/// "column alignment and color when TTY-attached, plain when piped").
+///
+/// `style = true` attaches the colors/attributes; comfy-table then
+/// applies them ONLY when stdout is a TTY (`should_style`), so piped
+/// output stays plain with no extra gating here. `style = false`
+/// (the `NO_COLOR` path) builds plain cells outright, so not even a
+/// TTY gets ANSI. The split keeps the styling decision unit-testable:
+/// tests render with `enforce_styling()` — which would override a
+/// `force_no_tty()`-based gate but cannot conjure styles that were
+/// never attached.
+// `unused_results` allow: comfy-table's builder returns `&mut Table`
+// for chaining; discarding is the documented call shape.
+#[allow(unused_results)]
+fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
+    let header = |text: &str| {
+        if style {
+            Cell::new(text)
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan)
+        } else {
+            Cell::new(text)
+        }
+    };
+    // "yes" is the signal state in both flag columns; color it so the
+    // eye can scan a big table for encrypted/compressed entries.
+    let flag_cell = |val: bool, yes_color: Color| {
+        if val {
+            let cell = Cell::new("yes");
+            if style { cell.fg(yes_color) } else { cell }
+        } else {
+            Cell::new("no")
+        }
+    };
+
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL_CONDENSED);
+    table.set_header(vec![
+        header("Path"),
+        header("Size"),
+        header("Compressed"),
+        header("Encrypted"),
+    ]);
+    for entry in entries {
+        table.add_row(vec![
+            Cell::new(sanitize_for_display(entry.path())),
+            Cell::new(format_size(entry.uncompressed_size())),
+            flag_cell(entry.is_compressed(), Color::Green),
+            flag_cell(entry.is_encrypted(), Color::Yellow),
+        ]);
+    }
+    table
+}
+
+/// Replace control characters (C0 incl. ESC/BEL/CR, DEL, and C1 incl.
+/// the U+009B CSI) with U+FFFD in an untrusted pak string bound for
+/// human display. Keyed to the table FORMAT, not TTY-ness — a piped
+/// table gets paged into a terminal later. The core FString parser
+/// guarantees valid non-NUL Unicode — it does NOT strip controls, so a
+/// hostile pak can embed OSC/CSI sequences (title rewrites, screen
+/// clears, output-hiding). No legitimate virtual path contains control
+/// characters.
+///
+/// Consumers: the list/search entries table (here) and extract's
+/// summary FAILED lines. The remaining same-class surface — inspect's
+/// table tree renderer — is tracked as issue #708 (many call sites;
+/// its own pass). The JSON path deliberately has no equivalent — NOT
+/// because serde escapes everything (it escapes C0 only; DEL and C1
+/// incl. U+009B pass through as raw UTF-8) but because JSON is the
+/// machine interface: exact path bytes are the round-tripping
+/// contract, and machine consumers don't interpret terminal controls.
+pub(crate) fn sanitize_for_display(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.chars().any(char::is_control) {
+        std::borrow::Cow::Owned(
+            s.chars()
+                .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
 }
 
 // `bytes as f64` loses precision past 2^53, but the output is `{:.1}`
@@ -169,6 +267,123 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} GiB", bytes as f64 / GIB as f64)
     } else {
         format!("{:.1} TiB", bytes as f64 / TIB as f64)
+    }
+}
+
+#[cfg(test)]
+mod table_style_tests {
+    use paksmith_core::container::{EntryFlags, EntryMetadata};
+
+    use super::*;
+
+    fn entries() -> Vec<EntryMetadata> {
+        vec![
+            EntryMetadata::new(
+                "Game/enc.uasset".into(),
+                10,
+                20,
+                EntryFlags::NONE.encrypted(),
+            ),
+            EntryMetadata::new(
+                "Game/comp.uasset".into(),
+                10,
+                20,
+                EntryFlags::NONE.compressed(),
+            ),
+            EntryMetadata::new("Game/plain.txt".into(), 10, 20, EntryFlags::NONE),
+        ]
+    }
+
+    /// `enforce_styling()` renders the attached styles even off-TTY, so
+    /// the test can observe the ANSI bytes the SPEC's "color when
+    /// TTY-attached" clause produces on a real terminal.
+    #[test]
+    fn styled_table_attaches_ansi_when_forced() {
+        let mut table = build_entries_table(&entries(), true);
+        let _ = table.enforce_styling();
+        let rendered = table.to_string();
+        assert!(
+            rendered.contains("\u{1b}[1m"),
+            "header must be bold: {rendered}"
+        );
+        assert!(
+            rendered.contains("\u{1b}[38;5;14m"),
+            "header must be cyan: {rendered}"
+        );
+        // 4 headers + the encrypted-yes + compressed-yes cells all carry
+        // a foreground color — dropping .fg from flag_cell would fail
+        // this count even with the header styles intact.
+        assert!(
+            rendered.matches("\u{1b}[38;5;").count() >= 6,
+            "the two 'yes' flag cells must be colored too: {rendered}"
+        );
+    }
+
+    /// `style = false` (the NO_COLOR path) attaches nothing — even
+    /// `enforce_styling()` cannot conjure escapes that were never set.
+    #[test]
+    fn unstyled_table_has_no_ansi_even_when_forced() {
+        let mut table = build_entries_table(&entries(), false);
+        let _ = table.enforce_styling();
+        let rendered = table.to_string();
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "NO_COLOR table must be ANSI-free: {rendered}"
+        );
+        // Content survives unstyled.
+        assert!(rendered.contains("Game/enc.uasset") && rendered.contains("yes"));
+    }
+
+    /// Hostile pak paths cannot inject terminal escapes through the
+    /// table: every control char (ESC, BEL, C1 CSI, …) is replaced
+    /// before the cell is built — even under forced styling.
+    #[test]
+    fn hostile_path_control_chars_are_neutralized() {
+        let hostile = vec![EntryMetadata::new(
+            "Game/\u{1b}]0;pwned\u{7}/\u{9b}2Jx.uasset".into(),
+            10,
+            20,
+            EntryFlags::NONE,
+        )];
+        // Unstyled: the ONLY possible ESC source would be the hostile
+        // path, so the render must be entirely control-char-free.
+        let plain = build_entries_table(&hostile, false).to_string();
+        assert!(
+            !plain.contains('\u{1b}') && !plain.contains('\u{7}') && !plain.contains('\u{9b}'),
+            "control chars from the pak path must be neutralized: {plain:?}"
+        );
+        assert!(
+            plain.contains('\u{FFFD}'),
+            "replacement char must mark the stripped spots: {plain:?}"
+        );
+        // The harmless residue stays visible — only the control bytes
+        // are stripped, so the user can still SEE something was there.
+        assert!(
+            plain.contains("]0;pwned"),
+            "non-control residue must stay visible: {plain:?}"
+        );
+
+        // Styled: the table's own ANSI is present, but the hostile BEL /
+        // C1-CSI still cannot survive.
+        let mut styled_table = build_entries_table(&hostile, true);
+        let _ = styled_table.enforce_styling();
+        let styled = styled_table.to_string();
+        assert!(
+            !styled.contains('\u{7}') && !styled.contains('\u{9b}'),
+            "hostile BEL/CSI must not survive styled rendering: {styled:?}"
+        );
+    }
+
+    /// no-color.org contract, full polarity: absent or empty → styled;
+    /// present-and-non-empty → plain. This IS the whole NO_COLOR
+    /// decision (nothing else composes on top), so an inversion cannot
+    /// hide from the suite.
+    #[test]
+    fn styling_enabled_no_color_contract() {
+        assert!(styling_enabled(None));
+        assert!(styling_enabled(Some("".into())));
+        assert!(!styling_enabled(Some("1".into())));
+        assert!(!styling_enabled(Some("anything".into())));
     }
 }
 

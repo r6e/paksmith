@@ -15,6 +15,114 @@ fn fixture_path(name: &str) -> String {
 }
 
 #[test]
+fn list_and_search_json_carry_schema_version_envelope() {
+    // #652 (c): list/search JSON is `{"schema_version": 1, "entries": [...]}`
+    // — the envelope extract/inspect already adopted (SPEC: "JSON output is
+    // stable and structured"). schema_version is FIRST in the raw bytes
+    // (declaration-order pin, matching inspect's contract), and the two
+    // commands share one schema constant deliberately: they emit the same
+    // EntryRow shape through the same writer.
+    for cmd_name in ["list", "search"] {
+        let mut cmd = Command::cargo_bin("paksmith").unwrap();
+        cmd.args([
+            cmd_name,
+            &fixture_path("minimal_v6.pak"),
+            "--format",
+            "json",
+        ]);
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{cmd_name} must succeed before its JSON is parsed; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(v["schema_version"], 1, "{cmd_name}: schema_version = 1");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            2,
+            "{cmd_name}: envelope has EXACTLY schema_version + entries"
+        );
+        assert_eq!(
+            v["entries"].as_array().unwrap().len(),
+            5,
+            "{cmd_name}: entries array under the envelope"
+        );
+        let sv = stdout.find("\"schema_version\"").unwrap();
+        let en = stdout.find("\"entries\"").unwrap();
+        assert!(
+            sv < en,
+            "{cmd_name}: schema_version must precede entries in the raw bytes"
+        );
+    }
+}
+
+#[test]
+fn quiet_suppresses_auto_json_note() {
+    // #652 (a): the piped-auto note is advisory chatter; --quiet silences
+    // it. Without --quiet it still fires (pinned here so the note can't
+    // silently vanish).
+    let loud = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["list", &fixture_path("minimal_v6.pak")])
+        .output()
+        .unwrap();
+    assert!(loud.status.success(), "loud run must succeed");
+    assert!(
+        String::from_utf8(loud.stderr).unwrap().contains("note:"),
+        "piped auto-format must emit the advisory note without --quiet"
+    );
+
+    let quiet = Command::cargo_bin("paksmith")
+        .unwrap()
+        // Ambient RUST_LOG overrides --quiet by documented contract;
+        // strip it so a developer's environment can't fail this pin.
+        .env_remove("RUST_LOG")
+        .args(["--quiet", "list", &fixture_path("minimal_v6.pak")])
+        .output()
+        .unwrap();
+    assert!(quiet.status.success());
+    assert_eq!(
+        String::from_utf8(quiet.stderr).unwrap(),
+        "",
+        "--quiet must silence the advisory note"
+    );
+}
+
+#[test]
+fn quiet_conflicts_with_verbose() {
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args([
+            "--quiet",
+            "--verbose",
+            "list",
+            &fixture_path("minimal_v6.pak"),
+        ])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn quiet_keeps_error_prefix() {
+    // Errors are NOT advisory chatter — they survive --quiet.
+    let out = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env_remove("RUST_LOG")
+        .args(["--quiet", "list", "/nonexistent/nope.pak"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .starts_with("paksmith: error: "),
+        "errors must survive --quiet"
+    );
+}
+
+#[test]
 fn list_json_output() {
     let mut cmd = Command::cargo_bin("paksmith").unwrap();
     cmd.args(["list", &fixture_path("minimal_v6.pak"), "--format", "json"]);
@@ -23,7 +131,7 @@ fn list_json_output() {
     let stdout = String::from_utf8(output.stdout).unwrap();
 
     let entries: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let arr = entries.as_array().unwrap();
+    let arr = entries["entries"].as_array().unwrap();
     assert_eq!(arr.len(), 5);
 
     let paths: Vec<&str> = arr.iter().map(|e| e["path"].as_str().unwrap()).collect();
@@ -43,7 +151,10 @@ fn list_table_output() {
         .success()
         .stdout(predicate::str::contains("hero.uasset"))
         .stdout(predicate::str::contains("level01.umap"))
-        .stdout(predicate::str::contains("bgm.uasset"));
+        .stdout(predicate::str::contains("bgm.uasset"))
+        // #652: piped table output must stay ANSI-free — the color
+        // styles attach only for real TTYs (SPEC: "plain when piped").
+        .stdout(predicate::str::contains("\u{1b}[").not());
 }
 
 #[test]
@@ -58,7 +169,7 @@ fn list_format_auto_resolves_to_json_when_piped() {
 
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout).expect("auto format should produce JSON when not a TTY");
-    assert_eq!(parsed.as_array().unwrap().len(), 5);
+    assert_eq!(parsed["entries"].as_array().unwrap().len(), 5);
 }
 
 #[test]
@@ -77,7 +188,7 @@ fn list_with_filter() {
     let stdout = String::from_utf8(output.stdout).unwrap();
 
     let entries: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let arr = entries.as_array().unwrap();
+    let arr = entries["entries"].as_array().unwrap();
     assert_eq!(arr.len(), 2); // hero.uasset and bgm.uasset, not level01.umap
 }
 
@@ -139,7 +250,8 @@ fn list_garbage_input_file_exits_with_error() {
 }
 
 /// `--filter zzz` with zero matches must produce exit 0 and a valid
-/// JSON empty array (`[]`), NOT an error. Issue #31's coverage gap:
+/// JSON envelope with an empty `entries` array, NOT an error. Issue
+/// #31's coverage gap:
 /// today this behavior is unspecified — a future "error if filter
 /// matches nothing" change would compile silently.
 #[test]
@@ -165,9 +277,9 @@ fn list_filter_zero_matches_returns_empty_array() {
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .expect("zero-match filter must produce parseable JSON, not error text");
     assert_eq!(
-        parsed.as_array().unwrap().len(),
+        parsed["entries"].as_array().unwrap().len(),
         0,
-        "zero-match filter must produce an empty JSON array"
+        "zero-match filter must produce an empty `entries` array in the envelope"
     );
 }
 
@@ -185,7 +297,7 @@ fn list_json_output_schema_pins_all_fields() {
     assert!(output.status.success(), "list --format json must succeed");
     let stdout = String::from_utf8(output.stdout).unwrap();
     let entries: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let arr = entries.as_array().unwrap();
+    let arr = entries["entries"].as_array().unwrap();
     assert!(!arr.is_empty(), "fixture must have at least one entry");
 
     let first = &arr[0];
