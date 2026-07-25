@@ -31,6 +31,11 @@ fn list_and_search_json_carry_schema_version_envelope() {
             "json",
         ]);
         let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{cmd_name} must succeed before its JSON is parsed; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let stdout = String::from_utf8(output.stdout).unwrap();
         let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
         assert_eq!(v["schema_version"], 1, "{cmd_name}: schema_version = 1");
@@ -63,6 +68,7 @@ fn quiet_suppresses_auto_json_note() {
         .args(["list", &fixture_path("minimal_v6.pak")])
         .output()
         .unwrap();
+    assert!(loud.status.success(), "loud run must succeed");
     assert!(
         String::from_utf8(loud.stderr).unwrap().contains("note:"),
         "piped auto-format must emit the advisory note without --quiet"
