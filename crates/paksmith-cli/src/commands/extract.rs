@@ -92,12 +92,12 @@ pub(crate) fn run(
     });
 
     let pattern = match &args.filter {
-        Some(p) => Some(
-            glob::Pattern::new(p).map_err(|e| PaksmithError::InvalidArgument {
+        Some(p) => Some(crate::path_util::compile_glob(p).map_err(|reason| {
+            PaksmithError::InvalidArgument {
                 arg: "--filter",
-                reason: e.to_string(),
-            })?,
-        ),
+                reason,
+            }
+        })?),
         None => None,
     };
 

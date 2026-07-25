@@ -24,9 +24,76 @@ fn search_help_lists_flags() {
         .assert()
         .success();
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    for flag in ["--type", "--name", "--regex", "--min-size", "--max-size"] {
+    for flag in [
+        "--type",
+        "--name",
+        "--regex",
+        "--min-size",
+        "--max-size",
+        "--filter",
+    ] {
         assert!(out.contains(flag), "help missing {flag}");
     }
+}
+
+#[test]
+fn search_filter_matches_full_path_glob() {
+    // #652 (d): `--filter <glob>` matches the FULL virtual path, exactly
+    // like list/extract — `Content/**` selects both Content entries and
+    // excludes root.txt.
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "search"])
+        .arg(fixture(PAK))
+        .args(["--filter", "Content/**"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let arr = v.as_array().unwrap();
+    assert_eq!(
+        arr.len(),
+        2,
+        "Content/** must match exactly the 2 Content entries"
+    );
+    for e in arr {
+        assert!(
+            e["path"].as_str().unwrap().starts_with("Content/"),
+            "non-Content entry leaked through --filter: {e}"
+        );
+    }
+}
+
+#[test]
+fn search_filter_ands_with_other_predicates() {
+    // Predicates AND-compose: a deep filter + --type narrows to the one
+    // nested uasset.
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "search"])
+        .arg(fixture(PAK))
+        .args(["--filter", "Content/Subdir/**", "--type", "uasset"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["path"], "Content/Subdir/Deep/nested.uasset");
+}
+
+#[test]
+fn search_filter_bad_glob_exits_2_naming_flag() {
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .arg("search")
+        .arg(fixture(PAK))
+        .args(["--filter", "[unclosed"])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("--filter"),
+        "bad glob must be attributed to --filter: {stderr}"
+    );
 }
 
 #[test]

@@ -9,6 +9,8 @@ use crate::commands::search::SearchArgs;
 pub(crate) struct Predicates {
     /// Lowercased extensions to match against; empty = any extension.
     types: Vec<String>,
+    /// Glob matched against the FULL virtual path (`--filter`).
+    filter: Option<glob::Pattern>,
     /// Glob matched against the entry basename (filename).
     name: Option<glob::Pattern>,
     /// Regex matched against the full virtual path (unanchored).
@@ -25,6 +27,12 @@ impl Predicates {
     pub(crate) fn from_args(args: &SearchArgs) -> Result<Self, (&'static str, String)> {
         let types = args.r#type.iter().map(|t| t.to_ascii_lowercase()).collect();
 
+        let filter = args
+            .filter
+            .as_deref()
+            .map(crate::path_util::compile_glob)
+            .transpose()
+            .map_err(|e| ("--filter", e))?;
         let name = args
             .name
             .as_deref()
@@ -59,6 +67,7 @@ impl Predicates {
         }
         Ok(Self {
             types,
+            filter,
             name,
             regex,
             min_size,
@@ -78,6 +87,11 @@ impl Predicates {
             if !self.types.contains(&ext) {
                 return false;
             }
+        }
+        if let Some(g) = &self.filter
+            && !g.matches(path)
+        {
+            return false;
         }
         if let Some(g) = &self.name
             && !g.matches(basename)
@@ -206,11 +220,32 @@ mod predicate_tests {
         crate::commands::search::SearchArgs {
             pak: std::path::PathBuf::new(),
             r#type: vec![],
+            filter: None,
             name: None,
             regex: None,
             min_size: None,
             max_size: None,
         }
+    }
+
+    #[test]
+    fn filter_matches_full_path_not_basename() {
+        // #652 (d): `--filter` is FULL-path glob semantics (list/extract
+        // parity); a basename-shaped pattern must NOT match a nested
+        // entry through it — that's `--name`'s job.
+        let mut a = args();
+        a.filter = Some("Content/**".into());
+        let p = Predicates::from_args(&a).unwrap();
+        assert!(p.matches(&entry("Content/Deep/x.uasset", 10)));
+        assert!(!p.matches(&entry("Other/x.uasset", 10)));
+
+        let mut a2 = args();
+        a2.filter = Some("x.uasset".into());
+        let p2 = Predicates::from_args(&a2).unwrap();
+        assert!(
+            !p2.matches(&entry("Content/x.uasset", 10)),
+            "--filter must glob the full path, not the basename"
+        );
     }
 
     #[test]

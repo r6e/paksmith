@@ -23,6 +23,11 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "EXT")]
     pub(crate) r#type: Vec<String>,
 
+    /// Glob matched against the FULL virtual path (like list/extract's
+    /// `--filter`), e.g. `Game/**`. ANDs with the other predicates.
+    #[arg(long, value_name = "GLOB")]
+    pub(crate) filter: Option<String>,
+
     /// Glob matched against the entry BASENAME (filename), e.g. `Hero*`.
     #[arg(long, value_name = "GLOB")]
     pub(crate) name: Option<String>,

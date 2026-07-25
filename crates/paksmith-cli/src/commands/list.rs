@@ -34,9 +34,11 @@ pub(crate) fn run(
 
     let filtered: Vec<_> = match &args.filter {
         Some(pattern) => {
-            let pat = glob::Pattern::new(pattern).map_err(|e| PaksmithError::InvalidArgument {
-                arg: "--filter",
-                reason: e.to_string(),
+            let pat = crate::path_util::compile_glob(pattern).map_err(|reason| {
+                PaksmithError::InvalidArgument {
+                    arg: "--filter",
+                    reason,
+                }
             })?;
             reader.entries().filter(|e| pat.matches(e.path())).collect()
         }
