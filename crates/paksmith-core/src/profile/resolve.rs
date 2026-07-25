@@ -255,6 +255,104 @@ pub async fn resolve_pak_context(
     }
 }
 
+/// A profile-paks selection (issue #655): the profile id plus its
+/// `pak_paths` glob patterns, verbatim from the local store.
+///
+/// Path-free — unlike [`PakOpenContext`] this never reads a pak footer;
+/// it answers "which archives does this profile name?", not "which key
+/// opens this pak?". Pattern expansion (globbing, `--detect`-relative
+/// joining) is the caller's job: core stores the patterns as opaque
+/// strings and does no matching.
+///
+/// Marked `#[non_exhaustive]` (like [`PakOpenContext`]) so future
+/// fields are not breaking; external consumers construct it only via
+/// [`profile_pak_patterns`].
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ProfilePaks {
+    /// The selected profile id (explicit `--game`, or the unique
+    /// `--detect` match).
+    pub id: String,
+    /// The profile's `pak_paths` patterns, order preserved. Never empty
+    /// — an empty list faults as [`ProfileFault::NoPakPaths`] instead.
+    pub patterns: Vec<String>,
+}
+
+/// Resolve the profile-paks selection for `--game`/`--detect` (issue
+/// #655): which profile, and which `pak_paths` patterns.
+///
+/// No network, ever — a registry-only id must already be cached
+/// (`profile fetch`), and since [`RegistryProfile`] cannot carry
+/// `pak_paths` (see [`MappingsSource`]'s registry note) a fetch could
+/// never help: registry-sourced selections always fault as
+/// [`ProfileFault::NoPakPaths`]. Precedence mirrors
+/// [`resolve_pak_context`]: `--game` wins over `--detect`; `--detect`
+/// requires an existing directory and a unique detection match.
+///
+/// # Errors
+///
+/// [`crate::PaksmithError::InvalidArgument`] when neither selector is
+/// given or the `--detect` dir is not a directory;
+/// [`ProfileFault::ProfileNotFound`] for an unknown id;
+/// [`ProfileFault::DetectionNoMatch`] / [`ProfileFault::DetectionAmbiguous`]
+/// per the `--detect` 0/1/many policy; [`ProfileFault::NoPakPaths`]
+/// when the selected profile records no patterns.
+pub fn profile_pak_patterns(
+    game: Option<&str>,
+    detect: Option<&Path>,
+) -> crate::Result<ProfilePaks> {
+    let store = ProfileStore::load()?;
+    let cache = load_cache_lenient();
+    profile_pak_patterns_in(&store, cache.as_ref(), game, detect)
+}
+
+/// Store-parameterized core of [`profile_pak_patterns`] (unit-testable,
+/// no env reads beyond detection's bounded filesystem checks).
+fn profile_pak_patterns_in(
+    store: &ProfileStore,
+    cache: Option<&RegistryCache>,
+    game: Option<&str>,
+    detect: Option<&Path>,
+) -> crate::Result<ProfilePaks> {
+    let id: String = if let Some(g) = game {
+        if detect.is_some() {
+            tracing::debug!("--game overrides --detect");
+        }
+        g.to_string()
+    } else if let Some(dir) = detect {
+        if !dir.is_dir() {
+            return Err(PaksmithError::InvalidArgument {
+                arg: "--detect",
+                reason: format!("not a directory: {}", dir.display()),
+            });
+        }
+        unique_detect_id(detect_in(store, cache, dir), dir)?
+    } else {
+        return Err(PaksmithError::InvalidArgument {
+            arg: "--game/--detect",
+            reason: "a profile selector is required when no pak path is given".to_string(),
+        });
+    };
+
+    let patterns = match resolve_profile_layered(store, cache, &id) {
+        Some(ResolvedProfile::Local(p)) => p.pak_paths.clone(),
+        // RegistryProfile has no pak_paths field — a cached registry id
+        // is a valid selection that cannot name archives.
+        Some(ResolvedProfile::Registry(_)) => Vec::new(),
+        None => {
+            return Err(PaksmithError::Profile {
+                fault: ProfileFault::ProfileNotFound { id },
+            });
+        }
+    };
+    if patterns.is_empty() {
+        return Err(PaksmithError::Profile {
+            fault: ProfileFault::NoPakPaths { id },
+        });
+    }
+    Ok(ProfilePaks { id, patterns })
+}
+
 /// The unique profile id from a detection sweep, or the typed fault the
 /// `--detect` contract specifies: zero matches → `DetectionNoMatch`,
 /// more than one → `DetectionAmbiguous` (ids joined for the message).
@@ -488,6 +586,7 @@ mod tests {
                     contains: vec![],
                 }),
                 mappings,
+                pak_paths: Vec::new(),
             },
         );
         store
@@ -629,6 +728,7 @@ mod tests {
                 mappings: Some(crate::profile::MappingsSource::Path(
                     "/maps/hero.usmap".into(),
                 )),
+                pak_paths: Vec::new(),
             },
         );
         assert_eq!(
@@ -655,9 +755,161 @@ mod tests {
                 keys: BTreeMap::new(),
                 detect: None,
                 mappings: None,
+                pak_paths: Vec::new(),
             },
         );
         assert_eq!(profile_mappings_in(&store, "plain"), None);
+    }
+
+    /// Store with one `hero` profile carrying pak_paths patterns (and
+    /// detect rules so the --detect legs can select it).
+    fn hero_store_with_pak_paths(patterns: Vec<String>) -> ProfileStore {
+        let mut store = ProfileStore::default();
+        let _ = store.profiles.insert(
+            "hero".into(),
+            GameProfile {
+                name: "Hero".into(),
+                engine_version: None,
+                keys: BTreeMap::new(),
+                detect: Some(DetectRules {
+                    require_paths: vec!["Game/Paks".into()],
+                    contains: vec![],
+                }),
+                mappings: None,
+                pak_paths: patterns,
+            },
+        );
+        store
+    }
+
+    #[test]
+    fn profile_pak_patterns_in_game_hit_returns_patterns_verbatim() {
+        let store = hero_store_with_pak_paths(vec!["/g/Paks/*.pak".into(), "Extra/*.pak".into()]);
+        let got = profile_pak_patterns_in(&store, None, Some("hero"), None).unwrap();
+        assert_eq!(got.id, "hero");
+        assert_eq!(
+            got.patterns,
+            vec!["/g/Paks/*.pak".to_string(), "Extra/*.pak".to_string()],
+            "patterns pass through verbatim, order preserved"
+        );
+    }
+
+    #[test]
+    fn profile_pak_patterns_in_empty_patterns_is_no_pak_paths_fault() {
+        // A profile that exists but records no archive locations is a
+        // TYPED fault, not an empty success — the remedy (add patterns)
+        // is the same whether the profile is local-without-field or
+        // registry-sourced, so both collapse to NoPakPaths.
+        let store = hero_store_with_pak_paths(Vec::new());
+        let err = profile_pak_patterns_in(&store, None, Some("hero"), None).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::Profile {
+                    fault: ProfileFault::NoPakPaths { id }
+                } if id == "hero"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn profile_pak_patterns_in_registry_only_id_is_no_pak_paths_fault() {
+        // RegistryProfile has no pak_paths field (deny_unknown_fields +
+        // ed25519-signed doc — see MappingsSource's registry note), so a
+        // cached registry id is a VALID selection that still faults.
+        let store = ProfileStore::default();
+        let cache = RegistryCache {
+            fetched_at_unix: 0,
+            doc: crate::profile::registry::RegistryDoc {
+                profiles: vec![crate::profile::registry::RegistryProfile {
+                    id: "reg-game".into(),
+                    name: "Registry Game".into(),
+                    engine_version: None,
+                    keys: BTreeMap::new(),
+                    detect: None,
+                }],
+            },
+        };
+        let err =
+            profile_pak_patterns_in(&store, Some(&cache), Some("reg-game"), None).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::Profile {
+                    fault: ProfileFault::NoPakPaths { id }
+                } if id == "reg-game"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn profile_pak_patterns_in_unknown_id_is_profile_not_found() {
+        let store = hero_store_with_pak_paths(vec!["/g/*.pak".into()]);
+        let err = profile_pak_patterns_in(&store, None, Some("absent"), None).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::Profile {
+                    fault: ProfileFault::ProfileNotFound { id }
+                } if id == "absent"
+            ),
+            "a typo'd --game must be LOUD, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn profile_pak_patterns_in_detect_unique_match_returns_patterns() {
+        let game = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(game.path().join("Game/Paks")).unwrap();
+        let store = hero_store_with_pak_paths(vec!["Game/Paks/*.pak".into()]);
+        let got = profile_pak_patterns_in(&store, None, None, Some(game.path())).unwrap();
+        assert_eq!(got.id, "hero");
+        assert_eq!(got.patterns, vec!["Game/Paks/*.pak".to_string()]);
+    }
+
+    #[test]
+    fn profile_pak_patterns_in_detect_nonexistent_dir_is_invalid_argument() {
+        let store = hero_store_with_pak_paths(vec!["/g/*.pak".into()]);
+        let err =
+            profile_pak_patterns_in(&store, None, None, Some(Path::new("/definitely/not/a/dir")))
+                .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidArgument {
+                    arg: "--detect",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn profile_pak_patterns_in_game_wins_over_detect() {
+        // Mirror of resolve_pak_context's precedence: --game overrides
+        // --detect entirely (the dir is never even validated).
+        let store = hero_store_with_pak_paths(vec!["/g/*.pak".into()]);
+        let got = profile_pak_patterns_in(
+            &store,
+            None,
+            Some("hero"),
+            Some(Path::new("/definitely/not/a/dir")),
+        )
+        .unwrap();
+        assert_eq!(got.id, "hero");
+    }
+
+    #[test]
+    fn profile_pak_patterns_in_neither_selector_is_invalid_argument() {
+        let store = hero_store_with_pak_paths(vec!["/g/*.pak".into()]);
+        let err = profile_pak_patterns_in(&store, None, None, None).unwrap_err();
+        assert!(
+            matches!(&err, PaksmithError::InvalidArgument { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -676,6 +928,7 @@ mod tests {
                     contains: vec![],
                 }),
                 mappings: None,
+                pak_paths: Vec::new(),
             },
         );
         let got = detect_in(&store, None, game.path());
@@ -701,6 +954,7 @@ mod tests {
                 keys: BTreeMap::new(),
                 detect: Some(rules.clone()),
                 mappings: None,
+                pak_paths: Vec::new(),
             },
         );
         let cache = RegistryCache {
@@ -759,6 +1013,7 @@ mod tests {
                 keys: BTreeMap::new(),
                 detect: None,
                 mappings: None,
+                pak_paths: Vec::new(),
             },
         );
         let _ = store.profiles.insert(
@@ -769,6 +1024,7 @@ mod tests {
                 keys: BTreeMap::new(),
                 detect: None,
                 mappings: None,
+                pak_paths: Vec::new(),
             },
         );
         let cache = RegistryCache {

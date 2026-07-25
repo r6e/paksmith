@@ -172,6 +172,7 @@ fn add(a: &AddArgs) -> paksmith_core::Result<u8> {
             keys: BTreeMap::new(),
             detect: None,
             mappings: a.mappings.clone().map(MappingsSource::Path),
+            pak_paths: Vec::new(),
         },
     );
     store.save()?;

@@ -314,6 +314,7 @@ mod tests {
                 }],
             }),
             mappings: None,
+            pak_paths: Vec::new(),
         };
         let text = toml::to_string_pretty(&p).unwrap();
         assert!(text.contains("require_paths"));
@@ -331,6 +332,7 @@ mod tests {
             keys: BTreeMap::default(),
             detect: None,
             mappings: None,
+            pak_paths: Vec::new(),
         };
         let text = toml::to_string_pretty(&p).unwrap();
         assert!(

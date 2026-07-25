@@ -1186,6 +1186,15 @@ pub enum ProfileFault {
         /// 32-hex GUID that was looked up.
         guid: String,
     },
+    /// The selected profile records no `pak_paths` patterns, so a
+    /// profile-paks invocation (no explicit pak path) cannot proceed.
+    /// Registry-sourced profiles always fault here — `RegistryProfile`
+    /// carries no such field.
+    #[error("profile `{id}` has no pak_paths patterns")]
+    NoPakPaths {
+        /// Profile id.
+        id: String,
+    },
     /// The registry payload's ed25519 signature did not verify against the
     /// trusted key. Carries no payload or key material.
     #[error("registry signature verification failed")]

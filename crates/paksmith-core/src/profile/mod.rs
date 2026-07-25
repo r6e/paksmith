@@ -154,6 +154,21 @@ pub struct GameProfile {
     /// the command line wins over this (issue #651).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mappings: Option<MappingsSource>,
+    /// Where this game's archives live (SPEC `GameProfile.pak_paths`,
+    /// issue #655): glob patterns, stored as opaque strings — core does
+    /// no matching (the CLI expands them with its existing `glob` dep).
+    /// Absolute patterns stand alone; relative patterns resolve against
+    /// the `--detect` install dir at expansion time. Serialized as a
+    /// TOML string array; an empty list is omitted so pre-#655 stores
+    /// stay byte-stable.
+    ///
+    /// Local-store only, NOT on [`registry::RegistryProfile`], for the
+    /// same reason as [`MappingsSource`] (see its registry note) plus
+    /// two of its own: registry-supplied patterns would feed untrusted
+    /// input into the CLI's backtracking glob matcher, and install
+    /// layouts are per-user, not per-game-version.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pak_paths: Vec<String>,
 }
 
 /// The whole on-disk document.
@@ -285,6 +300,7 @@ mod tests {
                 keys: BTreeMap::new(),
                 detect: None,
                 mappings: None,
+                pak_paths: Vec::new(),
             },
         );
         let cache = RegistryCache {
@@ -431,6 +447,7 @@ mod tests {
             keys,
             detect: None,
             mappings: None,
+            pak_paths: Vec::new(),
         };
         assert_eq!(
             resolve_key(&p, Some(&missing)).unwrap().to_hex(),
@@ -451,6 +468,7 @@ mod tests {
             keys,
             detect: None,
             mappings: None,
+            pak_paths: Vec::new(),
         };
         // exact GUID hit
         assert_eq!(resolve_key(&p, Some(g.as_bytes())).unwrap().to_hex(), K1);
@@ -468,6 +486,7 @@ mod tests {
             keys: BTreeMap::new(),
             detect: None,
             mappings: None,
+            pak_paths: Vec::new(),
         };
         assert!(resolve_key(&p2, Some(g.as_bytes())).is_none());
         // I3: map has only a non-zero GUID key; pak_guid = None → zero-default
@@ -480,6 +499,7 @@ mod tests {
             keys: only_nonzero_keys,
             detect: None,
             mappings: None,
+            pak_paths: Vec::new(),
         };
         assert!(
             resolve_key(&p3, None).is_none(),
@@ -500,6 +520,7 @@ mod tests {
                 keys,
                 detect: None,
                 mappings: None,
+                pak_paths: Vec::new(),
             },
         );
         let store = ProfileStore { profiles };
@@ -527,6 +548,7 @@ mod tests {
                 keys: BTreeMap::new(),
                 detect: None,
                 mappings: Some(MappingsSource::Path("/maps/hero.usmap".into())),
+                pak_paths: Vec::new(),
             },
         );
         let store = ProfileStore { profiles };
@@ -540,6 +562,61 @@ mod tests {
             back.profiles["hero"].mappings,
             Some(MappingsSource::Path("/maps/hero.usmap".into())),
             "mappings source round-trips"
+        );
+    }
+
+    #[test]
+    fn store_toml_roundtrip_includes_pak_paths() {
+        let mut profiles = BTreeMap::new();
+        let _ = profiles.insert(
+            "hero".to_string(),
+            GameProfile {
+                name: "Hero".into(),
+                engine_version: None,
+                keys: BTreeMap::new(),
+                detect: None,
+                mappings: None,
+                pak_paths: vec![
+                    "/games/hero/Content/Paks/*.pak".to_string(),
+                    "Content/Paks/patch/*.pak".to_string(),
+                ],
+            },
+        );
+        let store = ProfileStore { profiles };
+        let text = toml::to_string_pretty(&store).unwrap();
+        assert!(
+            text.contains("pak_paths") && text.contains("Content/Paks/*.pak"),
+            "pak_paths serialized as a string array: {text}"
+        );
+        let back: ProfileStore = toml::from_str(&text).unwrap();
+        assert_eq!(
+            back.profiles["hero"].pak_paths,
+            vec![
+                "/games/hero/Content/Paks/*.pak".to_string(),
+                "Content/Paks/patch/*.pak".to_string(),
+            ],
+            "pak_paths round-trips in order"
+        );
+    }
+
+    #[test]
+    fn store_without_pak_paths_key_still_loads() {
+        // Backward compat: pre-#655 stores have no `pak_paths` key.
+        let text = r#"
+[profiles.old]
+name = "Old Game"
+engine_version = "4.27"
+
+[profiles.old.keys]
+"#;
+        let back: ProfileStore = toml::from_str(text).unwrap();
+        assert!(back.profiles["old"].pak_paths.is_empty());
+        // And an empty list serializes WITHOUT the key —
+        // skip_serializing_if keeps old-shape documents byte-stable.
+        let out = toml::to_string_pretty(&back).unwrap();
+        assert!(
+            !out.contains("pak_paths"),
+            "empty pak_paths must not serialize: {out}"
         );
     }
 
@@ -578,6 +655,7 @@ engine_version = "4.27"
                 keys,
                 detect: None,
                 mappings: None,
+                pak_paths: Vec::new(),
             },
         );
         let text = toml::to_string_pretty(&ProfileStore { profiles }).unwrap();
