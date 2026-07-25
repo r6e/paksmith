@@ -278,7 +278,7 @@ fn list_filter_zero_matches_returns_empty_array() {
     assert_eq!(
         parsed["entries"].as_array().unwrap().len(),
         0,
-        "zero-match filter must produce an empty JSON array"
+        "zero-match filter must produce an empty `entries` array in the envelope"
     );
 }
 

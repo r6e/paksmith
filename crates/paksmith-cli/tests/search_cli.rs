@@ -110,7 +110,7 @@ fn search_no_predicates_lists_all_as_json() {
     let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert!(
         v["entries"].as_array().is_some_and(|a| !a.is_empty()),
-        "expected non-empty JSON array"
+        "expected a non-empty `entries` array in the envelope"
     );
 }
 
