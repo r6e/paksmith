@@ -61,7 +61,13 @@ fn expand_patterns(
                     ),
                 });
             };
-            let Some(joined) = safe_join_pattern(dir, pattern) else {
+            // The base dir is a LITERAL path, not pattern text — escape
+            // its glob metacharacters (`[`, `*`, `?`, …; legal in real
+            // install-dir names) so they can't corrupt or misattribute
+            // the match. Only the profile's own pattern globs.
+            let escaped_dir =
+                std::path::PathBuf::from(glob::Pattern::escape(&dir.to_string_lossy()));
+            let Some(joined) = safe_join_pattern(&escaped_dir, pattern) else {
                 return Err(PaksmithError::InvalidArgument {
                     arg: "pak_paths",
                     reason: format!(
@@ -100,6 +106,14 @@ fn expand_patterns(
 /// components (mirror of detection's `safe_join`; `.` is harmless).
 /// Glob metacharacters pass through untouched — `*`/`?`/`[` are
 /// ordinary `Normal` components to `Path`.
+///
+/// Symlink note (same documented policy as detection's `safe_join`):
+/// the component guard bounds the JOINED PATH text, not what the
+/// filesystem resolves it to — a symlink inside the install dir can
+/// point outside it and the glob walk / archive open will follow it.
+/// The profile and the `--detect` dir are the invoking user's own
+/// input, so this crosses no privilege boundary (an explicit
+/// `<path>` argument already grants the same read access).
 fn safe_join_pattern(dir: &Path, pattern: &str) -> Option<PathBuf> {
     if pattern.is_empty() {
         return None;
@@ -113,6 +127,35 @@ fn safe_join_pattern(dir: &Path, pattern: &str) -> Option<PathBuf> {
         }
     }
     Some(out)
+}
+
+/// Render a path list for human-facing labels/messages ("a, b, c").
+pub(crate) fn join_display(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Open every source archive and collect its (filtered) entries — the
+/// shared list/search loop. Per-source key resolution goes through the
+/// same `resolve_pak_key` path as an explicit invocation.
+pub(crate) fn collect_entry_groups(
+    sources: Vec<PathBuf>,
+    aes_key: Option<&paksmith_core::AesKey>,
+    game: Option<&str>,
+    detect: Option<&Path>,
+    keep: impl Fn(&paksmith_core::container::EntryMetadata) -> bool,
+) -> paksmith_core::Result<Vec<(PathBuf, Vec<paksmith_core::container::EntryMetadata>)>> {
+    let mut groups = Vec::with_capacity(sources.len());
+    for pak in sources {
+        let key = crate::commands::key_resolve::resolve_pak_key(&pak, aes_key, game, detect)?;
+        let reader = paksmith_core::container::open(&pak, key.as_ref())?;
+        let entries: Vec<_> = reader.entries().filter(&keep).collect();
+        groups.push((pak, entries));
+    }
+    Ok(groups)
 }
 
 #[cfg(test)]
@@ -161,6 +204,18 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn base_dir_with_glob_metacharacters_still_matches() {
+        // The --detect dir is literal path text: a bracketed dir name
+        // (real-world edition tags) must neither fail the glob compile
+        // nor silently become a character class.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("Game [2014]");
+        touch(&dir.join("Paks/a.pak"));
+        let got = expand_patterns("hero", &["Paks/*.pak".to_string()], Some(&dir)).unwrap();
+        assert_eq!(got, vec![dir.join("Paks/a.pak")]);
     }
 
     #[test]

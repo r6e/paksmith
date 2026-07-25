@@ -107,7 +107,7 @@ pub(crate) struct AddArgs {
     /// Stored as-given; absolute paths recommended.
     #[arg(long, value_name = "PATH")]
     pub(crate) mappings: Option<std::path::PathBuf>,
-    /// Glob pattern locating this game's archives (repeatable, #655).
+    /// Glob pattern locating this game's archives (repeatable).
     /// Absolute patterns stand alone; relative patterns resolve against
     /// the `--detect` install dir at run time. Stored as-given.
     #[arg(long = "pak-path", value_name = "GLOB")]
@@ -162,6 +162,16 @@ pub(crate) fn run(cmd: &ProfileCmd, _format: OutputFormat) -> paksmith_core::Res
 }
 
 fn add(a: &AddArgs) -> paksmith_core::Result<u8> {
+    // Validate every layer (CLAUDE.md): a syntactically invalid glob is
+    // rejected HERE, not stored to fail at first expansion.
+    for pattern in &a.pak_paths {
+        if let Err(e) = glob::Pattern::new(pattern) {
+            return Err(PaksmithError::InvalidArgument {
+                arg: "--pak-path",
+                reason: format!("`{pattern}` is not a valid glob: {e}"),
+            });
+        }
+    }
     let mut store = ProfileStore::load()?;
     if store.profiles.contains_key(&a.id) {
         return Err(PaksmithError::InvalidArgument {

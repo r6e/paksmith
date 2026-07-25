@@ -1,4 +1,4 @@
-//! `paksmith search <pak>` — query archive entries by extension, name
+//! `paksmith search [pak]` — query archive entries by extension, name
 //! (basename glob), full-path regex, and uncompressed size range. Index-only;
 //! no asset parsing.
 
@@ -14,7 +14,7 @@ use crate::search::Predicates;
 #[derive(Args)]
 pub(crate) struct SearchArgs {
     /// Path to the .pak file. Optional when `--game`/`--detect` selects
-    /// a profile with `pak_paths` patterns (#655) — then every matching
+    /// a profile with `pak_paths` patterns — then every matching
     /// archive is searched.
     pub(crate) pak: Option<PathBuf>,
 
@@ -57,21 +57,12 @@ pub(crate) fn run(
         .map_err(|(arg, reason)| PaksmithError::InvalidArgument { arg, reason })?;
 
     let sources = crate::profile_paks::resolve_pak_sources(args.pak.as_deref(), game, detect)?;
-    let mut groups = Vec::with_capacity(sources.len());
-    for pak in sources {
-        let key = crate::commands::key_resolve::resolve_pak_key(&pak, aes_key, game, detect)?;
-        let reader = paksmith_core::container::open(&pak, key.as_ref())?;
-        let matches: Vec<_> = reader.entries().filter(|e| predicates.matches(e)).collect();
-        groups.push((pak, matches));
-    }
+    let groups = crate::profile_paks::collect_entry_groups(sources, aes_key, game, detect, |e| {
+        predicates.matches(e)
+    })?;
 
     let resolved = format.resolve();
     crate::output::note_auto_resolved_to_json(format, resolved, quiet);
-    if args.pak.is_some() {
-        // Explicit-path invocation: byte-identical output to pre-#655.
-        crate::output::print_entries(&groups[0].1, resolved)?;
-    } else {
-        crate::output::print_entries_grouped(&groups, resolved)?;
-    }
+    crate::output::print_entry_groups(&groups, args.pak.is_some(), resolved)?;
     Ok(())
 }

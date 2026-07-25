@@ -54,9 +54,20 @@ pub(crate) struct FailureRecord {
 #[derive(Debug, Serialize)]
 pub(crate) struct ExtractSummary {
     /// Schema version for forward-compatibility. Consumers may check this
-    /// before parsing; currently always 1.
+    /// before parsing; currently always 1. Additive optional keys that
+    /// never appear in a pre-existing output mode (`sources`, #655) do
+    /// not bump.
     pub(crate) schema_version: u32,
+    /// Source archive label. Explicit-path runs: the one path,
+    /// unchanged from pre-#655. Profile-paks runs: every source
+    /// archive, comma-joined — HUMAN display only (", " is a legal
+    /// path substring); machine consumers use `sources`.
     pub(crate) pak: String,
+    /// The source archives, one element per path — present only in
+    /// profile-paks mode (#655); the machine-readable counterpart of
+    /// the joined `pak` label.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) sources: Vec<String>,
     pub(crate) output_dir: String,
     pub(crate) dry_run: bool,
     pub(crate) counts: Counts,
@@ -71,6 +82,7 @@ impl ExtractSummary {
         dry_run: bool,
         outcomes: Vec<EntryOutcome>,
     ) -> Self {
+        let sources = Vec::new();
         let mut counts = Counts::default();
         let mut failures = Vec::new();
         let mut outputs = Vec::new();
@@ -109,6 +121,7 @@ impl ExtractSummary {
         outputs.sort_by(|a, b| a.entry.cmp(&b.entry));
         failures.sort_by(|a, b| a.entry.cmp(&b.entry));
         Self {
+            sources,
             schema_version: 1,
             pak,
             output_dir,
