@@ -227,15 +227,15 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
 /// incl. U+009B pass through as raw UTF-8) but because JSON is the
 /// machine interface: exact path bytes are the round-tripping
 /// contract, and machine consumers don't interpret terminal controls.
-pub(crate) fn sanitize_for_display(path: &str) -> std::borrow::Cow<'_, str> {
-    if path.chars().any(char::is_control) {
+pub(crate) fn sanitize_for_display(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.chars().any(char::is_control) {
         std::borrow::Cow::Owned(
-            path.chars()
+            s.chars()
                 .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
                 .collect(),
         )
     } else {
-        std::borrow::Cow::Borrowed(path)
+        std::borrow::Cow::Borrowed(s)
     }
 }
 
