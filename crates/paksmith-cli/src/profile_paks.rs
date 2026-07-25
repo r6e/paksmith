@@ -49,6 +49,16 @@ fn expand_patterns(
 ) -> paksmith_core::Result<Vec<PathBuf>> {
     let mut out: Vec<PathBuf> = Vec::new();
     for pattern in patterns {
+        // An empty string is storable (hand-edited TOML; `glob` even
+        // compiles it) but meaningless — reject it by name here, before
+        // the absolute/relative split can misattribute it to a missing
+        // `--detect` dir or a traversal rejection.
+        if pattern.is_empty() {
+            return Err(PaksmithError::InvalidArgument {
+                arg: "pak_paths",
+                reason: format!("profile `{id}` has an empty pak_paths pattern"),
+            });
+        }
         let effective: String = if Path::new(pattern).is_absolute() {
             pattern.clone()
         } else {
@@ -271,6 +281,26 @@ mod tests {
         let pat = dir.path().join("Paks/*.pak").to_string_lossy().into_owned();
         let got = expand_patterns("hero", &[pat], None).unwrap();
         assert_eq!(got, vec![dir.path().join("Paks/real.pak")]);
+    }
+
+    #[test]
+    fn empty_pattern_is_a_clear_invalid_argument() {
+        // With OR without a base dir the message names the real
+        // problem — never the traversal guard or the missing-detect
+        // branch an empty string would otherwise fall into.
+        for base in [None, Some(Path::new("/tmp"))] {
+            let err = expand_patterns("hero", &[String::new()], base).unwrap_err();
+            match &err {
+                PaksmithError::InvalidArgument { arg, reason } => {
+                    assert_eq!(*arg, "pak_paths");
+                    assert!(
+                        reason.contains("empty pak_paths pattern"),
+                        "the message names the defect: {reason}"
+                    );
+                }
+                other => panic!("got {other:?}"),
+            }
+        }
     }
 
     #[test]

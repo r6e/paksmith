@@ -92,6 +92,23 @@ fn add_rejects_invalid_pak_path_glob() {
 }
 
 #[test]
+fn add_rejects_empty_pak_path() {
+    // `glob` compiles "" without complaint, so empty needs its own
+    // store-time rejection.
+    let cfg = tempdir().unwrap();
+    let out = paksmith(cfg.path())
+        .args(["profile", "add", "hero", "--name", "Hero", "--pak-path", ""])
+        .assert()
+        .failure()
+        .code(2);
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("empty pattern"),
+        "the rejection names the defect: {stderr}"
+    );
+}
+
+#[test]
 fn show_without_pak_paths_renders_dash() {
     let cfg = tempdir().unwrap();
     let _ = paksmith(cfg.path())

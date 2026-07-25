@@ -163,8 +163,15 @@ pub(crate) fn run(cmd: &ProfileCmd, _format: OutputFormat) -> paksmith_core::Res
 
 fn add(a: &AddArgs) -> paksmith_core::Result<u8> {
     // Validate every layer (CLAUDE.md): a syntactically invalid glob is
-    // rejected HERE, not stored to fail at first expansion.
+    // rejected HERE, not stored to fail at first expansion. Empty is
+    // checked explicitly — `glob` compiles "" without complaint.
     for pattern in &a.pak_paths {
+        if pattern.is_empty() {
+            return Err(PaksmithError::InvalidArgument {
+                arg: "--pak-path",
+                reason: "empty pattern".to_string(),
+            });
+        }
         if let Err(e) = glob::Pattern::new(pattern) {
             return Err(PaksmithError::InvalidArgument {
                 arg: "--pak-path",
