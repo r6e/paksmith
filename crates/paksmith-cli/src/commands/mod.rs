@@ -45,7 +45,7 @@ impl Command {
             Self::Inspect(args) => {
                 inspect::run(args, format, aes_key, game, detect, quiet).map(|()| 0)
             }
-            Self::Extract(args) => extract::run(args, format, aes_key, game, detect),
+            Self::Extract(args) => extract::run(args, format, aes_key, game, detect, quiet),
             Self::Search(args) => {
                 search::run(args, format, aes_key, game, detect, quiet).map(|()| 0)
             }

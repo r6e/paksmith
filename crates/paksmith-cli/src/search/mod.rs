@@ -36,9 +36,9 @@ impl Predicates {
         let name = args
             .name
             .as_deref()
-            .map(glob::Pattern::new)
+            .map(crate::path_util::compile_glob)
             .transpose()
-            .map_err(|e| ("--name", e.to_string()))?;
+            .map_err(|e| ("--name", e))?;
         let regex = args
             .regex
             .as_deref()

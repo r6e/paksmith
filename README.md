@@ -96,7 +96,8 @@ cargo run -p paksmith-cli -- list path/to/archive.pak
 
 `paksmith list` auto-detects whether stdout is a terminal — emits a human-readable
 table (with color; set `NO_COLOR` to disable) interactively, JSON when piped or
-redirected. Override with `--format table` or `--format json`. The JSON shape is
+redirected. Override with `--format table` or `--format json`. `--quiet` silences
+advisory notes and drops logging to error-level (errors still print). The JSON shape is
 a versioned envelope shared with `search`:
 
 ```json

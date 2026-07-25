@@ -65,19 +65,22 @@ fn search_filter_matches_full_path_glob() {
 
 #[test]
 fn search_filter_composes_with_other_predicates() {
-    // Predicates AND-compose: a deep filter + --type narrows to the one
-    // nested uasset.
+    // Predicates AND-compose, with DIVERGENT evidence: on this fixture
+    // `--filter "Content/**"` alone matches 2 entries and
+    // `--max-size 15` alone matches 2 (a.uasset 14 B + root.txt 15 B) —
+    // only the conjunction narrows to exactly {Content/a.uasset}, so
+    // deleting EITHER predicate arm from Predicates::matches fails this.
     let assert = Command::cargo_bin("paksmith")
         .unwrap()
         .args(["--format", "json", "search"])
         .arg(fixture(PAK))
-        .args(["--filter", "Content/Subdir/**", "--type", "uasset"])
+        .args(["--filter", "Content/**", "--max-size", "15"])
         .assert()
         .success();
     let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     let arr = v["entries"].as_array().unwrap();
     assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["path"], "Content/Subdir/Deep/nested.uasset");
+    assert_eq!(arr[0]["path"], "Content/a.uasset");
 }
 
 #[test]

@@ -102,8 +102,7 @@ pub(crate) fn emit(
     let resolved = format.resolve();
 
     // Advisory note on stderr when `--format auto` resolves (no `--path`,
-    // which always forces JSON) — the shared list/search note, --quiet
-    // aware (#652 deduped the previously-inlined copy).
+    // which always forces JSON) — the shared, --quiet-aware list/search note.
     crate::output::note_auto_resolved_to_json(format, resolved, quiet);
 
     match resolved {

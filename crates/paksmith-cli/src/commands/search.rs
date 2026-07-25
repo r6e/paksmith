@@ -24,7 +24,7 @@ pub(crate) struct SearchArgs {
     pub(crate) r#type: Vec<String>,
 
     /// Glob matched against the FULL virtual path (like list/extract's
-    /// `--filter`), e.g. `Game/**`. ANDs with the other predicates.
+    /// `--filter`), e.g. `Game/**`.
     #[arg(long, value_name = "GLOB")]
     pub(crate) filter: Option<String>,
 

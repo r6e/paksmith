@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use clap::Args;
 
 use paksmith_core::AesKey;
-use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 
@@ -33,18 +32,15 @@ pub(crate) fn run(
         None => PakReader::open(&args.path)?,
     };
 
-    let filtered: Vec<_> = match &args.filter {
-        Some(pattern) => {
-            let pat = crate::path_util::compile_glob(pattern).map_err(|reason| {
-                PaksmithError::InvalidArgument {
-                    arg: "--filter",
-                    reason,
-                }
-            })?;
-            reader.entries().filter(|e| pat.matches(e.path())).collect()
-        }
-        None => reader.entries().collect(),
-    };
+    let pattern = args
+        .filter
+        .as_deref()
+        .map(|p| crate::path_util::compile_glob_arg("--filter", p))
+        .transpose()?;
+    let filtered: Vec<_> = reader
+        .entries()
+        .filter(|e| pattern.as_ref().is_none_or(|pat| pat.matches(e.path())))
+        .collect();
 
     let resolved = format.resolve();
     crate::output::note_auto_resolved_to_json(format, resolved, quiet);

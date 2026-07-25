@@ -102,10 +102,6 @@ struct EntryRow<'a> {
     encrypted: bool,
 }
 
-// `unused_results` allow scoped to this function: comfy-table's
-// builder returns `&mut Table` for chaining; discarding is the
-// documented call shape.
-#[allow(unused_results)]
 pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
     let stdout = io::stdout();
     let stdout_lock = stdout.lock();
@@ -120,19 +116,18 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
     let mut out = io::BufWriter::new(stdout_lock);
     match format {
         ResolvedFormat::Json => {
-            let rows: Vec<EntryRow> = entries
-                .iter()
-                .map(|e| EntryRow {
-                    path: e.path(),
-                    size: e.uncompressed_size(),
-                    compressed_size: e.compressed_size(),
-                    compressed: e.is_compressed(),
-                    encrypted: e.is_encrypted(),
-                })
-                .collect();
             let envelope = EntriesOutput {
                 schema_version: ENTRIES_SCHEMA_VERSION,
-                entries: rows,
+                entries: entries
+                    .iter()
+                    .map(|e| EntryRow {
+                        path: e.path(),
+                        size: e.uncompressed_size(),
+                        compressed_size: e.compressed_size(),
+                        compressed: e.is_compressed(),
+                        encrypted: e.is_encrypted(),
+                    })
+                    .collect(),
             };
             // Stream directly to stdout instead of building the full string in
             // memory. serde_json wraps the underlying io::Error; the helper
@@ -142,7 +137,7 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
             writeln!(out)?;
         }
         ResolvedFormat::Table => {
-            let table = build_entries_table(entries, !no_color_from(std::env::var_os("NO_COLOR")));
+            let table = build_entries_table(entries, styling_enabled(std::env::var_os("NO_COLOR")));
             writeln!(out, "{table}")?;
         }
     }
@@ -150,11 +145,15 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
     Ok(())
 }
 
-/// True iff the `NO_COLOR` convention (<https://no-color.org>) disables
-/// styling: the variable present with any NON-empty value. Pure —
-/// `print_entries` wires in the real env read.
-fn no_color_from(var: Option<std::ffi::OsString>) -> bool {
-    var.is_some_and(|v| !v.is_empty())
+/// Whether to ATTACH styles to the entries table, per the `NO_COLOR`
+/// convention (<https://no-color.org>): enabled iff the variable is
+/// absent or present-but-empty. Pure and polarity-complete in ONE fn
+/// (like [`OutputFormat::resolve_with_tty`], and for the same reason):
+/// a black-box test cannot see this decision — comfy-table suppresses
+/// ANSI off-TTY whichever way it goes — so the whole contract is
+/// unit-pinned here. `print_entries` wires in the real env read.
+fn styling_enabled(no_color: Option<std::ffi::OsString>) -> bool {
+    no_color.is_none_or(|v| v.is_empty())
 }
 
 /// Build the `list`/`search` entries table (SPEC Design Principles:
@@ -183,7 +182,7 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
     };
     // "yes" is the signal state in both flag columns; color it so the
     // eye can scan a big table for encrypted/compressed entries.
-    let yes_no = |val: bool, yes_color: Color| {
+    let flag_cell = |val: bool, yes_color: Color| {
         if val {
             let cell = Cell::new("yes");
             if style { cell.fg(yes_color) } else { cell }
@@ -202,13 +201,32 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
     ]);
     for entry in entries {
         table.add_row(vec![
-            Cell::new(entry.path()),
+            Cell::new(sanitize_for_tty(entry.path())),
             Cell::new(format_size(entry.uncompressed_size())),
-            yes_no(entry.is_compressed(), Color::Green),
-            yes_no(entry.is_encrypted(), Color::Yellow),
+            flag_cell(entry.is_compressed(), Color::Green),
+            flag_cell(entry.is_encrypted(), Color::Yellow),
         ]);
     }
     table
+}
+
+/// Replace control characters (C0 incl. ESC/BEL/CR, DEL, and C1 incl.
+/// the U+009B CSI) with U+FFFD before an untrusted pak path reaches the
+/// terminal. The core FString parser guarantees valid non-NUL Unicode —
+/// it does NOT strip controls, so a hostile pak can embed OSC/CSI
+/// sequences (title rewrites, screen clears, output-hiding) in an entry
+/// path. No legitimate virtual path contains control characters. The
+/// JSON path needs no equivalent: serde_json escapes controls.
+fn sanitize_for_tty(path: &str) -> std::borrow::Cow<'_, str> {
+    if path.chars().any(char::is_control) {
+        std::borrow::Cow::Owned(
+            path.chars()
+                .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    }
 }
 
 // `bytes as f64` loses precision past 2^53, but the output is `{:.1}`
@@ -275,13 +293,19 @@ mod table_style_tests {
         let _ = table.enforce_styling();
         let rendered = table.to_string();
         assert!(
-            rendered.contains("\u{1b}["),
-            "styled table must carry ANSI escapes under enforce_styling: {rendered}"
-        );
-        // Header bold+cyan and at least one colored "yes" cell.
-        assert!(
             rendered.contains("\u{1b}[1m"),
             "header must be bold: {rendered}"
+        );
+        assert!(
+            rendered.contains("\u{1b}[38;5;14m"),
+            "header must be cyan: {rendered}"
+        );
+        // 4 headers + the encrypted-yes + compressed-yes cells all carry
+        // a foreground color — dropping .fg from flag_cell would fail
+        // this count even with the header styles intact.
+        assert!(
+            rendered.matches("\u{1b}[38;5;").count() >= 6,
+            "the two 'yes' flag cells must be colored too: {rendered}"
         );
     }
 
@@ -300,14 +324,50 @@ mod table_style_tests {
         assert!(rendered.contains("Game/enc.uasset") && rendered.contains("yes"));
     }
 
-    /// no-color.org contract: present-and-non-empty disables; absent or
-    /// empty does not.
+    /// Hostile pak paths cannot inject terminal escapes through the
+    /// table: every control char (ESC, BEL, C1 CSI, …) is replaced
+    /// before the cell is built — even under forced styling.
     #[test]
-    fn no_color_env_contract() {
-        assert!(!no_color_from(None));
-        assert!(!no_color_from(Some("".into())));
-        assert!(no_color_from(Some("1".into())));
-        assert!(no_color_from(Some("anything".into())));
+    fn hostile_path_control_chars_are_neutralized() {
+        let hostile = vec![EntryMetadata::new(
+            "Game/\u{1b}]0;pwned\u{7}/\u{9b}2Jx.uasset".into(),
+            10,
+            20,
+            EntryFlags::NONE,
+        )];
+        // Unstyled: the ONLY possible ESC source would be the hostile
+        // path, so the render must be entirely control-char-free.
+        let plain = build_entries_table(&hostile, false).to_string();
+        assert!(
+            !plain.contains('\u{1b}') && !plain.contains('\u{7}') && !plain.contains('\u{9b}'),
+            "control chars from the pak path must be neutralized: {plain:?}"
+        );
+        assert!(
+            plain.contains('\u{FFFD}'),
+            "replacement char must mark the stripped spots: {plain:?}"
+        );
+        // The harmless residue stays visible — only the control bytes
+        // are stripped, so the user can still SEE something was there.
+        assert!(plain.contains("]0;pwned"));
+
+        // Styled: the table's own ANSI is present, but the hostile BEL /
+        // C1-CSI still cannot survive.
+        let mut styled_table = build_entries_table(&hostile, true);
+        let _ = styled_table.enforce_styling();
+        let styled = styled_table.to_string();
+        assert!(!styled.contains('\u{7}') && !styled.contains('\u{9b}'));
+    }
+
+    /// no-color.org contract, full polarity: absent or empty → styled;
+    /// present-and-non-empty → plain. This IS the whole NO_COLOR
+    /// decision (nothing else composes on top), so an inversion cannot
+    /// hide from the suite.
+    #[test]
+    fn styling_enabled_no_color_contract() {
+        assert!(styling_enabled(None));
+        assert!(styling_enabled(Some("".into())));
+        assert!(!styling_enabled(Some("1".into())));
+        assert!(!styling_enabled(Some("anything".into())));
     }
 }
 

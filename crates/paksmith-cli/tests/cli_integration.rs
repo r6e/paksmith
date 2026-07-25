@@ -35,6 +35,11 @@ fn list_and_search_json_carry_schema_version_envelope() {
         let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
         assert_eq!(v["schema_version"], 1, "{cmd_name}: schema_version = 1");
         assert_eq!(
+            v.as_object().unwrap().len(),
+            2,
+            "{cmd_name}: envelope has EXACTLY schema_version + entries"
+        );
+        assert_eq!(
             v["entries"].as_array().unwrap().len(),
             5,
             "{cmd_name}: entries array under the envelope"
@@ -65,6 +70,9 @@ fn quiet_suppresses_auto_json_note() {
 
     let quiet = Command::cargo_bin("paksmith")
         .unwrap()
+        // Ambient RUST_LOG overrides --quiet by documented contract;
+        // strip it so a developer's environment can't fail this pin.
+        .env_remove("RUST_LOG")
         .args(["--quiet", "list", &fixture_path("minimal_v6.pak")])
         .output()
         .unwrap();
@@ -95,6 +103,7 @@ fn quiet_keeps_error_prefix() {
     // Errors are NOT advisory chatter — they survive --quiet.
     let out = Command::cargo_bin("paksmith")
         .unwrap()
+        .env_remove("RUST_LOG")
         .args(["--quiet", "list", "/nonexistent/nope.pak"])
         .output()
         .unwrap();
@@ -136,7 +145,10 @@ fn list_table_output() {
         .success()
         .stdout(predicate::str::contains("hero.uasset"))
         .stdout(predicate::str::contains("level01.umap"))
-        .stdout(predicate::str::contains("bgm.uasset"));
+        .stdout(predicate::str::contains("bgm.uasset"))
+        // #652: piped table output must stay ANSI-free — the color
+        // styles attach only for real TTYs (SPEC: "plain when piped").
+        .stdout(predicate::str::contains("\u{1b}[").not());
 }
 
 #[test]

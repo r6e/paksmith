@@ -1,9 +1,18 @@
 //! Small path helpers shared across CLI commands.
 
-/// Compile a `--filter`-style glob (matched against FULL virtual paths).
-/// Returns the glob error's message on failure; callers wrap it in their
-/// own error shape (`InvalidArgument` in list/extract, the
-/// `(flag, reason)` tuple in search's predicate compiler).
+/// Compile a glob pattern for an entry-matching flag. What the glob is
+/// matched AGAINST (full virtual path for `--filter`, basename for
+/// search's `--name`) is each call site's contract, not this helper's.
+/// Returns the glob error's message on failure; search's predicate
+/// compiler wraps it in its `(flag, reason)` tuple, and
+/// [`compile_glob_arg`] wraps it for the `InvalidArgument` callers.
+///
+/// Complexity note: `glob` is a backtracking matcher — pathological
+/// patterns (`a*a*a*…b`) are super-linear against long non-matching
+/// paths, unlike the linear-time `--regex` predicate. Bounded in
+/// practice (patterns are the invoking user's own input; core caps
+/// paths at 64 KiB), so self-inflicted only — do not expose glob
+/// matching to pak-supplied patterns.
 pub(crate) fn compile_glob(pattern: &str) -> Result<glob::Pattern, String> {
     glob::Pattern::new(pattern).map_err(|e| e.to_string())
 }
@@ -20,4 +29,14 @@ pub(crate) fn extension_of(basename: &str) -> Option<String> {
         .rfind('.')
         .filter(|&i| i > 0)
         .map(|i| basename[i + 1..].to_ascii_lowercase())
+}
+
+/// [`compile_glob`] wrapped as `PaksmithError::InvalidArgument` under
+/// `arg` — the shape list/extract report bad `--filter` globs with.
+pub(crate) fn compile_glob_arg(
+    arg: &'static str,
+    pattern: &str,
+) -> paksmith_core::Result<glob::Pattern> {
+    compile_glob(pattern)
+        .map_err(|reason| paksmith_core::PaksmithError::InvalidArgument { arg, reason })
 }
