@@ -82,7 +82,7 @@ pub struct PakOpenContext {
     /// `--mappings` argument precedence over this.
     pub mappings: Option<MappingsSource>,
     /// The selected profile's declared engine version, parsed
-    /// leniently (#656): an unparseable string degrades to `None` with
+    /// leniently (#656): an unparsable string degrades to `None` with
     /// a warning, never an error — registry-authored strings are
     /// untrusted input, and one bad value must not fail an open.
     ///
@@ -775,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn unparseable_engine_version_degrades_to_no_hint() {
+    fn unparsable_engine_version_degrades_to_no_hint() {
         // Hand-edited or registry-authored garbage must never fail an
         // open — it degrades to "no hint", i.e. the pre-#656 parse.
         let mut store = hero_store_with_detect(None);

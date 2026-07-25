@@ -11,7 +11,7 @@
 //! (store parse failure is all-or-nothing), the TOML round-trip pins
 //! `engine_version = "5.3"` byte-exactly, and the ed25519-signed
 //! registry schema can never change. Parsing happens leniently at
-//! RESOLUTION time instead — an unparseable string degrades to `None`
+//! RESOLUTION time instead — an unparsable string degrades to `None`
 //! with a warning, never an error, because registry-authored strings
 //! are untrusted input.
 //!
