@@ -1,4 +1,5 @@
-//! `paksmith inspect [pak] <asset>` (or `inspect <asset>` with a profile) — dump a uasset's parsed
+//! `paksmith inspect [pak] <asset>` — or `inspect <asset>` with a
+//! `--game`/`--detect` profile supplying the archives — dump a uasset's parsed
 //! shape as JSON.
 //!
 //! The output covers the structural header (summary, name table,

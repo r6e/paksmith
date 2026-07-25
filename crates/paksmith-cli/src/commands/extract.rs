@@ -26,8 +26,9 @@ pub(crate) struct ExtractArgs {
     /// a profile with `pak_paths` patterns — then every matching
     /// archive is extracted. Archives mount in sorted path order, and a
     /// virtual path present in several archives extracts from the LAST
-    /// one only (UE patch semantics: later alphabetical mounts
-    /// override; shadowed copies are skipped, not collisions).
+    /// one only, matching UE's conventional alphabetical mount order
+    /// where later mounts override (as community references like FModel
+    /// document it); shadowed copies are skipped, not collisions.
     pub(crate) pak: Option<PathBuf>,
 
     /// Output directory (created if absent).
@@ -99,10 +100,15 @@ pub(crate) fn run(
             locres: args.locres_format,
         },
     };
-    let (usmap, opened) =
-        open_and_collect(&sources, args, aes_key, game, detect, pattern.as_ref())?;
-    let entry_lists: Vec<Vec<String>> = opened.iter().map(|(_, e)| e.clone()).collect();
-    let winning = winning_entries(&entry_lists);
+    let opened = open_and_collect(
+        &sources,
+        args.mappings.as_deref(),
+        aes_key,
+        game,
+        detect,
+        pattern.as_ref(),
+    )?;
+    let winning = winning_entries(&opened.entry_lists);
 
     // FIX 6: hide progress when stderr is not a TTY (e.g. CI, piped
     // output) so non-interactive callers get clean stderr without ANSI
@@ -133,12 +139,12 @@ pub(crate) fn run(
         .transpose()?;
 
     let mut all_outcomes = Vec::new();
-    for ((reader, _), entries) in opened.iter().zip(&winning) {
+    for (reader, entries) in opened.readers.iter().zip(&winning) {
         let job = ExtractJob {
             reader: Arc::clone(reader),
             registry: &registry,
             cfg: &cfg,
-            mappings: usmap.clone(),
+            mappings: opened.usmap.clone(),
         };
         let outcomes = match &pool {
             Some(p) => p.install(|| job.run_with_progress(entries, &progress)),
@@ -157,9 +163,8 @@ pub(crate) fn run(
         all_outcomes,
     );
     if args.pak.is_none() {
-        summary.sources = sources.iter().map(|p| p.display().to_string()).collect();
+        summary.sources = crate::profile_paks::display_all(&sources);
     }
-    let summary = summary;
 
     let resolved = format.resolve();
     let stdout = io::stdout();
@@ -170,42 +175,44 @@ pub(crate) fn run(
     Ok(u8::from(summary.had_failures()))
 }
 
-type OpenedSource = (
-    std::sync::Arc<dyn paksmith_core::container::ContainerReader>,
-    Vec<String>,
-);
+/// Phase 1's yield: every source archive open, its filtered entry
+/// list, and the once-resolved usmap. Parallel vectors, index-aligned
+/// with the sorted `sources` order `winning_entries` decides by.
+struct OpenedSources {
+    usmap: Option<std::sync::Arc<paksmith_core::asset::Usmap>>,
+    readers: Vec<std::sync::Arc<dyn paksmith_core::container::ContainerReader>>,
+    entry_lists: Vec<Vec<String>>,
+}
 
 /// Phase 1 of a (possibly multi-archive) extract: resolve and open
 /// EVERY source, collecting its filtered entry list, before any writes.
 /// A bad archive (missing key, corrupt index) fails the whole run
 /// cleanly at exit 2 with nothing partial on disk, instead of
-/// discarding a half-finished run's summary. Per-source context
-/// resolution repeats the store load / detection sweep (known cost —
-/// hoisting needs a batch core entry point); the usmap is
-/// profile-derived and pak-independent, so it is resolved and parsed
-/// exactly once.
-#[allow(clippy::type_complexity)]
+/// discarding a half-finished run's summary. Every reader (open file
+/// handle + parsed index) is held simultaneously — the memory price of
+/// the all-open-before-write guarantee. Per-source context resolution
+/// repeats the store load / detection sweep (known cost — hoisting
+/// needs a batch core entry point); the usmap is profile-derived and
+/// pak-independent, so it is resolved and parsed exactly once.
 fn open_and_collect(
     sources: &[std::path::PathBuf],
-    args: &ExtractArgs,
+    mappings_arg: Option<&std::path::Path>,
     aes_key: Option<&AesKey>,
     game: Option<&str>,
     detect: Option<&std::path::Path>,
     pattern: Option<&glob::Pattern>,
-) -> paksmith_core::Result<(
-    Option<std::sync::Arc<paksmith_core::asset::Usmap>>,
-    Vec<OpenedSource>,
-)> {
+) -> paksmith_core::Result<OpenedSources> {
     let mut usmap = None;
-    let mut opened = Vec::with_capacity(sources.len());
-    for pak in sources {
+    let mut readers = Vec::with_capacity(sources.len());
+    let mut entry_lists = Vec::with_capacity(sources.len());
+    for (i, pak) in sources.iter().enumerate() {
         let ctx = crate::commands::key_resolve::resolve_pak_context(pak, aes_key, game, detect)?;
-        if usmap.is_none() {
-            usmap = Some(crate::commands::mappings_resolve::resolve_usmap(
-                args.mappings.as_deref(),
+        if i == 0 {
+            usmap = crate::commands::mappings_resolve::resolve_usmap(
+                mappings_arg,
                 ctx.mappings.as_ref(),
                 crate::commands::mappings_resolve::mappings_selector(game),
-            )?);
+            )?;
         }
         let reader = paksmith_core::container::open(pak, ctx.key.as_ref())?;
         let entries: Vec<String> = reader
@@ -213,12 +220,18 @@ fn open_and_collect(
             .filter(|e| pattern.is_none_or(|pat| pat.matches(e.path())))
             .map(|e| e.path().to_string())
             .collect();
-        opened.push((reader, entries));
+        readers.push(reader);
+        entry_lists.push(entries);
     }
-    Ok((usmap.unwrap_or(None), opened))
+    Ok(OpenedSources {
+        usmap,
+        readers,
+        entry_lists,
+    })
 }
 
-/// Phase 2's winner decision, pure: UE mounts paks alphabetically and
+/// Phase 2's winner decision, pure: by UE convention (as community
+/// references like FModel document it) paks mount alphabetically and
 /// later mounts override, so a virtual path present in several archives
 /// extracts from the LAST source in sorted expansion order. Shadowed
 /// copies are simply not extracted — no spurious create_new failures,

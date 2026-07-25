@@ -124,7 +124,7 @@ impl<'a> EntryRow<'a> {
     }
 }
 
-pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
+fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
     let stdout = io::stdout();
     let stdout_lock = stdout.lock();
     // Wrap stdout in a `BufWriter` so per-entry writes coalesce into
@@ -202,6 +202,9 @@ fn print_entries_grouped(
     let mut out = io::BufWriter::new(stdout_lock);
     match format {
         ResolvedFormat::Json => {
+            // Owned display strings must outlive the rows that
+            // borrow them — this vec exists for the lifetime, not
+            // for iteration convenience.
             let sources: Vec<String> = groups
                 .iter()
                 .map(|(p, _)| p.display().to_string())

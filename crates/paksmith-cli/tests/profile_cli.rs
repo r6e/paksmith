@@ -62,6 +62,36 @@ fn add_with_pak_paths_shows_patterns() {
 }
 
 #[test]
+fn add_rejects_invalid_pak_path_glob() {
+    // Validation at store time (defense in depth): a syntactically
+    // invalid glob never reaches profiles.toml.
+    let cfg = tempdir().unwrap();
+    let out = paksmith(cfg.path())
+        .args([
+            "profile",
+            "add",
+            "hero",
+            "--name",
+            "Hero",
+            "--pak-path",
+            "/x/[",
+        ])
+        .assert()
+        .failure()
+        .code(2);
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("not a valid glob"),
+        "the rejection names the defect: {stderr}"
+    );
+    // And nothing was stored: the id is free for a valid retry.
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "hero", "--name", "Hero"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn show_without_pak_paths_renders_dash() {
     let cfg = tempdir().unwrap();
     let _ = paksmith(cfg.path())

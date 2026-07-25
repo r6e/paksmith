@@ -129,13 +129,14 @@ fn safe_join_pattern(dir: &Path, pattern: &str) -> Option<PathBuf> {
     Some(out)
 }
 
+/// The display form of each path, one element per path.
+pub(crate) fn display_all(paths: &[PathBuf]) -> Vec<String> {
+    paths.iter().map(|p| p.display().to_string()).collect()
+}
+
 /// Render a path list for human-facing labels/messages ("a, b, c").
 pub(crate) fn join_display(paths: &[PathBuf]) -> String {
-    paths
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
+    display_all(paths).join(", ")
 }
 
 /// Open every source archive and collect its (filtered) entries — the

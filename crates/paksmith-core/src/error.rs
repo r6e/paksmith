@@ -1191,8 +1191,10 @@ pub enum ProfileFault {
     /// Registry-sourced profiles always fault here — `RegistryProfile`
     /// carries no such field.
     #[error(
-        "profile `{id}` has no pak_paths patterns; add them with `paksmith profile add \
-         --pak-path <GLOB>` (registry profiles cannot carry patterns — use a local profile)"
+        "profile `{id}` has no pak_paths patterns; set them with `paksmith profile add \
+         --pak-path <GLOB>` for a new profile, or add a `pak_paths` array to the profile \
+         in profiles.toml for an existing one (registry profiles cannot carry patterns — \
+         define a local profile with the same id)"
     )]
     NoPakPaths {
         /// Profile id.

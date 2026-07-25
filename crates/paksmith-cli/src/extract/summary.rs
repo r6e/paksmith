@@ -82,7 +82,6 @@ impl ExtractSummary {
         dry_run: bool,
         outcomes: Vec<EntryOutcome>,
     ) -> Self {
-        let sources = Vec::new();
         let mut counts = Counts::default();
         let mut failures = Vec::new();
         let mut outputs = Vec::new();
@@ -121,7 +120,7 @@ impl ExtractSummary {
         outputs.sort_by(|a, b| a.entry.cmp(&b.entry));
         failures.sort_by(|a, b| a.entry.cmp(&b.entry));
         Self {
-            sources,
+            sources: Vec::new(),
             schema_version: 1,
             pak,
             output_dir,
@@ -143,7 +142,10 @@ impl ExtractSummary {
                 writeln!(w)
             }
             ResolvedFormat::Table => {
-                writeln!(w, "extracted from {}", self.pak)?;
+                // In profile-paks mode `pak` carries glob-DISCOVERED
+                // filenames, not user-typed argv — same trust class as
+                // list/search's grouped header, same neutralization.
+                writeln!(w, "extracted from {}", sanitize_for_display(&self.pak))?;
                 writeln!(w, "  converted:         {}", self.counts.converted)?;
                 writeln!(w, "  raw copied:        {}", self.counts.raw_copied)?;
                 writeln!(w, "  skipped companion: {}", self.counts.skipped_companion)?;
@@ -203,6 +205,25 @@ mod tests {
     /// must not reach the terminal through the table summary — each
     /// field routes through `sanitize_for_display` independently (a
     /// dropped wrapper call on either field would fail this).
+    #[test]
+    fn table_header_sanitizes_discovered_pak_label() {
+        // In profile-paks mode `pak` carries glob-DISCOVERED filenames;
+        // a hostile archive name must not reach the terminal raw.
+        let s = ExtractSummary::from_outcomes(
+            "evil\u{1b}[31m.pak, ok.pak".into(),
+            "out".into(),
+            false,
+            vec![],
+        );
+        let mut buf = Vec::new();
+        s.render(ResolvedFormat::Table, &mut buf).unwrap();
+        let rendered = String::from_utf8(buf).unwrap();
+        assert!(
+            !rendered.contains('\u{1b}') && rendered.contains('\u{FFFD}'),
+            "escape neutralized in the extracted-from header: {rendered:?}"
+        );
+    }
+
     #[test]
     fn table_failed_lines_are_control_char_free() {
         let s = ExtractSummary::from_outcomes(

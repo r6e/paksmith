@@ -302,18 +302,7 @@ fn relative_pattern_resolves_against_detect_dir() {
     let paks = install.path().join("Paks");
     std::fs::create_dir_all(&paks).unwrap();
     let _ = std::fs::copy(fixture("real_v8b_multi.pak"), paks.join("game.pak")).unwrap();
-    let _ = paksmith(cfg.path())
-        .args([
-            "profile",
-            "add",
-            "hero",
-            "--name",
-            "Hero",
-            "--pak-path",
-            "Paks/*.pak",
-        ])
-        .assert()
-        .success();
+    add_pak_path_profile(cfg.path(), "hero", "Paks/*.pak");
     // Detect rules have no `profile add` flag; seed them by appending a
     // TOML table (the detect_cli.rs pattern — the store round-trips it
     // or the run below fails on CorruptStore).
