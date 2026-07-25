@@ -94,12 +94,14 @@ List the entries in a pak archive:
 cargo run -p paksmith-cli -- list path/to/archive.pak
 ```
 
-With a profile that records `pak_paths` glob patterns, the path argument can be
-omitted — every matching archive is listed, with per-entry `source` provenance:
+Record the archive locations on the profile once:
 
 ```sh
 cargo run -p paksmith-cli -- profile add hero --name Hero --pak-path '/games/hero/Paks/*.pak'
 ```
+
+Then the path argument can be omitted — every matching archive is listed, with
+per-entry `source` provenance:
 
 ```sh
 cargo run -p paksmith-cli -- --game hero list
