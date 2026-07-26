@@ -134,7 +134,7 @@ pub(crate) struct RemoveArgs {
     pub(crate) id: String,
 }
 
-/// `ProfileNotFound` for `id`. Five call sites build this identically.
+/// `ProfileNotFound` for `id`. Both wrappers below build it identically.
 fn profile_not_found(id: &str) -> PaksmithError {
     PaksmithError::Profile {
         fault: ProfileFault::ProfileNotFound { id: id.to_string() },
@@ -153,24 +153,32 @@ fn profile_not_found(id: &str) -> PaksmithError {
 /// infer it from a command that works with `--game` and not with `show`.
 ///
 /// The same asymmetry means a STALE cache is reported as-is: `test` can call a
-/// key wrong that `--game` would refresh and accept. That is a real gap, not a
-/// hidden one — see the note in the issue-#658 follow-up.
+/// key wrong that `--game` would refresh and accept. `test` says so at the
+/// moment it happens (see `test`); the contract is also recorded in ROADMAP
+/// §Phase 5.
 fn resolve_layered_or_not_found<'a>(
     store: &'a ProfileStore,
     cache: Option<&'a paksmith_core::profile::cache::RegistryCache>,
     id: &str,
+    quiet: bool,
 ) -> paksmith_core::Result<ResolvedProfile<'a>> {
     resolve_profile_layered(store, cache, id).ok_or_else(|| {
-        eprintln!(
-            "note: `{id}` is in neither the local store nor the cached registry; \
+        if !quiet {
+            eprintln!(
+                "note: `{id}` is in neither the local store nor the cached registry; \
              if it is a registry profile, run `paksmith profile fetch` first"
-        );
+            );
+        }
         profile_not_found(id)
     })
 }
 
-/// `ProfileNotFound` for a command that MUTATES the local store, with a
-/// remediation hint when the id does resolve in the registry cache (#658).
+/// PRINTS a remediation hint to stderr, then returns `ProfileNotFound`, for a
+/// command that MUTATES the local store (#658).
+///
+/// Side-effecting by design — it reads the registry cache and may write a
+/// `note:` line — so the name says so rather than reading as pure
+/// construction.
 ///
 /// `show`/`test` resolve registry profiles, so a bare "no profile named `x`"
 /// from `remove`/`key add`/`key remove` is factually false one command later.
@@ -179,12 +187,16 @@ fn resolve_layered_or_not_found<'a>(
 /// wording needed to stop lying. Follows the remediation-hint precedent
 /// `ProfileFault::NoPakPaths` already sets for the same local/registry split,
 /// CLI-side so core's wire-stable `Display` set is untouched.
-fn local_profile_not_found(id: &str) -> PaksmithError {
+fn hint_read_only_then_not_found(id: &str, quiet: bool) -> PaksmithError {
     let cache = paksmith_core::profile::resolve::load_cache_lenient();
-    if cache.as_ref().and_then(|c| c.get(id)).is_some() {
+    if !quiet && cache.as_ref().and_then(|c| c.get(id)).is_some() {
+        // Command-NEUTRAL: `remove` asks to delete, so telling it to `add`
+        // points the wrong way (and the shadow would not even achieve what it
+        // wanted — the id reappears, tagged `[local]`).
         eprintln!(
-            "note: `{id}` is a registry profile and is read-only; run \
-             `paksmith profile add {id} --name <name>` to create a local \
+            "note: `{id}` comes from the signed registry document and cannot \
+             be edited or deleted locally; `paksmith profile fetch` refreshes \
+             it, and `paksmith profile add {id} --name <name>` creates a local \
              profile that shadows it"
         );
     }
@@ -207,17 +219,21 @@ fn now_unix() -> paksmith_core::Result<u64> {
 /// `_format` is accepted for CLI consistency but ignored: `profile` output is
 /// human-readable only. Structured (`--format json`) output is deferred to a
 /// later sub-phase.
-pub(crate) fn run(cmd: &ProfileCmd, _format: OutputFormat) -> paksmith_core::Result<u8> {
+pub(crate) fn run(
+    cmd: &ProfileCmd,
+    _format: OutputFormat,
+    quiet: bool,
+) -> paksmith_core::Result<u8> {
     match cmd {
         ProfileCmd::Add(a) => add(a),
         ProfileCmd::List => list(),
-        ProfileCmd::Show(a) => show(a),
-        ProfileCmd::Remove(a) => remove(a),
+        ProfileCmd::Show(a) => show(a, quiet),
+        ProfileCmd::Remove(a) => remove(a, quiet),
         ProfileCmd::Key { cmd } => match cmd {
-            KeyCmd::Add(a) => key_add(a),
-            KeyCmd::Remove(a) => key_remove(a),
+            KeyCmd::Add(a) => key_add(a, quiet),
+            KeyCmd::Remove(a) => key_remove(a, quiet),
         },
-        ProfileCmd::Test(a) => test(a),
+        ProfileCmd::Test(a) => test(a, quiet),
         ProfileCmd::Fetch(a) => fetch(a),
         ProfileCmd::Detect(a) => crate::commands::detect::run(&a.dir),
     }
@@ -304,10 +320,10 @@ fn list() -> paksmith_core::Result<u8> {
     Ok(0)
 }
 
-fn show(a: &ShowArgs) -> paksmith_core::Result<u8> {
+fn show(a: &ShowArgs, quiet: bool) -> paksmith_core::Result<u8> {
     let store = ProfileStore::load()?;
     let cache = paksmith_core::profile::resolve::load_cache_lenient();
-    let resolved = resolve_layered_or_not_found(&store, cache.as_ref(), &a.id)?;
+    let resolved = resolve_layered_or_not_found(&store, cache.as_ref(), &a.id, quiet)?;
 
     // Only the ASYMMETRIC fields are matched: a registry profile structurally
     // carries no `mappings` and no `pak_paths` (see `MappingsSource`'s registry
@@ -357,17 +373,17 @@ fn show(a: &ShowArgs) -> paksmith_core::Result<u8> {
     Ok(0)
 }
 
-fn remove(a: &RemoveArgs) -> paksmith_core::Result<u8> {
+fn remove(a: &RemoveArgs, quiet: bool) -> paksmith_core::Result<u8> {
     let mut store = ProfileStore::load()?;
     if store.profiles.remove(&a.id).is_none() {
-        return Err(local_profile_not_found(&a.id));
+        return Err(hint_read_only_then_not_found(&a.id, quiet));
     }
     store.save()?;
     println!("removed profile `{}`", a.id);
     Ok(0)
 }
 
-fn key_add(a: &KeyAddArgs) -> paksmith_core::Result<u8> {
+fn key_add(a: &KeyAddArgs, quiet: bool) -> paksmith_core::Result<u8> {
     let key = AesKey::from_hex(&a.key).map_err(|e| PaksmithError::InvalidArgument {
         arg: "--key",
         reason: e.to_string(),
@@ -383,14 +399,14 @@ fn key_add(a: &KeyAddArgs) -> paksmith_core::Result<u8> {
     let p = store
         .profiles
         .get_mut(&a.id)
-        .ok_or_else(|| local_profile_not_found(&a.id))?;
+        .ok_or_else(|| hint_read_only_then_not_found(&a.id, quiet))?;
     let _ = p.keys.insert(guid, key);
     store.save()?;
     println!("added key for GUID {} to `{}`", guid.to_hex(), a.id);
     Ok(0)
 }
 
-fn key_remove(a: &KeyRemoveArgs) -> paksmith_core::Result<u8> {
+fn key_remove(a: &KeyRemoveArgs, quiet: bool) -> paksmith_core::Result<u8> {
     let guid = KeyGuid::from_hex(&a.guid).map_err(|e| PaksmithError::InvalidArgument {
         arg: "--guid",
         reason: e.to_string(),
@@ -399,7 +415,7 @@ fn key_remove(a: &KeyRemoveArgs) -> paksmith_core::Result<u8> {
     let p = store
         .profiles
         .get_mut(&a.id)
-        .ok_or_else(|| local_profile_not_found(&a.id))?;
+        .ok_or_else(|| hint_read_only_then_not_found(&a.id, quiet))?;
     if p.keys.remove(&guid).is_none() {
         return Err(PaksmithError::Profile {
             fault: ProfileFault::NoKeyForGuid {
@@ -456,13 +472,13 @@ fn fetch(a: &FetchArgs) -> paksmith_core::Result<u8> {
     Ok(0)
 }
 
-fn test(a: &TestArgs) -> paksmith_core::Result<u8> {
+fn test(a: &TestArgs, quiet: bool) -> paksmith_core::Result<u8> {
     use paksmith_core::container::pak::PakReader;
     use paksmith_core::profile::key_test::{KeyTestOutcome, test_key};
 
     let store = ProfileStore::load()?;
     let cache = paksmith_core::profile::resolve::load_cache_lenient();
-    let resolved = resolve_layered_or_not_found(&store, cache.as_ref(), &a.id)?;
+    let resolved = resolve_layered_or_not_found(&store, cache.as_ref(), &a.id, quiet)?;
     let guid = PakReader::read_footer_guid(&a.pak)?;
     let key = resolved
         .resolve_key(guid.as_ref())
@@ -473,6 +489,20 @@ fn test(a: &TestArgs) -> paksmith_core::Result<u8> {
             },
         })?;
     let outcome = test_key(&a.pak, key);
+    // C2: `--game`/`--detect` auto-refresh a stale registry document; these
+    // read commands do not (see `resolve_layered_or_not_found`). So a
+    // registry-sourced key can test WRONG here while `extract --game` refreshes
+    // and succeeds — and this is the command a user reaches for to explain that
+    // very failure. Say it at the moment it happens; a contract recorded only in
+    // a planning doc is not disclosure to someone staring at "wrong key".
+    if !quiet && matches!(outcome, KeyTestOutcome::WrongKey) && resolved.source() == "registry" {
+        eprintln!(
+            "note: `{}` came from the cached registry document, which these \
+             commands never refresh; if `--game` works where this does not, \
+             the cache is stale — run `paksmith profile fetch`",
+            a.id
+        );
+    }
     let label = match outcome {
         KeyTestOutcome::Verified => "verified",
         KeyTestOutcome::Decrypted => "decrypted (no index hash to verify)",

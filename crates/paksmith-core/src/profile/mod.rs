@@ -209,18 +209,18 @@ pub fn resolve_key<'a>(
 
 /// The single implementation of the GUID→key rule, over a bare key map.
 ///
-/// `pub(crate)`: the parameter is the store's internal representation, and
-/// putting `BTreeMap<KeyGuid, AesKey>` in the public API would pin that
-/// container choice forever. External callers reach the rule through
-/// [`resolve_key`] (a `GameProfile`) or [`ResolvedProfile::resolve_key`] (a
-/// profile of either origin) — neither exposes the map.
+/// `pub(crate)` because every caller outside this crate is better served by
+/// one of the two typed entry points — [`resolve_key`] for a [`GameProfile`],
+/// [`ResolvedProfile::resolve_key`] for a profile of either origin — so the
+/// bare-map form would be public surface with no consumer. It is NOT hiding
+/// the container type: `GameProfile::keys`, `RegistryProfile::keys` and
+/// [`ResolvedProfile::keys`] are all public and all `BTreeMap<KeyGuid,
+/// AesKey>`, so that choice was pinned long before this function existed.
 ///
-/// Three in-crate call sites share it: [`resolve_key`],
-/// [`ResolvedProfile::resolve_key`], and `resolve::resolve_within`, which needs
-/// the same lookup but reports a miss as `NoKeyForGuid` rather than `None`.
-/// Keeping exact-match-then-`ZERO`-fallback in one place is the point: a
-/// profile storing only a default key must open GUID-tagged paks identically
-/// whichever asked.
+/// What it does own is the exact-match-then-`ZERO`-fallback rule, in one
+/// place, for callers that report a miss differently: `None` here, and
+/// `NoKeyForGuid` in `resolve::resolve_within`. A profile storing only a
+/// default key must open GUID-tagged paks identically whichever asked.
 #[must_use]
 pub(crate) fn resolve_key_in<'a>(
     keys: &'a BTreeMap<KeyGuid, AesKey>,
@@ -253,15 +253,11 @@ pub fn display_guid(guid: Option<[u8; 16]>) -> String {
 
 /// A profile resolved from either the local store or the registry cache.
 ///
-/// Deliberately NOT `#[non_exhaustive]`, unlike its `#[non_exhaustive]`
-/// siblings ([`crate::profile::resolve::DetectMatch`],
-/// [`crate::profile::resolve::PakOpenContext`]): the domain is the two places a
-/// profile can come from, and a third would be a deliberate design decision
-/// rather than an incremental field addition. Callers legitimately match both
-/// arms to render the local/registry asymmetry — a registry profile carries no
-/// `mappings` and no `pak_paths` — and forcing a `_ =>` arm on a closed
-/// two-variant enum would obscure exactly the distinction those matches exist
-/// to make. Prefer the accessors below where the two arms agree.
+/// Deliberately NOT `#[non_exhaustive]`, unlike its siblings: callers match
+/// both arms to render the local/registry asymmetry (a registry profile
+/// carries no `mappings` and no `pak_paths`), and a `_ =>` arm would turn a
+/// future third source into silence at exactly the sites that must not be
+/// silent. Use the accessors below wherever the arms agree.
 #[derive(Debug, Clone, Copy)]
 pub enum ResolvedProfile<'a> {
     /// User-authored local profile (wins).
@@ -302,10 +298,6 @@ impl<'a> ResolvedProfile<'a> {
     }
 
     /// The profile's `guid → key` map.
-    ///
-    /// The one field whose meaning is identical on both arms, and the reason
-    /// this accessor exists: the same two-arm match had accumulated at three
-    /// call sites across two crates.
     #[must_use]
     pub fn keys(self) -> &'a BTreeMap<KeyGuid, AesKey> {
         match self {
@@ -554,6 +546,87 @@ mod tests {
             "11".repeat(32),
             "unknown non-zero GUID must fall back to the ZERO default key"
         );
+    }
+
+    /// Every [`ResolvedProfile`] accessor, on BOTH arms, with DIVERGENT values.
+    ///
+    /// The mutants these guard are whole-body replacements — they make the
+    /// method return one constant for both arms — so a fixture pair sharing a
+    /// value would let the mutant survive. Every field below therefore differs
+    /// between the two arms, and both are asserted.
+    #[test]
+    fn resolved_profile_accessors_report_each_arm() {
+        use crate::profile::registry::RegistryProfile;
+
+        let mut local_keys = BTreeMap::new();
+        let _ = local_keys.insert(KeyGuid::ZERO, key(K1));
+        let local = GameProfile {
+            name: "LocalName".into(),
+            engine_version: Some("5.3".into()),
+            keys: local_keys,
+            detect: None,
+            mappings: None,
+            pak_paths: Vec::new(),
+        };
+
+        // Divergent on every axis: different name, different engine version,
+        // different key-map size (2 vs 1), different GUID.
+        let g = KeyGuid::from_bytes([9u8; 16]);
+        let mut reg_keys = BTreeMap::new();
+        let _ = reg_keys.insert(KeyGuid::ZERO, key(K1));
+        let _ = reg_keys.insert(g, key(&"22".repeat(32)));
+        let registry = RegistryProfile {
+            id: "reg".into(),
+            name: "RegistryName".into(),
+            engine_version: Some("4.27".into()),
+            keys: reg_keys,
+            detect: None,
+        };
+
+        let l = ResolvedProfile::Local(&local);
+        let r = ResolvedProfile::Registry(&registry);
+
+        assert_eq!(l.source(), "local");
+        assert_eq!(r.source(), "registry");
+        assert_eq!(l.name(), "LocalName");
+        assert_eq!(r.name(), "RegistryName");
+        assert_eq!(l.engine_version(), Some("5.3"));
+        assert_eq!(r.engine_version(), Some("4.27"));
+        assert_eq!(l.keys().len(), 1);
+        assert_eq!(r.keys().len(), 2);
+
+        // `resolve_key` on both arms: the ZERO default, and the registry's
+        // GUID-specific key which the local arm does not have at all.
+        assert_eq!(l.resolve_key(None).unwrap().to_hex(), K1);
+        assert_eq!(r.resolve_key(None).unwrap().to_hex(), K1);
+        assert_eq!(
+            r.resolve_key(Some(g.as_bytes())).unwrap().to_hex(),
+            "22".repeat(32),
+            "registry arm resolves its GUID-specific key"
+        );
+        assert_eq!(
+            l.resolve_key(Some(g.as_bytes())).unwrap().to_hex(),
+            K1,
+            "local arm has no such GUID and falls back to the ZERO default"
+        );
+    }
+
+    /// A profile with NO engine version reports `None` — pins the
+    /// `Some("")`/`Some("xyzzy")` mutants that a `Some(_)`-only fixture leaves
+    /// alive.
+    #[test]
+    fn resolved_profile_engine_version_is_none_when_unset() {
+        let p = GameProfile {
+            name: "N".into(),
+            engine_version: None,
+            keys: BTreeMap::new(),
+            detect: None,
+            mappings: None,
+            pak_paths: Vec::new(),
+        };
+        assert_eq!(ResolvedProfile::Local(&p).engine_version(), None);
+        assert!(ResolvedProfile::Local(&p).keys().is_empty());
+        assert!(ResolvedProfile::Local(&p).resolve_key(None).is_none());
     }
 
     #[test]

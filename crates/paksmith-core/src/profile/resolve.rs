@@ -222,10 +222,7 @@ pub async fn resolve_pak_context(
     //    the cache.
     match resolve_profile_layered(&store, cache.as_ref(), id) {
         Some(p) => {
-            let key = match &p {
-                ResolvedProfile::Local(p) => resolve_within(&p.keys, id, pak_guid)?,
-                ResolvedProfile::Registry(p) => resolve_within(&p.keys, id, pak_guid)?,
-            };
+            let key = resolve_within(p.keys(), id, pak_guid)?;
             Ok(ProfileParseInputs::from_resolved(&p, id).into_context(key))
         }
         None => Err(PaksmithError::Profile {
@@ -453,15 +450,15 @@ impl ProfileParseInputs {
     /// carry `engine_version`: it is the one parse input that survives
     /// the local/registry split (#656).
     fn from_resolved(profile: &ResolvedProfile<'_>, id: &str) -> Self {
-        match profile {
-            ResolvedProfile::Local(p) => Self {
-                mappings: p.mappings.clone(),
-                engine_version: parse_engine_version(p.engine_version.as_deref(), id),
+        Self {
+            // Only `mappings` differs: a registry profile structurally cannot
+            // carry one (see `MappingsSource`'s registry note). The explicit
+            // match is what keeps that asymmetry visible.
+            mappings: match profile {
+                ResolvedProfile::Local(p) => p.mappings.clone(),
+                ResolvedProfile::Registry(_) => None,
             },
-            ResolvedProfile::Registry(p) => Self {
-                mappings: None,
-                engine_version: parse_engine_version(p.engine_version.as_deref(), id),
-            },
+            engine_version: parse_engine_version(profile.engine_version(), id),
         }
     }
 

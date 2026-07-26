@@ -49,7 +49,7 @@ impl Command {
             Self::Search(args) => {
                 search::run(args, format, aes_key, game, detect, quiet).map(|()| 0)
             }
-            Self::Profile { cmd } => profile::run(cmd, format),
+            Self::Profile { cmd } => profile::run(cmd, format, quiet),
         }
     }
 }

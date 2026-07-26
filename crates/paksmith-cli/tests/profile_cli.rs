@@ -1011,8 +1011,8 @@ fn show_resolves_cached_registry_profile() {
         txt.contains("5.3"),
         "the registry profile's engine_version must appear: {txt}"
     );
-    // The FULL line, not the bare word: `contains("registry")` passes on any
-    // incidental mention and would survive deleting the line outright.
+    // The FULL line, not the bare word: renaming the label to `origin:` would
+    // still satisfy `contains("registry")`.
     assert!(
         txt.contains("source: registry"),
         "provenance must be stated so a user knows why it is not editable: {txt}"
@@ -1068,9 +1068,8 @@ fn show_local_shadows_cached_registry_entry() {
         .success();
     let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(txt.contains("LocalWins"), "local must win: {txt}");
-    // Pins the OTHER arm's literal. Without this, swapping the two source
-    // strings passes the whole suite — and the only mutants CI generates here
-    // are whole-body `Ok(0)`/`Ok(1)` replacements, which never perturb them.
+    // Pins the OTHER arm's literal: without this, swapping the two source
+    // strings passes the whole suite.
     assert!(
         txt.contains("source: local"),
         "a local profile must report local provenance: {txt}"
@@ -1155,12 +1154,21 @@ fn show_and_test_degrade_on_corrupt_cache_for_a_local_id() {
     let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(txt.contains("source: local"), "{txt}");
 
-    // `test` reaches the same degradation before touching the pak.
+    // Give the profile the fixture's key so the degraded path exits 0. A hard
+    // `RegistryCache::load()?` would fail with `CacheCorrupt` — ALSO exit 2 —
+    // so asserting `.code(2)` here would pass against the very regression this
+    // test documents.
     let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "mine", "--key", KEY])
+        .assert()
+        .success();
+    let out = paksmith(cfg.path())
         .args(["profile", "test", "mine"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
-        .code(2); // no key for the GUID — resolution itself succeeded
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(txt.contains("verified"), "{txt}");
 }
 
 /// The mutating commands are read-only w.r.t. registry profiles, and say so
@@ -1181,12 +1189,13 @@ fn mutating_commands_hint_that_registry_profiles_are_read_only() {
             "--guid",
             &"00".repeat(16),
         ],
+        vec!["profile", "key", "add", "reg-only", "--key", KEY],
     ] {
         let out = paksmith(cfg.path()).args(&args).assert().code(2);
         let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
         assert!(
-            err.contains("registry profile") && err.contains("read-only"),
-            "{args:?} must explain the id is a read-only registry profile: {err}"
+            err.contains("signed registry document") && err.contains("cannot"),
+            "{args:?} must explain the id cannot be edited locally: {err}"
         );
     }
 
@@ -1197,7 +1206,53 @@ fn mutating_commands_hint_that_registry_profiles_are_read_only() {
         .code(2);
     let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
     assert!(
-        !err.contains("read-only"),
+        !err.contains("signed registry document"),
         "an absent id must not be described as a registry profile: {err}"
+    );
+}
+
+/// `--quiet` is documented as "no advisory notes". Both `note:` lines added for
+/// #658 use the same prefix as the pre-existing gated one, so they gate too —
+/// errors still print, since those are not notes.
+#[test]
+fn quiet_suppresses_the_advisory_notes_but_not_the_error() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    // The read-only hint on a mutating command.
+    let out = paksmith(cfg.path())
+        .args(["--quiet", "profile", "remove", "reg-only"])
+        .assert()
+        .code(2);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        !err.contains("note:"),
+        "advisory note must be silenced: {err}"
+    );
+    assert!(
+        err.contains("paksmith: error:"),
+        "the error itself must still print: {err}"
+    );
+
+    // The `profile fetch` hint on an unresolvable id.
+    let out = paksmith(cfg.path())
+        .args(["--quiet", "profile", "show", "absent"])
+        .assert()
+        .code(2);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        !err.contains("note:"),
+        "advisory note must be silenced: {err}"
+    );
+
+    // Without --quiet both notes appear (otherwise the gate proves nothing).
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "absent"])
+        .assert()
+        .code(2);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        err.contains("note:"),
+        "the note must appear unquieted: {err}"
     );
 }

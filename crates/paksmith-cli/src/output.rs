@@ -319,9 +319,13 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
 /// characters.
 ///
 /// Consumers: the list/search entries table (here) and extract's
-/// summary FAILED lines. The remaining same-class surface — inspect's
-/// table tree renderer — is tracked as issue #708 (many call sites;
-/// its own pass). The JSON path deliberately has no equivalent — NOT
+/// summary FAILED lines. Two same-class surfaces remain, BOTH tracked
+/// as issue #708 (many call sites; their own pass): inspect's table
+/// tree renderer, and the `profile` command family — `show`, `list`
+/// and `detect` render registry-authored `name`/`id`/`engine_version`,
+/// and `profile`'s not-found hints echo an id that may have been copied
+/// from a registry listing. Registry strings are length-capped
+/// (`MAX_STR`) but not character-class restricted. The JSON path deliberately has no equivalent — NOT
 /// because serde escapes everything (it escapes C0 only; DEL and C1
 /// incl. U+009B pass through as raw UTF-8) but because JSON is the
 /// machine interface: exact path bytes are the round-tripping
