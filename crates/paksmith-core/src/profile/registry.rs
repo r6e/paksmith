@@ -80,6 +80,21 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
             if d.byte_signatures.len() > crate::profile::detection::MAX_BYTE_SIGNATURES {
                 return Err(format!("too many byte signatures in `{}`", p.id));
             }
+            // CAP BEFORE PARSE, the order every other check in this fn uses
+            // (`p.id` is capped at the top, before any message interpolates
+            // it). `hex` is capped as a STRING, so an accepted signature is at
+            // most MAX_STR/2 bytes — and the well-formedness scan below then
+            // only ever sees, and only ever quotes, <= MAX_STR chars.
+            if d.require_paths.iter().any(|s| s.len() > MAX_STR)
+                || d.contains
+                    .iter()
+                    .any(|c| c.path.len() > MAX_STR || c.substring.len() > MAX_STR)
+                || d.byte_signatures
+                    .iter()
+                    .any(|b| b.path.len() > MAX_STR || b.hex.len() > MAX_STR)
+            {
+                return Err(format!("detect string field exceeds cap in `{}`", p.id));
+            }
             // Structurally-invalid hex is a HARD rejection, matching how this
             // same document's `keys` field treats bad hex (`keys_serde` fails
             // the whole document via `D::Error::custom`). Accepting it would
@@ -94,20 +109,6 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
                     "byte signature in `{}` is not an even-length unprefixed hex string: `{}`",
                     p.id, bad.hex
                 ));
-            }
-            // `hex` is capped as a STRING, like every other registry field, so
-            // the decoded signature is at most MAX_STR/2 bytes. Checked BEFORE
-            // well-formedness above would be wrong-order: a 10 MiB hex blob
-            // should fail on length, not decode.
-            if d.require_paths.iter().any(|s| s.len() > MAX_STR)
-                || d.contains
-                    .iter()
-                    .any(|c| c.path.len() > MAX_STR || c.substring.len() > MAX_STR)
-                || d.byte_signatures
-                    .iter()
-                    .any(|b| b.path.len() > MAX_STR || b.hex.len() > MAX_STR)
-            {
-                return Err(format!("detect string field exceeds cap in `{}`", p.id));
             }
         }
     }
@@ -704,6 +705,26 @@ mod tests {
         assert!(parse_registry(ok.as_bytes()).is_ok());
     }
 
+    /// Over-cap AND malformed must fail on LENGTH, not decode — pins the
+    /// cap-before-parse order, which `rejects_overlong_byte_signature_hex`
+    /// cannot because its value is valid hex that decodes fine.
+    #[test]
+    fn overlong_malformed_hex_fails_on_length_not_decode() {
+        let long_bad = "zz".repeat(MAX_STR);
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"byte_signatures":[{{"path":"p","hex":"{long_bad}"}}]}}}}]"#
+        );
+        let err = parse_registry(json.as_bytes()).unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds cap"),
+            "must be rejected on length before decode quotes it: {err}"
+        );
+        assert!(
+            !err.contains("zzzz"),
+            "an over-cap value must never be interpolated into the error: {err}"
+        );
+    }
+
     #[test]
     fn rejects_overlong_byte_signature_hex() {
         let long = "ab".repeat(MAX_STR); // 2*MAX_STR chars > MAX_STR
@@ -713,9 +734,9 @@ mod tests {
         assert!(parse_registry(json.as_bytes()).is_err());
     }
 
-    /// A registry document written BEFORE `bytes` existed still parses — the
+    /// A registry document written BEFORE `byte_signatures` existed still parses
     /// field is `#[serde(default)]`. This is the compatibility direction that
-    /// holds; the reverse (an old binary reading a document that USES `bytes`)
+    /// — the reverse (an old binary reading a document that USES the field)
     /// does not, because `DetectRules` is `deny_unknown_fields`.
     #[test]
     fn accepts_detect_without_a_byte_signatures_field() {
@@ -724,11 +745,11 @@ mod tests {
         let d = doc.profiles[0].detect.as_ref().unwrap();
         assert!(
             d.byte_signatures.is_empty(),
-            "absent `bytes` must default to empty"
+            "absent `byte_signatures` must default to empty"
         );
     }
 
-    /// The wire shape: `bytes` parses as a list of `{path, hex}` and an unknown
+    /// The wire shape: `byte_signatures` parses as a list of `{path, hex}`; an unknown
     /// sibling key is refused, so a typo'd rule fails loudly rather than being
     /// silently dropped from a signed document.
     #[test]

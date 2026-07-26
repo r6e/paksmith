@@ -194,8 +194,8 @@ pub fn rules_match(dir: &Path, rules: &DetectRules) -> bool {
         // silently never detects is indistinguishable from a wrong rule.
         let Some(needle) = decode_hex(&rule.hex) else {
             tracing::warn!(
-                path = rule.path,
-                hex = rule.hex,
+                path = %rule.path,
+                hex = %rule.hex,
                 "detect byte signature is not an even-length unprefixed hex string; \
                  this rule can never match"
             );
@@ -317,6 +317,27 @@ mod tests {
         }
     }
 
+    /// An empty `substring` is vacuously true — `file_contains` returns before
+    /// even opening the file, so it matches a path that does not exist. Pinned
+    /// because making `file_contains_bytes` total removed the `windows(0)` panic
+    /// that used to make losing that early return LOUD; without this, losing it
+    /// silently flips the semantics to "matches nothing".
+    #[test]
+    fn empty_substring_is_vacuously_true() {
+        let d = tempfile::tempdir().unwrap();
+        let rules = DetectRules {
+            contains: vec![ContainsRule {
+                path: "does-not-exist.ini".into(),
+                substring: String::new(),
+            }],
+            ..Default::default()
+        };
+        assert!(
+            rules_match(d.path(), &rules),
+            "an empty substring matches without consulting the file"
+        );
+    }
+
     /// `file_contains_bytes` is TOTAL on an empty needle. Unreachable through
     /// either caller (`file_contains` returns early, `decode_hex` rejects `""`),
     /// so it is called directly here — otherwise the guard is an uncoverable
@@ -400,19 +421,13 @@ mod tests {
         }
     }
 
-    /// A missing file does not match, and — unlike `contains` with an empty
-    /// substring — an undecodable needle does not short-circuit to true before
-    /// the file is even consulted.
+    /// A missing file does not match.
     #[test]
     fn byte_signature_missing_file_does_not_match() {
         let d = tempfile::tempdir().unwrap();
         assert!(!rules_match(
             d.path(),
             &byte_signature_rules("absent.exe", "dead")
-        ));
-        assert!(!rules_match(
-            d.path(),
-            &byte_signature_rules("absent.exe", "")
         ));
     }
 
@@ -452,15 +467,15 @@ mod tests {
         ));
     }
 
-    /// Rule kinds AND together, and `bytes` alone is enough to be detectable
-    /// (a profile with only byte rules is not "no rules").
+    /// Rule kinds AND together, and `byte_signatures` alone is enough to be
+    /// detectable (a profile with only signatures is not "no rules").
     #[test]
     fn byte_signature_rules_and_with_other_kinds_and_stand_alone() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "game.exe", &[0xDE, 0xAD]);
         write(d.path(), "cfg.ini", b"Engine=UE5");
 
-        // bytes alone: detectable.
+        // signatures alone: detectable.
         assert!(rules_match(
             d.path(),
             &byte_signature_rules("game.exe", "dead")
@@ -480,7 +495,7 @@ mod tests {
         };
         assert!(rules_match(d.path(), &all));
 
-        // A failing byte rule fails the whole conjunction even when the others pass.
+        // A failing signature fails the conjunction even when the others pass.
         let mut one_bad = all.clone();
         one_bad.byte_signatures[0].hex = "beef".into();
         assert!(!rules_match(d.path(), &one_bad));
