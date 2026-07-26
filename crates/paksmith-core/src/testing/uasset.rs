@@ -724,13 +724,15 @@ pub fn build_minimal_ue5_1009_texture2d_with_mip_flag() -> MinimalPackage {
     // UE5 (>= 5.2) prefix: bUsingDerivedData flag + the 16-byte skip.
     body.push(0);
     // The 0xFF filler is LOAD-BEARING, not arbitrary padding. A 5.2
-    // read of these 5.3-shaped bytes is desynced by `bSerializeMipData`'s
-    // four bytes, which lands this filler on `bUsingDerivedData` — a
-    // strict {0,1} bool that then rejects, so the mis-parse fails LOUD.
-    // Zero filler would let the desynced read succeed silently, and
-    // `same_bytes_parse_differently_under_5_2_and_5_3_profiles` would
-    // still pass while demonstrating far less. Do not "clean up" to
-    // zeros.
+    // read of these 5.3-shaped bytes runs four bytes early (it does not
+    // consume `bSerializeMipData`), so every subsequent field is read
+    // from four bytes back. `bUsingDerivedData` picks up a zero byte
+    // out of `skipOffset` and PASSES; the desync is not caught until
+    // `SizeX`, which lands on the filler's last four bytes and reads
+    // `-1`, failing its `[0, 16384]` range check — so the mis-parse
+    // fails LOUD. Zero filler would slide past that check too and fail
+    // somewhere later and less legibly. Do not "clean up" to zeros; the
+    // trailing four bytes are pinned below.
     body.extend_from_slice(&[0xFFu8; 15]);
     // FTexturePlatformData header.
     body.extend_from_slice(&64i32.to_le_bytes()); // SizeX
@@ -2866,6 +2868,22 @@ mod tests {
         }
         assert_eq!(pkg.names.names.len(), 4);
         assert_eq!(pkg.imports.imports.len(), 2);
+
+        // The filler bytes immediately preceding `SizeX` must be 0xFF.
+        // That is what makes the 5.2 mis-parse fail LOUD: reading four
+        // bytes early puts them in `SizeX`, which is then `-1` and
+        // fails its `[0, 16384]` range check. Zeroing them would let
+        // the desync slide past that check and fail later and less
+        // legibly, while the divergence assertions below still passed.
+        let sizex_preceded_by_filler = pkg
+            .bytes
+            .windows(8)
+            .filter(|w| w == b"\xFF\xFF\xFF\xFF\x40\x00\x00\x00")
+            .count();
+        assert_eq!(
+            sizex_preceded_by_filler, 1,
+            "expected exactly one 0xFF-run immediately before SizeX=64"
+        );
 
         // And the divergence the fixture exists to demonstrate: the
         // 5.3-shaped body decodes ONLY under a >= 5.3 hint.
