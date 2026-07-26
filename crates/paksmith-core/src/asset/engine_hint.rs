@@ -193,8 +193,9 @@ mod tests {
                 patch: Some(2)
             })
         );
-        // All four case spellings of the prefix, so a dropped arm is
-        // observable (each `strip_prefix` is otherwise unpinned).
+        // All four case spellings, so a mutated prefix literal or a
+        // case-insensitivity regression is observable — the compare is
+        // otherwise pinned only for the exact-case spelling.
         for spelling in ["UE4.27", "ue4.27", "Ue4.27", "uE4.27"] {
             assert_eq!(
                 UeVersion::parse_lenient(spelling),
