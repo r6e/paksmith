@@ -23,7 +23,14 @@ pub struct RegistryProfile {
     pub id: String,
     /// Display name.
     pub name: String,
-    /// Optional engine version.
+    /// Optional engine version, e.g. `"5.3"`.
+    ///
+    /// CONSUMED as a parse input since #656: parsed leniently into a
+    /// [`crate::asset::UeVersion`] at resolution and carried to the
+    /// asset parser. Unlike mappings — which `RegistryProfile`
+    /// deliberately cannot carry — this crosses the local/registry
+    /// split, making it the first parse input a signed registry can
+    /// supply. Length-capped like every other registry string.
     #[serde(default)]
     pub engine_version: Option<String>,
     /// guid → key (32-hex → 64-hex on the wire).

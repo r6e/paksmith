@@ -69,7 +69,10 @@ pub(crate) fn now_unix() -> crate::Result<u64> {
 /// The latter two are PARSE inputs rather than open inputs — they
 /// reach `Package::read_from*_with` through
 /// [`crate::asset::ReadOptions`], not the container layer — so a
-/// caller that only opens (`list`/`search`) can ignore them.
+/// caller that only opens (`list`/`search`) can ignore them. The
+/// engine version travels as-is; `mappings` is a SOURCE (a path or
+/// registry reference) that the caller first loads into an
+/// `Arc<Usmap>`.
 ///
 /// Marked `#[non_exhaustive]` (like [`DetectMatch`]) so future fields —
 /// e.g. more profile-carried open state — are not breaking changes;
@@ -105,8 +108,8 @@ pub struct PakOpenContext {
 /// `--detect` (auto-detect from an install dir). `None` when no selector is set.
 ///
 /// Thin delegate over [`resolve_pak_context`] that keeps the pre-#651
-/// key-only signature for callers that don't consume mappings (the GUI
-/// open flow can migrate to the context form as a follow-up).
+/// key-only signature for callers that consume neither parse input
+/// (the GUI open flow can migrate to the context form as a follow-up).
 ///
 /// # Errors
 ///
@@ -134,10 +137,11 @@ pub async fn resolve_pak_key(
 /// In the `--aes-key` combination, `--game` keeps its hard contract
 /// (the named id must exist — locally or in the CACHED registry doc —
 /// or the resolution fails with `ProfileNotFound`, exactly as it does
-/// without `--aes-key`; a typo'd `--game` must never silently produce a
-/// run stripped of its parse inputs), while `--detect` stays best-effort (warn + `None`
-/// on no-unique-match — detection is probabilistic, and pre-#651 this
-/// path never ran it at all). `--aes-key` alone still performs zero
+/// without `--aes-key`; a typo'd `--game` must never silently produce
+/// a run stripped of its parse inputs), while `--detect` stays
+/// best-effort (warn + `None` on no-unique-match — detection is
+/// probabilistic, and pre-#651 this path never ran it at all).
+/// `--aes-key` alone still performs zero
 /// profile I/O, and no `--aes-key` combination touches the pak footer
 /// or the network — a registry-only id must already be cached
 /// (`profile fetch`) to be recognized here.
@@ -169,11 +173,7 @@ pub async fn resolve_pak_context(
         }
         unique_detect_id(detect_matches(dir)?, dir)?
     } else {
-        return Ok(PakOpenContext {
-            key: None,
-            mappings: None,
-            engine_version: None,
-        });
+        return Ok(ProfileParseInputs::default().into_context(None));
     };
     let id = id.as_str();
 
@@ -187,11 +187,7 @@ pub async fn resolve_pak_context(
         // one place (a duplicated arm here is what let the registry
         // `--detect` path silently drop the engine version).
         let inputs = ProfileParseInputs::from_resolved(&ResolvedProfile::Local(profile), id);
-        return Ok(PakOpenContext {
-            key: resolve_within(&profile.keys, id, pak_guid)?,
-            mappings: inputs.mappings,
-            engine_version: inputs.engine_version,
-        });
+        return Ok(inputs.into_context(resolve_within(&profile.keys, id, pak_guid)?));
     }
 
     // 2. Determine whether the cache is fresh enough to skip a fetch.
@@ -230,12 +226,7 @@ pub async fn resolve_pak_context(
                 ResolvedProfile::Local(p) => resolve_within(&p.keys, id, pak_guid)?,
                 ResolvedProfile::Registry(p) => resolve_within(&p.keys, id, pak_guid)?,
             };
-            let inputs = ProfileParseInputs::from_resolved(&p, id);
-            Ok(PakOpenContext {
-                key,
-                mappings: inputs.mappings,
-                engine_version: inputs.engine_version,
-            })
+            Ok(ProfileParseInputs::from_resolved(&p, id).into_context(key))
         }
         None => Err(PaksmithError::Profile {
             fault: ProfileFault::ProfileNotFound { id: id.to_string() },
@@ -473,6 +464,21 @@ impl ProfileParseInputs {
             },
         }
     }
+
+    /// Pair these inputs with an already-resolved key to form the
+    /// pak-open context.
+    ///
+    /// The single place the context's fields are assembled, for the
+    /// same reason [`Self::from_resolved`] is the single mapper: the
+    /// next profile-borne parse input becomes a field on this struct
+    /// rather than a fourth thing to remember at four call sites.
+    fn into_context(self, key: Option<AesKey>) -> PakOpenContext {
+        PakOpenContext {
+            key,
+            mappings: self.mappings,
+            engine_version: self.engine_version,
+        }
+    }
 }
 
 /// Parse a profile's stored `engine_version` leniently (#656).
@@ -524,14 +530,17 @@ fn detect_profile_inputs_in(
 
 /// The parse inputs for `id` across the local store and the registry
 /// cache (local wins), or the empty set if neither has it.
+///
+/// The same lookup as [`named_profile_inputs_in`] with the miss
+/// swallowed — which is precisely the `--game`-vs-`--detect`
+/// difference, a typo'd explicit id being loud where a failed
+/// auto-detect is not.
 fn profile_inputs_in(
     store: &ProfileStore,
     cache: Option<&RegistryCache>,
     id: &str,
 ) -> ProfileParseInputs {
-    resolve_profile_layered(store, cache, id)
-        .map(|p| ProfileParseInputs::from_resolved(&p, id))
-        .unwrap_or_default()
+    named_profile_inputs_in(store, cache, id).unwrap_or_default()
 }
 
 /// Fetch the registry and wrap the result in a [`RegistryCache`].
@@ -700,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn named_profile_mappings_in_local_hit_returns_source() {
+    fn named_profile_inputs_in_local_hit_returns_source() {
         // Kills the `-> Ok(None)` mutant and pins the #651 contract: an
         // explicit key must not drop the --game profile's mappings.
         let store = hero_store_with_detect(Some(crate::profile::MappingsSource::Path(
@@ -717,9 +726,10 @@ mod tests {
     }
 
     #[test]
-    fn named_profile_mappings_in_unknown_id_is_profile_not_found() {
+    fn named_profile_inputs_in_unknown_id_is_profile_not_found() {
         // A typo'd --game must be LOUD even with --aes-key set — never a
-        // silent no-mappings run (R1 architect finding).
+        // silent run stripped of its parse inputs (R1 architect
+        // finding).
         let store = hero_store_with_detect(None);
         let err = named_profile_inputs_in(&store, None, "absent");
         assert!(matches!(
@@ -731,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn named_profile_mappings_in_cached_registry_id_is_none() {
+    fn named_profile_inputs_in_cached_registry_id_is_none() {
         use crate::profile::registry::{RegistryDoc, RegistryProfile};
         // A cached registry id is a VALID selection; registry profiles
         // cannot carry mappings, so the answer is None — not an error.
@@ -859,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_profile_mappings_in_unique_match() {
+    fn detect_profile_inputs_in_unique_match() {
         let game_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(game_dir.path().join("Game/Paks")).unwrap();
         let store = hero_store_with_detect(Some(crate::profile::MappingsSource::Path(
@@ -875,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_profile_mappings_in_no_match_is_none() {
+    fn detect_profile_inputs_in_no_match_is_none() {
         let empty_dir = tempfile::tempdir().unwrap();
         let store = hero_store_with_detect(Some(crate::profile::MappingsSource::Path(
             "/maps/hero.usmap".into(),
@@ -888,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_profile_mappings_in_ambiguous_is_none() {
+    fn detect_profile_inputs_in_ambiguous_is_none() {
         let game_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(game_dir.path().join("Game/Paks")).unwrap();
         let mut store = hero_store_with_detect(Some(crate::profile::MappingsSource::Path(
@@ -929,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_mappings_in_returns_local_source() {
+    fn profile_inputs_in_returns_local_source() {
         let mut store = ProfileStore::default();
         let _ = store.profiles.insert(
             "hero".into(),
@@ -958,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_mappings_in_none_when_profile_has_no_mappings() {
+    fn profile_inputs_in_none_when_profile_has_no_mappings() {
         let mut store = ProfileStore::default();
         let _ = store.profiles.insert(
             "plain".into(),
