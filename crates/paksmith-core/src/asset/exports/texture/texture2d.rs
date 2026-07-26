@@ -287,8 +287,7 @@ pub(crate) fn read_from_kind(
 /// custom arms just above their base, so a custom game ALWAYS sorts
 /// below the next stock version. Any per-game override must therefore
 /// key on game identity, never on a version comparison — which a
-/// `major.minor` hint cannot
-/// express — see
+/// `major.minor` hint cannot express — see
 /// [`crate::asset::engine_hint::resolve_engine_gate`]'s scope note.
 /// Such a title is `Denies` here, exactly as it was before #656.
 fn serialize_mip_data_verdict(ctx: &AssetContext) -> crate::asset::engine_hint::WireVerdict {
