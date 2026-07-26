@@ -985,10 +985,16 @@ async fn profile_fetch_allow_http_still_verifies_signature() {
 
 /// Seed a registry cache holding one profile with the encrypted fixture's key.
 fn seed_registry_cache(config_dir: &std::path::Path, id: &str, name: &str) {
+    seed_registry_cache_with_key(config_dir, id, name, KEY);
+}
+
+/// As above, with an explicit key — lets a test seed a WRONG registry key,
+/// which is the only way to reach `test`'s stale-cache note.
+fn seed_registry_cache_with_key(config_dir: &std::path::Path, id: &str, name: &str, key: &str) {
     let base = config_dir.join("paksmith");
     std::fs::create_dir_all(&base).unwrap();
     let cache_json = format!(
-        r#"{{"fetched_at_unix":9999999999,"profiles":[{{"id":"{id}","name":"{name}","engine_version":"5.3","keys":{{"00000000000000000000000000000000":"{KEY}"}}}}]}}"#
+        r#"{{"fetched_at_unix":9999999999,"profiles":[{{"id":"{id}","name":"{name}","engine_version":"5.3","keys":{{"00000000000000000000000000000000":"{key}"}}}}]}}"#
     );
     std::fs::write(base.join("registry-cache.json"), cache_json).unwrap();
 }
@@ -1211,9 +1217,11 @@ fn mutating_commands_hint_that_registry_profiles_are_read_only() {
     );
 }
 
-/// `--quiet` is documented as "no advisory notes". Both `note:` lines added for
-/// #658 use the same prefix as the pre-existing gated one, so they gate too —
-/// errors still print, since those are not notes.
+/// `--quiet` is documented as "no advisory notes". All three `note:` lines
+/// added for #658 route through the same guarded helper as the pre-existing
+/// one, so they gate too — errors still print, since those are not notes.
+/// (The third, `test`'s stale-cache note, is covered in
+/// `test_warns_only_when_a_wrong_key_came_from_the_registry`.)
 #[test]
 fn quiet_suppresses_the_advisory_notes_but_not_the_error() {
     let cfg = tempdir().unwrap();
@@ -1255,4 +1263,64 @@ fn quiet_suppresses_the_advisory_notes_but_not_the_error() {
         err.contains("note:"),
         "the note must appear unquieted: {err}"
     );
+}
+
+/// `test` warns that a REGISTRY-sourced key came from a cache these commands
+/// never refresh — the disclosure that stops `profile test` contradicting
+/// `extract --game` inside the staleness window.
+///
+/// All three legs are asserted, because each is a separate mutable term of the
+/// guard: it fires for registry+wrong, does NOT fire for local+wrong (where
+/// `profile fetch` would be useless advice pointing away from the real cause),
+/// and is silenced by `--quiet` like every other advisory note.
+#[test]
+fn test_warns_only_when_a_wrong_key_came_from_the_registry() {
+    let wrong = "00".repeat(32);
+
+    // (a) registry + wrong key → exit 1, note present.
+    let cfg = tempdir().unwrap();
+    seed_registry_cache_with_key(cfg.path(), "reg-bad", "RegBad", &wrong);
+    let out = paksmith(cfg.path())
+        .args(["profile", "test", "reg-bad"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(1);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        err.contains("cached registry document"),
+        "a registry-sourced wrong key must name the stale cache: {err}"
+    );
+
+    // (b) local + wrong key → exit 1, note ABSENT. `profile fetch` cannot help
+    // a local profile, so firing here would send the user the wrong way.
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "loc", "--name", "Loc"])
+        .assert()
+        .success();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "loc", "--key", &wrong])
+        .assert()
+        .success();
+    let out = paksmith(cfg.path())
+        .args(["profile", "test", "loc"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(1);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        !err.contains("cached registry document"),
+        "a LOCAL wrong key must not be blamed on the registry cache: {err}"
+    );
+
+    // (c) --quiet silences it; the exit code is unchanged.
+    let cfg = tempdir().unwrap();
+    seed_registry_cache_with_key(cfg.path(), "reg-bad", "RegBad", &wrong);
+    let out = paksmith(cfg.path())
+        .args(["--quiet", "profile", "test", "reg-bad"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(1);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(!err.contains("cached registry document"), "{err}");
 }

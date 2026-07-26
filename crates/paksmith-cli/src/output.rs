@@ -46,14 +46,27 @@ pub(crate) enum ResolvedFormat {
 /// Emit a one-line stderr note when `--format auto` silently resolved to JSON
 /// (stdout isn't a TTY), so users piping into head/jq aren't surprised.
 /// `--quiet` (#652) suppresses it — it is advisory chatter, not an error.
+/// Emit an advisory `note:` line to stderr unless `--quiet`.
+///
+/// The single guarded site for the flag's "no advisory notes" half. Inline
+/// `if !quiet { eprintln!("note: …") }` at each call site made the contract
+/// depend on remembering the guard, and multiplied the `delete !` mutant by
+/// the number of sites.
+pub(crate) fn note(quiet: bool, msg: &str) {
+    if !quiet {
+        eprintln!("note: {msg}");
+    }
+}
+
 pub(crate) fn note_auto_resolved_to_json(
     format: OutputFormat,
     resolved: ResolvedFormat,
     quiet: bool,
 ) {
-    if !quiet && matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
-        eprintln!(
-            "note: stdout is not a terminal — emitting JSON. Pass --format table to force table output."
+    if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
+        note(
+            quiet,
+            "stdout is not a terminal — emitting JSON. Pass --format table to force table output.",
         );
     }
 }
@@ -325,7 +338,8 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
 /// and `detect` render registry-authored `name`/`id`/`engine_version`,
 /// and `profile`'s not-found hints echo an id that may have been copied
 /// from a registry listing. Registry strings are length-capped
-/// (`MAX_STR`) but not character-class restricted. The JSON path deliberately has no equivalent — NOT
+/// (`MAX_STR`) but not character-class restricted. The JSON path
+/// deliberately has no equivalent — NOT
 /// because serde escapes everything (it escapes C0 only; DEL and C1
 /// incl. U+009B pass through as raw UTF-8) but because JSON is the
 /// machine interface: exact path bytes are the round-tripping

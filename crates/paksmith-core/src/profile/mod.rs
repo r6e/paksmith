@@ -310,8 +310,8 @@ impl<'a> ResolvedProfile<'a> {
     /// exact-match-then-default rule.
     ///
     /// The public way to apply that rule to a resolved profile of either
-    /// origin. Callers outside this crate use this rather than reaching for the
-    /// key map, so the map's container type stays an implementation detail.
+    /// origin, so callers do not re-implement the ZERO fallback against
+    /// [`Self::keys`].
     #[must_use]
     pub fn resolve_key(self, pak_guid: Option<&[u8; 16]>) -> Option<&'a AesKey> {
         resolve_key_in(self.keys(), pak_guid)
@@ -552,8 +552,10 @@ mod tests {
     ///
     /// The mutants these guard are whole-body replacements — they make the
     /// method return one constant for both arms — so a fixture pair sharing a
-    /// value would let the mutant survive. Every field below therefore differs
-    /// between the two arms, and both are asserted.
+    /// value would let the mutant survive. Every ASSERTED value therefore
+    /// differs between the arms (name, engine version, `keys().len()` 1 vs 2),
+    /// and both are checked. The two maps do share `ZERO -> K1`: the
+    /// fallback assertion below needs a default on each side.
     #[test]
     fn resolved_profile_accessors_report_each_arm() {
         use crate::profile::registry::RegistryProfile;

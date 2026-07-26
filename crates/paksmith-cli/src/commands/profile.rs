@@ -163,12 +163,13 @@ fn resolve_layered_or_not_found<'a>(
     quiet: bool,
 ) -> paksmith_core::Result<ResolvedProfile<'a>> {
     resolve_profile_layered(store, cache, id).ok_or_else(|| {
-        if !quiet {
-            eprintln!(
-                "note: `{id}` is in neither the local store nor the cached registry; \
-             if it is a registry profile, run `paksmith profile fetch` first"
-            );
-        }
+        crate::output::note(
+            quiet,
+            &format!(
+                "`{id}` is in neither the local store nor the cached registry; \
+                 if it is a registry profile, run `paksmith profile fetch` first"
+            ),
+        );
         profile_not_found(id)
     })
 }
@@ -189,15 +190,18 @@ fn resolve_layered_or_not_found<'a>(
 /// CLI-side so core's wire-stable `Display` set is untouched.
 fn hint_read_only_then_not_found(id: &str, quiet: bool) -> PaksmithError {
     let cache = paksmith_core::profile::resolve::load_cache_lenient();
-    if !quiet && cache.as_ref().and_then(|c| c.get(id)).is_some() {
+    if cache.as_ref().and_then(|c| c.get(id)).is_some() {
         // Command-NEUTRAL: `remove` asks to delete, so telling it to `add`
         // points the wrong way (and the shadow would not even achieve what it
         // wanted — the id reappears, tagged `[local]`).
-        eprintln!(
-            "note: `{id}` comes from the signed registry document and cannot \
-             be edited or deleted locally; `paksmith profile fetch` refreshes \
-             it, and `paksmith profile add {id} --name <name>` creates a local \
-             profile that shadows it"
+        crate::output::note(
+            quiet,
+            &format!(
+                "`{id}` comes from the signed registry document and cannot be \
+                 edited or deleted locally; `paksmith profile fetch` refreshes \
+                 it, and `paksmith profile add {id} --name <name>` creates a \
+                 local profile that shadows it"
+            ),
         );
     }
     profile_not_found(id)
@@ -495,12 +499,20 @@ fn test(a: &TestArgs, quiet: bool) -> paksmith_core::Result<u8> {
     // and succeeds — and this is the command a user reaches for to explain that
     // very failure. Say it at the moment it happens; a contract recorded only in
     // a planning doc is not disclosure to someone staring at "wrong key".
-    if !quiet && matches!(outcome, KeyTestOutcome::WrongKey) && resolved.source() == "registry" {
-        eprintln!(
-            "note: `{}` came from the cached registry document, which these \
-             commands never refresh; if `--game` works where this does not, \
-             the cache is stale — run `paksmith profile fetch`",
-            a.id
+    // Discriminant, NOT `source() == "registry"`: that method's job is
+    // rendering, so branching on it would let a label rename silently disable
+    // the note across a crate boundary.
+    if matches!(outcome, KeyTestOutcome::WrongKey)
+        && matches!(resolved, ResolvedProfile::Registry(_))
+    {
+        crate::output::note(
+            quiet,
+            &format!(
+                "`{}` came from the cached registry document, which these \
+                 commands never refresh; if `--game` works where this does \
+                 not, the cache is stale — run `paksmith profile fetch`",
+                a.id
+            ),
         );
     }
     let label = match outcome {
