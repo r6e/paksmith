@@ -2845,6 +2845,12 @@ mod tests {
         // builder — a dropped `exports`/`payloads`/`names`/`imports`
         // collapses to the one-export default.
         assert_eq!(pkg.exports.exports.len(), 2);
+        // -1 is the "no preload dependencies" sentinel; a positive
+        // value would claim a dependency index this fixture has no
+        // table for, making it malformed rather than minimal.
+        for e in &pkg.exports.exports {
+            assert_eq!(e.first_export_dependency, -1);
+        }
         assert_eq!(pkg.names.names.len(), 4);
         assert_eq!(pkg.imports.imports.len(), 2);
 
