@@ -101,6 +101,18 @@ pub struct ByteSignatureRule {
     pub hex: String,
 }
 
+/// Clamp an untrusted string to a short prefix for a log field.
+///
+/// The local store is not cap-validated, so a hand-edited value can be
+/// arbitrarily long; `MAX_STR` bounds only the registry path.
+fn truncate_for_log(s: &str) -> String {
+    const LOG_FIELD_MAX: usize = 64;
+    match s.char_indices().nth(LOG_FIELD_MAX) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
+    }
+}
+
 /// Decode an even-length, unprefixed, case-insensitive hex string to bytes.
 ///
 /// `None` for odd length, any non-hex byte, or the empty string. The registry
@@ -193,9 +205,18 @@ pub fn rules_match(dir: &Path, rules: &DetectRules) -> bool {
         // means a hand-edited local store: warn, because a profile that
         // silently never detects is indistinguishable from a wrong rule.
         let Some(needle) = decode_hex(&rule.hex) else {
+            // Plain field bindings, NOT the `%` sigil: `%` is
+            // `tracing::field::display()`, which the default subscriber writes
+            // RAW, while a plain `String` field records via `record_str` and is
+            // escaped. These values are untrusted (a hand-edited store), and a
+            // raw ESC sequence here clears the screen or retitles the terminal.
+            //
+            // Truncated because the local store is never cap-validated —
+            // `MAX_STR` bounds the registry path only — so `hex` can be
+            // megabytes here and this warn fires once per rule per profile.
             tracing::warn!(
-                path = %rule.path,
-                hex = %rule.hex,
+                path = truncate_for_log(&rule.path),
+                hex = truncate_for_log(&rule.hex),
                 "detect byte signature is not an even-length unprefixed hex string; \
                  this rule can never match"
             );
@@ -315,6 +336,23 @@ mod tests {
         for bad in ["//", "::", "@@", "GG", "``", "gg"] {
             assert_eq!(decode_hex(bad), None, "hex {bad:?} must be rejected");
         }
+    }
+
+    /// `truncate_for_log` bounds an untrusted value and keeps char boundaries.
+    /// The local store is not cap-validated, so this is the only bound on a
+    /// hand-edited `hex` reaching a log field.
+    #[test]
+    fn truncate_for_log_bounds_untrusted_values() {
+        assert_eq!(truncate_for_log("dead"), "dead");
+        let long = "a".repeat(500);
+        let out = truncate_for_log(&long);
+        assert_eq!(out.chars().count(), 65, "64 chars plus the ellipsis");
+        assert!(out.ends_with('…'));
+        // Multi-byte input must not split a char.
+        let wide = "é".repeat(500);
+        let out = truncate_for_log(&wide);
+        assert!(out.starts_with('é') && out.ends_with('…'));
+        assert_eq!(out.chars().count(), 65);
     }
 
     /// An empty `substring` is vacuously true — `file_contains` returns before
