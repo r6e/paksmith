@@ -46,8 +46,13 @@ impl UeVersion {
     /// anything else — the caller warns and proceeds unhinted.
     pub fn parse_lenient(s: &str) -> Option<Self> {
         let s = s.trim();
-        // One case-insensitive two-char prefix. `get` returns None on
-        // a char boundary, matching the no-prefix path.
+        // One case-insensitive two-char prefix. `str::get` yields
+        // None when byte 2 is past the end or falls INSIDE a char (a
+        // leading 3- or 4-byte one), so both cases fall through to the
+        // no-prefix path instead of panicking. A 2-byte leading char
+        // ends exactly at byte 2, so it yields `Some` and simply fails
+        // the ASCII compare. The `&s[2..]` index inside the arm is
+        // reachable only after `get` proved byte 2 is a boundary.
         let s = match s.get(..2) {
             Some(p) if p.eq_ignore_ascii_case("UE") => &s[2..],
             _ => s,
@@ -201,6 +206,20 @@ mod tests {
                 "prefix spelling {spelling:?}"
             );
         }
+    }
+
+    #[test]
+    fn multibyte_leading_chars_fall_through_without_panicking() {
+        // The prefix probe indexes byte 2. Pin both shapes the comment
+        // describes: a 3-byte leading char (byte 2 falls INSIDE it, so
+        // `get` yields None) and a 2-byte one (byte 2 is a boundary, so
+        // `get` yields Some and the ASCII compare simply fails). Either
+        // way the value is rejected rather than panicking.
+        for bad in ["\u{20ac}5.3", "\u{e9}5.3", "\u{1f600}5.3"] {
+            assert_eq!(UeVersion::parse_lenient(bad), None, "input: {bad:?}");
+        }
+        // And a multi-byte char AFTER a real prefix stays harmless.
+        assert_eq!(UeVersion::parse_lenient("UE\u{20ac}"), None);
     }
 
     #[test]
