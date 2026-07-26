@@ -33,22 +33,21 @@ struct Cli {
     #[arg(long, global = true, value_name = "HEX")]
     aes_key: Option<String>,
 
-    /// Resolve the AES key (and, for inspect/extract, the profile's
-    /// mappings and engine version) from a stored profile id (see
-    /// `paksmith profile`). With
-    /// `--aes-key`, the explicit key wins but the profile still supplies
-    /// mappings — and the id must exist. When the pak path is omitted,
-    /// the profile's `pak_paths` patterns select the archives to
-    /// operate on.
+    /// Resolve the AES key — and, for inspect/extract, the profile's
+    /// mappings and engine version — from a stored profile id (see
+    /// `paksmith profile`). With `--aes-key` the explicit key wins but
+    /// the profile still supplies both parse inputs, and the id must
+    /// exist. When the pak path is omitted, the profile's `pak_paths`
+    /// patterns select the archives to operate on.
     #[arg(long, global = true, value_name = "ID")]
     game: Option<String>,
 
-    /// Auto-detect the game (key + mappings + engine version) from an
-    /// install directory.
-    /// `--game` wins over `--detect`; with `--aes-key`, detection is
-    /// best-effort and only supplies mappings. When the pak path is
-    /// omitted, the detected profile's `pak_paths` select the archives,
-    /// and relative patterns resolve against this directory.
+    /// Auto-detect the game — key, mappings and engine version — from
+    /// an install directory. `--game` wins over `--detect`; with
+    /// `--aes-key` detection is best-effort and supplies the parse
+    /// inputs but not the key. When the pak path is omitted, the
+    /// detected profile's `pak_paths` select the archives, and relative
+    /// patterns resolve against this directory.
     #[arg(long, global = true, value_name = "DIR")]
     detect: Option<std::path::PathBuf>,
 
