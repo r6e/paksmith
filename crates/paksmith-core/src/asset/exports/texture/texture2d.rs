@@ -282,7 +282,12 @@ pub(crate) fn read_from_kind(
 /// (`GAME_TheFirstDescendant` sorts as `GAME_UE5_2 + 3` — so it is
 /// BELOW `GAME_UE5_3` and the `>=` clause misses it — and its explicit
 /// arm maps it to object version `1002`, yet the `||` clause still
-/// makes it write the field), which a `major.minor` hint cannot
+/// makes it write the field). That is structural, not a quirk of this
+/// title: `EGame` spaces each major-minor slot by `1 << 16` and packs
+/// custom arms just above their base, so a custom game ALWAYS sorts
+/// below the next stock version. Any per-game override must therefore
+/// key on game identity, never on a version comparison — which a
+/// `major.minor` hint cannot
 /// express — see
 /// [`crate::asset::engine_hint::resolve_engine_gate`]'s scope note.
 /// Such a title is `Denies` here, exactly as it was before #656.
@@ -693,13 +698,15 @@ fn read_mip_count(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<u3
 /// applies the 16-byte skip. This gate does NOT consult the #656 profile
 /// hint — it gates on the object version `file_version_ue5`, which is
 /// an exact proxy **for stock engine versions**: CUE4Parse's verbatim
-/// `EGame`→`FPackageFileVersion` arms map `< GAME_UE5_2 => (522, 1008)`
-/// and `< GAME_UE5_4 => (522, 1009)` — i.e. `GAME_UE5_0`/`5.1 → 1008` and
+/// `EGame`→`FPackageFileVersion` arms map `< GAME_UE5_1 => (522, 1004)`,
+/// `< GAME_UE5_2 => (522, 1008)` and `< GAME_UE5_4 => (522, 1009)` — the
+/// arms are ORDERED, so `GAME_UE5_0 → 1004`, `GAME_UE5_1 → 1008` and
 /// `GAME_UE5_2`/`5.3 → 1009` (`VER_UE5_DATA_RESOURCES`) — so
 /// `file_version_ue5 >= 1009` ⟺ `Ar.Game >= GAME_UE5_2`, and
 /// `file_version_ue5.is_some()` ⟺ `Ar.Game >= GAME_UE5_0`. (CUE4Parse's
 /// per-game version *overrides* are unreachable here — paksmith branches
-/// on `file_version_ue5` alone, with no game-profile field — and even a
+/// on `file_version_ue5` alone here, not consulting the #656 hint — and
+/// even a
 /// misclassification between the two UE5 branches consumes the same 16
 /// bytes, so `SizeX` alignment is unaffected.) The
 /// `IsFilterEditorOnly` condition is implied: paksmith rejects uncooked
@@ -1345,9 +1352,9 @@ mod tests {
 
     #[test]
     fn ue5_0_skips_16_byte_prefix() {
-        // 1004 = VER_UE5_LARGE_WORLD_COORDINATES, an early-UE5.0 object
-        // version (5.0's EGame default is 1008; both are < 1009 and take
-        // the full 16-byte placeholder skip, which is what this pins).
+        // 1004 = VER_UE5_LARGE_WORLD_COORDINATES, UE 5.0's EGame object
+        // version. Both it and 5.1's 1008 are < 1009 and take the full
+        // 16-byte placeholder skip, which is what this pins.
         assert_prefix_checksum(parse_with_prefix(Some(1004), &[0xFFu8; 16]));
     }
 
