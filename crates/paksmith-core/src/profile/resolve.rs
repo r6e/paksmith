@@ -62,12 +62,22 @@ pub(crate) fn now_unix() -> crate::Result<u64> {
 }
 
 /// Everything a caller needs to open and decode a pak selected via
-/// `--aes-key` / `--game` / `--detect`: the AES key (if any) plus the
-/// selected profile's mappings source (if any) — issue #651.
+/// `--aes-key` / `--game` / `--detect`: the AES key (if any), the
+/// selected profile's mappings source (#651), and its declared engine
+/// version (#656).
+///
+/// The latter two are PARSE inputs rather than open inputs — they
+/// reach `Package::read_from*_with` through
+/// [`crate::asset::ReadOptions`], not the container layer — so a
+/// caller that only opens (`list`/`search`) can ignore them. The
+/// engine version travels as-is; `mappings` is a SOURCE (a path or
+/// registry reference) that the caller first loads into an
+/// `Arc<Usmap>`.
 ///
 /// Marked `#[non_exhaustive]` (like [`DetectMatch`]) so future fields —
 /// e.g. more profile-carried open state — are not breaking changes;
 /// external consumers construct it only via [`resolve_pak_context`].
+/// `engine_version` is the first field added under that allowance.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct PakOpenContext {
@@ -81,14 +91,25 @@ pub struct PakOpenContext {
     /// see [`MappingsSource`]). Call sites give an explicit
     /// `--mappings` argument precedence over this.
     pub mappings: Option<MappingsSource>,
+    /// The selected profile's declared engine version, parsed
+    /// leniently (#656): an unparsable string degrades to `None` with
+    /// a warning, never an error — registry-authored strings are
+    /// untrusted input, and one bad value must not fail an open.
+    ///
+    /// UNLIKE [`Self::mappings`], a REGISTRY profile can supply this:
+    /// `RegistryProfile` has carried `engine_version` since the
+    /// registry shipped, so this is the first profile-borne parse
+    /// input that survives the local/registry split. Feeds
+    /// [`crate::asset::AssetContext::engine_version_hint`].
+    pub engine_version: Option<crate::asset::UeVersion>,
 }
 
 /// Resolve the AES key for a pak: `--aes-key` (wins) > `--game` (explicit id) >
 /// `--detect` (auto-detect from an install dir). `None` when no selector is set.
 ///
 /// Thin delegate over [`resolve_pak_context`] that keeps the pre-#651
-/// key-only signature for callers that don't consume mappings (the GUI
-/// open flow can migrate to the context form as a follow-up).
+/// key-only signature for callers that consume neither parse input
+/// (the GUI open flow can migrate to the context form as a follow-up).
 ///
 /// # Errors
 ///
@@ -102,21 +123,25 @@ pub async fn resolve_pak_key(
     Ok(resolve_pak_context(path, aes_key, game, detect).await?.key)
 }
 
-/// Resolve the full [`PakOpenContext`] (key + profile mappings source).
+/// Resolve the full [`PakOpenContext`]: the key plus the profile's
+/// parse inputs — its mappings source (#651) and declared engine
+/// version (#656).
 ///
 /// Key precedence is unchanged from the pre-#651 `resolve_pak_key`:
-/// `--aes-key` (wins) > `--game` (explicit id) > `--detect`. The
-/// mappings source is the selected profile's `mappings` field — and it
-/// is resolved even when `--aes-key` short-circuits the KEY lookup: an
-/// explicit key must not silently drop the profile's mappings.
+/// `--aes-key` (wins) > `--game` (explicit id) > `--detect`. The parse
+/// inputs come from the selected profile's `mappings` and
+/// `engine_version` fields — and BOTH are resolved even when
+/// `--aes-key` short-circuits the KEY lookup: an explicit key must not
+/// silently drop them.
 ///
 /// In the `--aes-key` combination, `--game` keeps its hard contract
 /// (the named id must exist — locally or in the CACHED registry doc —
 /// or the resolution fails with `ProfileNotFound`, exactly as it does
-/// without `--aes-key`; a typo'd `--game` must never silently produce a
-/// no-mappings run), while `--detect` stays best-effort (warn + `None`
-/// on no-unique-match — detection is probabilistic, and pre-#651 this
-/// path never ran it at all). `--aes-key` alone still performs zero
+/// without `--aes-key`; a typo'd `--game` must never silently produce
+/// a run stripped of its parse inputs), while `--detect` stays
+/// best-effort (warn + `None` on no-unique-match — detection is
+/// probabilistic, and pre-#651 this path never ran it at all).
+/// `--aes-key` alone still performs zero
 /// profile I/O, and no `--aes-key` combination touches the pak footer
 /// or the network — a registry-only id must already be cached
 /// (`profile fetch`) to be recognized here.
@@ -131,49 +156,7 @@ pub async fn resolve_pak_context(
     detect: Option<&Path>,
 ) -> crate::Result<PakOpenContext> {
     if let Some(k) = aes_key {
-        if game.is_some() {
-            tracing::debug!("--aes-key overrides --game");
-        } else if detect.is_some() {
-            tracing::debug!("--aes-key overrides --detect");
-        }
-        // #651: an explicit key must not silently drop the selected
-        // profile's mappings (see the fn doc for the per-selector
-        // contract). No pak-footer read and no network on any
-        // `--aes-key` combination.
-        let mappings = if let Some(g) = game {
-            if detect.is_some() {
-                tracing::debug!("--game overrides --detect");
-            }
-            // HARD: same contract as keyed resolution — the named id
-            // must exist (store errors propagate; unknown id is
-            // `ProfileNotFound`).
-            let store = ProfileStore::load()?;
-            let cache = load_cache_lenient();
-            named_profile_mappings_in(&store, cache.as_ref(), g)?
-        } else if let Some(dir) = detect {
-            // Best-effort: detection is probabilistic, so store or
-            // detection problems degrade to no-mappings with a warning.
-            match ProfileStore::load() {
-                Ok(store) => {
-                    let cache = load_cache_lenient();
-                    detect_profile_mappings_in(&store, cache.as_ref(), dir)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "profile store unreadable; --aes-key set, continuing \
-                         without profile mappings"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        return Ok(PakOpenContext {
-            key: Some(k.clone()),
-            mappings,
-        });
+        return explicit_key_context(k, game, detect);
     }
     // Effective profile id: --game (explicit) wins over --detect (auto).
     let id: String = if let Some(g) = game {
@@ -190,10 +173,7 @@ pub async fn resolve_pak_context(
         }
         unique_detect_id(detect_matches(dir)?, dir)?
     } else {
-        return Ok(PakOpenContext {
-            key: None,
-            mappings: None,
-        });
+        return Ok(ProfileParseInputs::default().into_context(None));
     };
     let id = id.as_str();
 
@@ -202,10 +182,12 @@ pub async fn resolve_pak_context(
 
     // 1. Local profiles.toml wins — no network ever when the id is local.
     if let Some(profile) = store.profiles.get(id) {
-        return Ok(PakOpenContext {
-            key: resolve_within(&profile.keys, id, pak_guid)?,
-            mappings: profile.mappings.clone(),
-        });
+        // Through `from_resolved` like every other site: the mapping
+        // from a resolved profile to its parse inputs lives in exactly
+        // one place (a duplicated arm here is what let the registry
+        // `--detect` path silently drop the engine version).
+        let inputs = ProfileParseInputs::from_resolved(&ResolvedProfile::Local(profile), id);
+        return Ok(inputs.into_context(resolve_within(&profile.keys, id, pak_guid)?));
     }
 
     // 2. Determine whether the cache is fresh enough to skip a fetch.
@@ -239,16 +221,13 @@ pub async fn resolve_pak_context(
     //    local first (already handled above, so local always misses here), then
     //    the cache.
     match resolve_profile_layered(&store, cache.as_ref(), id) {
-        Some(ResolvedProfile::Local(p)) => Ok(PakOpenContext {
-            key: resolve_within(&p.keys, id, pak_guid)?,
-            mappings: p.mappings.clone(),
-        }),
-        // Registry profiles cannot carry mappings (`RegistryProfile` has
-        // no such field — see `MappingsSource`'s registry note).
-        Some(ResolvedProfile::Registry(p)) => Ok(PakOpenContext {
-            key: resolve_within(&p.keys, id, pak_guid)?,
-            mappings: None,
-        }),
+        Some(p) => {
+            let key = match &p {
+                ResolvedProfile::Local(p) => resolve_within(&p.keys, id, pak_guid)?,
+                ResolvedProfile::Registry(p) => resolve_within(&p.keys, id, pak_guid)?,
+            };
+            Ok(ProfileParseInputs::from_resolved(&p, id).into_context(key))
+        }
         None => Err(PaksmithError::Profile {
             fault: ProfileFault::ProfileNotFound { id: id.to_string() },
         }),
@@ -380,52 +359,188 @@ fn unique_detect_id(mut matches: Vec<DetectMatch>, dir: &Path) -> crate::Result<
     }
 }
 
-/// HARD `--game` mappings lookup for the `--aes-key` path (#651,
+/// The `--aes-key` branch of [`resolve_pak_context`]: the explicit key
+/// wins, but the selected profile still supplies its parse inputs.
+///
+/// #651/#656: an explicit key must not silently drop the profile's
+/// mappings or engine version (see [`resolve_pak_context`]'s doc for
+/// the per-selector contract). No pak-footer read and no network on
+/// any `--aes-key` combination.
+fn explicit_key_context(
+    key: &AesKey,
+    game: Option<&str>,
+    detect: Option<&Path>,
+) -> crate::Result<PakOpenContext> {
+    if game.is_some() {
+        tracing::debug!("--aes-key overrides --game");
+    } else if detect.is_some() {
+        tracing::debug!("--aes-key overrides --detect");
+    }
+    let inputs = if let Some(g) = game {
+        if detect.is_some() {
+            tracing::debug!("--game overrides --detect");
+        }
+        // HARD: same contract as keyed resolution — the named id must
+        // exist (store errors propagate; unknown id is
+        // `ProfileNotFound`).
+        let store = ProfileStore::load()?;
+        let cache = load_cache_lenient();
+        named_profile_inputs_in(&store, cache.as_ref(), g)?
+    } else if let Some(dir) = detect {
+        // Best-effort: detection is probabilistic, so store or
+        // detection problems degrade to no inputs with a warning.
+        match ProfileStore::load() {
+            Ok(store) => {
+                let cache = load_cache_lenient();
+                detect_profile_inputs_in(&store, cache.as_ref(), dir)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "profile store unreadable; --aes-key set, continuing \
+                     without profile parse inputs"
+                );
+                ProfileParseInputs::default()
+            }
+        }
+    } else {
+        ProfileParseInputs::default()
+    };
+    Ok(PakOpenContext {
+        key: Some(key.clone()),
+        mappings: inputs.mappings,
+        engine_version: inputs.engine_version,
+    })
+}
+
+/// HARD `--game` parse-inputs lookup for the `--aes-key` path (#651,
 /// store-parameterized so it is unit-testable): a local profile yields
-/// its mappings; a CACHED registry id is a valid selection that yields
-/// `None` (registry profiles cannot carry mappings — see
-/// [`MappingsSource`]); an unknown id is `ProfileNotFound`, exactly as
-/// in keyed resolution. No network — a registry-only id must already be
-/// cached (`profile fetch`).
-fn named_profile_mappings_in(
+/// its mappings AND engine version; a CACHED registry id is a valid
+/// selection that yields its engine version but no mappings (see
+/// [`MappingsSource`]'s registry note); an unknown id is
+/// `ProfileNotFound`, exactly as in keyed resolution. No network — a
+/// registry-only id must already be cached (`profile fetch`).
+fn named_profile_inputs_in(
     store: &ProfileStore,
     cache: Option<&RegistryCache>,
     id: &str,
-) -> crate::Result<Option<MappingsSource>> {
-    match resolve_profile_layered(store, cache, id) {
-        Some(ResolvedProfile::Local(p)) => Ok(p.mappings.clone()),
-        Some(ResolvedProfile::Registry(_)) => Ok(None),
-        None => Err(PaksmithError::Profile {
+) -> crate::Result<ProfileParseInputs> {
+    resolve_profile_layered(store, cache, id)
+        .map(|p| ProfileParseInputs::from_resolved(&p, id))
+        .ok_or_else(|| PaksmithError::Profile {
             fault: ProfileFault::ProfileNotFound { id: id.to_string() },
-        }),
-    }
+        })
 }
 
-/// Best-effort `--detect` mappings lookup for the `--aes-key` path
-/// (store-parameterized, unit-testable): the unique `detect_in` match's
-/// mappings; anything else (zero or ambiguous matches) degrades to
-/// `None` with a warning.
-fn detect_profile_mappings_in(
-    store: &ProfileStore,
-    cache: Option<&RegistryCache>,
-    dir: &Path,
-) -> Option<MappingsSource> {
-    match unique_detect_id(detect_in(store, cache, dir), dir) {
-        Ok(id) => profile_mappings_in(store, &id),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "--detect found no unique profile; --aes-key set, continuing \
-                 without profile mappings"
-            );
-            None
+/// The parse-affecting state a selected profile contributes (#651
+/// mappings, #656 engine version).
+///
+/// [`ProfileParseInputs::from_resolved`] is the SINGLE place that maps
+/// a resolved profile to these, so the `--aes-key` and keyed paths
+/// cannot drift and the next profile-borne parse input is a field here
+/// rather than another arm to remember in two files.
+#[derive(Clone, Debug, Default)]
+struct ProfileParseInputs {
+    mappings: Option<MappingsSource>,
+    engine_version: Option<crate::asset::UeVersion>,
+}
+
+impl ProfileParseInputs {
+    /// Map a resolved profile to its parse inputs.
+    ///
+    /// Registry profiles carry no mappings (`RegistryProfile` has no
+    /// such field — see [`MappingsSource`]'s registry note) but DO
+    /// carry `engine_version`: it is the one parse input that survives
+    /// the local/registry split (#656).
+    fn from_resolved(profile: &ResolvedProfile<'_>, id: &str) -> Self {
+        match profile {
+            ResolvedProfile::Local(p) => Self {
+                mappings: p.mappings.clone(),
+                engine_version: parse_engine_version(p.engine_version.as_deref(), id),
+            },
+            ResolvedProfile::Registry(p) => Self {
+                mappings: None,
+                engine_version: parse_engine_version(p.engine_version.as_deref(), id),
+            },
+        }
+    }
+
+    /// Pair these inputs with an already-resolved key to form the
+    /// pak-open context.
+    ///
+    /// The single place the context's fields are assembled, for the
+    /// same reason [`Self::from_resolved`] is the single mapper: the
+    /// next profile-borne parse input becomes a field on this struct
+    /// rather than a fourth thing to remember at four call sites.
+    fn into_context(self, key: Option<AesKey>) -> PakOpenContext {
+        PakOpenContext {
+            key,
+            mappings: self.mappings,
+            engine_version: self.engine_version,
         }
     }
 }
 
-/// The LOCAL store's mappings source for `id`, if any.
-fn profile_mappings_in(store: &ProfileStore, id: &str) -> Option<MappingsSource> {
-    store.profiles.get(id).and_then(|p| p.mappings.clone())
+/// Parse a profile's stored `engine_version` leniently (#656).
+///
+/// Never errors: the string may be hand-edited or registry-authored
+/// (untrusted), and a malformed value must degrade to "no hint" — the
+/// parse then behaves exactly as it did before hints existed — rather
+/// than failing an open the user could not otherwise explain.
+fn parse_engine_version(raw: Option<&str>, id: &str) -> Option<crate::asset::UeVersion> {
+    let raw = raw?;
+    let parsed = crate::asset::UeVersion::parse_lenient(raw);
+    if parsed.is_none() {
+        tracing::warn!(
+            profile = id,
+            value = raw,
+            "profile engine_version is not a `major.minor[.patch]` version \
+             (e.g. \"5.3\"); continuing without an engine-version hint"
+        );
+    }
+    parsed
+}
+
+/// Best-effort `--detect` parse-inputs lookup for the `--aes-key` path
+/// (store-parameterized, unit-testable): the unique `detect_in` match's
+/// parse inputs; anything else (zero or ambiguous matches) degrades to
+/// the empty set with a warning.
+fn detect_profile_inputs_in(
+    store: &ProfileStore,
+    cache: Option<&RegistryCache>,
+    dir: &Path,
+) -> ProfileParseInputs {
+    match unique_detect_id(detect_in(store, cache, dir), dir) {
+        // LAYERED, not local-only: `detect_in` matches cached registry
+        // profiles too, and a registry profile carries `engine_version`
+        // (#656). Looking only at the local store would silently drop
+        // the hint for exactly the registry-shipped detect rules that
+        // make auto-detection work out of the box.
+        Ok(id) => profile_inputs_in(store, cache, &id),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "--detect found no unique profile; --aes-key set, continuing \
+                 without profile parse inputs"
+            );
+            ProfileParseInputs::default()
+        }
+    }
+}
+
+/// The parse inputs for `id` across the local store and the registry
+/// cache (local wins), or the empty set if neither has it.
+///
+/// The same lookup as [`named_profile_inputs_in`] with the miss
+/// swallowed — which is precisely the `--game`-vs-`--detect`
+/// difference, a typo'd explicit id being loud where a failed
+/// auto-detect is not.
+fn profile_inputs_in(
+    store: &ProfileStore,
+    cache: Option<&RegistryCache>,
+    id: &str,
+) -> ProfileParseInputs {
+    named_profile_inputs_in(store, cache, id).unwrap_or_default()
 }
 
 /// Fetch the registry and wrap the result in a [`RegistryCache`].
@@ -594,14 +709,16 @@ mod tests {
     }
 
     #[test]
-    fn named_profile_mappings_in_local_hit_returns_source() {
+    fn named_profile_inputs_in_local_hit_returns_source() {
         // Kills the `-> Ok(None)` mutant and pins the #651 contract: an
         // explicit key must not drop the --game profile's mappings.
         let store = hero_store_with_detect(Some(crate::profile::MappingsSource::Path(
             "/maps/hero.usmap".into(),
         )));
         assert_eq!(
-            named_profile_mappings_in(&store, None, "hero").unwrap(),
+            named_profile_inputs_in(&store, None, "hero")
+                .unwrap()
+                .mappings,
             Some(crate::profile::MappingsSource::Path(
                 "/maps/hero.usmap".into()
             ))
@@ -609,11 +726,12 @@ mod tests {
     }
 
     #[test]
-    fn named_profile_mappings_in_unknown_id_is_profile_not_found() {
+    fn named_profile_inputs_in_unknown_id_is_profile_not_found() {
         // A typo'd --game must be LOUD even with --aes-key set — never a
-        // silent no-mappings run (R1 architect finding).
+        // silent run stripped of its parse inputs (R1 architect
+        // finding).
         let store = hero_store_with_detect(None);
-        let err = named_profile_mappings_in(&store, None, "absent");
+        let err = named_profile_inputs_in(&store, None, "absent");
         assert!(matches!(
             err,
             Err(PaksmithError::Profile {
@@ -623,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn named_profile_mappings_in_cached_registry_id_is_none() {
+    fn named_profile_inputs_in_cached_registry_id_is_none() {
         use crate::profile::registry::{RegistryDoc, RegistryProfile};
         // A cached registry id is a VALID selection; registry profiles
         // cannot carry mappings, so the answer is None — not an error.
@@ -641,20 +759,124 @@ mod tests {
             },
         };
         assert_eq!(
-            named_profile_mappings_in(&store, Some(&cache), "reg").unwrap(),
+            named_profile_inputs_in(&store, Some(&cache), "reg")
+                .unwrap()
+                .mappings,
             None
         );
     }
 
     #[test]
-    fn detect_profile_mappings_in_unique_match() {
+    fn engine_version_parses_from_a_local_profile() {
+        let mut store = hero_store_with_detect(None);
+        assert_eq!(
+            named_profile_inputs_in(&store, None, "hero")
+                .unwrap()
+                .engine_version,
+            None,
+            "no stored version means no hint"
+        );
+        store
+            .profiles
+            .get_mut("hero")
+            .expect("seeded")
+            .engine_version = Some("5.3".into());
+        assert_eq!(
+            named_profile_inputs_in(&store, None, "hero")
+                .unwrap()
+                .engine_version,
+            crate::asset::UeVersion::parse_lenient("5.3")
+        );
+    }
+
+    #[test]
+    fn detect_matching_a_registry_profile_still_yields_its_engine_version() {
+        // The registry ships detect rules so auto-detection works out
+        // of the box, and registry profiles carry engine_version — so
+        // a registry-sourced --detect match must NOT lose the hint.
+        // (Local-store-only lookup was invisible pre-#656 because
+        // registry profiles never carried mappings.)
+        let game = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(game.path().join("Game/Paks")).unwrap();
+        let store = ProfileStore::default(); // registry-only id
+        let cache = RegistryCache {
+            fetched_at_unix: 0,
+            doc: crate::profile::registry::RegistryDoc {
+                profiles: vec![crate::profile::registry::RegistryProfile {
+                    id: "reg".into(),
+                    name: "Registry".into(),
+                    engine_version: Some("5.3".into()),
+                    keys: BTreeMap::new(),
+                    detect: Some(DetectRules {
+                        require_paths: vec!["Game/Paks".into()],
+                        contains: vec![],
+                    }),
+                }],
+            },
+        };
+        let inputs = detect_profile_inputs_in(&store, Some(&cache), game.path());
+        assert_eq!(
+            inputs.engine_version,
+            crate::asset::UeVersion::parse_lenient("5.3"),
+            "a registry-sourced detect match must carry its engine version"
+        );
+        assert_eq!(inputs.mappings, None, "registry still carries no mappings");
+    }
+
+    #[test]
+    fn engine_version_crosses_the_registry_split_unlike_mappings() {
+        // The #656 asymmetry: RegistryProfile has always carried
+        // engine_version, so a registry-sourced selection supplies a
+        // parse hint even though it can never supply mappings.
+        let store = ProfileStore::default();
+        let cache = RegistryCache {
+            fetched_at_unix: 0,
+            doc: crate::profile::registry::RegistryDoc {
+                profiles: vec![crate::profile::registry::RegistryProfile {
+                    id: "reg".into(),
+                    name: "Registry".into(),
+                    engine_version: Some("5.3".into()),
+                    keys: BTreeMap::new(),
+                    detect: None,
+                }],
+            },
+        };
+        let inputs = named_profile_inputs_in(&store, Some(&cache), "reg").unwrap();
+        assert_eq!(inputs.mappings, None, "registry never carries mappings");
+        assert_eq!(
+            inputs.engine_version,
+            crate::asset::UeVersion::parse_lenient("5.3"),
+            "registry DOES carry the engine version"
+        );
+    }
+
+    #[test]
+    fn unparsable_engine_version_degrades_to_no_hint() {
+        // Hand-edited or registry-authored garbage must never fail an
+        // open — it degrades to "no hint", i.e. the pre-#656 parse.
+        let mut store = hero_store_with_detect(None);
+        store
+            .profiles
+            .get_mut("hero")
+            .expect("seeded")
+            .engine_version = Some("Fortnite Chapter 5".into());
+        assert_eq!(
+            named_profile_inputs_in(&store, None, "hero")
+                .expect("a malformed version is not an error")
+                .engine_version,
+            None
+        );
+    }
+
+    #[test]
+    fn detect_profile_inputs_in_unique_match() {
         let game_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(game_dir.path().join("Game/Paks")).unwrap();
         let store = hero_store_with_detect(Some(crate::profile::MappingsSource::Path(
             "/maps/hero.usmap".into(),
         )));
         assert_eq!(
-            detect_profile_mappings_in(&store, None, game_dir.path()),
+            detect_profile_inputs_in(&store, None, game_dir.path()).mappings,
             Some(crate::profile::MappingsSource::Path(
                 "/maps/hero.usmap".into()
             )),
@@ -663,20 +885,20 @@ mod tests {
     }
 
     #[test]
-    fn detect_profile_mappings_in_no_match_is_none() {
+    fn detect_profile_inputs_in_no_match_is_none() {
         let empty_dir = tempfile::tempdir().unwrap();
         let store = hero_store_with_detect(Some(crate::profile::MappingsSource::Path(
             "/maps/hero.usmap".into(),
         )));
         assert_eq!(
-            detect_profile_mappings_in(&store, None, empty_dir.path()),
+            detect_profile_inputs_in(&store, None, empty_dir.path()).mappings,
             None,
             "zero detect matches degrade to None"
         );
     }
 
     #[test]
-    fn detect_profile_mappings_in_ambiguous_is_none() {
+    fn detect_profile_inputs_in_ambiguous_is_none() {
         let game_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(game_dir.path().join("Game/Paks")).unwrap();
         let mut store = hero_store_with_detect(Some(crate::profile::MappingsSource::Path(
@@ -686,7 +908,7 @@ mod tests {
         let hero = store.profiles["hero"].clone();
         let _ = store.profiles.insert("hero2".into(), hero);
         assert_eq!(
-            detect_profile_mappings_in(&store, None, game_dir.path()),
+            detect_profile_inputs_in(&store, None, game_dir.path()).mappings,
             None,
             "ambiguous detection degrades to None"
         );
@@ -717,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_mappings_in_returns_local_source() {
+    fn profile_inputs_in_returns_local_source() {
         let mut store = ProfileStore::default();
         let _ = store.profiles.insert(
             "hero".into(),
@@ -733,20 +955,20 @@ mod tests {
             },
         );
         assert_eq!(
-            profile_mappings_in(&store, "hero"),
+            profile_inputs_in(&store, None, "hero").mappings,
             Some(crate::profile::MappingsSource::Path(
                 "/maps/hero.usmap".into()
             ))
         );
         assert_eq!(
-            profile_mappings_in(&store, "absent"),
+            profile_inputs_in(&store, None, "absent").mappings,
             None,
             "unknown id is None, not an error"
         );
     }
 
     #[test]
-    fn profile_mappings_in_none_when_profile_has_no_mappings() {
+    fn profile_inputs_in_none_when_profile_has_no_mappings() {
         let mut store = ProfileStore::default();
         let _ = store.profiles.insert(
             "plain".into(),
@@ -759,7 +981,7 @@ mod tests {
                 pak_paths: Vec::new(),
             },
         );
-        assert_eq!(profile_mappings_in(&store, "plain"), None);
+        assert_eq!(profile_inputs_in(&store, None, "plain").mappings, None);
     }
 
     /// Store with one `hero` profile carrying pak_paths patterns —

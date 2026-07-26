@@ -66,8 +66,9 @@ pub(crate) struct InspectArgs {
 
 /// Run the `inspect` subcommand.
 ///
-/// Resolves the pak-open context (key + any profile mappings source),
-/// loads the effective usmap (explicit `--mappings` wins — see
+/// Resolves the pak-open context (key + the profile's parse inputs:
+/// mappings source and engine version), loads the effective usmap
+/// (explicit `--mappings` wins — see
 /// [`crate::commands::mappings_resolve`]), parses the package, then
 /// delegates all output assembly — format resolution, `--export`
 /// selection, `--path` drilling, and the `--format table` human tree
@@ -107,7 +108,11 @@ pub(crate) fn run(
         crate::commands::mappings_resolve::mappings_selector(game),
     )?;
     let reader = paksmith_core::container::open(&pak, ctx.key.as_ref())?;
-    let pkg = Package::read_from_reader(&reader, asset, usmap.as_ref())?;
+    // #656: the profile's declared engine version rides along, so gates
+    // the wire leaves ambiguous (UE 5.2 vs 5.3 `bSerializeMipData`)
+    // resolve the way the selected game actually serializes.
+    let opts = crate::read_options::build(usmap.as_ref(), ctx.engine_version);
+    let pkg = Package::read_from_reader_with(&reader, asset, &opts)?;
     crate::inspect::emit(&pkg, args, format, quiet)
 }
 

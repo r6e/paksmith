@@ -268,6 +268,66 @@ pub(crate) fn read_from_kind(
     Ok((data, bulk_records))
 }
 
+/// The wire's verdict on `bSerializeMipData` for a cooked
+/// `UTexture2D` (#656).
+///
+/// Exactly ONE object version is ambiguous: at `1009` CUE4Parse maps
+/// both UE 5.2 and 5.3, and only 5.3 writes the field. `>= 1010`
+/// (5.4-dev) writes it; below `1009` — UE 5.1, 5.0 and every UE4 — it
+/// is absent, so a profile declaring a newer engine must not disturb
+/// those.
+///
+/// Those bands hold for CUE4Parse's STOCK `EGame` arms. A custom arm
+/// can opt into the field below its nominal version
+/// (`GAME_TheFirstDescendant` sorts as `GAME_UE5_2 + 3` — so it is
+/// BELOW `GAME_UE5_3` and the `>=` clause misses it — and its explicit
+/// arm maps it to object version `1002`, yet the `||` clause still
+/// makes it write the field). That is structural, not a quirk of this
+/// title: `EGame` spaces each major-minor slot by `1 << 16` and packs
+/// custom arms just above their base, so a custom game ALWAYS sorts
+/// below the next stock version. Any per-game override must therefore
+/// key on game identity, never on a version comparison — which a
+/// `major.minor` hint cannot express — see
+/// [`crate::asset::engine_hint::resolve_engine_gate`]'s scope note.
+/// Such a title is `Denies` here, exactly as it was before #656.
+fn serialize_mip_data_verdict(ctx: &AssetContext) -> crate::asset::engine_hint::WireVerdict {
+    use crate::asset::engine_hint::WireVerdict;
+    if ctx
+        .version
+        .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
+    {
+        WireVerdict::Asserts
+    } else if ctx.version.ue5_at_least(VER_UE5_DATA_RESOURCES) {
+        WireVerdict::Ambiguous
+    } else {
+        WireVerdict::Denies
+    }
+}
+
+/// The engine version at which `bSerializeMipData` enters the cooked
+/// `UTexture2D` layout — CUE4Parse's `Ar.Game >= GAME_UE5_3`.
+///
+/// This states the SAME boundary as [`serialize_mip_data_verdict`]'s
+/// object-version bands, in engine terms rather than wire terms, so
+/// the two must move together. Named rather than passed as bare
+/// positional `u32`s, which read as arbitrary numbers at the call site
+/// and let one half of the pair change silently.
+const SERIALIZE_MIP_DATA_ENGINE: (u32, u32) = (5, 3);
+
+/// Whether a cooked `UTexture2D` entry carries `bSerializeMipData`:
+/// the wire's verdict, with the profile's engine version deciding the
+/// one ambiguous band. Shared by the reader and the test builder so
+/// neither the verdict NOR the gate version can drift between them.
+fn reads_serialize_mip_data(ctx: &AssetContext) -> bool {
+    let (major, minor) = SERIALIZE_MIP_DATA_ENGINE;
+    crate::asset::engine_hint::resolve_engine_gate(
+        serialize_mip_data_verdict(ctx),
+        ctx.engine_version_hint,
+        major,
+        minor,
+    )
+}
+
 /// Read the `UTexture` / `UTexture2D` binary-section entry that precedes
 /// the `FTexturePlatformData`, returning `bSerializeMipData` (whether each
 /// mip carries an inline `FByteBulkData`).
@@ -282,23 +342,38 @@ pub(crate) fn read_from_kind(
 ///    than parsed.
 /// 2. `UTexture2D` `FStripDataFlags` (2 bytes; value unused).
 /// 3. Owner `bCooked` (`u32` `ReadBoolean` ∈ {0,1}), gated
-///    `Ar.Ver >= ADD_COOKED_TO_TEXTURE2D` (227, far below paksmith's 504
-///    floor → always present). `false` ⇒ no cooked platform data ⇒
+///    `Ar.Ver >= ADD_COOKED_TO_TEXTURE2D` (125, derived from the
+///    `ADD_PINTYPE_ARRAY = 108` anchor — the region carries no explicit
+///    values; far below paksmith's 504 floor → always present).
+///    `false` ⇒ no cooked platform data ⇒
 ///    [`AssetParseFault::TextureNotCooked`].
 /// 4. `bSerializeMipData` (`u32` `ReadBoolean` ∈ {0,1}) iff
-///    `Ar.Game >= GAME_UE5_3`. paksmith has no engine version, so it uses
-///    `file_version_ue5 >= VER_UE5_SCRIPT_SERIALIZATION_OFFSET (1010)` as
-///    the proxy, defaulting `true` below it.
+///    `Ar.Game >= GAME_UE5_3` — an ENGINE-version gate, not an
+///    object-version one, which is why it needs the next section.
 ///
-/// **Known limitation (UE 5.2 vs 5.3).** CUE4Parse maps *both*
-/// `GAME_UE5_2` and `GAME_UE5_3` to object version `1009`, so a UE 5.3
-/// asset serialized at `1009` is indistinguishable from 5.2 by
-/// `file_version_ue5`. paksmith optimizes for 5.2 (the established
-/// target): at `1009` it reads no `bSerializeMipData`, which is correct
-/// for 5.2 / UE4 / 5.0 / 5.1 but mis-aligns a real 5.3-at-`1009` texture's
-/// mip records. Resolved when game profiles (Phase 5) supply the engine
-/// version. `>= 1010` (5.4-preview object versions paksmith still accepts)
-/// correctly reads the flag.
+/// **UE 5.2 vs 5.3.** CUE4Parse maps *both* `GAME_UE5_2` and
+/// `GAME_UE5_3` to object version `1009`, so a UE 5.3 asset serialized
+/// at `1009` is indistinguishable from 5.2 by `file_version_ue5`
+/// alone. [`serialize_mip_data_verdict`] therefore splits the range
+/// into three bands:
+/// - **`>= 1010`** (incl. the 5.4-preview object versions paksmith
+///   accepts): unambiguous, the flag is read.
+/// - **Exactly `1009`** — the ONLY ambiguous value: a game profile
+///   declaring `>= 5.3` ([`AssetContext::engine_version_hint`]) makes
+///   the flag be read; without one paksmith keeps its established 5.2
+///   default (correct for 5.2, and mis-aligning a real 5.3-at-`1009`
+///   texture's mip records exactly as before — an unhinted read is
+///   unchanged by #656).
+/// - **Below `1009`** (UE 5.1, 5.0 and every UE4): absent for every
+///   STOCK engine version. A hint does NOT change that — a profile
+///   selected for its AES key must not desync older cooked content.
+///   (A custom title can write the field from far below this band via
+///   the gate's `||` clause — see [`serialize_mip_data_verdict`] — but
+///   that needs game identity, not a version hint, so it stays
+///   `Denies` exactly as it was before #656.)
+///
+/// The rule those bands feed is
+/// [`crate::asset::engine_hint::resolve_engine_gate`].
 fn read_segment2_entry(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,
@@ -323,15 +398,12 @@ fn read_segment2_entry(
         return Err(fault(asset_path, AssetParseFault::TextureNotCooked));
     }
 
-    // (4) bSerializeMipData (UE 5.3+ proxy; default true below it).
-    // ONLY the 2D class carries the flag on the wire — the cube/array/
-    // volume Deserialize bodies never read it (CUE4Parse threads the
-    // default `true` into DeserializeCookedPlatformData for them).
-    let serialize_mip_data = if kind == TextureKind::TwoD
-        && ctx
-            .version
-            .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
-    {
+    // (4) bSerializeMipData (UE 5.3+; wire proxy refined by the
+    // profile's engine version — #656). ONLY the 2D class carries the
+    // flag on the wire — the cube/array/volume Deserialize bodies never
+    // read it (CUE4Parse threads the default `true` into
+    // DeserializeCookedPlatformData for them).
+    let serialize_mip_data = if kind == TextureKind::TwoD && reads_serialize_mip_data(ctx) {
         read_owner_bool(cur, asset_path, AssetWireField::TextureSerializeMipData)?
     } else {
         true
@@ -444,7 +516,8 @@ fn read_mip_records(
 
     // `bCooked` is present only for UE4 cooked content
     // (`Ar.Ver >= TEXTURE_SOURCE_ART_REFACTOR && Ar.Game < GAME_UE5_0`).
-    // `TEXTURE_SOURCE_ART_REFACTOR` (~14) is far below paksmith's UE4
+    // `TEXTURE_SOURCE_ART_REFACTOR` (143, derived from the
+    // `ADD_PINTYPE_ARRAY = 108` anchor) is far below paksmith's UE4
     // floor (`VER_UE4_NAME_HASHES_SERIALIZED = 504`), so it's implied;
     // the live gate is just "is UE4" (`file_version_ue5.is_none()`).
     let has_bcooked = ctx.version.file_version_ue5.is_none();
@@ -637,16 +710,16 @@ fn read_mip_count(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<u3
 /// **Version gate (object-version proxy).** CUE4Parse gates this on
 /// `Ar.Game` (the engine version): `>= GAME_UE5_2` reads a
 /// `bUsingDerivedData` flag, while `>= GAME_UE5_0 && IsFilterEditorOnly`
-/// applies the 16-byte skip. paksmith has no engine-version field in the
-/// reader, so it gates on the object version `file_version_ue5`, which is
+/// applies the 16-byte skip. This gate does NOT consult the #656 profile
+/// hint — it gates on the object version `file_version_ue5`, which is
 /// an exact proxy **for stock engine versions**: CUE4Parse's verbatim
-/// `EGame`→`FPackageFileVersion` arms map `< GAME_UE5_2 => (522, 1008)`
-/// and `< GAME_UE5_4 => (522, 1009)` — i.e. `GAME_UE5_0`/`5.1 → 1008` and
+/// `EGame`→`FPackageFileVersion` arms map `< GAME_UE5_1 => (522, 1004)`,
+/// `< GAME_UE5_2 => (522, 1008)` and `< GAME_UE5_4 => (522, 1009)` — the
+/// arms are ORDERED, so `GAME_UE5_0 → 1004`, `GAME_UE5_1 → 1008` and
 /// `GAME_UE5_2`/`5.3 → 1009` (`VER_UE5_DATA_RESOURCES`) — so
 /// `file_version_ue5 >= 1009` ⟺ `Ar.Game >= GAME_UE5_2`, and
 /// `file_version_ue5.is_some()` ⟺ `Ar.Game >= GAME_UE5_0`. (CUE4Parse's
-/// per-game version *overrides* are unreachable here — paksmith branches
-/// on `file_version_ue5` alone, with no game-profile field — and even a
+/// per-game version *overrides* are unreachable here, and even a
 /// misclassification between the two UE5 branches consumes the same 16
 /// bytes, so `SizeX` alignment is unaffected.) The
 /// `IsFilterEditorOnly` condition is implied: paksmith rejects uncooked
@@ -793,6 +866,7 @@ mod tests {
     use crate::asset::property::test_utils::{
         make_ctx,
         make_ctx_with_version,
+        make_ctx_with_version_and_engine,
         write_fstring,
         write_int_property,
         // `none` ends a top-level export body: the `None` tag + the object-GUID
@@ -839,7 +913,9 @@ mod tests {
     /// entry** (two `FStripDataFlags` — the `UTexture` base one with
     /// editor-data-stripped set, then the `UTexture2D` one — + owner
     /// `bCooked = 1` + `bSerializeMipData = 1` when `file_version_ue5 >=
-    /// 1010`), then the **platform-data key** ([`write_pd_key`]: the
+    /// 1010`, or at `1009` under a >= 5.3 engine hint — it delegates to
+    /// the reader's own [`reads_serialize_mip_data`]), then the
+    /// **platform-data key** ([`write_pd_key`]: the
     /// `DeserializeCookedPlatformData` leading `pixelFormatName` FName +
     /// `skipOffset`). Every full-texture fixture prepends this.
     fn write_segment2_entry(buf: &mut Vec<u8>, ctx: &AssetContext) {
@@ -847,10 +923,7 @@ mod tests {
         // bSerializeMipData = true when the version reads it). Delegates the
         // byte layout to `write_entry` so the entry format lives in one
         // place; appends the platform-data key.
-        let serialize = ctx
-            .version
-            .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
-            .then_some(1);
+        let serialize = reads_serialize_mip_data(ctx).then_some(1);
         write_entry(buf, STRIP_FLAG_EDITOR_DATA, 1, serialize);
         write_pd_key(buf, ctx);
     }
@@ -1294,9 +1367,9 @@ mod tests {
 
     #[test]
     fn ue5_0_skips_16_byte_prefix() {
-        // 1004 = VER_UE5_LARGE_WORLD_COORDINATES, an early-UE5.0 object
-        // version (5.0's EGame default is 1008; both are < 1009 and take
-        // the full 16-byte placeholder skip, which is what this pins).
+        // 1004 = VER_UE5_LARGE_WORLD_COORDINATES, UE 5.0's EGame object
+        // version. Both it and 5.1's 1008 are < 1009 and take the full
+        // 16-byte placeholder skip, which is what this pins.
         assert_prefix_checksum(parse_with_prefix(Some(1004), &[0xFFu8; 16]));
     }
 
@@ -2172,7 +2245,7 @@ mod tests {
     }
 
     #[test]
-    fn bserialize_mip_data_not_read_below_1010() {
+    fn bserialize_mip_data_not_read_at_1009_unhinted() {
         // At object version 1009 (UE5.2 / 5.3-baseline) the entry has NO
         // bSerializeMipData — paksmith optimizes for 5.2. The entry is 8
         // bytes; the platform data follows immediately. A spurious 4-byte
@@ -2186,6 +2259,137 @@ mod tests {
         bytes.extend_from_slice(&[0xFFu8; 15]);
         plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", &one_mip());
         let (data, records) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
+        assert_eq!(data.mips[0].size_x, 64);
+        assert_eq!(records[0].size_on_disk, 4096);
+    }
+
+    /// Issue #656 acceptance: the SAME bytes at the ambiguous object
+    /// version 1009 parse differently under a 5.2 vs a 5.3 profile.
+    ///
+    /// CUE4Parse maps both engine versions to 1009, so the wire alone
+    /// cannot say whether `bSerializeMipData` is present. The body here
+    /// is a genuine 5.3 texture (flag present). Under the 5.3 hint the
+    /// reader consumes it and the mip records line up; unhinted (or
+    /// under 5.2) it keeps paksmith's shipped 5.2 default, the 4-byte
+    /// flag is read as the following field, and the parse fails rather
+    /// than silently mis-decoding.
+    #[test]
+    fn engine_hint_5_3_reads_bserialize_mip_data_at_1009() {
+        let body = |ctx: &AssetContext| {
+            let mut bytes = Vec::new();
+            none(&mut bytes);
+            // A real 5.3 entry: bSerializeMipData IS on the wire.
+            write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, Some(1));
+            write_pd_key(&mut bytes, ctx);
+            bytes.push(0); // UE5.2+ prefix flag
+            bytes.extend_from_slice(&[0xFFu8; 15]);
+            plain(&mut bytes, ctx, 64, 64, "PF_DXT5", &one_mip());
+            bytes
+        };
+
+        // 5.3 profile: the flag is consumed, everything after aligns.
+        let ctx_53 = make_ctx_with_version_and_engine(522, Some(1009), "5.3");
+        let bytes = body(&ctx_53);
+        let (data, records) = read_from(&bytes, &ctx_53, "tex.uasset")
+            .expect("a 5.3 profile must consume bSerializeMipData at 1009");
+        assert_eq!(data.mips[0].size_x, 64);
+        assert_eq!(records[0].size_on_disk, 4096);
+
+        // 5.2 profile: same bytes, shipped default, 4-byte desync.
+        let ctx_52 = make_ctx_with_version_and_engine(522, Some(1009), "5.2");
+        assert_eq!(bytes, body(&ctx_52), "the two readings see IDENTICAL bytes");
+        let err = read_from(&bytes, &ctx_52, "tex.uasset")
+            .expect_err("a 5.2 profile must NOT consume the flag");
+        // WHERE the desync surfaces, not merely that it does. The
+        // 4-byte shift is not caught at `bUsingDerivedData` — that
+        // reads a zero byte out of `skipOffset` and passes — but at
+        // `SizeX`, which lands on the 0xFF filler and reads `-1`.
+        // Pinned because a reader field-order or width change could
+        // move the failure elsewhere and silently falsify the
+        // mechanism documented at the fixture's filler.
+        assert!(
+            err.to_string().contains("texture_size_x"),
+            "expected the desync to surface at SizeX, got: {err}"
+        );
+
+        // And no hint behaves exactly like the 5.2 profile — the
+        // pre-#656 default is preserved for unhinted reads.
+        let ctx_none = make_ctx_with_version(522, Some(1009));
+        let err_unhinted = read_from(&bytes, &ctx_none, "tex.uasset")
+            .expect_err("unhinted keeps the shipped 5.2 default");
+        assert_eq!(
+            err.to_string(),
+            err_unhinted.to_string(),
+            "a 5.2 hint and no hint must be indistinguishable"
+        );
+    }
+
+    /// A 5.3 profile must NOT disturb packages whose wire version
+    /// unambiguously says there is no flag — UE4, 5.0 and 5.1 (object
+    /// version < 1009). Only 1009 is ambiguous; firing the hint below
+    /// it consumes 4 bytes that are not on the wire and desyncs every
+    /// later field, silently degrading the export to `Generic`.
+    #[test]
+    fn engine_hint_does_not_fire_below_the_ambiguous_version() {
+        // A profile can legitimately be selected for its AES key while
+        // the archive holds older cooked content.
+        for (ue4, ue5) in [(522, None), (522, Some(1004)), (522, Some(1008))] {
+            let hinted = make_ctx_with_version_and_engine(ue4, ue5, "5.3");
+            let plainctx = make_ctx_with_version(ue4, ue5);
+            let mut bytes = Vec::new();
+            none(&mut bytes);
+            // No bSerializeMipData: correct for every version here.
+            write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, None);
+            write_pd_key(&mut bytes, &plainctx);
+            if ue5.is_some() {
+                bytes.push(0); // UE5 prefix flag
+                bytes.extend_from_slice(&[0xFFu8; 15]);
+            }
+            plain(&mut bytes, &plainctx, 64, 64, "PF_DXT5", &one_mip());
+            let (data, _) = read_from(&bytes, &hinted, "tex.uasset").unwrap_or_else(|e| {
+                panic!("ue5={ue5:?} must parse unchanged under a 5.3 hint: {e}")
+            });
+            assert_eq!(data.mips[0].size_x, 64, "ue5={ue5:?}");
+        }
+    }
+
+    /// The sibling classes never read `bSerializeMipData`, and a 5.3
+    /// profile does not change that — the flag is 2D-only on the wire,
+    /// so the hint must not leak across the `kind` conjunct at the
+    /// ambiguous 1009 either.
+    #[test]
+    fn engine_hint_does_not_reach_sibling_kinds_at_1009() {
+        let ctx = make_ctx_with_version_and_engine(522, Some(1009), "5.3");
+        for kind in [TextureKind::Cube, TextureKind::Array, TextureKind::Volume] {
+            let mut bytes = Vec::new();
+            none(&mut bytes);
+            // No bSerializeMipData: siblings never carry it.
+            write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, None);
+            write_pd_key(&mut bytes, &ctx);
+            bytes.push(0);
+            bytes.extend_from_slice(&[0xFFu8; 15]);
+            plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", &one_mip());
+            let (data, _) = read_from_kind(&bytes, &ctx, "tex.uasset", kind)
+                .unwrap_or_else(|e| panic!("{kind:?} must ignore the hint: {e}"));
+            assert_eq!(data.mips[0].size_x, 64, "{kind:?}");
+        }
+    }
+
+    /// A hint can only ADD a gate the wire missed, never remove one the
+    /// wire asserts: at 1010 the object version is unambiguous, so a
+    /// (contradictory) 5.2 profile must not suppress the flag.
+    #[test]
+    fn engine_hint_never_suppresses_an_unambiguous_wire_gate() {
+        let ctx = make_ctx_with_version_and_engine(522, Some(1010), "5.2");
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, Some(1));
+        write_pd_key(&mut bytes, &ctx);
+        bytes.push(0);
+        bytes.extend_from_slice(&[0xFFu8; 15]);
+        plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", &one_mip());
+        let (data, records) =
+            read_from(&bytes, &ctx, "tex.uasset").expect("wire >= 1010 still reads the flag");
         assert_eq!(data.mips[0].size_x, 64);
         assert_eq!(records[0].size_on_disk, 4096);
     }

@@ -38,6 +38,11 @@ pub(crate) struct ExtractJob<'a> {
     /// selected profile's source — #651), shared across all workers
     /// (see `Package::read_from_reader` for the `&Arc` rationale).
     pub(crate) mappings: Option<Arc<Usmap>>,
+    /// The selected profile's declared engine version (#656), applied
+    /// to every entry this job parses. `None` when no profile was
+    /// selected or it declares none — then every gate keeps its
+    /// object-version proxy.
+    pub(crate) engine_version: Option<paksmith_core::asset::UeVersion>,
 }
 
 impl ExtractJob<'_> {
@@ -55,8 +60,15 @@ impl ExtractJob<'_> {
     }
 
     fn extract_asset(&self, entry_path: &str) -> EntryOutcome {
-        let pkg = match Package::read_from_reader(&self.reader, entry_path, self.mappings.as_ref())
-        {
+        // The projection into `build` is the residual untested hop:
+        // deleting `self.engine_version` here fails to compile, but
+        // substituting `None` would not. Same structural limit as
+        // `open_and_collect`'s `engine_version = ctx.engine_version`
+        // — `PakOpenContext` has no public constructor, so neither
+        // read can be lifted into a unit-testable position without a
+        // core-side change.
+        let opts = crate::read_options::build(self.mappings.as_ref(), self.engine_version);
+        let pkg = match Package::read_from_reader_with(&self.reader, entry_path, &opts) {
             Ok(p) => p,
             Err(e) => return failed(entry_path, e),
         };

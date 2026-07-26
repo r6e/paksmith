@@ -138,8 +138,15 @@ pub enum MappingsSource {
 pub struct GameProfile {
     /// Human-readable display name.
     pub name: String,
-    /// Optional engine version (e.g. `"5.3"`); feeds future detection and the
-    /// UE5.2-vs-5.3 texture-version gap.
+    /// Optional engine version (e.g. `"5.3"`, `"4.27"`).
+    ///
+    /// Parsed leniently at resolution into [`crate::asset::UeVersion`]
+    /// and threaded into the parser as
+    /// [`crate::asset::AssetContext::engine_version_hint`] (#656),
+    /// where it resolves gates the package's own object versions
+    /// cannot express — the UE5.2-vs-5.3 `bSerializeMipData` gap. A
+    /// malformed value degrades to no hint with a warning, never an
+    /// error. Also feeds future detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_version: Option<String>,
     /// guid → key. Serialized as a TOML table of 32-hex → 64-hex strings.

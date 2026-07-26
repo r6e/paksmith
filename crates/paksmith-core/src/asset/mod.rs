@@ -28,6 +28,7 @@ use serde::Serialize;
 pub mod bulk_data;
 pub mod custom_version;
 pub mod data_resource;
+pub mod engine_hint;
 pub mod engine_version;
 pub mod export_table;
 pub(crate) mod exports;
@@ -45,6 +46,7 @@ pub mod version;
 pub mod wire;
 
 pub use custom_version::{CustomVersion, CustomVersionContainer};
+pub use engine_hint::UeVersion;
 pub use engine_version::EngineVersion;
 pub use export_table::{ExportTable, ObjectExport};
 pub use exports::mesh::section::MeshSection;
@@ -57,6 +59,7 @@ pub use import_table::{ImportTable, ObjectImport};
 pub use mappings::Usmap;
 pub use name_table::{FName, NameTable};
 pub use package::Package;
+pub use package::ReadOptions;
 pub use package_index::{PackageIndex, PackageIndexError};
 pub use property::PropertyBag;
 pub use summary::PackageSummary;
@@ -852,9 +855,10 @@ pub struct Texture2DMipMap {
     pub size_z: u32,
 }
 
-/// Bundle threading the parsed name/import/export tables, version, and
-/// optional `.usmap` schema registry through downstream property
-/// parsers (Phase 2b+).
+/// Bundle threading the parsed name/import/export tables, version,
+/// optional `.usmap` schema registry, and the caller's optional
+/// engine-version hint (#656) through downstream property parsers
+/// (Phase 2b+).
 ///
 /// **Thread safety:** `AssetContext: Send + Sync`. All components are
 /// `Arc`-shared immutable data — safe to clone and share across
@@ -931,6 +935,23 @@ pub struct AssetContext {
     /// [`bulk_data::FByteBulkData::read_from_ctx`]. `Arc` so context
     /// clones are refcount-cheap.
     pub(crate) data_resources: std::sync::Arc<[crate::asset::data_resource::FObjectDataResource]>,
+    /// Out-of-band engine version supplied by a game profile (#656).
+    ///
+    /// Some wire gates are ENGINE-version gates that the package's own
+    /// object versions only approximate — most concretely UE 5.2 and
+    /// 5.3 both serialize object version 1009, yet only 5.3 writes
+    /// `bSerializeMipData` in a `UTexture2D`'s cooked entry. When a
+    /// profile declares the version, the affected gates consult this;
+    /// with `None` they keep their established object-version proxy
+    /// (paksmith's shipped default), so an unhinted parse is
+    /// byte-for-byte what it was before this field existed.
+    ///
+    /// REFINES, never restricts: a hint can only disambiguate a gate
+    /// the wire leaves ambiguous, never raise paksmith's UE 4.13+ asset
+    /// floor or reject a package the unhinted path accepts. Defaults
+    /// `None` from [`AssetContext::new`]; set on the
+    /// `Package::read_from*` path from the caller's profile.
+    pub engine_version_hint: Option<engine_hint::UeVersion>,
 }
 
 impl AssetContext {
@@ -961,7 +982,24 @@ impl AssetContext {
             // Default: classic inline bulk headers. Only the real
             // `Package::read_from*` path parses a data-resource table. #642.
             data_resources: std::sync::Arc::from(Vec::new()),
+            // Set from the caller's profile on the
+            // `Package::read_from*` path; see the field's own doc.
+            engine_version_hint: None,
         }
+    }
+
+    /// Attach an out-of-band engine-version hint (issue #656).
+    ///
+    /// A convenience, not a gate: the field is `pub` and settable
+    /// directly on an owned value. The builder exists so callers need
+    /// neither a struct literal (which `#[non_exhaustive]` blocks from
+    /// outside this crate) nor a seventh parameter on `new`. The
+    /// in-crate `Package::read_from*` path uses a struct literal and
+    /// does not go through this.
+    #[must_use]
+    pub fn with_engine_version_hint(mut self, hint: Option<engine_hint::UeVersion>) -> Self {
+        self.engine_version_hint = hint;
+        self
     }
 }
 

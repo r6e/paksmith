@@ -164,8 +164,8 @@ exclude_re = [
     # `resolve_pak_key` into `resolve_pak_context` (`resolve_pak_key` is now a
     # one-line delegate) — all read `PAKSMITH_CONFIG_DIR` / the network / a
     # pak file. Their PURE inner logic (`available_in`, `detect_in`,
-    # `resolve_within`, `unique_detect_id`, `named_profile_mappings_in`,
-    # `detect_profile_mappings_in`, `profile_mappings_in`) is unit-tested; the
+    # `resolve_within`, `unique_detect_id`, `named_profile_inputs_in`,
+    # `detect_profile_inputs_in`, `profile_inputs_in`) is unit-tested; the
     # wrappers are exercised by the `paksmith-cli` integration suite, but
     # cargo-mutants scopes tests to the mutated package so those cross-crate
     # kills aren't credited — identical to the existing `ProfileStore::load` /

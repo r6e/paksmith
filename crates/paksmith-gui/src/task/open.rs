@@ -77,7 +77,10 @@ async fn run_inner(
 ) -> Result<LoadedArchive, OpenError> {
     // Issue #706 seam: switch to `resolve_pak_context` to also get the
     // profile's `MappingsSource`, load it once here, and carry the parsed
-    // `Arc<Usmap>` in `LoadedArchive` for the asset/export tasks.
+    // `Arc<Usmap>` in `LoadedArchive` for the asset/export tasks. The
+    // same switch picks up the profile's engine-version hint (#656),
+    // which the GUI likewise does not thread today — the texture viewer
+    // is exactly where the UE 5.2-vs-5.3 gap shows.
     let resolved_key = paksmith_core::profile::resolve::resolve_pak_key(
         &path,
         manual_key.as_ref(),

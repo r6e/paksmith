@@ -99,7 +99,11 @@ pub(crate) struct AddArgs {
     /// Display name
     #[arg(long)]
     pub(crate) name: String,
-    /// Engine version, e.g. 5.3
+    /// Engine version, e.g. `5.3` (`major.minor`, optional `.patch`,
+    /// optional `UE` prefix). Consulted by inspect/extract for gates
+    /// the package bytes leave ambiguous — notably UE 5.2 vs 5.3,
+    /// which share one object version. Stored as given; an
+    /// unparsable value warns and is ignored rather than failing.
     #[arg(long)]
     pub(crate) engine_version: Option<String>,
     /// `.usmap` mappings file this profile supplies when selected via

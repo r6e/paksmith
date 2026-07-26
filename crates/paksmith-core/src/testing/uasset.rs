@@ -138,11 +138,16 @@ pub struct MinimalPackageSpec {
     /// `CustomVersionContainer` to exercise the populated-container
     /// fixture.
     pub custom_versions: CustomVersionContainer,
-    /// `saved_by_engine_version`. Defaults to a `0.0.0-0+""` empty
-    /// engine version (matches the original UE 4.27 fixture's
-    /// equivalent of an empty cooked stamp).
+    /// `saved_by_engine_version`. Defaults to a POPULATED
+    /// `4.27.2-0+++UE4+Release-4.27`, matching the real UE 4.27
+    /// fixture's cooked stamp — not an empty value. (This doc claimed
+    /// an empty `0.0.0-0+""` default from #258 until #656; the stale
+    /// claim was cited as evidence in an unrelated design rationale
+    /// before anyone read the `Default` impl below.)
     pub saved_by_engine_version: EngineVersion,
-    /// `compatible_with_engine_version`. Same default as above.
+    /// `compatible_with_engine_version`. Also populated, and NOT
+    /// identical to the above: `4.27.0`, differing in the patch
+    /// component.
     pub compatible_with_engine_version: EngineVersion,
     /// `PersistentGuid` — only emitted at UE4 ≥ 518 with
     /// `!PKG_FilterEditorOnly`. The builder validates the gate state.
@@ -690,6 +695,124 @@ fn build_minimal_with_texture2d_body(texture_body: Vec<u8>) -> MinimalPackage {
     build_minimal_with_texture_class("Texture2D", texture_body)
 }
 
+/// A UE5 package at the AMBIGUOUS object version `1009` holding one
+/// `Texture2D` export whose cooked entry is written in the UE 5.3
+/// shape — i.e. `bSerializeMipData` IS on the wire (#656).
+///
+/// `1009` is the one value where the package bytes cannot say whether
+/// they came from 5.2 or 5.3, so the same bytes must parse differently
+/// depending on the caller's declared engine version. Exists so that
+/// divergence is provable through the PUBLIC entry points, not only in
+/// the reader's own unit tests.
+#[must_use]
+pub fn build_minimal_ue5_1009_texture2d_with_mip_flag() -> MinimalPackage {
+    let mut body = Vec::new();
+    // Segment 1: tagged properties — `None` terminator + object-GUID tail.
+    body.extend_from_slice(&0i32.to_le_bytes());
+    body.extend_from_slice(&0i32.to_le_bytes());
+    body.extend_from_slice(&0i32.to_le_bytes());
+    // Segment-2 entry: UTexture + UTexture2D strip flags, owner bCooked,
+    // then the UE 5.3-only bSerializeMipData.
+    body.extend_from_slice(&[1u8, 0u8, 0u8, 0u8]);
+    body.extend_from_slice(&1u32.to_le_bytes()); // owner bCooked
+    body.extend_from_slice(&1u32.to_le_bytes()); // bSerializeMipData (5.3)
+    // DeserializeCookedPlatformData key: non-None pixelFormatName + i64
+    // skipOffset (UE 4.20+ width).
+    body.extend_from_slice(&1i32.to_le_bytes());
+    body.extend_from_slice(&0i32.to_le_bytes());
+    body.extend_from_slice(&0i64.to_le_bytes());
+    // UE5 (>= 5.2) prefix: bUsingDerivedData flag + the 16-byte skip.
+    body.push(0);
+    // The 0xFF filler is LOAD-BEARING, not arbitrary padding. A 5.2
+    // read of these 5.3-shaped bytes runs four bytes early (it does not
+    // consume `bSerializeMipData`), so every subsequent field is read
+    // from four bytes back. `bUsingDerivedData` picks up a zero byte
+    // out of `skipOffset` and PASSES; the desync is not caught until
+    // `SizeX`, which lands on the filler's last four bytes and reads
+    // `-1`, failing its `[0, 16384]` range check — so the mis-parse
+    // fails LOUD. Zero filler would slide past that check too and fail
+    // somewhere later and less legibly. Do not "clean up" to zeros; the
+    // trailing four bytes are pinned below.
+    body.extend_from_slice(&[0xFFu8; 15]);
+    // FTexturePlatformData header.
+    body.extend_from_slice(&64i32.to_le_bytes()); // SizeX
+    body.extend_from_slice(&64i32.to_le_bytes()); // SizeY
+    body.extend_from_slice(&1u32.to_le_bytes()); // PackedData
+    write_fstring(&mut body, "PF_DXT5");
+    body.extend_from_slice(&0i32.to_le_bytes()); // FirstMipToSerialize
+    body.extend_from_slice(&1i32.to_le_bytes()); // mip count
+    // One mip. bSerializeMipData = true ⇒ the per-mip bulk data IS
+    // present. NOTE no per-mip `bCooked`: that field is UE4-only
+    // (`file_version_ue5.is_none()`), and this fixture is UE5.
+    body.extend_from_slice(&0x0001_0001u32.to_le_bytes()); // bulk flags
+    body.extend_from_slice(&4096i32.to_le_bytes()); // ElementCount
+    body.extend_from_slice(&4096u32.to_le_bytes()); // SizeOnDisk
+    body.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile
+    body.extend_from_slice(&64i32.to_le_bytes()); // mip SizeX
+    body.extend_from_slice(&64i32.to_le_bytes()); // mip SizeY
+    body.extend_from_slice(&1i32.to_le_bytes()); // mip SizeZ (UE 4.20+/UE5)
+    body.extend_from_slice(&0u32.to_le_bytes()); // bIsVirtual = false
+
+    let engine = EngineVersion {
+        major: 5,
+        minor: 3,
+        patch: 0,
+        changelist: 0,
+        branch: "++UE5+Release-5.3".to_string(),
+    };
+    let (names, imports, _, payloads) = texture_class_tables("Texture2D", body);
+    // UE5 export records carry fields UE4's do not (no per-export
+    // package_guid from 1005; is_inherited_instance from 1006;
+    // generate_public_hash from 1003), so the UE4-shaped
+    // `fixture_export` cannot be reused here — build them UE5-shaped.
+    let ue5_export =
+        |class_index: PackageIndex, object_name: u32, serial_size: usize| ObjectExport {
+            class_index,
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name,
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size: serial_size as i64,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: None,
+            is_inherited_instance: Some(false),
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: Some(false),
+            // Below 1010 these stay absent.
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        };
+    let exports = ExportTable {
+        exports: vec![
+            ue5_export(PackageIndex::Import(0), 2, payloads[0].len()),
+            ue5_export(PackageIndex::Import(1), 3, payloads[1].len()),
+        ],
+    };
+    build_minimal(MinimalPackageSpec {
+        legacy_file_version: -8,
+        file_version_ue5: Some(1009),
+        names,
+        imports,
+        exports,
+        payloads,
+        saved_by_engine_version: engine.clone(),
+        compatible_with_engine_version: engine,
+        ..MinimalPackageSpec::default()
+    })
+}
+
 /// Like [`build_minimal_with_texture2d`] but with the texture export's
 /// class name parameterized — `"TextureCube"` / `"Texture2DArray"` /
 /// `"VolumeTexture"` route the body through the #648 multidim dispatch
@@ -698,6 +821,24 @@ fn build_minimal_with_texture2d_body(texture_body: Vec<u8>) -> MinimalPackage {
 /// texture with `texture_body` as its payload.
 #[must_use]
 pub fn build_minimal_with_texture_class(class_name: &str, texture_body: Vec<u8>) -> MinimalPackage {
+    let (names, imports, exports, payloads) = texture_class_tables(class_name, texture_body);
+    build_minimal(MinimalPackageSpec {
+        names,
+        imports,
+        exports,
+        payloads,
+        ..MinimalPackageSpec::default()
+    })
+}
+
+/// The name/import/export tables (and payloads) for a two-export
+/// texture fixture: export[0] is a generic `None`-terminator body,
+/// export[1] carries `texture_body` under `class_name`. Shared so the
+/// UE4 and UE5 texture builders cannot describe different shapes.
+fn texture_class_tables(
+    class_name: &str,
+    texture_body: Vec<u8>,
+) -> (NameTable, ImportTable, ExportTable, Vec<Vec<u8>>) {
     let names = NameTable {
         names: vec![
             FName::new("/Script/CoreUObject"),
@@ -740,13 +881,7 @@ pub fn build_minimal_with_texture_class(class_name: &str, texture_body: Vec<u8>)
             fixture_export(PackageIndex::Import(1), 3, texture_body.len()),
         ],
     };
-    build_minimal(MinimalPackageSpec {
-        names,
-        imports,
-        exports,
-        payloads: vec![generic_body, texture_body],
-        ..MinimalPackageSpec::default()
-    })
+    (names, imports, exports, vec![generic_body, texture_body])
 }
 
 /// Returns `(uasset_header_bytes, uexp_payload_bytes)` — the split form of the
@@ -2694,6 +2829,78 @@ pub fn build_minimal_licensee_engine_version() -> MinimalPackage {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// Shape + behaviour pin for the #656 UE5-1009 texture fixture.
+    ///
+    /// In-source for the same reason as the #648 pins below:
+    /// `cargo-mutants` credits only default-members, and this
+    /// builder's only other consumer is the `engine_hint_seam`
+    /// capstone in `paksmith-core-tests` — so every
+    /// `MinimalPackageSpec` field here is invisible to mutation
+    /// testing unless something in THIS crate depends on it. Deleting
+    /// any of them silently falls back to `MinimalPackageSpec::
+    /// default()` (a UE 4.27 package), which is exactly the shape this
+    /// fixture must NOT be.
+    #[test]
+    fn ue5_1009_texture_fixture_pins_its_shape_and_hint_divergence() {
+        use crate::asset::{Asset, Package, ReadOptions, UeVersion};
+
+        let pkg = build_minimal_ue5_1009_texture2d_with_mip_flag();
+
+        // The ambiguous-version shape itself. `legacy_file_version`'s
+        // sign and `file_version_ue5`'s exact value are what make this
+        // fixture ambiguous rather than UE4 or 5.4-dev.
+        assert_eq!(pkg.summary.version.legacy_file_version, -8);
+        assert_eq!(pkg.summary.version.file_version_ue5, Some(1009));
+        // The engine stamps this fixture claims (UE 5.3).
+        assert_eq!(pkg.summary.saved_by_engine_version.major, 5);
+        assert_eq!(pkg.summary.saved_by_engine_version.minor, 3);
+        assert_eq!(pkg.summary.compatible_with_engine_version.minor, 3);
+        // Two exports (generic + texture) from the shared table
+        // builder — a dropped `exports`/`payloads`/`names`/`imports`
+        // collapses to the one-export default.
+        assert_eq!(pkg.exports.exports.len(), 2);
+        // -1 is the "no preload dependencies" sentinel; a positive
+        // value would claim a dependency index this fixture has no
+        // table for, making it malformed rather than minimal.
+        for e in &pkg.exports.exports {
+            assert_eq!(e.first_export_dependency, -1);
+        }
+        assert_eq!(pkg.names.names.len(), 4);
+        assert_eq!(pkg.imports.imports.len(), 2);
+
+        // The four bytes before `SizeX` must be 0xFF — that is what
+        // makes a 5.2 mis-parse fail loudly at `SizeX` rather than
+        // wandering on. Mechanism: see the filler comment in
+        // `build_minimal_ue5_1009_texture2d_with_mip_flag`.
+        let sizex_preceded_by_filler = pkg
+            .bytes
+            .windows(8)
+            .filter(|w| w == b"\xFF\xFF\xFF\xFF\x40\x00\x00\x00")
+            .count();
+        assert_eq!(
+            sizex_preceded_by_filler, 1,
+            "expected exactly one 0xFF-run immediately before SizeX=64"
+        );
+
+        // And the divergence the fixture exists to demonstrate: the
+        // 5.3-shaped body decodes ONLY under a >= 5.3 hint.
+        let typed = |hint: Option<UeVersion>| {
+            Package::read_from_with(
+                &pkg.bytes,
+                None,
+                &ReadOptions::new().with_engine_version_hint(hint),
+                "Game/Tex.uasset",
+            )
+            .expect("the fixture header parses either way")
+            .payloads
+            .iter()
+            .any(|a| matches!(a, Asset::Texture2D(_)))
+        };
+        assert!(typed(UeVersion::parse_lenient("5.3")));
+        assert!(!typed(UeVersion::parse_lenient("5.2")));
+        assert!(!typed(None));
+    }
 
     /// Builder pins for the #648 multidim fixture bodies. In-source because
     /// `cargo-mutants` excludes the `texture_integration` capstone (it lives

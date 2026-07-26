@@ -143,6 +143,12 @@ pub struct Package {
     /// the storage shape (`Arc<Usmap>`) is an implementation detail;
     /// callers access mappings via [`Package::context()`].
     mappings: Option<Arc<Usmap>>,
+    /// Engine-version hint supplied to the `read_from*_with` entry
+    /// points, retained so [`Package::context()`] resurfaces it to
+    /// Phase 3+ handlers that drive secondary decode passes — the same
+    /// role `mappings` plays. `None` for every bare-entry-point read
+    /// (#656).
+    engine_version_hint: Option<crate::asset::UeVersion>,
     /// `FByteBulkData` records + lazy-resolved bytes per export
     /// (Phase 3b). Sparse: keys are export indices that carry bulk
     /// records. **Single map with tuple values** (NOT two parallel
@@ -439,6 +445,67 @@ fn companion_loader<R: crate::container::ContainerReader + ?Sized + 'static>(
     }
 }
 
+/// Optional inputs to a package read: the `.usmap` schema registry
+/// and the out-of-band engine-version hint (#656).
+///
+/// Exists so hints accumulate WITHOUT reshaping the read entry points:
+/// `mappings` arrived in #651 as a new parameter on the three public
+/// entry points plus the private `read_from_inner`, and further
+/// engine-version residuals are catalogued on
+/// `AssetVersion`'s `is_*_or_later` gates. Each future one that a hint
+/// can resolve adds a field here — additive for every caller —
+/// instead of another parameter on every signature. (Most of those
+/// gates OVER-fire rather than under-fire, so they need a different
+/// resolver — see `engine_hint::resolve_engine_gate`'s scope note.)
+///
+/// Convention for the NEXT profile-borne parse input: add a field
+/// here and thread it through the CLI's `read_options::build`, which
+/// both delivery paths already call. Adding it at the call sites
+/// instead is what left the #656 wiring untested — the bare entry
+/// points cannot force that audit the way a signature change would.
+///
+/// `#[non_exhaustive]`: construct with [`ReadOptions::new`] and the
+/// builder setters (a struct literal is blocked outside this crate).
+/// The fields are `pub` and readable — and settable directly on an
+/// owned value — so the builders are a convenience, not a gate. The
+/// bare `read_from*` entry points remain and pass mappings only, so
+/// all pre-#656 call sites are untouched.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct ReadOptions<'a> {
+    /// `.usmap` schema registry for unversioned-property packages
+    /// (#651). Borrowed: batch callers share ONE parsed registry
+    /// across rayon workers.
+    pub mappings: Option<&'a Arc<Usmap>>,
+    /// Engine version declared by the caller's game profile (#656).
+    /// Refines gates the package's own object versions cannot
+    /// disambiguate; `None` keeps every established proxy, so an
+    /// unhinted read is byte-identical to pre-#656.
+    pub engine_version_hint: Option<crate::asset::UeVersion>,
+}
+
+impl<'a> ReadOptions<'a> {
+    /// No mappings, no hint — identical to the bare `read_from*` path.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Supply the `.usmap` schema registry.
+    #[must_use]
+    pub fn with_mappings(mut self, mappings: Option<&'a Arc<Usmap>>) -> Self {
+        self.mappings = mappings;
+        self
+    }
+
+    /// Supply the profile's engine version.
+    #[must_use]
+    pub fn with_engine_version_hint(mut self, hint: Option<crate::asset::UeVersion>) -> Self {
+        self.engine_version_hint = hint;
+        self
+    }
+}
+
 impl Package {
     /// Parse a `.uasset` from `uasset`, optionally stitched with a
     /// companion `.uexp` slice.
@@ -477,10 +544,31 @@ impl Package {
     ///   extends past `uasset.len()` and no `.uexp` was provided
     /// - [`AssetParseFault::SplitAssetSizeMismatch`] when a `.uexp` is
     ///   needed but `uasset.len() != total_header_size`
+    ///
+    /// See [`Self::read_from_with`] to also supply a profile's
+    /// engine-version hint (#656).
     pub fn read_from(
         uasset: &[u8],
         uexp: Option<&[u8]>,
         mappings: Option<&Arc<Usmap>>,
+        asset_path: &str,
+    ) -> crate::Result<Self> {
+        Self::read_from_with(
+            uasset,
+            uexp,
+            &ReadOptions::new().with_mappings(mappings),
+            asset_path,
+        )
+    }
+
+    /// [`Self::read_from`] with the full [`ReadOptions`] set (#656).
+    ///
+    /// # Errors
+    /// Same as [`Self::read_from`].
+    pub fn read_from_with(
+        uasset: &[u8],
+        uexp: Option<&[u8]>,
+        opts: &ReadOptions<'_>,
         asset_path: &str,
     ) -> crate::Result<Self> {
         // Non-pak callers (unit tests, raw-byte ingest) have no
@@ -495,14 +583,7 @@ impl Package {
             missing_companion_loader(CompanionFileKind::Ubulk, asset_path.to_string());
         let uptnl_loader =
             missing_companion_loader(CompanionFileKind::Uptnl, asset_path.to_string());
-        Self::read_from_inner(
-            uasset,
-            uexp,
-            mappings,
-            asset_path,
-            ubulk_loader,
-            uptnl_loader,
-        )
+        Self::read_from_inner(uasset, uexp, opts, asset_path, ubulk_loader, uptnl_loader)
     }
 
     /// Internal entry point shared by [`Self::read_from`] (stub
@@ -516,7 +597,7 @@ impl Package {
     fn read_from_inner<U, T>(
         uasset: &[u8],
         uexp: Option<&[u8]>,
-        mappings: Option<&Arc<Usmap>>,
+        opts: &ReadOptions<'_>,
         asset_path: &str,
         ubulk_loader: U,
         uptnl_loader: T,
@@ -725,10 +806,11 @@ impl Package {
             exports: Arc::clone(&exports),
             version: summary.version,
             custom_versions: Arc::new(summary.custom_versions.clone()),
-            mappings: mappings.map(Arc::clone),
+            mappings: opts.mappings.map(Arc::clone),
             bulk_resolver: Some(Arc::clone(&resolver)),
             soft_object_paths_indexed: summary.soft_object_paths_indexed(),
             data_resources: Arc::clone(&data_resources),
+            engine_version_hint: opts.engine_version_hint,
         };
 
         // Phase 2f: dispatch the unversioned (schema-driven) property
@@ -818,6 +900,7 @@ impl Package {
             exports,
             payloads,
             mappings: ctx.mappings.clone(),
+            engine_version_hint: ctx.engine_version_hint,
             bulk_data: HashMap::new(),
             resolver,
             data_resources,
@@ -877,17 +960,35 @@ impl Package {
     /// `.ubulk` / `.uptnl` at pak-open time is fine — the lazy
     /// loaders only fire when bulk-data resolution actually needs
     /// them.
+    ///
+    /// See [`Self::read_from_pak_with`] to also supply a profile's
+    /// engine-version hint (#656).
     pub fn read_from_pak<P: AsRef<std::path::Path>>(
         pak_path: P,
         virtual_path: &str,
         mappings: Option<&Arc<Usmap>>,
     ) -> crate::Result<Self> {
+        Self::read_from_pak_with(
+            pak_path,
+            virtual_path,
+            &ReadOptions::new().with_mappings(mappings),
+        )
+    }
+
+    /// [`Self::read_from_pak`] with the full [`ReadOptions`] set (#656).
+    ///
+    /// # Errors
+    /// Same as [`Self::read_from_pak`].
+    pub fn read_from_pak_with<P: AsRef<std::path::Path>>(
+        pak_path: P,
+        virtual_path: &str,
+        opts: &ReadOptions<'_>,
+    ) -> crate::Result<Self> {
         // Phase 3b: wrap `PakReader` in `Arc` so the companion-loader
         // closures can capture cloned refcounted handles. `PakReader`
-        // is `Send + Sync` (Phase 1 design); `Arc<PakReader>` auto-
-        // derefs to `&PakReader` for the synchronous reads below.
+        // is `Send + Sync` (Phase 1 design).
         let reader = Arc::new(crate::container::pak::PakReader::open(pak_path)?);
-        Self::read_from_reader(&reader, virtual_path, mappings)
+        Self::read_from_reader_with(&reader, virtual_path, opts)
     }
 
     /// Parse the UAsset at `virtual_path` from an already-open
@@ -914,10 +1015,31 @@ impl Package {
     /// [`Self::read_from_pak`]: a missing `.uexp` is silently treated as
     /// a monolithic asset; missing `.ubulk` / `.uptnl` surface only if
     /// bulk-data resolution actually needs them.
+    ///
+    /// See [`Self::read_from_reader_with`] to also supply a profile's
+    /// engine-version hint (#656).
     pub fn read_from_reader<R: crate::container::ContainerReader + ?Sized + 'static>(
         reader: &Arc<R>,
         virtual_path: &str,
         mappings: Option<&Arc<Usmap>>,
+    ) -> crate::Result<Self> {
+        Self::read_from_reader_with(
+            reader,
+            virtual_path,
+            &ReadOptions::new().with_mappings(mappings),
+        )
+    }
+
+    /// [`Self::read_from_reader`] with the full [`ReadOptions`] set —
+    /// the entry point that carries a profile's engine-version hint
+    /// into the parse (#656).
+    ///
+    /// # Errors
+    /// Same as [`Self::read_from_reader`].
+    pub fn read_from_reader_with<R: crate::container::ContainerReader + ?Sized + 'static>(
+        reader: &Arc<R>,
+        virtual_path: &str,
+        opts: &ReadOptions<'_>,
     ) -> crate::Result<Self> {
         let uasset_bytes = reader.read_entry(virtual_path)?;
 
@@ -955,7 +1077,7 @@ impl Package {
         Self::read_from_inner(
             &uasset_bytes,
             uexp_bytes.as_deref(),
-            mappings,
+            opts,
             virtual_path,
             ubulk_loader,
             uptnl_loader,
@@ -1127,6 +1249,7 @@ impl Package {
             bulk_resolver: Some(Arc::clone(&self.resolver)),
             soft_object_paths_indexed: self.summary.soft_object_paths_indexed(),
             data_resources: Arc::clone(&self.data_resources),
+            engine_version_hint: self.engine_version_hint,
         }
     }
 }
@@ -1388,6 +1511,41 @@ fn read_payloads(
         payloads.push(super::Asset::Generic(bag));
     }
     Ok((payloads, bulk_records))
+}
+
+#[cfg(test)]
+mod read_options_tests {
+    use super::ReadOptions;
+
+    /// The builders are the documented construction path but live
+    /// outside the `__test_utils`-gated module below, which the
+    /// package-scoped mutants baseline compiles out — without this
+    /// their bodies are unpinned.
+    ///
+    /// TWIN: `engine_hint_seam.rs::read_options_fields_are_independent`
+    /// asserts the same composition from OUTSIDE the crate, proving the
+    /// symbols are public. This copy is the one cargo-mutants credits
+    /// (`paksmith-core-tests` is excluded from `default-members`), so
+    /// any rigor added there must be mirrored here — the reverse drift
+    /// is how a vacuous assertion survived on this side once already.
+    #[test]
+    fn builders_set_each_field_and_compose() {
+        let hint = crate::asset::UeVersion::parse_lenient("5.3");
+        assert!(hint.is_some());
+        assert!(ReadOptions::new().engine_version_hint.is_none());
+        assert!(ReadOptions::new().mappings.is_none());
+
+        let opts = ReadOptions::new().with_engine_version_hint(hint);
+        assert_eq!(opts.engine_version_hint, hint);
+        // Setting mappings afterwards must preserve the hint. Uses a
+        // REAL registry: passing `None` leaves the field at its
+        // default, so the follow-up would hold even against a
+        // `with_mappings` that dropped its argument.
+        let usmap = std::sync::Arc::new(crate::asset::Usmap::default());
+        let opts = opts.with_mappings(Some(&usmap));
+        assert!(opts.mappings.is_some(), "with_mappings must set mappings");
+        assert_eq!(opts.engine_version_hint, hint);
+    }
 }
 
 #[cfg(all(test, feature = "__test_utils"))]

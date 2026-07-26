@@ -204,8 +204,9 @@ pub(crate) const VER_UE4_GAME_UE4_20_OBJECT_PROXY: i32 = 516;
 /// index `0` decodes as `bIsVirtual == 0`), though paksmith has no 4.21/4.22
 /// (object `517`) fixture to confirm it; the worst case is fail-loud — a
 /// multi-platform-data 4.21/4.22 texture mis-reads a non-zero `bIsVirtual` and
-/// degrades to `Generic`. paksmith has no engine version (Phase 5 game
-/// profiles), so the object version is the only available proxy; `517` is
+/// degrades to `Generic`. `AssetVersion` carries no engine version (a
+/// profile hint reaches `AssetContext` since #656, but this proxy does not
+/// consult it), so the object version is the only input here; `517` is
 /// the closest, same class of over-approximation as the `516`/4.19-4.20
 /// collision. See [`AssetVersion::is_virtual_textures_or_later`].
 pub(crate) const VER_UE4_GAME_UE4_23_OBJECT_PROXY: i32 = 517;
@@ -243,10 +244,12 @@ pub(crate) const VER_UE4_GAME_UE4_25_OBJECT_PROXY: i32 = 518;
 /// (4.26 and 4.27 both report `522`). An object-version proxy therefore cannot
 /// split them: for genuine `GAME_UE4_26` VT content paksmith reads `u32` where
 /// CUE4Parse reads `u16`, a 2-byte-per-layer desync with no recovery point.
-/// **UNVERIFIED** — paksmith has no `GAME_UE4_26` VT fixture and no
-/// engine-version input until Phase 5 game profiles, so whether stock 4.26 VT
-/// content is reachable here (and on-disk `u16`) is untested; `>= 522` is the
-/// tightest object-version threshold available and is exact from 4.27 up.
+/// **UNVERIFIED** — paksmith has no `GAME_UE4_26` VT fixture, and this gate
+/// does not consult the #656 profile hint (it is an over-approximation, which
+/// that hint cannot correct — see `engine_hint::resolve_engine_gate`'s scope
+/// note), so whether stock 4.26 VT content is reachable here (and on-disk
+/// `u16`) is untested; `>= 522` is the tightest object-version threshold
+/// available and is exact from 4.27 up.
 /// See [`AssetVersion::is_ue4_27_or_later`].
 pub(crate) const VER_UE4_GAME_UE4_27_OBJECT_PROXY: i32 = 522;
 
@@ -425,8 +428,11 @@ impl AssetVersion {
     /// CUE4Parse gates the per-mip `SizeZ` field (present iff `Ar.Game >=
     /// GAME_UE4_20`) and the `FTexturePlatformData` `skipOffset` width
     /// (`i64` iff `>= GAME_UE4_20`, else `i32`) on the engine version;
-    /// paksmith has no engine version, so it proxies with the object
-    /// version. **Known imperfection:** `GAME_UE4_19` and `GAME_UE4_20`
+    /// `AssetVersion` gates on the object version alone — the #656 profile
+    /// hint lives on `AssetContext` and is not consulted here (correcting
+    /// this one means SUPPRESSING a gate the wire asserts, which
+    /// `engine_hint::resolve_engine_gate` deliberately cannot do).
+    /// **Known imperfection:** `GAME_UE4_19` and `GAME_UE4_20`
     /// both serialize object version `516`, so a genuine UE4.19 texture is
     /// treated as 4.20+ here (reads `SizeZ` + an `i64` `skipOffset` it
     /// doesn't have → 4-byte desync → the export degrades to `Generic`).
