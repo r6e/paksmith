@@ -982,21 +982,20 @@ impl AssetContext {
             // Default: classic inline bulk headers. Only the real
             // `Package::read_from*` path parses a data-resource table. #642.
             data_resources: std::sync::Arc::from(Vec::new()),
-            // Default: no out-of-band hint — every gate keeps its
-            // object-version proxy, so an unhinted parse is unchanged
-            // from pre-#656. Set from the caller's profile on the
-            // `Package::read_from*` path. #656.
+            // Set from the caller's profile on the
+            // `Package::read_from*` path; see the field's own doc.
             engine_version_hint: None,
         }
     }
 
     /// Attach an out-of-band engine-version hint (issue #656).
     ///
-    /// Builder form because [`AssetContext`] is `#[non_exhaustive]`:
-    /// external callers set the hint without a struct literal and
-    /// without widening `new`'s six-parameter signature. (The
-    /// in-crate `Package::read_from*` path uses a struct literal, so
-    /// it does not go through this.)
+    /// A convenience, not a gate: the field is `pub` and settable
+    /// directly on an owned value. The builder exists so callers need
+    /// neither a struct literal (which `#[non_exhaustive]` blocks from
+    /// outside this crate) nor a seventh parameter on `new`. The
+    /// in-crate `Package::read_from*` path uses a struct literal and
+    /// does not go through this.
     #[must_use]
     pub fn with_engine_version_hint(mut self, hint: Option<engine_hint::UeVersion>) -> Self {
         self.engine_version_hint = hint;

@@ -19,6 +19,36 @@
 //! `FEngineVersion` (5 fields incl. changelist + branch) read from a
 //! package summary; this type is the 2-3 component human form users
 //! store in profiles.
+//!
+//! # Why not the package's own `saved_by_engine_version`?
+//!
+//! Every package carries an in-band engine stamp that paksmith already
+//! parses and displays ([`crate::asset::PackageSummary`]), and at first
+//! glance it answers the 5.2-vs-5.3 question for free. It is
+//! deliberately NOT the tiebreaker:
+//!
+//! - **It is archive-controlled.** It would let the same untrusted
+//!   bytes whose layout is in question nominate how to read
+//!   themselves. A profile declaration is supplied out-of-band by the
+//!   user or a signed registry, so a crafted package cannot select its
+//!   own parse.
+//! - **It is frequently absent.** Cooked and stripped builds can zero
+//!   it — paksmith's own minimal fixture default is the empty
+//!   `0.0.0-0+""` stamp — so a gate keyed on it would silently take
+//!   the "older" branch for exactly the shipped content that matters.
+//! - **Licensee forks rewrite it.** A custom engine version is common
+//!   in shipped titles, which is the same reason the stamp cannot be
+//!   compared against stock version numbers.
+//! - **The reference parser does not use it.** CUE4Parse gates on
+//!   `Ar.Game`, a selection the user makes; it reads
+//!   `SavedByEngineVersion` for display and never for layout. If the
+//!   in-band stamp were dependable, an out-of-band game selection
+//!   would not be needed at all.
+//!
+//! A future refinement could use the stamp as CORROBORATION (fire only
+//! when it agrees with the hint or is absent), which is strictly safer
+//! than either input alone. That is a separate design with its own
+//! safety argument, not a drop-in replacement for this one.
 
 /// A parsed `major.minor[.patch]` engine version from a profile.
 ///
@@ -29,6 +59,14 @@
 /// Note the derived equality is EXACT, so `"5.3"` and `"5.3.0"` are
 /// different values even though every gate treats them identically —
 /// compare through [`UeVersion::at_least`], not `==`.
+///
+/// Deliberately NOT `#[non_exhaustive]`, unlike most public structs in
+/// this crate: `major.minor.patch` is the whole of what a UE version
+/// number is, so there is no foreseeable field to add. (Per-game
+/// identity, the one refinement the gates want next, cannot be a field
+/// here — see `resolve_engine_gate`'s scope note.) Keeping literals
+/// constructible matters for a small `Copy` value type callers
+/// legitimately want to write inline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UeVersion {
     /// Engine major version (4 or 5 for every supported asset).
@@ -77,7 +115,7 @@ impl UeVersion {
 
     /// True iff this version is `major.minor` or later (patch ignored:
     /// no supported wire difference is patch-scoped).
-    pub fn at_least(&self, major: u32, minor: u32) -> bool {
+    pub fn at_least(self, major: u32, minor: u32) -> bool {
         (self.major, self.minor) >= (major, minor)
     }
 }
@@ -100,8 +138,7 @@ impl std::fmt::Display for UeVersion {
 /// ambiguous case, and must NOT disturb a package whose wire version
 /// says plainly that the field is absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum WireVerdict {
+pub(crate) enum WireVerdict {
     /// The object versions unambiguously place the package at or above
     /// the gate: the field IS on the wire. A hint cannot override this
     /// — the bytes outrank a fallible human annotation.
@@ -145,7 +182,7 @@ pub enum WireVerdict {
 /// opts in below its nominal engine version still needs a per-game
 /// override this type does not model.
 #[must_use]
-pub fn resolve_engine_gate(
+pub(crate) fn resolve_engine_gate(
     wire: WireVerdict,
     hint: Option<UeVersion>,
     major: u32,
@@ -154,7 +191,30 @@ pub fn resolve_engine_gate(
     match wire {
         WireVerdict::Asserts => true,
         WireVerdict::Denies => false,
-        WireVerdict::Ambiguous => hint.is_some_and(|h| h.at_least(major, minor)),
+        WireVerdict::Ambiguous => {
+            let fires = hint.is_some_and(|h| h.at_least(major, minor));
+            // The only branch a user can influence, and the only one
+            // whose outcome they cannot otherwise explain: a missing or
+            // too-old profile `engine_version` surfaces downstream just
+            // as a degraded export, with nothing naming the cause.
+            if let Some(h) = hint {
+                tracing::debug!(
+                    hint = %h,
+                    gate_major = major,
+                    gate_minor = minor,
+                    fires,
+                    "engine-version hint decided a wire-ambiguous gate"
+                );
+            } else {
+                tracing::debug!(
+                    gate_major = major,
+                    gate_minor = minor,
+                    "wire-ambiguous gate with no engine-version hint; \
+                     keeping the established default"
+                );
+            }
+            fires
+        }
     }
 }
 

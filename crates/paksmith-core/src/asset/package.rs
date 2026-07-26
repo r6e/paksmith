@@ -449,8 +449,9 @@ fn companion_loader<R: crate::container::ContainerReader + ?Sized + 'static>(
 /// and the out-of-band engine-version hint (#656).
 ///
 /// Exists so hints accumulate WITHOUT reshaping the read entry points:
-/// `mappings` arrived in #651 as a new parameter on four public fns,
-/// and further engine-version residuals are catalogued on
+/// `mappings` arrived in #651 as a new parameter on the three public
+/// entry points plus the private `read_from_inner`, and further
+/// engine-version residuals are catalogued on
 /// `AssetVersion`'s `is_*_or_later` gates. Each future one that a hint
 /// can resolve adds a field here — additive for every caller —
 /// instead of another parameter on every signature. (Most of those
