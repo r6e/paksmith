@@ -297,15 +297,42 @@ pub(crate) fn read_from_kind(
 /// Two inputs resolve it:
 /// - **`>= 1010`** (incl. the 5.4-preview object versions paksmith
 ///   accepts): unambiguous, the flag is read.
-/// - **At `1009`**: a game profile declaring `>= 5.3`
-///   ([`AssetContext::engine_version_hint`]) makes the flag be read;
-///   without one paksmith keeps its established 5.2 default (correct
-///   for 5.2 / UE4 / 5.0 / 5.1, and mis-aligning a real 5.3-at-`1009`
+/// - **At exactly `1009`** — the ONLY ambiguous value: a game profile
+///   declaring `>= 5.3` ([`AssetContext::engine_version_hint`]) makes
+///   the flag be read; without one paksmith keeps its established 5.2
+///   default (correct for 5.2, and mis-aligning a real 5.3-at-`1009`
 ///   texture's mip records exactly as before — an unhinted read is
 ///   unchanged by #656).
+/// - **Below `1009`** (UE 5.1, 5.0 and every UE4): unambiguously
+///   absent. A hint does NOT change that — a profile selected for its
+///   AES key must not desync older cooked content.
 ///
 /// A hint can only ADD the read, never suppress it above `1010` — see
 /// [`crate::asset::engine_hint::resolve_engine_gate`].
+/// The wire's verdict on `bSerializeMipData` for a cooked
+/// `UTexture2D` (#656).
+///
+/// Exactly ONE object version is ambiguous: at `1009` CUE4Parse maps
+/// both UE 5.2 and 5.3, and only 5.3 writes the field. `>= 1010`
+/// (5.4-dev) unambiguously writes it; everything below `1009` — UE 5.1,
+/// 5.0 and every UE4 — unambiguously does not, so a profile declaring
+/// a newer engine must not disturb those. Shared by the reader and the
+/// test builder, so a fixture cannot encode a shape the reader would
+/// not read back.
+fn serialize_mip_data_verdict(ctx: &AssetContext) -> crate::asset::engine_hint::WireVerdict {
+    use crate::asset::engine_hint::WireVerdict;
+    if ctx
+        .version
+        .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
+    {
+        WireVerdict::Asserts
+    } else if ctx.version.ue5_at_least(VER_UE5_DATA_RESOURCES) {
+        WireVerdict::Ambiguous
+    } else {
+        WireVerdict::Denies
+    }
+}
+
 fn read_segment2_entry(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,
@@ -337,8 +364,7 @@ fn read_segment2_entry(
     // DeserializeCookedPlatformData for them).
     let serialize_mip_data = if kind == TextureKind::TwoD
         && crate::asset::engine_hint::resolve_engine_gate(
-            ctx.version
-                .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET),
+            serialize_mip_data_verdict(ctx),
             ctx.engine_version_hint,
             5,
             3,
@@ -648,8 +674,8 @@ fn read_mip_count(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<u3
 /// **Version gate (object-version proxy).** CUE4Parse gates this on
 /// `Ar.Game` (the engine version): `>= GAME_UE5_2` reads a
 /// `bUsingDerivedData` flag, while `>= GAME_UE5_0 && IsFilterEditorOnly`
-/// applies the 16-byte skip. paksmith has no engine-version field in the
-/// reader, so it gates on the object version `file_version_ue5`, which is
+/// applies the 16-byte skip. This gate does NOT consult the #656 profile
+/// hint — it gates on the object version `file_version_ue5`, which is
 /// an exact proxy **for stock engine versions**: CUE4Parse's verbatim
 /// `EGame`→`FPackageFileVersion` arms map `< GAME_UE5_2 => (522, 1008)`
 /// and `< GAME_UE5_4 => (522, 1009)` — i.e. `GAME_UE5_0`/`5.1 → 1008` and
@@ -860,8 +886,7 @@ mod tests {
         // byte layout to `write_entry` so the entry format lives in one
         // place; appends the platform-data key.
         let serialize = crate::asset::engine_hint::resolve_engine_gate(
-            ctx.version
-                .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET),
+            serialize_mip_data_verdict(ctx),
             ctx.engine_version_hint,
             5,
             3,
@@ -2254,6 +2279,35 @@ mod tests {
             err_unhinted.to_string(),
             "a 5.2 hint and no hint must be indistinguishable"
         );
+    }
+
+    /// A 5.3 profile must NOT disturb packages whose wire version
+    /// unambiguously says there is no flag — UE4, 5.0 and 5.1 (object
+    /// version < 1009). Only 1009 is ambiguous; firing the hint below
+    /// it consumes 4 bytes that are not on the wire and desyncs every
+    /// later field, silently degrading the export to `Generic`.
+    #[test]
+    fn engine_hint_does_not_fire_below_the_ambiguous_version() {
+        // A profile can legitimately be selected for its AES key while
+        // the archive holds older cooked content.
+        for (ue4, ue5) in [(522, None), (522, Some(1004)), (522, Some(1008))] {
+            let hinted = make_ctx_with_version_and_engine(ue4, ue5, "5.3");
+            let plainctx = make_ctx_with_version(ue4, ue5);
+            let mut bytes = Vec::new();
+            none(&mut bytes);
+            // No bSerializeMipData: correct for every version here.
+            write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, None);
+            write_pd_key(&mut bytes, &plainctx);
+            if ue5.is_some() {
+                bytes.push(0); // UE5 prefix flag
+                bytes.extend_from_slice(&[0xFFu8; 15]);
+            }
+            plain(&mut bytes, &plainctx, 64, 64, "PF_DXT5", &one_mip());
+            let (data, _) = read_from(&bytes, &hinted, "tex.uasset").unwrap_or_else(|e| {
+                panic!("ue5={ue5:?} must parse unchanged under a 5.3 hint: {e}")
+            });
+            assert_eq!(data.mips[0].size_x, 64, "ue5={ue5:?}");
+        }
     }
 
     /// A hint can only ADD a gate the wire missed, never remove one the

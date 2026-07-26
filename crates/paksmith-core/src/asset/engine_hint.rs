@@ -20,14 +20,16 @@
 //! package summary; this type is the 2-3 component human form users
 //! store in profiles.
 
-use serde::{Deserialize, Serialize};
-
 /// A parsed `major.minor[.patch]` engine version from a profile.
 ///
 /// Ordered comparisons use [`UeVersion::at_least`]; `patch` is carried
 /// for display fidelity but deliberately ignored by gates (no known
 /// wire difference is patch-scoped).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Note the derived equality is EXACT, so `"5.3"` and `"5.3.0"` are
+/// different values even though every gate treats them identically —
+/// compare through [`UeVersion::at_least`], not `==`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UeVersion {
     /// Engine major version (4 or 5 for every supported asset).
     pub major: u32,
@@ -44,13 +46,13 @@ impl UeVersion {
     /// anything else — the caller warns and proceeds unhinted.
     pub fn parse_lenient(s: &str) -> Option<Self> {
         let s = s.trim();
-        let s = s
-            .strip_prefix("UE")
-            .or_else(|| s.strip_prefix("ue"))
-            .or_else(|| s.strip_prefix("Ue"))
-            .or_else(|| s.strip_prefix("uE"))
-            .unwrap_or(s)
-            .trim_start();
+        // One case-insensitive two-char prefix. `get` returns None on
+        // a char boundary, matching the no-prefix path.
+        let s = match s.get(..2) {
+            Some(p) if p.eq_ignore_ascii_case("UE") => &s[2..],
+            _ => s,
+        }
+        .trim_start();
         let mut parts = s.split('.');
         let major: u32 = parts.next()?.parse().ok()?;
         let minor: u32 = parts.next()?.parse().ok()?;
@@ -84,24 +86,70 @@ impl std::fmt::Display for UeVersion {
     }
 }
 
-/// Resolve an ENGINE-version gate that the package's own object
-/// versions only approximate.
+/// What a package's own object versions say about an engine-version
+/// gate — a THREE-state answer, because "the proxy is false" and "the
+/// wire cannot tell" are different facts with different consequences.
 ///
-/// `wire` is the established object-version proxy; `hint` is the
-/// profile's declaration. The result is `wire || hint >= major.minor`
-/// — deliberately monotone: a hint can only ADD a gate the wire
-/// missed, never remove one the wire asserts.
+/// Collapsing them into one boolean is the bug this enum exists to
+/// prevent: a profile declaring 5.3 must refine the genuinely
+/// ambiguous case, and must NOT disturb a package whose wire version
+/// says plainly that the field is absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WireVerdict {
+    /// The object versions unambiguously place the package at or above
+    /// the gate: the field IS on the wire. A hint cannot override this
+    /// — the bytes outrank a fallible human annotation.
+    Asserts,
+    /// The object versions unambiguously place the package below the
+    /// gate: the field is NOT on the wire. A hint cannot override this
+    /// either, so declaring a newer engine can never desync an older
+    /// package (e.g. reusing a UE5.3 profile for its AES key over UE4
+    /// content).
+    Denies,
+    /// The object versions cannot distinguish — two engine versions
+    /// serialize the same value and only one writes the field. This is
+    /// the ONLY state a hint decides.
+    Ambiguous,
+}
+
+/// Resolve an ENGINE-version gate against the wire's verdict and the
+/// profile's declaration.
 ///
-/// That asymmetry is the safety property. The bytes are ground truth
-/// for what they contain; a profile is a fallible human annotation, so
-/// a profile contradicting an unambiguous wire signal loses. Where the
-/// wire is genuinely ambiguous (the whole point of a hint) the proxy
-/// reads `false` and the hint decides. With no hint the expression
-/// collapses to `wire`, so every unhinted parse is byte-for-byte what
-/// it was before hints existed.
+/// [`WireVerdict::Ambiguous`] is the only state the hint decides; with
+/// no hint it resolves `false`, which is paksmith's established
+/// default, so every unhinted parse is byte-for-byte what it was
+/// before hints existed.
+///
+/// # Scope: this resolves FALSE-NEGATIVE residuals only
+///
+/// It answers "the wire cannot tell, does this engine write the
+/// field?". Several catalogued residuals are the opposite shape — the
+/// object-version proxy OVER-fires (e.g. UE 4.19 sharing object
+/// version 516 with 4.20, or 517 standing in for the 4.23
+/// VirtualTextures boundary), so resolving them means SUPPRESSING a
+/// gate the wire asserts. That inverts the safety argument above and
+/// needs its own resolver with its own justification; do not reach for
+/// this one.
+///
+/// # Scope: version-only, no per-game overrides
+///
+/// CUE4Parse gates can name specific titles (`bSerializeMipData` is
+/// `Ar.Game >= GAME_UE5_3 || Ar.Game == GAME_TheFirstDescendant`). A
+/// declared `major.minor` cannot express that clause, so a title that
+/// opts in below its nominal engine version still needs a per-game
+/// override this type does not model.
 #[must_use]
-pub fn resolve_engine_gate(wire: bool, hint: Option<UeVersion>, major: u32, minor: u32) -> bool {
-    wire || hint.is_some_and(|h| h.at_least(major, minor))
+pub fn resolve_engine_gate(
+    wire: WireVerdict,
+    hint: Option<UeVersion>,
+    major: u32,
+    minor: u32,
+) -> bool {
+    match wire {
+        WireVerdict::Asserts => true,
+        WireVerdict::Denies => false,
+        WireVerdict::Ambiguous => hint.is_some_and(|h| h.at_least(major, minor)),
+    }
 }
 
 #[cfg(test)]
@@ -139,14 +187,19 @@ mod tests {
                 patch: Some(2)
             })
         );
-        assert_eq!(
-            UeVersion::parse_lenient("ue4.27"),
-            Some(UeVersion {
-                major: 4,
-                minor: 27,
-                patch: None
-            })
-        );
+        // All four case spellings of the prefix, so a dropped arm is
+        // observable (each `strip_prefix` is otherwise unpinned).
+        for spelling in ["UE4.27", "ue4.27", "Ue4.27", "uE4.27"] {
+            assert_eq!(
+                UeVersion::parse_lenient(spelling),
+                Some(UeVersion {
+                    major: 4,
+                    minor: 27,
+                    patch: None
+                }),
+                "prefix spelling {spelling:?}"
+            );
+        }
     }
 
     #[test]
@@ -171,17 +224,22 @@ mod tests {
     }
 
     #[test]
-    fn engine_gate_is_monotone_over_the_wire_proxy() {
+    fn only_the_ambiguous_verdict_consults_the_hint() {
         let v52 = UeVersion::parse_lenient("5.2");
         let v53 = UeVersion::parse_lenient("5.3");
-        // No hint: collapses to the wire, both polarities.
-        assert!(resolve_engine_gate(true, None, 5, 3));
-        assert!(!resolve_engine_gate(false, None, 5, 3));
-        // Hint ADDS a gate the ambiguous wire missed.
-        assert!(resolve_engine_gate(false, v53, 5, 3));
-        assert!(!resolve_engine_gate(false, v52, 5, 3));
-        // Hint NEVER removes one the wire asserts (contradiction loses).
-        assert!(resolve_engine_gate(true, v52, 5, 3));
+        // Asserts: the wire wins, whatever the profile claims.
+        for hint in [None, v52, v53] {
+            assert!(resolve_engine_gate(WireVerdict::Asserts, hint, 5, 3));
+        }
+        // Denies: the wire wins here too — a newer profile must NOT
+        // make an older package read a field it never wrote.
+        for hint in [None, v52, v53] {
+            assert!(!resolve_engine_gate(WireVerdict::Denies, hint, 5, 3));
+        }
+        // Ambiguous: the hint decides, defaulting false without one.
+        assert!(!resolve_engine_gate(WireVerdict::Ambiguous, None, 5, 3));
+        assert!(!resolve_engine_gate(WireVerdict::Ambiguous, v52, 5, 3));
+        assert!(resolve_engine_gate(WireVerdict::Ambiguous, v53, 5, 3));
     }
 
     #[test]

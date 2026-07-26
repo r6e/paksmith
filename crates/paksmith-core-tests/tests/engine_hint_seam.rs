@@ -48,8 +48,8 @@ fn bare_entry_point_carries_no_hint() {
         None,
         "an unhinted read must stay unhinted"
     );
-    // …and is byte-for-byte the same parse as an explicitly empty
-    // options set.
+    // …and parses the same export set as an explicitly empty options
+    // set (the bare path and `ReadOptions::new()` are one path).
     let via_opts = parse_with(&ReadOptions::new());
     assert_eq!(
         parsed.exports.exports.len(),
@@ -93,6 +93,50 @@ fn container_entry_point_carries_the_hint() {
     )
     .expect("fixture asset parses");
     assert_eq!(pkg.context().engine_version_hint, hint);
+}
+
+/// Issue #656 acceptance, end to end through the PUBLIC API: one
+/// package at the ambiguous object version `1009`, two reads that
+/// differ only by the declared engine version.
+///
+/// The bytes are a genuine UE 5.3 texture (`bSerializeMipData`
+/// present). A 5.3 profile consumes the flag and the typed texture
+/// export decodes; a 5.2 profile — and an unhinted read — keep
+/// paksmith's established 5.2 default, desync by that flag's four
+/// bytes, and the export degrades instead of decoding. Same bytes,
+/// different parse, sole variable the profile's declaration.
+#[test]
+fn same_bytes_parse_differently_under_5_2_and_5_3_profiles() {
+    use paksmith_core::asset::Asset;
+    use paksmith_core::testing::uasset::build_minimal_ue5_1009_texture2d_with_mip_flag;
+
+    let pkg = build_minimal_ue5_1009_texture2d_with_mip_flag();
+    let typed_texture = |hint: Option<UeVersion>| -> bool {
+        let parsed = Package::read_from_with(
+            &pkg.bytes,
+            None,
+            &ReadOptions::new().with_engine_version_hint(hint),
+            "Game/Tex.uasset",
+        )
+        .expect("the package header parses either way");
+        parsed
+            .payloads
+            .iter()
+            .any(|a| matches!(a, Asset::Texture2D(_)))
+    };
+
+    assert!(
+        typed_texture(UeVersion::parse_lenient("5.3")),
+        "a 5.3 profile must decode the texture at the ambiguous 1009"
+    );
+    assert!(
+        !typed_texture(UeVersion::parse_lenient("5.2")),
+        "a 5.2 profile must NOT decode these 5.3-shaped bytes"
+    );
+    assert!(
+        !typed_texture(None),
+        "no hint keeps the established 5.2 default"
+    );
 }
 
 /// A hint never rescues a genuinely broken package: it refines version

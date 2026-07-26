@@ -690,6 +690,114 @@ fn build_minimal_with_texture2d_body(texture_body: Vec<u8>) -> MinimalPackage {
     build_minimal_with_texture_class("Texture2D", texture_body)
 }
 
+/// A UE5 package at the AMBIGUOUS object version `1009` holding one
+/// `Texture2D` export whose cooked entry is written in the UE 5.3
+/// shape — i.e. `bSerializeMipData` IS on the wire (#656).
+///
+/// `1009` is the one value where the package bytes cannot say whether
+/// they came from 5.2 or 5.3, so the same bytes must parse differently
+/// depending on the caller's declared engine version. Exists so that
+/// divergence is provable through the PUBLIC entry points, not only in
+/// the reader's own unit tests.
+#[must_use]
+pub fn build_minimal_ue5_1009_texture2d_with_mip_flag() -> MinimalPackage {
+    let mut body = Vec::new();
+    // Segment 1: tagged properties — `None` terminator + object-GUID tail.
+    body.extend_from_slice(&0i32.to_le_bytes());
+    body.extend_from_slice(&0i32.to_le_bytes());
+    body.extend_from_slice(&0i32.to_le_bytes());
+    // Segment-2 entry: UTexture + UTexture2D strip flags, owner bCooked,
+    // then the UE 5.3-only bSerializeMipData.
+    body.extend_from_slice(&[1u8, 0u8, 0u8, 0u8]);
+    body.extend_from_slice(&1u32.to_le_bytes()); // owner bCooked
+    body.extend_from_slice(&1u32.to_le_bytes()); // bSerializeMipData (5.3)
+    // DeserializeCookedPlatformData key: non-None pixelFormatName + i64
+    // skipOffset (UE 4.20+ width).
+    body.extend_from_slice(&1i32.to_le_bytes());
+    body.extend_from_slice(&0i32.to_le_bytes());
+    body.extend_from_slice(&0i64.to_le_bytes());
+    // UE5 (>= 5.2) prefix: bUsingDerivedData flag + the 16-byte skip.
+    body.push(0);
+    body.extend_from_slice(&[0xFFu8; 15]);
+    // FTexturePlatformData header.
+    body.extend_from_slice(&64i32.to_le_bytes()); // SizeX
+    body.extend_from_slice(&64i32.to_le_bytes()); // SizeY
+    body.extend_from_slice(&1u32.to_le_bytes()); // PackedData
+    write_fstring(&mut body, "PF_DXT5");
+    body.extend_from_slice(&0i32.to_le_bytes()); // FirstMipToSerialize
+    body.extend_from_slice(&1i32.to_le_bytes()); // mip count
+    // One mip. bSerializeMipData = true ⇒ the per-mip bulk data IS
+    // present. NOTE no per-mip `bCooked`: that field is UE4-only
+    // (`file_version_ue5.is_none()`), and this fixture is UE5.
+    body.extend_from_slice(&0x0001_0001u32.to_le_bytes()); // bulk flags
+    body.extend_from_slice(&4096i32.to_le_bytes()); // ElementCount
+    body.extend_from_slice(&4096u32.to_le_bytes()); // SizeOnDisk
+    body.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile
+    body.extend_from_slice(&64i32.to_le_bytes()); // mip SizeX
+    body.extend_from_slice(&64i32.to_le_bytes()); // mip SizeY
+    body.extend_from_slice(&1i32.to_le_bytes()); // mip SizeZ (UE 4.20+/UE5)
+    body.extend_from_slice(&0u32.to_le_bytes()); // bIsVirtual = false
+
+    let engine = EngineVersion {
+        major: 5,
+        minor: 3,
+        patch: 0,
+        changelist: 0,
+        branch: "++UE5+Release-5.3".to_string(),
+    };
+    let (names, imports, _, payloads) = texture_class_tables("Texture2D", body);
+    // UE5 export records carry fields UE4's do not (no per-export
+    // package_guid from 1005; is_inherited_instance from 1006;
+    // generate_public_hash from 1003), so the UE4-shaped
+    // `fixture_export` cannot be reused here — build them UE5-shaped.
+    let ue5_export =
+        |class_index: PackageIndex, object_name: u32, serial_size: usize| ObjectExport {
+            class_index,
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name,
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size: serial_size as i64,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: None,
+            is_inherited_instance: Some(false),
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: Some(false),
+            // Below 1010 these stay absent.
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        };
+    let exports = ExportTable {
+        exports: vec![
+            ue5_export(PackageIndex::Import(0), 2, payloads[0].len()),
+            ue5_export(PackageIndex::Import(1), 3, payloads[1].len()),
+        ],
+    };
+    build_minimal(MinimalPackageSpec {
+        legacy_file_version: -8,
+        file_version_ue5: Some(1009),
+        names,
+        imports,
+        exports,
+        payloads,
+        saved_by_engine_version: engine.clone(),
+        compatible_with_engine_version: engine,
+        ..MinimalPackageSpec::default()
+    })
+}
+
 /// Like [`build_minimal_with_texture2d`] but with the texture export's
 /// class name parameterized — `"TextureCube"` / `"Texture2DArray"` /
 /// `"VolumeTexture"` route the body through the #648 multidim dispatch
@@ -698,6 +806,24 @@ fn build_minimal_with_texture2d_body(texture_body: Vec<u8>) -> MinimalPackage {
 /// texture with `texture_body` as its payload.
 #[must_use]
 pub fn build_minimal_with_texture_class(class_name: &str, texture_body: Vec<u8>) -> MinimalPackage {
+    let (names, imports, exports, payloads) = texture_class_tables(class_name, texture_body);
+    build_minimal(MinimalPackageSpec {
+        names,
+        imports,
+        exports,
+        payloads,
+        ..MinimalPackageSpec::default()
+    })
+}
+
+/// The name/import/export tables (and payloads) for a two-export
+/// texture fixture: export[0] is a generic `None`-terminator body,
+/// export[1] carries `texture_body` under `class_name`. Shared so the
+/// UE4 and UE5 texture builders cannot describe different shapes.
+fn texture_class_tables(
+    class_name: &str,
+    texture_body: Vec<u8>,
+) -> (NameTable, ImportTable, ExportTable, Vec<Vec<u8>>) {
     let names = NameTable {
         names: vec![
             FName::new("/Script/CoreUObject"),
@@ -740,13 +866,7 @@ pub fn build_minimal_with_texture_class(class_name: &str, texture_body: Vec<u8>)
             fixture_export(PackageIndex::Import(1), 3, texture_body.len()),
         ],
     };
-    build_minimal(MinimalPackageSpec {
-        names,
-        imports,
-        exports,
-        payloads: vec![generic_body, texture_body],
-        ..MinimalPackageSpec::default()
-    })
+    (names, imports, exports, vec![generic_body, texture_body])
 }
 
 /// Returns `(uasset_header_bytes, uexp_payload_bytes)` — the split form of the

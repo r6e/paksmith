@@ -210,19 +210,18 @@ pub async fn resolve_pak_context(
     //    local first (already handled above, so local always misses here), then
     //    the cache.
     match resolve_profile_layered(&store, cache.as_ref(), id) {
-        Some(ResolvedProfile::Local(p)) => Ok(PakOpenContext {
-            key: resolve_within(&p.keys, id, pak_guid)?,
-            mappings: p.mappings.clone(),
-            engine_version: parse_engine_version(p.engine_version.as_deref(), id),
-        }),
-        // Registry profiles cannot carry mappings (`RegistryProfile` has
-        // no such field — see `MappingsSource`'s registry note) but DO
-        // carry `engine_version` (#656).
-        Some(ResolvedProfile::Registry(p)) => Ok(PakOpenContext {
-            key: resolve_within(&p.keys, id, pak_guid)?,
-            mappings: None,
-            engine_version: parse_engine_version(p.engine_version.as_deref(), id),
-        }),
+        Some(p) => {
+            let key = match &p {
+                ResolvedProfile::Local(p) => resolve_within(&p.keys, id, pak_guid)?,
+                ResolvedProfile::Registry(p) => resolve_within(&p.keys, id, pak_guid)?,
+            };
+            let inputs = ProfileParseInputs::from_resolved(&p, id);
+            Ok(PakOpenContext {
+                key,
+                mappings: inputs.mappings,
+                engine_version: inputs.engine_version,
+            })
+        }
         None => Err(PaksmithError::Profile {
             fault: ProfileFault::ProfileNotFound { id: id.to_string() },
         }),
@@ -408,7 +407,7 @@ fn explicit_key_context(
     })
 }
 
-/// HARD `--game` mappings lookup for the `--aes-key` path (#651,
+/// HARD `--game` parse-inputs lookup for the `--aes-key` path (#651,
 /// store-parameterized so it is unit-testable): a local profile yields
 /// its mappings; a CACHED registry id is a valid selection that yields
 /// `None` (registry profiles cannot carry mappings — see
@@ -420,32 +419,45 @@ fn named_profile_inputs_in(
     cache: Option<&RegistryCache>,
     id: &str,
 ) -> crate::Result<ProfileParseInputs> {
-    match resolve_profile_layered(store, cache, id) {
-        Some(ResolvedProfile::Local(p)) => Ok(ProfileParseInputs {
-            mappings: p.mappings.clone(),
-            engine_version: parse_engine_version(p.engine_version.as_deref(), id),
-        }),
-        // Registry profiles carry no mappings (see `MappingsSource`)
-        // but DO carry `engine_version` — the one parse input that
-        // crosses the local/registry split (#656).
-        Some(ResolvedProfile::Registry(p)) => Ok(ProfileParseInputs {
-            mappings: None,
-            engine_version: parse_engine_version(p.engine_version.as_deref(), id),
-        }),
-        None => Err(PaksmithError::Profile {
+    resolve_profile_layered(store, cache, id)
+        .map(|p| ProfileParseInputs::from_resolved(&p, id))
+        .ok_or_else(|| PaksmithError::Profile {
             fault: ProfileFault::ProfileNotFound { id: id.to_string() },
-        }),
-    }
+        })
 }
 
-/// The parse-affecting state a selected profile contributes, resolved
-/// once so the `--aes-key` and keyed paths agree (#651 mappings, #656
-/// engine version). Additive: the next profile-borne parse input is a
-/// field here, not a third parallel lookup.
+/// The parse-affecting state a selected profile contributes (#651
+/// mappings, #656 engine version).
+///
+/// [`ProfileParseInputs::from_resolved`] is the SINGLE place that maps
+/// a resolved profile to these, so the `--aes-key` and keyed paths
+/// cannot drift and the next profile-borne parse input is a field here
+/// rather than another arm to remember in two files.
 #[derive(Clone, Debug, Default)]
 struct ProfileParseInputs {
     mappings: Option<MappingsSource>,
     engine_version: Option<crate::asset::UeVersion>,
+}
+
+impl ProfileParseInputs {
+    /// Map a resolved profile to its parse inputs.
+    ///
+    /// Registry profiles carry no mappings (`RegistryProfile` has no
+    /// such field — see [`MappingsSource`]'s registry note) but DO
+    /// carry `engine_version`: it is the one parse input that survives
+    /// the local/registry split (#656).
+    fn from_resolved(profile: &ResolvedProfile<'_>, id: &str) -> Self {
+        match profile {
+            ResolvedProfile::Local(p) => Self {
+                mappings: p.mappings.clone(),
+                engine_version: parse_engine_version(p.engine_version.as_deref(), id),
+            },
+            ResolvedProfile::Registry(p) => Self {
+                mappings: None,
+                engine_version: parse_engine_version(p.engine_version.as_deref(), id),
+            },
+        }
+    }
 }
 
 /// Parse a profile's stored `engine_version` leniently (#656).
@@ -468,7 +480,7 @@ fn parse_engine_version(raw: Option<&str>, id: &str) -> Option<crate::asset::UeV
     parsed
 }
 
-/// Best-effort `--detect` mappings lookup for the `--aes-key` path
+/// Best-effort `--detect` parse-inputs lookup for the `--aes-key` path
 /// (store-parameterized, unit-testable): the unique `detect_in` match's
 /// mappings; anything else (zero or ambiguous matches) degrades to
 /// `None` with a warning.
@@ -478,7 +490,12 @@ fn detect_profile_inputs_in(
     dir: &Path,
 ) -> ProfileParseInputs {
     match unique_detect_id(detect_in(store, cache, dir), dir) {
-        Ok(id) => profile_inputs_in(store, &id),
+        // LAYERED, not local-only: `detect_in` matches cached registry
+        // profiles too, and a registry profile carries `engine_version`
+        // (#656). Looking only at the local store would silently drop
+        // the hint for exactly the registry-shipped detect rules that
+        // make auto-detection work out of the box.
+        Ok(id) => profile_inputs_in(store, cache, &id),
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -490,15 +507,15 @@ fn detect_profile_inputs_in(
     }
 }
 
-/// The LOCAL store's parse inputs for `id`, if the profile exists.
-fn profile_inputs_in(store: &ProfileStore, id: &str) -> ProfileParseInputs {
-    store
-        .profiles
-        .get(id)
-        .map(|p| ProfileParseInputs {
-            mappings: p.mappings.clone(),
-            engine_version: parse_engine_version(p.engine_version.as_deref(), id),
-        })
+/// The parse inputs for `id` across the local store and the registry
+/// cache (local wins), or the empty set if neither has it.
+fn profile_inputs_in(
+    store: &ProfileStore,
+    cache: Option<&RegistryCache>,
+    id: &str,
+) -> ProfileParseInputs {
+    resolve_profile_layered(store, cache, id)
+        .map(|p| ProfileParseInputs::from_resolved(&p, id))
         .unwrap_or_default()
 }
 
@@ -748,6 +765,40 @@ mod tests {
     }
 
     #[test]
+    fn detect_matching_a_registry_profile_still_yields_its_engine_version() {
+        // The registry ships detect rules so auto-detection works out
+        // of the box, and registry profiles carry engine_version — so
+        // a registry-sourced --detect match must NOT lose the hint.
+        // (Local-store-only lookup was invisible pre-#656 because
+        // registry profiles never carried mappings.)
+        let game = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(game.path().join("Game/Paks")).unwrap();
+        let store = ProfileStore::default(); // registry-only id
+        let cache = RegistryCache {
+            fetched_at_unix: 0,
+            doc: crate::profile::registry::RegistryDoc {
+                profiles: vec![crate::profile::registry::RegistryProfile {
+                    id: "reg".into(),
+                    name: "Registry".into(),
+                    engine_version: Some("5.3".into()),
+                    keys: BTreeMap::new(),
+                    detect: Some(DetectRules {
+                        require_paths: vec!["Game/Paks".into()],
+                        contains: vec![],
+                    }),
+                }],
+            },
+        };
+        let inputs = detect_profile_inputs_in(&store, Some(&cache), game.path());
+        assert_eq!(
+            inputs.engine_version,
+            crate::asset::UeVersion::parse_lenient("5.3"),
+            "a registry-sourced detect match must carry its engine version"
+        );
+        assert_eq!(inputs.mappings, None, "registry still carries no mappings");
+    }
+
+    #[test]
     fn engine_version_crosses_the_registry_split_unlike_mappings() {
         // The #656 asymmetry: RegistryProfile has always carried
         // engine_version, so a registry-sourced selection supplies a
@@ -879,13 +930,13 @@ mod tests {
             },
         );
         assert_eq!(
-            profile_inputs_in(&store, "hero").mappings,
+            profile_inputs_in(&store, None, "hero").mappings,
             Some(crate::profile::MappingsSource::Path(
                 "/maps/hero.usmap".into()
             ))
         );
         assert_eq!(
-            profile_inputs_in(&store, "absent").mappings,
+            profile_inputs_in(&store, None, "absent").mappings,
             None,
             "unknown id is None, not an error"
         );
@@ -905,7 +956,7 @@ mod tests {
                 pak_paths: Vec::new(),
             },
         );
-        assert_eq!(profile_inputs_in(&store, "plain").mappings, None);
+        assert_eq!(profile_inputs_in(&store, None, "plain").mappings, None);
     }
 
     /// Store with one `hero` profile carrying pak_paths patterns —

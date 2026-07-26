@@ -109,15 +109,16 @@ bytes below it.
 **UE 5.2 vs 5.3 version-mapping note.** CUE4Parse's `EGame`→`FPackageFileVersion`
 table maps *both* `GAME_UE5_2` and `GAME_UE5_3` to UE5 object version
 `1009` (`< GAME_UE5_4 => (522, 1009)`); object versions `1010`
-(`SCRIPT_SERIALIZATION_OFFSET`) and `1011` are 5.4-preview. A parser
-without an engine-version signal therefore cannot
-distinguish a 5.2 texture (no `bSerializeMipData`) from a 5.3 texture
+(`SCRIPT_SERIALIZATION_OFFSET`) and `1011` are 5.4-preview. A parser without an engine-version signal therefore cannot distinguish a
+5.2 texture (no `bSerializeMipData`) from a 5.3 texture
 (`bSerializeMipData` present) at object version `1009` — the field's
 4-byte *presence* is what shifts the layout. `Ar.Game >= GAME_UE5_3` is an
-engine-version gate, not an object-version one. paksmith takes that
-signal from a game profile's declared engine version when one is selected
-(`--game` / `--detect`); with no profile it keeps the 5.2 reading, which
-is correct for 5.2 / UE4 / 5.0 / 5.1.
+engine-version gate, not an object-version one. paksmith takes that signal
+from a game profile's declared engine version when one is selected
+(`--game` / `--detect`); with no profile it keeps the 5.2 reading. Note
+`1009` is the *only* ambiguous value — below it (UE 5.1, 5.0 and every
+UE4) the field is unambiguously absent, so a declared engine version does
+not change those reads.
 
 ### Segment-2 platform-data key: `DeserializeCookedPlatformData` wrapper
 

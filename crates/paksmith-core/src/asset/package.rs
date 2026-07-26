@@ -450,14 +450,19 @@ fn companion_loader<R: crate::container::ContainerReader + ?Sized + 'static>(
 ///
 /// Exists so hints accumulate WITHOUT reshaping the read entry points:
 /// `mappings` arrived in #651 as a new parameter on four public fns,
-/// and seven further engine-version residuals are catalogued in
-/// `asset::version` awaiting the same treatment. Each future one adds
-/// a field here — additive for every caller — instead of another
-/// parameter on every signature.
+/// and further engine-version residuals are catalogued on
+/// `AssetVersion`'s `is_*_or_later` gates. Each future one that a hint
+/// can resolve adds a field here — additive for every caller —
+/// instead of another parameter on every signature. (Most of those
+/// gates OVER-fire rather than under-fire, so they need a different
+/// resolver — see `engine_hint::resolve_engine_gate`'s scope note.)
 ///
 /// `#[non_exhaustive]`: construct with [`ReadOptions::new`] and the
-/// builder setters. The bare `read_from*` entry points remain and pass
-/// mappings only, so all pre-#656 call sites are untouched.
+/// builder setters (a struct literal is blocked outside this crate).
+/// The fields are `pub` and readable — and settable directly on an
+/// owned value — so the builders are a convenience, not a gate. The
+/// bare `read_from*` entry points remain and pass mappings only, so
+/// all pre-#656 call sites are untouched.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct ReadOptions<'a> {
@@ -532,20 +537,15 @@ impl Package {
     ///   extends past `uasset.len()` and no `.uexp` was provided
     /// - [`AssetParseFault::SplitAssetSizeMismatch`] when a `.uexp` is
     ///   needed but `uasset.len() != total_header_size`
+    ///
+    /// See [`Self::read_from_with`] to also supply a profile's
+    /// engine-version hint (#656).
     pub fn read_from(
         uasset: &[u8],
         uexp: Option<&[u8]>,
         mappings: Option<&Arc<Usmap>>,
         asset_path: &str,
     ) -> crate::Result<Self> {
-        // Non-pak callers (unit tests, raw-byte ingest) have no
-        // companion source for streaming / optional-streaming tiers.
-        // If any 3e/3g/3h typed reader pushes a streaming-tier
-        // record into `Package::bulk_data` and a downstream consumer
-        // calls `resolve_bulk_for_export`, the stub loaders fire
-        // `MissingCompanionFile`. The container entry point
-        // (`read_from_reader`) overrides both with real
-        // `Arc<R>`-backed loaders.
         Self::read_from_with(
             uasset,
             uexp,
@@ -953,6 +953,9 @@ impl Package {
     /// `.ubulk` / `.uptnl` at pak-open time is fine — the lazy
     /// loaders only fire when bulk-data resolution actually needs
     /// them.
+    ///
+    /// See [`Self::read_from_pak_with`] to also supply a profile's
+    /// engine-version hint (#656).
     pub fn read_from_pak<P: AsRef<std::path::Path>>(
         pak_path: P,
         virtual_path: &str,
@@ -962,8 +965,11 @@ impl Package {
         // closures can capture cloned refcounted handles. `PakReader`
         // is `Send + Sync` (Phase 1 design); `Arc<PakReader>` auto-
         // derefs to `&PakReader` for the synchronous reads below.
-        let reader = Arc::new(crate::container::pak::PakReader::open(pak_path)?);
-        Self::read_from_reader(&reader, virtual_path, mappings)
+        Self::read_from_pak_with(
+            pak_path,
+            virtual_path,
+            &ReadOptions::new().with_mappings(mappings),
+        )
     }
 
     /// [`Self::read_from_pak`] with the full [`ReadOptions`] set (#656).
@@ -975,6 +981,9 @@ impl Package {
         virtual_path: &str,
         opts: &ReadOptions<'_>,
     ) -> crate::Result<Self> {
+        // Phase 3b: wrap `PakReader` in `Arc` so the companion-loader
+        // closures can capture cloned refcounted handles. `PakReader`
+        // is `Send + Sync` (Phase 1 design).
         let reader = Arc::new(crate::container::pak::PakReader::open(pak_path)?);
         Self::read_from_reader_with(&reader, virtual_path, opts)
     }
@@ -1003,6 +1012,9 @@ impl Package {
     /// [`Self::read_from_pak`]: a missing `.uexp` is silently treated as
     /// a monolithic asset; missing `.ubulk` / `.uptnl` surface only if
     /// bulk-data resolution actually needs them.
+    ///
+    /// See [`Self::read_from_reader_with`] to also supply a profile's
+    /// engine-version hint (#656).
     pub fn read_from_reader<R: crate::container::ContainerReader + ?Sized + 'static>(
         reader: &Arc<R>,
         virtual_path: &str,
@@ -1496,6 +1508,30 @@ fn read_payloads(
         payloads.push(super::Asset::Generic(bag));
     }
     Ok((payloads, bulk_records))
+}
+
+#[cfg(test)]
+mod read_options_tests {
+    use super::ReadOptions;
+
+    /// The builders are the documented construction path but live
+    /// outside the `__test_utils`-gated module below, which the
+    /// package-scoped mutants baseline compiles out — without this
+    /// their bodies are unpinned.
+    #[test]
+    fn builders_set_each_field_and_compose() {
+        let hint = crate::asset::UeVersion::parse_lenient("5.3");
+        assert!(hint.is_some());
+        assert!(ReadOptions::new().engine_version_hint.is_none());
+        assert!(ReadOptions::new().mappings.is_none());
+
+        let opts = ReadOptions::new().with_engine_version_hint(hint);
+        assert_eq!(opts.engine_version_hint, hint);
+        // Setting mappings afterwards must preserve the hint.
+        let opts = opts.with_mappings(None);
+        assert_eq!(opts.engine_version_hint, hint);
+        assert!(opts.mappings.is_none());
+    }
 }
 
 #[cfg(all(test, feature = "__test_utils"))]
