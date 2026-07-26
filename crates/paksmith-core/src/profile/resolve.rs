@@ -696,6 +696,7 @@ mod tests {
                 detect: Some(DetectRules {
                     require_paths: vec!["Game/Paks".into()],
                     contains: vec![],
+                    bytes: Vec::new(),
                 }),
                 mappings,
                 pak_paths: Vec::new(),
@@ -806,6 +807,7 @@ mod tests {
                     detect: Some(DetectRules {
                         require_paths: vec!["Game/Paks".into()],
                         contains: vec![],
+                        bytes: Vec::new(),
                     }),
                 }],
             },
@@ -1137,6 +1139,7 @@ mod tests {
                 detect: Some(DetectRules {
                     require_paths: vec!["Game/Paks".into()],
                     contains: vec![],
+                    bytes: Vec::new(),
                 }),
                 mappings: None,
                 pak_paths: Vec::new(),
@@ -1155,6 +1158,7 @@ mod tests {
         let rules = DetectRules {
             require_paths: vec!["Game/Paks".into()],
             contains: vec![],
+            bytes: Vec::new(),
         };
         let mut store = ProfileStore::default();
         let _ = store.profiles.insert(
@@ -1193,6 +1197,7 @@ mod tests {
         let rules = DetectRules {
             require_paths: vec!["Game/Paks".into()],
             contains: vec![],
+            bytes: Vec::new(),
         };
         let store = ProfileStore::default(); // empty — no local profiles
         let cache = RegistryCache {

@@ -77,10 +77,18 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
             if d.contains.len() > crate::profile::detection::MAX_CONTAINS {
                 return Err(format!("too many contains rules in `{}`", p.id));
             }
+            if d.bytes.len() > crate::profile::detection::MAX_BYTES_RULES {
+                return Err(format!("too many bytes rules in `{}`", p.id));
+            }
+            // `hex` is capped as a STRING, like every other registry field, so
+            // the decoded signature is at most MAX_STR/2 bytes.
             if d.require_paths.iter().any(|s| s.len() > MAX_STR)
                 || d.contains
                     .iter()
                     .any(|c| c.path.len() > MAX_STR || c.substring.len() > MAX_STR)
+                || d.bytes
+                    .iter()
+                    .any(|b| b.path.len() > MAX_STR || b.hex.len() > MAX_STR)
             {
                 return Err(format!("detect string field exceeds cap in `{}`", p.id));
             }
@@ -611,10 +619,18 @@ mod tests {
         let cont: Vec<String> = (0..crate::profile::detection::MAX_CONTAINS)
             .map(|_| format!(r#"{{"path":"{at_str}","substring":"{at_str}"}}"#))
             .collect();
+        // `hex` is capped as a string, so exactly MAX_STR hex chars is at-cap
+        // (and decodes to MAX_STR/2 bytes).
+        let at_hex = "ab".repeat(MAX_STR / 2);
+        assert_eq!(at_hex.len(), MAX_STR);
+        let byte_rules: Vec<String> = (0..crate::profile::detection::MAX_BYTES_RULES)
+            .map(|_| format!(r#"{{"path":"{at_str}","hex":"{at_hex}"}}"#))
+            .collect();
         let json = format!(
-            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"require_paths":[{}],"contains":[{}]}}}}]"#,
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"require_paths":[{}],"contains":[{}],"bytes":[{}]}}}}]"#,
             req.join(","),
-            cont.join(",")
+            cont.join(","),
+            byte_rules.join(",")
         );
         let doc = parse_registry(json.as_bytes()).unwrap();
         let d = doc.profiles[0].detect.as_ref().unwrap();
@@ -623,6 +639,64 @@ mod tests {
             crate::profile::detection::MAX_REQUIRE_PATHS
         );
         assert_eq!(d.contains.len(), crate::profile::detection::MAX_CONTAINS);
+        assert_eq!(d.bytes.len(), crate::profile::detection::MAX_BYTES_RULES);
+    }
+
+    #[test]
+    fn rejects_too_many_bytes_rules() {
+        let rules: Vec<String> = (0..=crate::profile::detection::MAX_BYTES_RULES)
+            .map(|i| format!(r#"{{"path":"p{i}","hex":"dead"}}"#))
+            .collect();
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"bytes":[{}]}}}}]"#,
+            rules.join(",")
+        );
+        assert!(parse_registry(json.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn rejects_overlong_bytes_path() {
+        let long = "a".repeat(MAX_STR + 1);
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"bytes":[{{"path":"{long}","hex":"dead"}}]}}}}]"#
+        );
+        assert!(parse_registry(json.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn rejects_overlong_bytes_hex() {
+        let long = "ab".repeat(MAX_STR); // 2*MAX_STR chars > MAX_STR
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"bytes":[{{"path":"p","hex":"{long}"}}]}}}}]"#
+        );
+        assert!(parse_registry(json.as_bytes()).is_err());
+    }
+
+    /// A registry document written BEFORE `bytes` existed still parses — the
+    /// field is `#[serde(default)]`. This is the compatibility direction that
+    /// holds; the reverse (an old binary reading a document that USES `bytes`)
+    /// does not, because `DetectRules` is `deny_unknown_fields`.
+    #[test]
+    fn accepts_detect_without_a_bytes_field() {
+        let json = r#"[{"id":"x","name":"y","keys":{},"detect":{"require_paths":["Game/Paks"]}}]"#;
+        let doc = parse_registry(json.as_bytes()).unwrap();
+        let d = doc.profiles[0].detect.as_ref().unwrap();
+        assert!(d.bytes.is_empty(), "absent `bytes` must default to empty");
+    }
+
+    /// The wire shape: `bytes` parses as a list of `{path, hex}` and an unknown
+    /// sibling key is refused, so a typo'd rule fails loudly rather than being
+    /// silently dropped from a signed document.
+    #[test]
+    fn bytes_rule_wire_shape_is_path_and_hex_only() {
+        let ok = r#"[{"id":"x","name":"y","keys":{},"detect":{"bytes":[{"path":"g.exe","hex":"DEADbeef"}]}}]"#;
+        let doc = parse_registry(ok.as_bytes()).unwrap();
+        let b = &doc.profiles[0].detect.as_ref().unwrap().bytes[0];
+        assert_eq!(b.path, "g.exe");
+        assert_eq!(b.hex, "DEADbeef", "hex is carried verbatim, not normalized");
+
+        let unknown = r#"[{"id":"x","name":"y","keys":{},"detect":{"bytes":[{"path":"g.exe","hex":"dead","offset":4}]}}]"#;
+        assert!(parse_registry(unknown.as_bytes()).is_err());
     }
 
     #[test]
