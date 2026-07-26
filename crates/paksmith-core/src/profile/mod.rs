@@ -118,7 +118,12 @@ impl KeyGuid {
 /// follow-up — it needs a registry schema-version story first:
 /// [`registry::RegistryProfile`] is `deny_unknown_fields` AND the
 /// registry document is ed25519-signed, so any new field there
-/// invalidates every already-signed document. Adding a variant HERE
+/// invalidates every already-signed document.
+///
+/// #658 took that hazard once, deliberately, adding
+/// `DetectRules::byte_signatures` while the default endpoint is still a
+/// `.invalid` placeholder (#657) and no signed document from it exists.
+/// That window closes when #657 ships; see [`detection::DetectRules`]. Adding a variant HERE
 /// stays additive for the local store (serde externally-tagged enums
 /// reject unknown variants on OLD binaries, so new variants ship with
 /// a store-format note).

@@ -6,25 +6,49 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Maximum number of `require_paths` / `contains` rules accepted from the
-/// untrusted registry (enforced by `validate_caps` in `registry::validate_caps`).
+/// Maximum number of `require_paths` entries accepted from the untrusted
+/// registry (enforced by `registry::validate_caps`, which caps each rule kind
+/// separately).
 pub(crate) const MAX_REQUIRE_PATHS: usize = 64;
 /// Maximum number of `contains` rules accepted from the untrusted registry.
 pub(crate) const MAX_CONTAINS: usize = 64;
-/// Cap on the bytes read from a `contains` target file before substring search.
+/// Cap on the bytes read from a target file before scanning it. Shared by
+/// `contains` and `byte_signatures` — the name predates the second kind.
 pub(crate) const MAX_CONTAINS_READ: usize = 1024 * 1024;
-/// Maximum number of `bytes` rules accepted from the untrusted registry.
+/// Maximum number of `byte_signatures` rules accepted from the untrusted
+/// registry.
 ///
-/// Matches [`MAX_CONTAINS`] because the two rule kinds cost the same: each
-/// reads up to [`MAX_CONTAINS_READ`] from one file and scans it once. Widening
-/// that window is deliberately NOT part of this rule kind — detection already
-/// amplifies across profiles, and the window is the multiplier (see #658).
-pub(crate) const MAX_BYTES_RULES: usize = 64;
+/// Matches `MAX_CONTAINS`: each kind opens one file, reads up to
+/// `MAX_CONTAINS_READ`, and scans it once, so the WORST-CASE per-profile read
+/// doubles when both are at their caps. The achievable per-DOCUMENT cost is
+/// bounded elsewhere and barely moves — see #658 for the measurements.
+pub(crate) const MAX_BYTE_SIGNATURES: usize = 64;
 
 /// Rules that recognise a game's install directory. All present rules must
 /// pass (logical AND). A profile with no rules is never auto-detected.
+///
+/// # Adding a field here has a deadline
+///
+/// This type is `deny_unknown_fields` AND travels inside the ed25519-signed
+/// registry document, so a document using a NEW field is rejected outright by
+/// any binary built before that field existed — the constraint
+/// [`crate::profile::MappingsSource`] cites as its reason for staying off
+/// `RegistryProfile` entirely. `byte_signatures` (#658) was payable only
+/// because `DEFAULT_REGISTRY_URL` is still a `.invalid` placeholder (#657), so
+/// no signed document from the default registry is in circulation. That is not
+/// true of a private endpoint, which `RegistryConfig` supports.
+///
+/// Once #657 stands up a live registry, any further field — the configurable
+/// read window deferred by #658 is the first in line — needs a schema-version
+/// story rather than a plain addition.
+///
+/// `#[non_exhaustive]` so the NEXT field is source-compatible for downstream
+/// struct literals: adding `byte_signatures` broke 15 in-repo literals, which
+/// is the same trade `asset::mappings` documents. Construct via
+/// [`Default::default`] and assign the `pub` fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct DetectRules {
     /// Relative paths (file OR dir) that must ALL exist under the target dir.
     #[serde(default)]
@@ -33,15 +57,8 @@ pub struct DetectRules {
     #[serde(default)]
     pub contains: Vec<ContainsRule>,
     /// "file contains byte signature" rules; all must pass (#658).
-    ///
-    /// `#[serde(default)]`, so documents written before this field existed
-    /// still parse. Note the reverse is NOT true: [`DetectRules`] is
-    /// `deny_unknown_fields` and the registry document is ed25519-signed, so a
-    /// document USING this field is rejected outright by any binary built
-    /// before it — which is why the field landed while the default endpoint is
-    /// still a placeholder (#657) and no signed document is in circulation.
-    #[serde(default)]
-    pub bytes: Vec<BytesRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub byte_signatures: Vec<ByteSignatureRule>,
 }
 
 /// A single "the file at `path` contains `substring`" rule.
@@ -56,44 +73,40 @@ pub struct ContainsRule {
 
 /// A single "the file at `path` contains this byte signature" rule.
 ///
-/// Exists because [`ContainsRule`]'s `substring` is a Rust `String` and so can
-/// only express valid UTF-8. A binary signature — the heuristic class ROADMAP
-/// §Phase 5 lists alongside subdirectory patterns and `.ini` contents — is
-/// arbitrary bytes, and the ones that identify a build routinely are not
-/// UTF-8.
+/// Exists because [`ContainsRule`]'s `substring` is a Rust `String`, so it can
+/// only express valid UTF-8 — and build-identifying signatures routinely are
+/// not.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BytesRule {
+pub struct ByteSignatureRule {
     /// Relative path to a file under the target dir.
     pub path: String,
-    /// The signature as lowercase-or-uppercase hex, no separators and NO `0x`
-    /// prefix — an even number of hex digits, decoded to the raw bytes searched
-    /// for within the same bounded read window as `contains`
-    /// (`MAX_CONTAINS_READ`, 1 MiB).
+    /// Even-length hex, either case, no separators. Decoded to raw bytes and
+    /// searched within the same bounded window as `contains`.
     ///
-    /// Two deliberate divergences a reader will otherwise trip over:
+    /// Two divergences a reader will otherwise trip over:
     ///
     /// - **No `0x` prefix**, unlike [`crate::KeyGuid::from_hex`] and
-    ///   `AesKey::from_hex`. Those decode fixed-width integers where a prefix
-    ///   is idiomatic; this is a byte string of caller-chosen length, and
-    ///   accepting a prefix would make `"0xAB"` mean one byte while `"0x0AB"`
-    ///   is odd-length garbage. Even-length pure hex is the whole contract.
+    ///   `AesKey::from_hex`, which both accept one — so "fixing the
+    ///   inconsistency" is the expected wrong move. A prefix would make
+    ///   `"0xAB"` one byte while `"0x0AB"` is odd-length garbage.
     /// - **Undecodable or EMPTY never matches**, whereas [`ContainsRule`]'s
-    ///   empty `substring` is vacuously true. A detection rule that matches
-    ///   every directory is a footgun; this form fails closed instead of
-    ///   inheriting it.
+    ///   empty `substring` is vacuously true — it returns before even opening
+    ///   the file, so an empty one matches any directory. Not inherited.
     ///
-    /// Capped by the registry's `MAX_STR` as a STRING, so at most 128
-    /// decoded bytes.
+    /// On the REGISTRY path `validate_caps` bounds this string by `MAX_STR`,
+    /// so at most 128 decoded bytes. The local store is not cap-validated, so
+    /// a hand-edited `profiles.toml` may carry a longer one — harmless, since a
+    /// needle longer than the read window simply never matches.
     pub hex: String,
 }
 
 /// Decode an even-length, unprefixed, case-insensitive hex string to bytes.
 ///
-/// `None` for odd length, any non-hex byte, or the empty string — every one of
-/// which makes the owning rule fail to match rather than error, because a
-/// malformed rule in a signed document must not fail the whole detection pass.
-fn decode_hex(s: &str) -> Option<Vec<u8>> {
+/// `None` for odd length, any non-hex byte, or the empty string. The registry
+/// path turns that into a parse error (`validate_caps`); the local store, which
+/// is never cap-validated, warns and declines the rule.
+pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
     /// One hex digit → its nibble value. `None` for anything else, which is
     /// the ONLY non-hex rejection — an `is_ascii_hexdigit` pre-check ahead of
     /// this would be unreachable, and so an untestable branch.
@@ -144,12 +157,17 @@ fn safe_join(dir: &Path, rel: &str) -> Option<PathBuf> {
 ///
 /// **Symlink note:** `safe_join` rejects rule strings that encode a path escape
 /// (`..`, absolute, or root components), but an existing symlink *inside* `dir`
-/// that points outside is followed by the OS as usual. A `require_paths` or
-/// `contains` rule can therefore observe the existence or up-to-`MAX_CONTAINS_READ`
+/// that points outside is followed by the OS as usual. Any rule can therefore
+/// observe the existence or up-to-`MAX_CONTAINS_READ`
 /// bytes of a file reachable via an in-directory symlink — this is a documented
-/// limitation, not a traversal guard bypass. No behavior change.
+/// limitation, not a traversal guard bypass. Applies identically to all three
+/// rule kinds: `require_paths` observes existence, `contains` and
+/// `byte_signatures` observe content.
 pub fn rules_match(dir: &Path, rules: &DetectRules) -> bool {
-    if rules.require_paths.is_empty() && rules.contains.is_empty() && rules.bytes.is_empty() {
+    if rules.require_paths.is_empty()
+        && rules.contains.is_empty()
+        && rules.byte_signatures.is_empty()
+    {
         return false;
     }
     for rel in &rules.require_paths {
@@ -166,12 +184,21 @@ pub fn rules_match(dir: &Path, rules: &DetectRules) -> bool {
             return false;
         }
     }
-    for rule in &rules.bytes {
+    for rule in &rules.byte_signatures {
         let Some(p) = safe_join(dir, &rule.path) else {
             return false;
         };
-        // Undecodable or empty → fail closed. See `BytesRule::hex`.
+        // Undecodable or empty → fail closed. See `ByteSignatureRule::hex`.
+        // The registry path rejects this at `validate_caps`, so reaching here
+        // means a hand-edited local store: warn, because a profile that
+        // silently never detects is indistinguishable from a wrong rule.
         let Some(needle) = decode_hex(&rule.hex) else {
+            tracing::warn!(
+                path = rule.path,
+                hex = rule.hex,
+                "detect byte signature is not an even-length unprefixed hex string; \
+                 this rule can never match"
+            );
             return false;
         };
         if !file_contains_bytes(&p, &needle) {
@@ -193,13 +220,16 @@ fn file_contains(path: &Path, needle: &str) -> bool {
 /// Whether the first [`MAX_CONTAINS_READ`] bytes of `path` contain `needle`.
 /// Missing/unreadable file → false.
 ///
-/// The shared read-and-scan for both rule kinds. The EMPTY-needle policy is
-/// deliberately left to each caller — `contains` treats it as vacuously true
-/// (pre-existing), `bytes` refuses it — so this function is never called with
-/// an empty needle and does not have to pick.
+/// TOTAL on an empty needle: `slice::windows(0)` PANICS, and core's invariant
+/// is that it does not panic. Both callers already exclude empty needles
+/// (`file_contains` returns early; `decode_hex` rejects `""`), so this guard is
+/// unreachable today — it is here so a third caller cannot reintroduce a
+/// release-mode panic, since a `debug_assert` alone is compiled out.
 fn file_contains_bytes(path: &Path, needle: &[u8]) -> bool {
     use std::io::Read as _;
-    debug_assert!(!needle.is_empty(), "callers own the empty-needle policy");
+    if needle.is_empty() {
+        return false;
+    }
     let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
@@ -241,6 +271,7 @@ mod tests {
         assert_eq!(MAX_REQUIRE_PATHS, 64);
         assert_eq!(MAX_CONTAINS, 64);
         assert_eq!(MAX_CONTAINS_READ, 1_048_576); // exactly 1 MiB (1024 * 1024)
+        assert_eq!(MAX_BYTE_SIGNATURES, 64);
     }
 
     // ---------------------------------------------------------------------
@@ -250,15 +281,54 @@ mod tests {
     // inexpressible.
     // ---------------------------------------------------------------------
 
-    fn bytes_rules(path: &str, hex: &str) -> DetectRules {
+    fn byte_signature_rules(path: &str, hex: &str) -> DetectRules {
         DetectRules {
             require_paths: Vec::new(),
             contains: Vec::new(),
-            bytes: vec![BytesRule {
+            byte_signatures: vec![ByteSignatureRule {
                 path: path.into(),
                 hex: hex.into(),
             }],
         }
+    }
+
+    /// `nibble`'s three ranges, pinned at every boundary — on `decode_hex`
+    /// directly, not through `rules_match`, because a range slip there only
+    /// surfaces if the byte it wrongly produces happens to occur in the fixture.
+    #[test]
+    fn decode_hex_accepts_exactly_the_three_hex_ranges() {
+        for (hex, want) in [
+            ("00", 0x00u8),
+            ("99", 0x99),
+            ("aa", 0xAA),
+            ("ff", 0xFF),
+            ("AA", 0xAA),
+            ("FF", 0xFF),
+            ("0f", 0x0F),
+            ("f0", 0xF0),
+        ] {
+            assert_eq!(decode_hex(hex), Some(vec![want]), "hex {hex:?}");
+        }
+        // Immediately OUTSIDE each range: '/' 0x2F and ':' 0x3A bracket
+        // b'0'..=b'9'; '@' 0x40 and 'G' 0x47 bracket b'A'..=b'F'; '`' 0x60 and
+        // 'g' 0x67 bracket b'a'..=b'f'. These are what an off-by-one admits.
+        for bad in ["//", "::", "@@", "GG", "``", "gg"] {
+            assert_eq!(decode_hex(bad), None, "hex {bad:?} must be rejected");
+        }
+    }
+
+    /// `file_contains_bytes` is TOTAL on an empty needle. Unreachable through
+    /// either caller (`file_contains` returns early, `decode_hex` rejects `""`),
+    /// so it is called directly here — otherwise the guard is an uncoverable
+    /// branch, and `slice::windows(0)` panics if it is ever removed.
+    #[test]
+    fn file_contains_bytes_is_total_on_an_empty_needle() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "f.bin", &[0xDE, 0xAD]);
+        assert!(!file_contains_bytes(&d.path().join("f.bin"), b""));
+        // Sanity: the same helper does match a real needle in that file, so the
+        // assertion above fails for the empty needle and not for the path.
+        assert!(file_contains_bytes(&d.path().join("f.bin"), &[0xDE]));
     }
 
     /// A signature of bytes that are NOT valid UTF-8 — the capability
@@ -268,10 +338,13 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         // 0xFF 0xFE is not valid UTF-8, so no `substring` rule can express it.
         write(d.path(), "game.exe", &[0x00, 0x11, 0xFF, 0xFE, 0x22]);
-        assert!(rules_match(d.path(), &bytes_rules("game.exe", "fffe")));
         assert!(rules_match(
             d.path(),
-            &bytes_rules("game.exe", "0011fffe22")
+            &byte_signature_rules("game.exe", "fffe")
+        ));
+        assert!(rules_match(
+            d.path(),
+            &byte_signature_rules("game.exe", "0011fffe22")
         ));
     }
 
@@ -280,9 +353,18 @@ mod tests {
     fn byte_signature_is_case_insensitive_and_absent_does_not_match() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "game.exe", &[0xDE, 0xAD, 0xBE, 0xEF]);
-        assert!(rules_match(d.path(), &bytes_rules("game.exe", "DEADBEEF")));
-        assert!(rules_match(d.path(), &bytes_rules("game.exe", "deadbeef")));
-        assert!(!rules_match(d.path(), &bytes_rules("game.exe", "deadbeee")));
+        assert!(rules_match(
+            d.path(),
+            &byte_signature_rules("game.exe", "DEADBEEF")
+        ));
+        assert!(rules_match(
+            d.path(),
+            &byte_signature_rules("game.exe", "deadbeef")
+        ));
+        assert!(!rules_match(
+            d.path(),
+            &byte_signature_rules("game.exe", "deadbeee")
+        ));
     }
 
     /// A malformed or empty hex needle NEVER matches — fail-closed, and a
@@ -299,18 +381,20 @@ mod tests {
         // these from matching.
         write(d.path(), "game.exe", &[0x00, 0xDE, 0xAD, 0x00]);
         for bad in [
-            "",         // empty: NOT vacuously true, unlike `substring`
-            "d",        // odd length
-            "deadb",    // odd length
-            "zz",       // non-hex — would be `[0x00]` if a non-hex digit
-            "zzzz",     // non-hex — would be `[0x00, 0x00]`
-            "00zz",     // half-valid: a partial decode must not be used
-            "de ad",    // internal space
-            "0xdead",   // no `0x` prefix accepted (see BytesRule's doc)
+            "",      // empty: NOT vacuously true, unlike `substring`
+            "d",     // odd length
+            "deadb", // odd length
+            "zz",    // non-hex — would be `[0x00]` if a non-hex digit
+            "zzzz",  // non-hex — would be `[0x00, 0x00]`
+            "00zz",  // half-valid: a partial decode must not be used
+            "de ad", // odd length (5): stops at the length guard, NOT on
+            // the space — even-length whitespace is below
+            "0xdead",   // no `0x` prefix accepted (see ByteSignatureRule's doc)
             "00\u{e9}", // multi-byte char: even BYTE length, odd digit count
+            "  ",       // even-length whitespace: actually reaches `nibble`
         ] {
             assert!(
-                !rules_match(d.path(), &bytes_rules("game.exe", bad)),
+                !rules_match(d.path(), &byte_signature_rules("game.exe", bad)),
                 "hex {bad:?} must not match"
             );
         }
@@ -322,8 +406,14 @@ mod tests {
     #[test]
     fn byte_signature_missing_file_does_not_match() {
         let d = tempfile::tempdir().unwrap();
-        assert!(!rules_match(d.path(), &bytes_rules("absent.exe", "dead")));
-        assert!(!rules_match(d.path(), &bytes_rules("absent.exe", "")));
+        assert!(!rules_match(
+            d.path(),
+            &byte_signature_rules("absent.exe", "dead")
+        ));
+        assert!(!rules_match(
+            d.path(),
+            &byte_signature_rules("absent.exe", "")
+        ));
     }
 
     /// Traversal-guarded like every other rule kind.
@@ -333,7 +423,7 @@ mod tests {
         write(d.path(), "game.exe", &[0xDE, 0xAD]);
         for esc in ["../game.exe", "/etc/passwd", ""] {
             assert!(
-                !rules_match(d.path(), &bytes_rules(esc, "dead")),
+                !rules_match(d.path(), &byte_signature_rules(esc, "dead")),
                 "path {esc:?} must not match"
             );
         }
@@ -348,7 +438,7 @@ mod tests {
         body.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         write(d.path(), "big.exe", &body);
         assert!(
-            !rules_match(d.path(), &bytes_rules("big.exe", "deadbeef")),
+            !rules_match(d.path(), &byte_signature_rules("big.exe", "deadbeef")),
             "a signature beyond the read window must not match"
         );
         // …and the same signature inside the window does match, so the test
@@ -356,19 +446,25 @@ mod tests {
         let mut inside = vec![0u8; 16];
         inside.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         write(d.path(), "small.exe", &inside);
-        assert!(rules_match(d.path(), &bytes_rules("small.exe", "deadbeef")));
+        assert!(rules_match(
+            d.path(),
+            &byte_signature_rules("small.exe", "deadbeef")
+        ));
     }
 
     /// Rule kinds AND together, and `bytes` alone is enough to be detectable
     /// (a profile with only byte rules is not "no rules").
     #[test]
-    fn bytes_rules_and_with_other_kinds_and_stand_alone() {
+    fn byte_signature_rules_and_with_other_kinds_and_stand_alone() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "game.exe", &[0xDE, 0xAD]);
         write(d.path(), "cfg.ini", b"Engine=UE5");
 
         // bytes alone: detectable.
-        assert!(rules_match(d.path(), &bytes_rules("game.exe", "dead")));
+        assert!(rules_match(
+            d.path(),
+            &byte_signature_rules("game.exe", "dead")
+        ));
 
         // Combined with a passing contains + require_paths.
         let all = DetectRules {
@@ -377,7 +473,7 @@ mod tests {
                 path: "cfg.ini".into(),
                 substring: "UE5".into(),
             }],
-            bytes: vec![BytesRule {
+            byte_signatures: vec![ByteSignatureRule {
                 path: "game.exe".into(),
                 hex: "dead".into(),
             }],
@@ -386,13 +482,8 @@ mod tests {
 
         // A failing byte rule fails the whole conjunction even when the others pass.
         let mut one_bad = all.clone();
-        one_bad.bytes[0].hex = "beef".into();
+        one_bad.byte_signatures[0].hex = "beef".into();
         assert!(!rules_match(d.path(), &one_bad));
-    }
-
-    #[test]
-    fn byte_rule_cap_constant_has_expected_value() {
-        assert_eq!(MAX_BYTES_RULES, 64);
     }
 
     #[test]
@@ -403,7 +494,7 @@ mod tests {
         let rules = DetectRules {
             require_paths: vec!["Game/Content/Paks".into(), "Game/Binaries".into()],
             contains: vec![],
-            bytes: Vec::new(),
+            byte_signatures: Vec::new(),
         };
         assert!(rules_match(d.path(), &rules));
     }
@@ -415,7 +506,7 @@ mod tests {
         let rules = DetectRules {
             require_paths: vec!["Game/Content/Paks".into(), "Game/Missing".into()],
             contains: vec![],
-            bytes: Vec::new(),
+            byte_signatures: Vec::new(),
         };
         assert!(!rules_match(d.path(), &rules));
     }
@@ -434,7 +525,7 @@ mod tests {
                 path: "Game/Game.uproject".into(),
                 substring: "FortniteGame".into(),
             }],
-            bytes: Vec::new(),
+            byte_signatures: Vec::new(),
         };
         assert!(rules_match(d.path(), &pass));
         let fail = DetectRules {
@@ -443,7 +534,7 @@ mod tests {
                 path: "Game/Game.uproject".into(),
                 substring: "NotPresent".into(),
             }],
-            bytes: Vec::new(),
+            byte_signatures: Vec::new(),
         };
         assert!(!rules_match(d.path(), &fail));
         let missing = DetectRules {
@@ -452,7 +543,7 @@ mod tests {
                 path: "Game/Nope".into(),
                 substring: "x".into(),
             }],
-            bytes: Vec::new(),
+            byte_signatures: Vec::new(),
         };
         assert!(!rules_match(d.path(), &missing));
     }
@@ -473,7 +564,7 @@ mod tests {
             let rules = DetectRules {
                 require_paths: vec![bad.to_string()],
                 contains: vec![],
-                bytes: Vec::new(),
+                byte_signatures: Vec::new(),
             };
             assert!(
                 !rules_match(d.path(), &rules),
@@ -502,7 +593,7 @@ mod tests {
                     path: bad.into(),
                     substring: "x".into(),
                 }],
-                bytes: Vec::new(),
+                byte_signatures: Vec::new(),
             };
             assert!(
                 !rules_match(d.path(), &rules),
@@ -531,7 +622,7 @@ mod tests {
                 path: "big.bin".into(),
                 substring: "PAST_CAP".into(),
             }],
-            bytes: Vec::new(),
+            byte_signatures: Vec::new(),
         };
         assert!(
             !rules_match(d.path(), &rules),
@@ -560,7 +651,7 @@ mod tests {
                 path: "straddle.bin".into(),
                 substring: String::from_utf8(needle.to_vec()).unwrap(),
             }],
-            bytes: Vec::new(),
+            byte_signatures: Vec::new(),
         };
         assert!(
             !rules_match(d.path(), &rules),
@@ -580,7 +671,7 @@ mod tests {
                     path: "Game/Game.uproject".into(),
                     substring: "Game".into(),
                 }],
-                bytes: Vec::new(),
+                byte_signatures: Vec::new(),
             }),
             mappings: None,
             pak_paths: Vec::new(),
@@ -591,14 +682,14 @@ mod tests {
         let d = back.detect.unwrap();
         assert_eq!(d.require_paths, vec!["Game/Content/Paks".to_string()]);
         assert_eq!(d.contains[0].substring, "Game");
-        assert!(d.bytes.is_empty());
+        assert!(d.byte_signatures.is_empty());
     }
 
     /// Byte rules survive the local store's TOML round-trip, and `hex` is
     /// carried verbatim rather than normalized — a store written by hand keeps
     /// whatever case the author used.
     #[test]
-    fn byte_rules_toml_roundtrip() {
+    fn byte_signatures_toml_roundtrip() {
         let p = GameProfile {
             name: "G".into(),
             engine_version: None,
@@ -606,7 +697,7 @@ mod tests {
             detect: Some(DetectRules {
                 require_paths: Vec::new(),
                 contains: Vec::new(),
-                bytes: vec![BytesRule {
+                byte_signatures: vec![ByteSignatureRule {
                     path: "Game/Binaries/Win64/Game.exe".into(),
                     hex: "DEADbeef".into(),
                 }],
@@ -615,18 +706,46 @@ mod tests {
             pak_paths: Vec::new(),
         };
         let text = toml::to_string_pretty(&p).unwrap();
-        assert!(text.contains("bytes"), "{text}");
+        assert!(text.contains("byte_signatures"), "{text}");
         let back: GameProfile = toml::from_str(&text).unwrap();
         let d = back.detect.unwrap();
-        assert_eq!(d.bytes[0].path, "Game/Binaries/Win64/Game.exe");
-        assert_eq!(d.bytes[0].hex, "DEADbeef");
+        assert_eq!(d.byte_signatures[0].path, "Game/Binaries/Win64/Game.exe");
+        assert_eq!(d.byte_signatures[0].hex, "DEADbeef");
         assert!(d.require_paths.is_empty() && d.contains.is_empty());
     }
 
-    /// A store written before `bytes` existed still loads (`serde(default)`),
+    /// An EMPTY `byte_signatures` must not be emitted. Without
+    /// `skip_serializing_if`, any store-mutating command (`profile add`,
+    /// `key add`, `remove`) rewrites every profile and injects
+    /// `byte_signatures = []` — which a pre-#658 binary rejects with
+    /// `CorruptStore` for the WHOLE store, since `DetectRules` is
+    /// `deny_unknown_fields`. Same assertion the `pak_paths` and `mappings`
+    /// siblings make for the same reason.
+    #[test]
+    fn empty_byte_signatures_is_omitted_from_toml() {
+        let p = GameProfile {
+            name: "G".into(),
+            engine_version: None,
+            keys: BTreeMap::default(),
+            detect: Some(DetectRules {
+                require_paths: vec!["Game/Paks".into()],
+                ..Default::default()
+            }),
+            mappings: None,
+            pak_paths: Vec::new(),
+        };
+        let text = toml::to_string_pretty(&p).unwrap();
+        assert!(
+            !text.contains("byte_signatures"),
+            "an empty byte_signatures must be omitted so pre-#658 binaries can \
+             still load the store: {text}"
+        );
+    }
+
+    /// A store written before `byte_signatures` existed still loads (`serde(default)`),
     /// which is the compatibility direction that holds for the local store too.
     #[test]
-    fn store_without_bytes_field_still_loads() {
+    fn store_without_byte_signatures_field_still_loads() {
         let text = r#"
 name = "G"
 
@@ -634,7 +753,7 @@ name = "G"
 require_paths = ["Game/Paks"]
 "#;
         let back: GameProfile = toml::from_str(text).unwrap();
-        assert!(back.detect.unwrap().bytes.is_empty());
+        assert!(back.detect.unwrap().byte_signatures.is_empty());
     }
 
     #[test]
