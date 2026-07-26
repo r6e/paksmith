@@ -66,7 +66,8 @@ pub(crate) struct InspectArgs {
 
 /// Run the `inspect` subcommand.
 ///
-/// Resolves the pak-open context (key + any profile mappings source),
+/// Resolves the pak-open context (key + the profile's parse inputs:
+/// mappings source and engine version),
 /// loads the effective usmap (explicit `--mappings` wins — see
 /// [`crate::commands::mappings_resolve`]), parses the package, then
 /// delegates all output assembly — format resolution, `--export`

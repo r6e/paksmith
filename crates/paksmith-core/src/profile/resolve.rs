@@ -120,19 +120,22 @@ pub async fn resolve_pak_key(
     Ok(resolve_pak_context(path, aes_key, game, detect).await?.key)
 }
 
-/// Resolve the full [`PakOpenContext`] (key + profile mappings source).
+/// Resolve the full [`PakOpenContext`]: the key plus the profile's
+/// parse inputs — its mappings source (#651) and declared engine
+/// version (#656).
 ///
 /// Key precedence is unchanged from the pre-#651 `resolve_pak_key`:
-/// `--aes-key` (wins) > `--game` (explicit id) > `--detect`. The
-/// mappings source is the selected profile's `mappings` field — and it
-/// is resolved even when `--aes-key` short-circuits the KEY lookup: an
-/// explicit key must not silently drop the profile's mappings.
+/// `--aes-key` (wins) > `--game` (explicit id) > `--detect`. The parse
+/// inputs come from the selected profile's `mappings` and
+/// `engine_version` fields — and BOTH are resolved even when
+/// `--aes-key` short-circuits the KEY lookup: an explicit key must not
+/// silently drop them.
 ///
 /// In the `--aes-key` combination, `--game` keeps its hard contract
 /// (the named id must exist — locally or in the CACHED registry doc —
 /// or the resolution fails with `ProfileNotFound`, exactly as it does
 /// without `--aes-key`; a typo'd `--game` must never silently produce a
-/// no-mappings run), while `--detect` stays best-effort (warn + `None`
+/// run stripped of its parse inputs), while `--detect` stays best-effort (warn + `None`
 /// on no-unique-match — detection is probabilistic, and pre-#651 this
 /// path never ran it at all). `--aes-key` alone still performs zero
 /// profile I/O, and no `--aes-key` combination touches the pak footer

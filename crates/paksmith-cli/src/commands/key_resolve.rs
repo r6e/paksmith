@@ -17,8 +17,9 @@ pub(crate) fn resolve_pak_key(
     ))
 }
 
-/// Context-form resolution (#651): key + profile mappings source in one
-/// call, for the commands that consume mappings (`inspect`, `extract`).
+/// Context-form resolution: the key plus the profile's parse inputs —
+/// mappings source (#651) and engine version (#656) — in one call, for
+/// the commands that parse assets (`inspect`, `extract`).
 pub(crate) fn resolve_pak_context(
     path: &Path,
     aes_key: Option<&AesKey>,

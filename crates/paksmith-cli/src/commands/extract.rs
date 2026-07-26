@@ -177,8 +177,9 @@ pub(crate) fn run(
 }
 
 /// Phase 1's yield: every source archive open, its filtered entry
-/// list, and the once-resolved usmap. Parallel vectors, index-aligned
-/// with the sorted `sources` order `winning_entries` decides by.
+/// list, and the two once-resolved profile inputs — the usmap and the
+/// engine-version hint (#656). Parallel vectors, index-aligned with
+/// the sorted `sources` order `winning_entries` decides by.
 struct OpenedSources {
     usmap: Option<std::sync::Arc<paksmith_core::asset::Usmap>>,
     /// The selected profile's engine version (#656) — profile-derived
@@ -196,8 +197,9 @@ struct OpenedSources {
 /// handle + parsed index) is held simultaneously — the memory price of
 /// the all-open-before-write guarantee. Per-source context resolution
 /// repeats the store load / detection sweep (known cost — hoisting
-/// needs a batch core entry point); the usmap is profile-derived and
-/// pak-independent, so it is resolved and parsed exactly once.
+/// needs a batch core entry point); the usmap and the engine-version
+/// hint are profile-derived and pak-independent, so both are resolved
+/// — and the usmap parsed — exactly once.
 fn open_and_collect(
     sources: &[std::path::PathBuf],
     mappings_arg: Option<&std::path::Path>,

@@ -34,7 +34,8 @@ struct Cli {
     aes_key: Option<String>,
 
     /// Resolve the AES key (and, for inspect/extract, the profile's
-    /// mappings) from a stored profile id (see `paksmith profile`). With
+    /// mappings and engine version) from a stored profile id (see
+    /// `paksmith profile`). With
     /// `--aes-key`, the explicit key wins but the profile still supplies
     /// mappings — and the id must exist. When the pak path is omitted,
     /// the profile's `pak_paths` patterns select the archives to
@@ -42,7 +43,8 @@ struct Cli {
     #[arg(long, global = true, value_name = "ID")]
     game: Option<String>,
 
-    /// Auto-detect the game (key + mappings) from an install directory.
+    /// Auto-detect the game (key + mappings + engine version) from an
+    /// install directory.
     /// `--game` wins over `--detect`; with `--aes-key`, detection is
     /// best-effort and only supplies mappings. When the pak path is
     /// omitted, the detected profile's `pak_paths` select the archives,
