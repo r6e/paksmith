@@ -62,12 +62,19 @@ pub(crate) fn now_unix() -> crate::Result<u64> {
 }
 
 /// Everything a caller needs to open and decode a pak selected via
-/// `--aes-key` / `--game` / `--detect`: the AES key (if any) plus the
-/// selected profile's mappings source (if any) — issue #651.
+/// `--aes-key` / `--game` / `--detect`: the AES key (if any), the
+/// selected profile's mappings source (#651), and its declared engine
+/// version (#656).
+///
+/// The latter two are PARSE inputs rather than open inputs — they
+/// reach `Package::read_from*_with` through
+/// [`crate::asset::ReadOptions`], not the container layer — so a
+/// caller that only opens (`list`/`search`) can ignore them.
 ///
 /// Marked `#[non_exhaustive]` (like [`DetectMatch`]) so future fields —
 /// e.g. more profile-carried open state — are not breaking changes;
 /// external consumers construct it only via [`resolve_pak_context`].
+/// `engine_version` is the first field added under that allowance.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct PakOpenContext {

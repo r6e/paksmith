@@ -855,9 +855,10 @@ pub struct Texture2DMipMap {
     pub size_z: u32,
 }
 
-/// Bundle threading the parsed name/import/export tables, version, and
-/// optional `.usmap` schema registry through downstream property
-/// parsers (Phase 2b+).
+/// Bundle threading the parsed name/import/export tables, version,
+/// optional `.usmap` schema registry, and the caller's optional
+/// engine-version hint (#656) through downstream property parsers
+/// (Phase 2b+).
 ///
 /// **Thread safety:** `AssetContext: Send + Sync`. All components are
 /// `Arc`-shared immutable data — safe to clone and share across
