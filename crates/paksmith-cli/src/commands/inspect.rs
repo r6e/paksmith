@@ -111,9 +111,7 @@ pub(crate) fn run(
     // #656: the profile's declared engine version rides along, so gates
     // the wire leaves ambiguous (UE 5.2 vs 5.3 `bSerializeMipData`)
     // resolve the way the selected game actually serializes.
-    let opts = paksmith_core::asset::ReadOptions::new()
-        .with_mappings(usmap.as_ref())
-        .with_engine_version_hint(ctx.engine_version);
+    let opts = crate::read_options::build(usmap.as_ref(), ctx.engine_version);
     let pkg = Package::read_from_reader_with(&reader, asset, &opts)?;
     crate::inspect::emit(&pkg, args, format, quiet)
 }

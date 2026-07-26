@@ -60,9 +60,7 @@ impl ExtractJob<'_> {
     }
 
     fn extract_asset(&self, entry_path: &str) -> EntryOutcome {
-        let opts = paksmith_core::asset::ReadOptions::new()
-            .with_mappings(self.mappings.as_ref())
-            .with_engine_version_hint(self.engine_version);
+        let opts = crate::read_options::build(self.mappings.as_ref(), self.engine_version);
         let pkg = match Package::read_from_reader_with(&self.reader, entry_path, &opts) {
             Ok(p) => p,
             Err(e) => return failed(entry_path, e),

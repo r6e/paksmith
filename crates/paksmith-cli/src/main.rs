@@ -6,6 +6,7 @@ mod inspect;
 mod output;
 mod path_util;
 mod profile_paks;
+mod read_options;
 mod search;
 
 use std::io;
@@ -36,18 +37,21 @@ struct Cli {
     /// Resolve the AES key — and, for inspect/extract, the profile's
     /// mappings and engine version — from a stored profile id (see
     /// `paksmith profile`). With `--aes-key` the explicit key wins but
-    /// the profile still supplies both parse inputs, and the id must
-    /// exist. When the pak path is omitted, the profile's `pak_paths`
-    /// patterns select the archives to operate on.
+    /// the profile still supplies whatever parse inputs it carries,
+    /// and the id must exist. A registry-sourced profile supplies an
+    /// engine version but never mappings. When the pak path is
+    /// omitted, the profile's `pak_paths` patterns select the archives
+    /// to operate on.
     #[arg(long, global = true, value_name = "ID")]
     game: Option<String>,
 
-    /// Auto-detect the game — key, mappings and engine version — from
-    /// an install directory. `--game` wins over `--detect`; with
-    /// `--aes-key` detection is best-effort and supplies the parse
-    /// inputs but not the key. When the pak path is omitted, the
-    /// detected profile's `pak_paths` select the archives, and relative
-    /// patterns resolve against this directory.
+    /// Auto-detect the game from an install directory: the AES key,
+    /// and for inspect/extract the matched profile's mappings and
+    /// engine version. `--game` wins over `--detect`; with `--aes-key`
+    /// detection is best-effort and supplies whatever parse inputs the
+    /// matched profile carries, but not the key. When the pak path is
+    /// omitted, the detected profile's `pak_paths` select the
+    /// archives, and relative patterns resolve against this directory.
     #[arg(long, global = true, value_name = "DIR")]
     detect: Option<std::path::PathBuf>,
 
