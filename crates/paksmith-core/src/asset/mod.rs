@@ -992,9 +992,10 @@ impl AssetContext {
     /// Attach an out-of-band engine-version hint (issue #656).
     ///
     /// Builder form because [`AssetContext`] is `#[non_exhaustive]`:
-    /// external callers (and the `Package::read_from*` path) set the
-    /// hint without a struct literal and without widening `new`'s
-    /// six-parameter signature.
+    /// external callers set the hint without a struct literal and
+    /// without widening `new`'s six-parameter signature. (The
+    /// in-crate `Package::read_from*` path uses a struct literal, so
+    /// it does not go through this.)
     #[must_use]
     pub fn with_engine_version_hint(mut self, hint: Option<engine_hint::UeVersion>) -> Self {
         self.engine_version_hint = hint;

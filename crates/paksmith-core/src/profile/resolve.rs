@@ -409,10 +409,10 @@ fn explicit_key_context(
 
 /// HARD `--game` parse-inputs lookup for the `--aes-key` path (#651,
 /// store-parameterized so it is unit-testable): a local profile yields
-/// its mappings; a CACHED registry id is a valid selection that yields
-/// `None` (registry profiles cannot carry mappings — see
-/// [`MappingsSource`]); an unknown id is `ProfileNotFound`, exactly as
-/// in keyed resolution. No network — a registry-only id must already be
+/// its mappings AND engine version; a CACHED registry id is a valid
+/// selection that yields its engine version but no mappings (see
+/// [`MappingsSource`]'s registry note); an unknown id is
+/// `ProfileNotFound`, exactly as in keyed resolution. No network — a registry-only id must already be
 /// cached (`profile fetch`).
 fn named_profile_inputs_in(
     store: &ProfileStore,
@@ -482,8 +482,8 @@ fn parse_engine_version(raw: Option<&str>, id: &str) -> Option<crate::asset::UeV
 
 /// Best-effort `--detect` parse-inputs lookup for the `--aes-key` path
 /// (store-parameterized, unit-testable): the unique `detect_in` match's
-/// mappings; anything else (zero or ambiguous matches) degrades to
-/// `None` with a warning.
+/// parse inputs; anything else (zero or ambiguous matches) degrades to
+/// the empty set with a warning.
 fn detect_profile_inputs_in(
     store: &ProfileStore,
     cache: Option<&RegistryCache>,

@@ -961,10 +961,6 @@ impl Package {
         virtual_path: &str,
         mappings: Option<&Arc<Usmap>>,
     ) -> crate::Result<Self> {
-        // Phase 3b: wrap `PakReader` in `Arc` so the companion-loader
-        // closures can capture cloned refcounted handles. `PakReader`
-        // is `Send + Sync` (Phase 1 design); `Arc<PakReader>` auto-
-        // derefs to `&PakReader` for the synchronous reads below.
         Self::read_from_pak_with(
             pak_path,
             virtual_path,

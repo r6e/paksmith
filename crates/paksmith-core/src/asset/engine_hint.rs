@@ -95,6 +95,7 @@ impl std::fmt::Display for UeVersion {
 /// ambiguous case, and must NOT disturb a package whose wire version
 /// says plainly that the field is absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WireVerdict {
     /// The object versions unambiguously place the package at or above
     /// the gate: the field IS on the wire. A hint cannot override this

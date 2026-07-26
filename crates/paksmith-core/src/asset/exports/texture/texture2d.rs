@@ -268,6 +268,48 @@ pub(crate) fn read_from_kind(
     Ok((data, bulk_records))
 }
 
+/// The wire's verdict on `bSerializeMipData` for a cooked
+/// `UTexture2D` (#656).
+///
+/// Exactly ONE object version is ambiguous: at `1009` CUE4Parse maps
+/// both UE 5.2 and 5.3, and only 5.3 writes the field. `>= 1010`
+/// (5.4-dev) writes it; below `1009` — UE 5.1, 5.0 and every UE4 — it
+/// is absent, so a profile declaring a newer engine must not disturb
+/// those.
+///
+/// Those bands hold for CUE4Parse's STOCK `EGame` arms. A custom arm
+/// can opt into the field below its nominal version (`GAME_TheFirst\
+/// Descendant` maps to object version `1002` yet satisfies the
+/// `Ar.Game` gate), which a `major.minor` hint cannot express — see
+/// [`crate::asset::engine_hint::resolve_engine_gate`]'s scope note.
+/// Such a title is `Denies` here, exactly as it was before #656.
+fn serialize_mip_data_verdict(ctx: &AssetContext) -> crate::asset::engine_hint::WireVerdict {
+    use crate::asset::engine_hint::WireVerdict;
+    if ctx
+        .version
+        .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
+    {
+        WireVerdict::Asserts
+    } else if ctx.version.ue5_at_least(VER_UE5_DATA_RESOURCES) {
+        WireVerdict::Ambiguous
+    } else {
+        WireVerdict::Denies
+    }
+}
+
+/// Whether a cooked `UTexture2D` entry carries `bSerializeMipData`:
+/// the wire's verdict, with the profile's engine version deciding the
+/// one ambiguous band. Shared by the reader and the test builder so
+/// neither the verdict NOR the gate version can drift between them.
+fn reads_serialize_mip_data(ctx: &AssetContext) -> bool {
+    crate::asset::engine_hint::resolve_engine_gate(
+        serialize_mip_data_verdict(ctx),
+        ctx.engine_version_hint,
+        5,
+        3,
+    )
+}
+
 /// Read the `UTexture` / `UTexture2D` binary-section entry that precedes
 /// the `FTexturePlatformData`, returning `bSerializeMipData` (whether each
 /// mip carries an inline `FByteBulkData`).
@@ -286,10 +328,10 @@ pub(crate) fn read_from_kind(
 ///    floor → always present). `false` ⇒ no cooked platform data ⇒
 ///    [`AssetParseFault::TextureNotCooked`].
 /// 4. `bSerializeMipData` (`u32` `ReadBoolean` ∈ {0,1}) iff
-///    `Ar.Game >= GAME_UE5_3` — an ENGINE-version gate. paksmith uses
-///    `file_version_ue5 >= VER_UE5_SCRIPT_SERIALIZATION_OFFSET (1010)`
-///    as the wire proxy, refined by a profile's declared engine version
-///    when one is supplied (#656).
+///    `Ar.Game >= GAME_UE5_3` — an ENGINE-version gate, resolved by
+///    [`serialize_mip_data_verdict`]: `>= 1010` asserts it, exactly
+///    `1009` is ambiguous and consults the profile's declared engine
+///    version (#656), below `1009` denies it.
 ///
 /// **UE 5.2 vs 5.3.** CUE4Parse maps *both* `GAME_UE5_2` and
 /// `GAME_UE5_3` to object version `1009`, so a UE 5.3 asset serialized
@@ -307,32 +349,9 @@ pub(crate) fn read_from_kind(
 ///   absent. A hint does NOT change that — a profile selected for its
 ///   AES key must not desync older cooked content.
 ///
-/// A hint can only ADD the read, never suppress it above `1010` — see
+/// The hint is consulted at `1009` and nowhere else; it can never
+/// override an unambiguous wire verdict in either direction — see
 /// [`crate::asset::engine_hint::resolve_engine_gate`].
-/// The wire's verdict on `bSerializeMipData` for a cooked
-/// `UTexture2D` (#656).
-///
-/// Exactly ONE object version is ambiguous: at `1009` CUE4Parse maps
-/// both UE 5.2 and 5.3, and only 5.3 writes the field. `>= 1010`
-/// (5.4-dev) unambiguously writes it; everything below `1009` — UE 5.1,
-/// 5.0 and every UE4 — unambiguously does not, so a profile declaring
-/// a newer engine must not disturb those. Shared by the reader and the
-/// test builder, so a fixture cannot encode a shape the reader would
-/// not read back.
-fn serialize_mip_data_verdict(ctx: &AssetContext) -> crate::asset::engine_hint::WireVerdict {
-    use crate::asset::engine_hint::WireVerdict;
-    if ctx
-        .version
-        .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
-    {
-        WireVerdict::Asserts
-    } else if ctx.version.ue5_at_least(VER_UE5_DATA_RESOURCES) {
-        WireVerdict::Ambiguous
-    } else {
-        WireVerdict::Denies
-    }
-}
-
 fn read_segment2_entry(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,
@@ -362,13 +381,7 @@ fn read_segment2_entry(
     // flag on the wire — the cube/array/volume Deserialize bodies never
     // read it (CUE4Parse threads the default `true` into
     // DeserializeCookedPlatformData for them).
-    let serialize_mip_data = if kind == TextureKind::TwoD
-        && crate::asset::engine_hint::resolve_engine_gate(
-            serialize_mip_data_verdict(ctx),
-            ctx.engine_version_hint,
-            5,
-            3,
-        ) {
+    let serialize_mip_data = if kind == TextureKind::TwoD && reads_serialize_mip_data(ctx) {
         read_owner_bool(cur, asset_path, AssetWireField::TextureSerializeMipData)?
     } else {
         true
@@ -885,13 +898,7 @@ mod tests {
         // bSerializeMipData = true when the version reads it). Delegates the
         // byte layout to `write_entry` so the entry format lives in one
         // place; appends the platform-data key.
-        let serialize = crate::asset::engine_hint::resolve_engine_gate(
-            serialize_mip_data_verdict(ctx),
-            ctx.engine_version_hint,
-            5,
-            3,
-        )
-        .then_some(1);
+        let serialize = reads_serialize_mip_data(ctx).then_some(1);
         write_entry(buf, STRIP_FLAG_EDITOR_DATA, 1, serialize);
         write_pd_key(buf, ctx);
     }
@@ -2307,6 +2314,28 @@ mod tests {
                 panic!("ue5={ue5:?} must parse unchanged under a 5.3 hint: {e}")
             });
             assert_eq!(data.mips[0].size_x, 64, "ue5={ue5:?}");
+        }
+    }
+
+    /// The sibling classes never read `bSerializeMipData`, and a 5.3
+    /// profile does not change that — the flag is 2D-only on the wire,
+    /// so the hint must not leak across the `kind` conjunct at the
+    /// ambiguous 1009 either.
+    #[test]
+    fn engine_hint_does_not_reach_sibling_kinds_at_1009() {
+        let ctx = make_ctx_with_version_and_engine(522, Some(1009), "5.3");
+        for kind in [TextureKind::Cube, TextureKind::Array, TextureKind::Volume] {
+            let mut bytes = Vec::new();
+            none(&mut bytes);
+            // No bSerializeMipData: siblings never carry it.
+            write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, None);
+            write_pd_key(&mut bytes, &ctx);
+            bytes.push(0);
+            bytes.extend_from_slice(&[0xFFu8; 15]);
+            plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", &one_mip());
+            let (data, _) = read_from_kind(&bytes, &ctx, "tex.uasset", kind)
+                .unwrap_or_else(|e| panic!("{kind:?} must ignore the hint: {e}"));
+            assert_eq!(data.mips[0].size_x, 64, "{kind:?}");
         }
     }
 
