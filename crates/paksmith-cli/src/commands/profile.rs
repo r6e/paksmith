@@ -7,7 +7,8 @@ use clap::{Args, Subcommand};
 
 use paksmith_core::error::ProfileFault;
 use paksmith_core::{
-    AesKey, GameProfile, KeyGuid, MappingsSource, PaksmithError, ProfileStore, display_guid,
+    AesKey, GameProfile, KeyGuid, MappingsSource, PaksmithError, ProfileStore, ResolvedProfile,
+    display_guid, resolve_profile_layered,
 };
 
 use crate::output::OutputFormat;
@@ -248,19 +249,44 @@ fn list() -> paksmith_core::Result<u8> {
 
 fn show(a: &ShowArgs) -> paksmith_core::Result<u8> {
     let store = ProfileStore::load()?;
-    let p = store
-        .profiles
-        .get(&a.id)
-        .ok_or_else(|| PaksmithError::Profile {
+    let cache = paksmith_core::profile::resolve::load_cache_lenient();
+    // LAYERED, matching `list` and every resolution path: a registry-cached
+    // profile can be auto-detected and used for extraction, so being unable to
+    // inspect it left the one command a user reaches for when it misbehaves
+    // reporting ProfileNotFound for a profile that demonstrably exists.
+    let resolved = resolve_profile_layered(&store, cache.as_ref(), &a.id).ok_or_else(|| {
+        PaksmithError::Profile {
             fault: ProfileFault::ProfileNotFound { id: a.id.clone() },
-        })?;
+        }
+    })?;
+
+    // Registry profiles structurally cannot carry `mappings` or `pak_paths`
+    // (see `MappingsSource`'s registry note) — those render as `-`, and the
+    // `source` line is what explains why.
+    let (source, name, engine_version, mappings, pak_paths, keys) = match &resolved {
+        ResolvedProfile::Local(p) => (
+            "local",
+            &p.name,
+            p.engine_version.as_deref(),
+            p.mappings.as_ref(),
+            p.pak_paths.as_slice(),
+            &p.keys,
+        ),
+        ResolvedProfile::Registry(p) => (
+            "registry",
+            &p.name,
+            p.engine_version.as_deref(),
+            None,
+            [].as_slice(),
+            &p.keys,
+        ),
+    };
+
     println!("id: {}", a.id);
-    println!("name: {}", p.name);
-    println!(
-        "engine_version: {}",
-        p.engine_version.as_deref().unwrap_or("-")
-    );
-    match &p.mappings {
+    println!("source: {source}");
+    println!("name: {name}");
+    println!("engine_version: {}", engine_version.unwrap_or("-"));
+    match mappings {
         // Not key material — safe to show unredacted.
         Some(MappingsSource::Path(path)) => {
             println!("mappings: {}", path.display());
@@ -268,16 +294,16 @@ fn show(a: &ShowArgs) -> paksmith_core::Result<u8> {
         None => println!("mappings: -"),
     }
     // Not key material — safe to show unredacted (mappings precedent).
-    if p.pak_paths.is_empty() {
+    if pak_paths.is_empty() {
         println!("pak_paths: -");
     } else {
         println!("pak_paths:");
-        for pattern in &p.pak_paths {
+        for pattern in pak_paths {
             println!("  {pattern}");
         }
     }
     println!("keys:");
-    for (guid, key) in &p.keys {
+    for (guid, key) in keys {
         if a.show_keys {
             // Deliberate reveal: only `--show-keys` renders key material.
             println!(
@@ -400,17 +426,24 @@ fn fetch(a: &FetchArgs) -> paksmith_core::Result<u8> {
 fn test(a: &TestArgs) -> paksmith_core::Result<u8> {
     use paksmith_core::container::pak::PakReader;
     use paksmith_core::profile::key_test::{KeyTestOutcome, test_key};
-    use paksmith_core::profile::resolve_key;
+    use paksmith_core::profile::resolve_key_in;
 
     let store = ProfileStore::load()?;
-    let p = store
-        .profiles
-        .get(&a.id)
-        .ok_or_else(|| PaksmithError::Profile {
+    let cache = paksmith_core::profile::resolve::load_cache_lenient();
+    // LAYERED like `show`: key-testing a registry-shipped key is exactly the
+    // diagnostic a user needs when auto-detection resolves but extraction
+    // fails, and that key never lives in the local store.
+    let resolved = resolve_profile_layered(&store, cache.as_ref(), &a.id).ok_or_else(|| {
+        PaksmithError::Profile {
             fault: ProfileFault::ProfileNotFound { id: a.id.clone() },
-        })?;
+        }
+    })?;
+    let keys = match &resolved {
+        ResolvedProfile::Local(p) => &p.keys,
+        ResolvedProfile::Registry(p) => &p.keys,
+    };
     let guid = PakReader::read_footer_guid(&a.pak)?;
-    let key = resolve_key(p, guid.as_ref()).ok_or_else(|| PaksmithError::Profile {
+    let key = resolve_key_in(keys, guid.as_ref()).ok_or_else(|| PaksmithError::Profile {
         fault: ProfileFault::NoKeyForGuid {
             id: a.id.clone(),
             guid: display_guid(guid),

@@ -974,3 +974,146 @@ async fn profile_fetch_allow_http_still_verifies_signature() {
         "no cache may be written when signature verification fails"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #658 item 1: `profile show` / `profile test` resolve LAYERED, so a
+// cached registry profile can be inspected and key-tested. `profile list`
+// already did this (`profile_list_shows_cached_registry_profiles`); these two
+// were local-store-only, so a registry-supplied game could be auto-detected
+// and used for extraction yet could not be shown or diagnosed.
+// ---------------------------------------------------------------------------
+
+/// Seed a registry cache holding one profile with the encrypted fixture's key.
+fn seed_registry_cache(config_dir: &std::path::Path, id: &str, name: &str) {
+    let base = config_dir.join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    let cache_json = format!(
+        r#"{{"fetched_at_unix":9999999999,"profiles":[{{"id":"{id}","name":"{name}","engine_version":"5.3","keys":{{"00000000000000000000000000000000":"{KEY}"}}}}]}}"#
+    );
+    std::fs::write(base.join("registry-cache.json"), cache_json).unwrap();
+}
+
+/// `profile show` resolves a registry-cached id and reports its provenance.
+#[test]
+fn show_resolves_cached_registry_profile() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "reg-only"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+    assert!(txt.contains("reg-only"), "id must appear: {txt}");
+    assert!(txt.contains("RegOnly"), "name must appear: {txt}");
+    assert!(
+        txt.contains("5.3"),
+        "the registry profile's engine_version must appear: {txt}"
+    );
+    assert!(
+        txt.contains("registry"),
+        "provenance must be stated so a user knows why it is not editable: {txt}"
+    );
+}
+
+/// Keys stay redacted for registry profiles too — the reveal is `--show-keys`
+/// only, exactly as for local ones.
+#[test]
+fn show_registry_profile_redacts_keys_by_default() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "reg-only"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        !txt.contains(KEY),
+        "registry key material must not leak without --show-keys: {txt}"
+    );
+    assert!(
+        txt.contains("<redacted>"),
+        "redaction marker expected: {txt}"
+    );
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "reg-only", "--show-keys"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        txt.contains(KEY),
+        "--show-keys must reveal registry keys as it does local ones: {txt}"
+    );
+}
+
+/// A local profile shadows a cached registry entry with the same id — the same
+/// precedence `resolve_profile_layered` applies everywhere else.
+#[test]
+fn show_local_shadows_cached_registry_entry() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "dual", "--name", "LocalWins"])
+        .assert()
+        .success();
+    seed_registry_cache(cfg.path(), "dual", "RegistryLoses");
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "dual"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(txt.contains("LocalWins"), "local must win: {txt}");
+    assert!(
+        !txt.contains("RegistryLoses"),
+        "shadowed registry entry must not be shown: {txt}"
+    );
+}
+
+/// An id in neither the store nor the cache is still `ProfileNotFound` (exit 2)
+/// — layering must not soften the unknown-id contract.
+#[test]
+fn show_unknown_id_still_not_found_with_a_cache_present() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    let _ = paksmith(cfg.path())
+        .args(["profile", "show", "absent"])
+        .assert()
+        .code(2);
+}
+
+/// `profile test` key-tests a registry-cached profile against a real encrypted
+/// pak — the diagnostic that tells a user whether a registry-shipped key works.
+#[test]
+fn test_resolves_cached_registry_profile() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "test", "reg-only"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        txt.contains("verified") || txt.contains("decrypted"),
+        "the registry-supplied key must test as working: {txt}"
+    );
+}
+
+/// `profile test` on an id present nowhere stays `ProfileNotFound` (exit 2),
+/// distinct from the exit-1 "key didn't work" outcome.
+#[test]
+fn test_unknown_id_still_not_found_with_a_cache_present() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    let _ = paksmith(cfg.path())
+        .args(["profile", "test", "absent"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(2);
+}

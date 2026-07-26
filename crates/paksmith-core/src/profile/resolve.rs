@@ -571,16 +571,14 @@ fn resolve_within(
     if keys.is_empty() {
         return Ok(None);
     }
-    let guid = pak_guid.map_or(KeyGuid::ZERO, KeyGuid::from_bytes);
-    let key = keys
-        .get(&guid)
-        .or_else(|| keys.get(&KeyGuid::ZERO))
-        .ok_or_else(|| PaksmithError::Profile {
+    let key = crate::profile::resolve_key_in(keys, pak_guid.as_ref()).ok_or_else(|| {
+        PaksmithError::Profile {
             fault: ProfileFault::NoKeyForGuid {
                 id: id.to_string(),
                 guid: display_guid(pak_guid),
             },
-        })?;
+        }
+    })?;
     Ok(Some(key.clone()))
 }
 

@@ -199,15 +199,30 @@ pub fn resolve_key<'a>(
     profile: &'a GameProfile,
     pak_guid: Option<&[u8; 16]>,
 ) -> Option<&'a AesKey> {
+    resolve_key_in(&profile.keys, pak_guid)
+}
+
+/// The same GUID→key rule as [`resolve_key`], over a bare key map.
+///
+/// Exists because the rule has THREE callers whose profile types differ:
+/// [`GameProfile`] (local), [`registry::RegistryProfile`] (registry-cached,
+/// which is not a `GameProfile` and never will be — it carries no mappings or
+/// `pak_paths`), and `resolve::resolve_within`, which needs the same lookup but
+/// reports a miss as `NoKeyForGuid` rather than `None`. Keeping the
+/// exact-match-then-`ZERO`-fallback in one place is the point: a profile that
+/// stores only a default key must open GUID-tagged paks identically no matter
+/// which of the three asked.
+#[must_use]
+pub fn resolve_key_in<'a>(
+    keys: &'a BTreeMap<KeyGuid, AesKey>,
+    pak_guid: Option<&[u8; 16]>,
+) -> Option<&'a AesKey> {
     // A missing pak GUID maps to ZERO directly; a present GUID (zero or
     // not) is wrapped and looked up, with ZERO as the fall-back. Wrapping
     // an all-zero GUID yields `KeyGuid::ZERO`, so the two paths converge on
     // the same lookup — no match guard is needed to special-case it.
     let guid = pak_guid.map_or(KeyGuid::ZERO, |b| KeyGuid::from_bytes(*b));
-    profile
-        .keys
-        .get(&guid)
-        .or_else(|| profile.keys.get(&KeyGuid::ZERO))
+    keys.get(&guid).or_else(|| keys.get(&KeyGuid::ZERO))
 }
 
 /// Render an [`AesKey`] as lowercase 64-char hex.
