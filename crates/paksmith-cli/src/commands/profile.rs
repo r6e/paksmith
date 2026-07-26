@@ -18,7 +18,7 @@ use crate::output::OutputFormat;
 pub(crate) enum ProfileCmd {
     /// Create a new profile
     Add(AddArgs),
-    /// List stored profiles
+    /// List local and cached registry profiles
     List,
     /// Show one profile
     Show(ShowArgs),
@@ -132,6 +132,63 @@ pub(crate) struct ShowArgs {
 pub(crate) struct RemoveArgs {
     /// Profile id
     pub(crate) id: String,
+}
+
+/// `ProfileNotFound` for `id`. Five call sites build this identically.
+fn profile_not_found(id: &str) -> PaksmithError {
+    PaksmithError::Profile {
+        fault: ProfileFault::ProfileNotFound { id: id.to_string() },
+    }
+}
+
+/// Resolve `id` across the local store and the registry cache (local wins), or
+/// fail with `ProfileNotFound` (#658).
+///
+/// OFFLINE ONLY, and deliberately unlike `--game`/`--detect`: those auto-fetch
+/// when the cache is stale or lacks the id (`resolve_pak_context`), because
+/// they are on their way to opening an archive. These are read/diagnostic
+/// commands, and a `show` that silently hits the network is surprising — so an
+/// id that exists only in a never-fetched registry document does NOT resolve
+/// here. The hint on the failure path says so rather than leaving the user to
+/// infer it from a command that works with `--game` and not with `show`.
+///
+/// The same asymmetry means a STALE cache is reported as-is: `test` can call a
+/// key wrong that `--game` would refresh and accept. That is a real gap, not a
+/// hidden one — see the note in the issue-#658 follow-up.
+fn resolve_layered_or_not_found<'a>(
+    store: &'a ProfileStore,
+    cache: Option<&'a paksmith_core::profile::cache::RegistryCache>,
+    id: &str,
+) -> paksmith_core::Result<ResolvedProfile<'a>> {
+    resolve_profile_layered(store, cache, id).ok_or_else(|| {
+        eprintln!(
+            "note: `{id}` is in neither the local store nor the cached registry; \
+             if it is a registry profile, run `paksmith profile fetch` first"
+        );
+        profile_not_found(id)
+    })
+}
+
+/// `ProfileNotFound` for a command that MUTATES the local store, with a
+/// remediation hint when the id does resolve in the registry cache (#658).
+///
+/// `show`/`test` resolve registry profiles, so a bare "no profile named `x`"
+/// from `remove`/`key add`/`key remove` is factually false one command later.
+/// Registry profiles are genuinely read-only — the cached document is
+/// ed25519-signed and re-fetched wholesale — so the exit code stands; only the
+/// wording needed to stop lying. Follows the remediation-hint precedent
+/// `ProfileFault::NoPakPaths` already sets for the same local/registry split,
+/// CLI-side so core's wire-stable `Display` set is untouched.
+fn local_profile_not_found(id: &str) -> PaksmithError {
+    let cache = paksmith_core::profile::resolve::load_cache_lenient();
+    if cache.as_ref().and_then(|c| c.get(id)).is_some() {
+        eprintln!(
+            "note: `{id}` is a registry profile and is read-only; run \
+             `paksmith profile add {id} --name <name>` to create a local \
+             profile that shadows it"
+        );
+    }
+    profile_not_found(id)
 }
 
 /// Current Unix time in seconds (CLI-local; core's `now_unix` is `pub(crate)`).
@@ -250,42 +307,24 @@ fn list() -> paksmith_core::Result<u8> {
 fn show(a: &ShowArgs) -> paksmith_core::Result<u8> {
     let store = ProfileStore::load()?;
     let cache = paksmith_core::profile::resolve::load_cache_lenient();
-    // LAYERED, matching `list` and every resolution path: a registry-cached
-    // profile can be auto-detected and used for extraction, so being unable to
-    // inspect it left the one command a user reaches for when it misbehaves
-    // reporting ProfileNotFound for a profile that demonstrably exists.
-    let resolved = resolve_profile_layered(&store, cache.as_ref(), &a.id).ok_or_else(|| {
-        PaksmithError::Profile {
-            fault: ProfileFault::ProfileNotFound { id: a.id.clone() },
-        }
-    })?;
+    let resolved = resolve_layered_or_not_found(&store, cache.as_ref(), &a.id)?;
 
-    // Registry profiles structurally cannot carry `mappings` or `pak_paths`
-    // (see `MappingsSource`'s registry note) — those render as `-`, and the
-    // `source` line is what explains why.
-    let (source, name, engine_version, mappings, pak_paths, keys) = match &resolved {
-        ResolvedProfile::Local(p) => (
-            "local",
-            &p.name,
-            p.engine_version.as_deref(),
-            p.mappings.as_ref(),
-            p.pak_paths.as_slice(),
-            &p.keys,
-        ),
-        ResolvedProfile::Registry(p) => (
-            "registry",
-            &p.name,
-            p.engine_version.as_deref(),
-            None,
-            [].as_slice(),
-            &p.keys,
-        ),
+    // Only the ASYMMETRIC fields are matched: a registry profile structurally
+    // carries no `mappings` and no `pak_paths` (see `MappingsSource`'s registry
+    // note), and an explicit match is what keeps that visible. Everything both
+    // arms agree on goes through the accessors.
+    let (mappings, pak_paths) = match resolved {
+        ResolvedProfile::Local(p) => (p.mappings.as_ref(), p.pak_paths.as_slice()),
+        ResolvedProfile::Registry(_) => (None, [].as_slice()),
     };
 
     println!("id: {}", a.id);
-    println!("source: {source}");
-    println!("name: {name}");
-    println!("engine_version: {}", engine_version.unwrap_or("-"));
+    println!("source: {}", resolved.source());
+    println!("name: {}", resolved.name());
+    println!(
+        "engine_version: {}",
+        resolved.engine_version().unwrap_or("-")
+    );
     match mappings {
         // Not key material — safe to show unredacted.
         Some(MappingsSource::Path(path)) => {
@@ -303,7 +342,7 @@ fn show(a: &ShowArgs) -> paksmith_core::Result<u8> {
         }
     }
     println!("keys:");
-    for (guid, key) in keys {
+    for (guid, key) in resolved.keys() {
         if a.show_keys {
             // Deliberate reveal: only `--show-keys` renders key material.
             println!(
@@ -321,9 +360,7 @@ fn show(a: &ShowArgs) -> paksmith_core::Result<u8> {
 fn remove(a: &RemoveArgs) -> paksmith_core::Result<u8> {
     let mut store = ProfileStore::load()?;
     if store.profiles.remove(&a.id).is_none() {
-        return Err(PaksmithError::Profile {
-            fault: ProfileFault::ProfileNotFound { id: a.id.clone() },
-        });
+        return Err(local_profile_not_found(&a.id));
     }
     store.save()?;
     println!("removed profile `{}`", a.id);
@@ -346,9 +383,7 @@ fn key_add(a: &KeyAddArgs) -> paksmith_core::Result<u8> {
     let p = store
         .profiles
         .get_mut(&a.id)
-        .ok_or_else(|| PaksmithError::Profile {
-            fault: ProfileFault::ProfileNotFound { id: a.id.clone() },
-        })?;
+        .ok_or_else(|| local_profile_not_found(&a.id))?;
     let _ = p.keys.insert(guid, key);
     store.save()?;
     println!("added key for GUID {} to `{}`", guid.to_hex(), a.id);
@@ -364,9 +399,7 @@ fn key_remove(a: &KeyRemoveArgs) -> paksmith_core::Result<u8> {
     let p = store
         .profiles
         .get_mut(&a.id)
-        .ok_or_else(|| PaksmithError::Profile {
-            fault: ProfileFault::ProfileNotFound { id: a.id.clone() },
-        })?;
+        .ok_or_else(|| local_profile_not_found(&a.id))?;
     if p.keys.remove(&guid).is_none() {
         return Err(PaksmithError::Profile {
             fault: ProfileFault::NoKeyForGuid {
@@ -426,29 +459,19 @@ fn fetch(a: &FetchArgs) -> paksmith_core::Result<u8> {
 fn test(a: &TestArgs) -> paksmith_core::Result<u8> {
     use paksmith_core::container::pak::PakReader;
     use paksmith_core::profile::key_test::{KeyTestOutcome, test_key};
-    use paksmith_core::profile::resolve_key_in;
 
     let store = ProfileStore::load()?;
     let cache = paksmith_core::profile::resolve::load_cache_lenient();
-    // LAYERED like `show`: key-testing a registry-shipped key is exactly the
-    // diagnostic a user needs when auto-detection resolves but extraction
-    // fails, and that key never lives in the local store.
-    let resolved = resolve_profile_layered(&store, cache.as_ref(), &a.id).ok_or_else(|| {
-        PaksmithError::Profile {
-            fault: ProfileFault::ProfileNotFound { id: a.id.clone() },
-        }
-    })?;
-    let keys = match &resolved {
-        ResolvedProfile::Local(p) => &p.keys,
-        ResolvedProfile::Registry(p) => &p.keys,
-    };
+    let resolved = resolve_layered_or_not_found(&store, cache.as_ref(), &a.id)?;
     let guid = PakReader::read_footer_guid(&a.pak)?;
-    let key = resolve_key_in(keys, guid.as_ref()).ok_or_else(|| PaksmithError::Profile {
-        fault: ProfileFault::NoKeyForGuid {
-            id: a.id.clone(),
-            guid: display_guid(guid),
-        },
-    })?;
+    let key = resolved
+        .resolve_key(guid.as_ref())
+        .ok_or_else(|| PaksmithError::Profile {
+            fault: ProfileFault::NoKeyForGuid {
+                id: a.id.clone(),
+                guid: display_guid(guid),
+            },
+        })?;
     let outcome = test_key(&a.pak, key);
     let label = match outcome {
         KeyTestOutcome::Verified => "verified",

@@ -195,6 +195,11 @@ pub struct ProfileStore {
 /// When a non-zero pak GUID is present but absent from the map, resolution
 /// falls back to the zero-default if one exists. This means a profile that
 /// stores only a single default key still opens GUID-tagged paks.
+///
+/// For a profile that may have come from the registry cache, use
+/// [`ResolvedProfile::resolve_key`] instead — [`registry::RegistryProfile`] is
+/// not a [`GameProfile`] and never will be.
+#[must_use]
 pub fn resolve_key<'a>(
     profile: &'a GameProfile,
     pak_guid: Option<&[u8; 16]>,
@@ -202,18 +207,22 @@ pub fn resolve_key<'a>(
     resolve_key_in(&profile.keys, pak_guid)
 }
 
-/// The same GUID→key rule as [`resolve_key`], over a bare key map.
+/// The single implementation of the GUID→key rule, over a bare key map.
 ///
-/// Exists because the rule has THREE callers whose profile types differ:
-/// [`GameProfile`] (local), [`registry::RegistryProfile`] (registry-cached,
-/// which is not a `GameProfile` and never will be — it carries no mappings or
-/// `pak_paths`), and `resolve::resolve_within`, which needs the same lookup but
-/// reports a miss as `NoKeyForGuid` rather than `None`. Keeping the
-/// exact-match-then-`ZERO`-fallback in one place is the point: a profile that
-/// stores only a default key must open GUID-tagged paks identically no matter
-/// which of the three asked.
+/// `pub(crate)`: the parameter is the store's internal representation, and
+/// putting `BTreeMap<KeyGuid, AesKey>` in the public API would pin that
+/// container choice forever. External callers reach the rule through
+/// [`resolve_key`] (a `GameProfile`) or [`ResolvedProfile::resolve_key`] (a
+/// profile of either origin) — neither exposes the map.
+///
+/// Three in-crate call sites share it: [`resolve_key`],
+/// [`ResolvedProfile::resolve_key`], and `resolve::resolve_within`, which needs
+/// the same lookup but reports a miss as `NoKeyForGuid` rather than `None`.
+/// Keeping exact-match-then-`ZERO`-fallback in one place is the point: a
+/// profile storing only a default key must open GUID-tagged paks identically
+/// whichever asked.
 #[must_use]
-pub fn resolve_key_in<'a>(
+pub(crate) fn resolve_key_in<'a>(
     keys: &'a BTreeMap<KeyGuid, AesKey>,
     pak_guid: Option<&[u8; 16]>,
 ) -> Option<&'a AesKey> {
@@ -243,11 +252,78 @@ pub fn display_guid(guid: Option<[u8; 16]>) -> String {
 }
 
 /// A profile resolved from either the local store or the registry cache.
+///
+/// Deliberately NOT `#[non_exhaustive]`, unlike its `#[non_exhaustive]`
+/// siblings ([`crate::profile::resolve::DetectMatch`],
+/// [`crate::profile::resolve::PakOpenContext`]): the domain is the two places a
+/// profile can come from, and a third would be a deliberate design decision
+/// rather than an incremental field addition. Callers legitimately match both
+/// arms to render the local/registry asymmetry — a registry profile carries no
+/// `mappings` and no `pak_paths` — and forcing a `_ =>` arm on a closed
+/// two-variant enum would obscure exactly the distinction those matches exist
+/// to make. Prefer the accessors below where the two arms agree.
+#[derive(Debug, Clone, Copy)]
 pub enum ResolvedProfile<'a> {
     /// User-authored local profile (wins).
     Local(&'a GameProfile),
     /// Cached registry profile.
     Registry(&'a registry::RegistryProfile),
+}
+
+impl<'a> ResolvedProfile<'a> {
+    /// Which layer answered: `"local"` or `"registry"`.
+    ///
+    /// Matches the vocabulary [`crate::profile::resolve::DetectMatch::source`]
+    /// already uses, so the two are not spelled differently for one concept.
+    #[must_use]
+    pub fn source(self) -> &'static str {
+        match self {
+            Self::Local(_) => "local",
+            Self::Registry(_) => "registry",
+        }
+    }
+
+    /// Display name.
+    #[must_use]
+    pub fn name(self) -> &'a str {
+        match self {
+            Self::Local(p) => &p.name,
+            Self::Registry(p) => &p.name,
+        }
+    }
+
+    /// Declared engine version, if the profile carries one (#656).
+    #[must_use]
+    pub fn engine_version(self) -> Option<&'a str> {
+        match self {
+            Self::Local(p) => p.engine_version.as_deref(),
+            Self::Registry(p) => p.engine_version.as_deref(),
+        }
+    }
+
+    /// The profile's `guid → key` map.
+    ///
+    /// The one field whose meaning is identical on both arms, and the reason
+    /// this accessor exists: the same two-arm match had accumulated at three
+    /// call sites across two crates.
+    #[must_use]
+    pub fn keys(self) -> &'a BTreeMap<KeyGuid, AesKey> {
+        match self {
+            Self::Local(p) => &p.keys,
+            Self::Registry(p) => &p.keys,
+        }
+    }
+
+    /// Resolve this profile's key for `pak_guid` — see [`resolve_key`] for the
+    /// exact-match-then-default rule.
+    ///
+    /// The public way to apply that rule to a resolved profile of either
+    /// origin. Callers outside this crate use this rather than reaching for the
+    /// key map, so the map's container type stays an implementation detail.
+    #[must_use]
+    pub fn resolve_key(self, pak_guid: Option<&[u8; 16]>) -> Option<&'a AesKey> {
+        resolve_key_in(self.keys(), pak_guid)
+    }
 }
 
 /// Resolve `id`: local store wins; else the registry cache; else `None`.
@@ -514,7 +590,7 @@ mod tests {
         };
         assert!(resolve_key(&p2, Some(g.as_bytes())).is_none());
         // I3: map has only a non-zero GUID key; pak_guid = None → zero-default
-        // lookup misses → None (exercises the `_ =>` arm's `.get(&ZERO)` miss)
+        // lookup misses → None (exercises the `.or_else(get(&ZERO))` fallback)
         let mut only_nonzero_keys = BTreeMap::new();
         let _ = only_nonzero_keys.insert(g, key(K1));
         let p3 = GameProfile {

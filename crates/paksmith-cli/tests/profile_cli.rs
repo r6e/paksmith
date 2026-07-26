@@ -1011,8 +1011,10 @@ fn show_resolves_cached_registry_profile() {
         txt.contains("5.3"),
         "the registry profile's engine_version must appear: {txt}"
     );
+    // The FULL line, not the bare word: `contains("registry")` passes on any
+    // incidental mention and would survive deleting the line outright.
     assert!(
-        txt.contains("registry"),
+        txt.contains("source: registry"),
         "provenance must be stated so a user knows why it is not editable: {txt}"
     );
 }
@@ -1066,6 +1068,13 @@ fn show_local_shadows_cached_registry_entry() {
         .success();
     let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(txt.contains("LocalWins"), "local must win: {txt}");
+    // Pins the OTHER arm's literal. Without this, swapping the two source
+    // strings passes the whole suite — and the only mutants CI generates here
+    // are whole-body `Ok(0)`/`Ok(1)` replacements, which never perturb them.
+    assert!(
+        txt.contains("source: local"),
+        "a local profile must report local provenance: {txt}"
+    );
     assert!(
         !txt.contains("RegistryLoses"),
         "shadowed registry entry must not be shown: {txt}"
@@ -1098,9 +1107,15 @@ fn test_resolves_cached_registry_profile() {
         .assert()
         .success();
     let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    // Unhedged on purpose: this fixture + key deterministically yields
+    // `Verified` (see `profile_test_reports_verified_for_correct_key`), and
+    // `KeyTestOutcome::Decrypted` is the documented WEAKER outcome — a zeroed
+    // hash slot can be forced by a downgrade attack. Accepting either would let
+    // a Verified→Decrypted regression pass, and `.success()` above already
+    // covers "one of the two".
     assert!(
-        txt.contains("verified") || txt.contains("decrypted"),
-        "the registry-supplied key must test as working: {txt}"
+        txt.contains("verified"),
+        "the registry-supplied key must VERIFY, not merely decrypt: {txt}"
     );
 }
 
@@ -1116,4 +1131,73 @@ fn test_unknown_id_still_not_found_with_a_cache_present() {
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
         .code(2);
+}
+
+/// A corrupt cache must not make a LOCAL profile unshowable. `show` and `test`
+/// now depend on `load_cache_lenient`'s degradation, which only `list` covered
+/// (`list_degrades_on_corrupt_cache`) — swapping it for a hard `load()?` would
+/// turn a corrupt cache into exit 2 for local ids and nothing would catch it.
+#[test]
+fn show_and_test_degrade_on_corrupt_cache_for_a_local_id() {
+    let cfg = tempdir().unwrap();
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "mine", "--name", "Mine"])
+        .assert()
+        .success();
+    std::fs::write(base.join("registry-cache.json"), b"not json {{{").unwrap();
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "mine"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(txt.contains("source: local"), "{txt}");
+
+    // `test` reaches the same degradation before touching the pak.
+    let _ = paksmith(cfg.path())
+        .args(["profile", "test", "mine"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(2); // no key for the GUID — resolution itself succeeded
+}
+
+/// The mutating commands are read-only w.r.t. registry profiles, and say so
+/// instead of claiming the profile does not exist (#658). Exit code stays 2;
+/// only the wording gained the remediation hint.
+#[test]
+fn mutating_commands_hint_that_registry_profiles_are_read_only() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    for args in [
+        vec!["profile", "remove", "reg-only"],
+        vec![
+            "profile",
+            "key",
+            "remove",
+            "reg-only",
+            "--guid",
+            &"00".repeat(16),
+        ],
+    ] {
+        let out = paksmith(cfg.path()).args(&args).assert().code(2);
+        let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+        assert!(
+            err.contains("registry profile") && err.contains("read-only"),
+            "{args:?} must explain the id is a read-only registry profile: {err}"
+        );
+    }
+
+    // An id in NEITHER layer gets no such hint — the plain not-found stands.
+    let out = paksmith(cfg.path())
+        .args(["profile", "remove", "nowhere"])
+        .assert()
+        .code(2);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        !err.contains("read-only"),
+        "an absent id must not be described as a registry profile: {err}"
+    );
 }

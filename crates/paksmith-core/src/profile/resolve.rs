@@ -558,11 +558,12 @@ async fn try_fetch(cfg: &RegistryConfig, now: u64) -> crate::Result<RegistryCach
 ///
 /// An EMPTY key map is `Ok(None)`: the profile configures no keys at all
 /// (legitimate since #651 — a mappings-only profile for an unencrypted
-/// game), matching `resolve_key`'s `None` for an empty map; an encrypted
+/// game), matching `resolve_key_in`'s `None` for an empty map; an encrypted
 /// pak then fails loudly downstream at `PakReader::open`. A POPULATED
 /// map resolves exact GUID match → zero-default (`KeyGuid::ZERO`) →
-/// `NoKeyForGuid` error (a genuine key/GUID mismatch — here the two
-/// helpers diverge: `resolve_key` stays `None`, this path errors).
+/// `NoKeyForGuid` error (a genuine key/GUID mismatch — here this wrapper
+/// diverges from the shared rule: `resolve_key_in` stays `None`, this
+/// path errors).
 fn resolve_within(
     keys: &BTreeMap<KeyGuid, AesKey>,
     id: &str,
