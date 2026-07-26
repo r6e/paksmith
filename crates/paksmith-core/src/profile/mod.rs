@@ -195,8 +195,35 @@ pub struct ProfileStore {
 /// When a non-zero pak GUID is present but absent from the map, resolution
 /// falls back to the zero-default if one exists. This means a profile that
 /// stores only a single default key still opens GUID-tagged paks.
+///
+/// For a profile that may have come from the registry cache, use
+/// [`ResolvedProfile::resolve_key`] instead — [`registry::RegistryProfile`] is
+/// not a [`GameProfile`] and never will be.
+#[must_use]
 pub fn resolve_key<'a>(
     profile: &'a GameProfile,
+    pak_guid: Option<&[u8; 16]>,
+) -> Option<&'a AesKey> {
+    resolve_key_in(&profile.keys, pak_guid)
+}
+
+/// The single implementation of the GUID→key rule, over a bare key map.
+///
+/// `pub(crate)` because every caller outside this crate is better served by
+/// one of the two typed entry points — [`resolve_key`] for a [`GameProfile`],
+/// [`ResolvedProfile::resolve_key`] for a profile of either origin — so the
+/// bare-map form would be public surface with no consumer. It is NOT hiding
+/// the container type: `GameProfile::keys`, `RegistryProfile::keys` and
+/// [`ResolvedProfile::keys`] are all public and all `BTreeMap<KeyGuid,
+/// AesKey>`, so that choice was pinned long before this function existed.
+///
+/// What it does own is the exact-match-then-`ZERO`-fallback rule, in one
+/// place, for callers that report a miss differently: `None` here, and
+/// `NoKeyForGuid` in `resolve::resolve_within`. A profile storing only a
+/// default key must open GUID-tagged paks identically whichever asked.
+#[must_use]
+pub(crate) fn resolve_key_in<'a>(
+    keys: &'a BTreeMap<KeyGuid, AesKey>,
     pak_guid: Option<&[u8; 16]>,
 ) -> Option<&'a AesKey> {
     // A missing pak GUID maps to ZERO directly; a present GUID (zero or
@@ -204,10 +231,7 @@ pub fn resolve_key<'a>(
     // an all-zero GUID yields `KeyGuid::ZERO`, so the two paths converge on
     // the same lookup — no match guard is needed to special-case it.
     let guid = pak_guid.map_or(KeyGuid::ZERO, |b| KeyGuid::from_bytes(*b));
-    profile
-        .keys
-        .get(&guid)
-        .or_else(|| profile.keys.get(&KeyGuid::ZERO))
+    keys.get(&guid).or_else(|| keys.get(&KeyGuid::ZERO))
 }
 
 /// Render an [`AesKey`] as lowercase 64-char hex.
@@ -228,11 +252,70 @@ pub fn display_guid(guid: Option<[u8; 16]>) -> String {
 }
 
 /// A profile resolved from either the local store or the registry cache.
+///
+/// Deliberately NOT `#[non_exhaustive]`, unlike its siblings: callers match
+/// both arms to render the local/registry asymmetry (a registry profile
+/// carries no `mappings` and no `pak_paths`), and a `_ =>` arm would turn a
+/// future third source into silence at exactly the sites that must not be
+/// silent. Use the accessors below wherever the arms agree.
+#[derive(Debug, Clone, Copy)]
 pub enum ResolvedProfile<'a> {
     /// User-authored local profile (wins).
     Local(&'a GameProfile),
     /// Cached registry profile.
     Registry(&'a registry::RegistryProfile),
+}
+
+impl<'a> ResolvedProfile<'a> {
+    /// Which layer answered: `"local"` or `"registry"`.
+    ///
+    /// Matches the vocabulary [`crate::profile::resolve::DetectMatch::source`]
+    /// already uses, so the two are not spelled differently for one concept.
+    #[must_use]
+    pub fn source(self) -> &'static str {
+        match self {
+            Self::Local(_) => "local",
+            Self::Registry(_) => "registry",
+        }
+    }
+
+    /// Display name.
+    #[must_use]
+    pub fn name(self) -> &'a str {
+        match self {
+            Self::Local(p) => &p.name,
+            Self::Registry(p) => &p.name,
+        }
+    }
+
+    /// Declared engine version, if the profile carries one (#656).
+    #[must_use]
+    pub fn engine_version(self) -> Option<&'a str> {
+        match self {
+            Self::Local(p) => p.engine_version.as_deref(),
+            Self::Registry(p) => p.engine_version.as_deref(),
+        }
+    }
+
+    /// The profile's `guid → key` map.
+    #[must_use]
+    pub fn keys(self) -> &'a BTreeMap<KeyGuid, AesKey> {
+        match self {
+            Self::Local(p) => &p.keys,
+            Self::Registry(p) => &p.keys,
+        }
+    }
+
+    /// Resolve this profile's key for `pak_guid` — see [`resolve_key`] for the
+    /// exact-match-then-default rule.
+    ///
+    /// The public way to apply that rule to a resolved profile of either
+    /// origin, so callers do not re-implement the ZERO fallback against
+    /// [`Self::keys`].
+    #[must_use]
+    pub fn resolve_key(self, pak_guid: Option<&[u8; 16]>) -> Option<&'a AesKey> {
+        resolve_key_in(self.keys(), pak_guid)
+    }
 }
 
 /// Resolve `id`: local store wins; else the registry cache; else `None`.
@@ -465,6 +548,89 @@ mod tests {
         );
     }
 
+    /// Every [`ResolvedProfile`] accessor, on BOTH arms, with DIVERGENT values.
+    ///
+    /// The mutants these guard are whole-body replacements — they make the
+    /// method return one constant for both arms — so a fixture pair sharing a
+    /// value would let the mutant survive. Every ASSERTED value therefore
+    /// differs between the arms (name, engine version, `keys().len()` 1 vs 2),
+    /// and both are checked. The two maps do share `ZERO -> K1`: the
+    /// fallback assertion below needs a default on each side.
+    #[test]
+    fn resolved_profile_accessors_report_each_arm() {
+        use crate::profile::registry::RegistryProfile;
+
+        let mut local_keys = BTreeMap::new();
+        let _ = local_keys.insert(KeyGuid::ZERO, key(K1));
+        let local = GameProfile {
+            name: "LocalName".into(),
+            engine_version: Some("5.3".into()),
+            keys: local_keys,
+            detect: None,
+            mappings: None,
+            pak_paths: Vec::new(),
+        };
+
+        // Divergent on every axis: different name, different engine version,
+        // different key-map size (2 vs 1), different GUID.
+        let g = KeyGuid::from_bytes([9u8; 16]);
+        let mut reg_keys = BTreeMap::new();
+        let _ = reg_keys.insert(KeyGuid::ZERO, key(K1));
+        let _ = reg_keys.insert(g, key(&"22".repeat(32)));
+        let registry = RegistryProfile {
+            id: "reg".into(),
+            name: "RegistryName".into(),
+            engine_version: Some("4.27".into()),
+            keys: reg_keys,
+            detect: None,
+        };
+
+        let l = ResolvedProfile::Local(&local);
+        let r = ResolvedProfile::Registry(&registry);
+
+        assert_eq!(l.source(), "local");
+        assert_eq!(r.source(), "registry");
+        assert_eq!(l.name(), "LocalName");
+        assert_eq!(r.name(), "RegistryName");
+        assert_eq!(l.engine_version(), Some("5.3"));
+        assert_eq!(r.engine_version(), Some("4.27"));
+        assert_eq!(l.keys().len(), 1);
+        assert_eq!(r.keys().len(), 2);
+
+        // `resolve_key` on both arms: the ZERO default, and the registry's
+        // GUID-specific key which the local arm does not have at all.
+        assert_eq!(l.resolve_key(None).unwrap().to_hex(), K1);
+        assert_eq!(r.resolve_key(None).unwrap().to_hex(), K1);
+        assert_eq!(
+            r.resolve_key(Some(g.as_bytes())).unwrap().to_hex(),
+            "22".repeat(32),
+            "registry arm resolves its GUID-specific key"
+        );
+        assert_eq!(
+            l.resolve_key(Some(g.as_bytes())).unwrap().to_hex(),
+            K1,
+            "local arm has no such GUID and falls back to the ZERO default"
+        );
+    }
+
+    /// A profile with NO engine version reports `None` — pins the
+    /// `Some("")`/`Some("xyzzy")` mutants that a `Some(_)`-only fixture leaves
+    /// alive.
+    #[test]
+    fn resolved_profile_engine_version_is_none_when_unset() {
+        let p = GameProfile {
+            name: "N".into(),
+            engine_version: None,
+            keys: BTreeMap::new(),
+            detect: None,
+            mappings: None,
+            pak_paths: Vec::new(),
+        };
+        assert_eq!(ResolvedProfile::Local(&p).engine_version(), None);
+        assert!(ResolvedProfile::Local(&p).keys().is_empty());
+        assert!(ResolvedProfile::Local(&p).resolve_key(None).is_none());
+    }
+
     #[test]
     fn resolve_prefers_exact_guid_then_zero_default() {
         let g = KeyGuid::from_hex("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6").unwrap();
@@ -499,7 +665,7 @@ mod tests {
         };
         assert!(resolve_key(&p2, Some(g.as_bytes())).is_none());
         // I3: map has only a non-zero GUID key; pak_guid = None → zero-default
-        // lookup misses → None (exercises the `_ =>` arm's `.get(&ZERO)` miss)
+        // lookup misses → None (exercises the `.or_else(get(&ZERO))` fallback)
         let mut only_nonzero_keys = BTreeMap::new();
         let _ = only_nonzero_keys.insert(g, key(K1));
         let p3 = GameProfile {

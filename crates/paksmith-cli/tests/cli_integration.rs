@@ -59,10 +59,11 @@ fn list_and_search_json_carry_schema_version_envelope() {
 }
 
 #[test]
-fn quiet_suppresses_auto_json_note() {
+fn auto_json_note_fires_only_when_auto_resolved_to_json() {
     // #652 (a): the piped-auto note is advisory chatter; --quiet silences
     // it. Without --quiet it still fires (pinned here so the note can't
-    // silently vanish).
+    // silently vanish). The third leg pins the OTHER half of the guard —
+    // an explicitly requested format is not an auto-resolution.
     let loud = Command::cargo_bin("paksmith")
         .unwrap()
         .args(["list", &fixture_path("minimal_v6.pak")])
@@ -87,6 +88,25 @@ fn quiet_suppresses_auto_json_note() {
         String::from_utf8(quiet.stderr).unwrap(),
         "",
         "--quiet must silence the advisory note"
+    );
+
+    // EXPLICIT `--format json`: the note's guard is `Auto && Json`, and both
+    // runs above have BOTH terms true, so they never exercise the conjunction
+    // with its terms disagreeing. Here `Json` holds and `Auto` does not, so a
+    // `&&`-to-`||` regression would emit a note about a resolution the user
+    // made explicitly.
+    let explicit = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env_remove("RUST_LOG")
+        .args(["--format", "json", "list", &fixture_path("minimal_v6.pak")])
+        .output()
+        .unwrap();
+    assert!(explicit.status.success());
+    assert!(
+        !String::from_utf8(explicit.stderr)
+            .unwrap()
+            .contains("note:"),
+        "an explicitly requested format must not be announced as auto-resolved"
     );
 }
 

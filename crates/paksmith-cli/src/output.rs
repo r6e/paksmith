@@ -43,6 +43,17 @@ pub(crate) enum ResolvedFormat {
     Table,
 }
 
+/// Emit an advisory `note:` line to stderr unless `--quiet`.
+///
+/// The single guarded site for the flag's "no advisory notes" half — every
+/// advisory note must route through here, or the contract depends on
+/// remembering an `if !quiet` at each new call site.
+pub(crate) fn note(quiet: bool, msg: &str) {
+    if !quiet {
+        eprintln!("note: {msg}");
+    }
+}
+
 /// Emit a one-line stderr note when `--format auto` silently resolved to JSON
 /// (stdout isn't a TTY), so users piping into head/jq aren't surprised.
 /// `--quiet` (#652) suppresses it — it is advisory chatter, not an error.
@@ -51,9 +62,10 @@ pub(crate) fn note_auto_resolved_to_json(
     resolved: ResolvedFormat,
     quiet: bool,
 ) {
-    if !quiet && matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
-        eprintln!(
-            "note: stdout is not a terminal — emitting JSON. Pass --format table to force table output."
+    if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
+        note(
+            quiet,
+            "stdout is not a terminal — emitting JSON. Pass --format table to force table output.",
         );
     }
 }
@@ -319,9 +331,14 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
 /// characters.
 ///
 /// Consumers: the list/search entries table (here) and extract's
-/// summary FAILED lines. The remaining same-class surface — inspect's
-/// table tree renderer — is tracked as issue #708 (many call sites;
-/// its own pass). The JSON path deliberately has no equivalent — NOT
+/// summary FAILED lines. Two same-class surfaces remain, BOTH tracked
+/// as issue #708 (many call sites; their own pass): inspect's table
+/// tree renderer, and the `profile` command family — `show`, `list`
+/// and `detect` render registry-authored `name`/`id`/`engine_version`,
+/// and `profile`'s not-found hints echo an id that may have been copied
+/// from a registry listing. Registry strings are length-capped
+/// (`MAX_STR`) but not character-class restricted. The JSON path
+/// deliberately has no equivalent — NOT
 /// because serde escapes everything (it escapes C0 only; DEL and C1
 /// incl. U+009B pass through as raw UTF-8) but because JSON is the
 /// machine interface: exact path bytes are the round-tripping

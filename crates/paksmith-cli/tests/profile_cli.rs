@@ -974,3 +974,361 @@ async fn profile_fetch_allow_http_still_verifies_signature() {
         "no cache may be written when signature verification fails"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #658 item 1: `profile show` / `profile test` resolve LAYERED, so a
+// cached registry profile can be inspected and key-tested. `profile list`
+// already did this (`profile_list_shows_cached_registry_profiles`); these two
+// were local-store-only, so a registry-supplied game could be auto-detected
+// and used for extraction yet could not be shown or diagnosed.
+// ---------------------------------------------------------------------------
+
+/// Seed a registry cache holding one profile with the encrypted fixture's key.
+fn seed_registry_cache(config_dir: &std::path::Path, id: &str, name: &str) {
+    seed_registry_cache_with_key(config_dir, id, name, KEY);
+}
+
+/// As above, with an explicit key — lets a test seed a WRONG registry key,
+/// which is the only way to reach `test`'s stale-cache note.
+fn seed_registry_cache_with_key(config_dir: &std::path::Path, id: &str, name: &str, key: &str) {
+    let base = config_dir.join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    let cache_json = format!(
+        r#"{{"fetched_at_unix":9999999999,"profiles":[{{"id":"{id}","name":"{name}","engine_version":"5.3","keys":{{"00000000000000000000000000000000":"{key}"}}}}]}}"#
+    );
+    std::fs::write(base.join("registry-cache.json"), cache_json).unwrap();
+}
+
+/// `profile show` resolves a registry-cached id and reports its provenance.
+#[test]
+fn show_resolves_cached_registry_profile() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "reg-only"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+    assert!(txt.contains("reg-only"), "id must appear: {txt}");
+    assert!(txt.contains("RegOnly"), "name must appear: {txt}");
+    assert!(
+        txt.contains("5.3"),
+        "the registry profile's engine_version must appear: {txt}"
+    );
+    // The FULL line, not the bare word: renaming the label to `origin:` would
+    // still satisfy `contains("registry")`.
+    assert!(
+        txt.contains("source: registry"),
+        "provenance must be stated so a user knows why it is not editable: {txt}"
+    );
+}
+
+/// Keys stay redacted for registry profiles too — the reveal is `--show-keys`
+/// only, exactly as for local ones.
+#[test]
+fn show_registry_profile_redacts_keys_by_default() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "reg-only"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        !txt.contains(KEY),
+        "registry key material must not leak without --show-keys: {txt}"
+    );
+    assert!(
+        txt.contains("<redacted>"),
+        "redaction marker expected: {txt}"
+    );
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "reg-only", "--show-keys"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        txt.contains(KEY),
+        "--show-keys must reveal registry keys as it does local ones: {txt}"
+    );
+}
+
+/// A local profile shadows a cached registry entry with the same id — the same
+/// precedence `resolve_profile_layered` applies everywhere else.
+#[test]
+fn show_local_shadows_cached_registry_entry() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "dual", "--name", "LocalWins"])
+        .assert()
+        .success();
+    seed_registry_cache(cfg.path(), "dual", "RegistryLoses");
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "dual"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(txt.contains("LocalWins"), "local must win: {txt}");
+    // Pins the OTHER arm's literal: without this, swapping the two source
+    // strings passes the whole suite.
+    assert!(
+        txt.contains("source: local"),
+        "a local profile must report local provenance: {txt}"
+    );
+    assert!(
+        !txt.contains("RegistryLoses"),
+        "shadowed registry entry must not be shown: {txt}"
+    );
+}
+
+/// An id in neither the store nor the cache is still `ProfileNotFound` (exit 2)
+/// — layering must not soften the unknown-id contract.
+#[test]
+fn show_unknown_id_still_not_found_with_a_cache_present() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    let _ = paksmith(cfg.path())
+        .args(["profile", "show", "absent"])
+        .assert()
+        .code(2);
+}
+
+/// `profile test` key-tests a registry-cached profile against a real encrypted
+/// pak — the diagnostic that tells a user whether a registry-shipped key works.
+#[test]
+fn test_resolves_cached_registry_profile() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "test", "reg-only"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    // Unhedged on purpose: this fixture + key deterministically yields
+    // `Verified` (see `profile_test_reports_verified_for_correct_key`), and
+    // `KeyTestOutcome::Decrypted` is the documented WEAKER outcome — a zeroed
+    // hash slot can be forced by a downgrade attack. Accepting either would let
+    // a Verified→Decrypted regression pass, and `.success()` above already
+    // covers "one of the two".
+    assert!(
+        txt.contains("verified"),
+        "the registry-supplied key must VERIFY, not merely decrypt: {txt}"
+    );
+    // Negates the stale-cache note's OUTCOME term: a registry key that WORKS
+    // must not be blamed on a stale cache. Without this, the note firing on
+    // every registry `test` goes unnoticed.
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        !err.contains("cached registry document"),
+        "a working registry key must not be called stale: {err}"
+    );
+}
+
+/// `profile test` on an id present nowhere stays `ProfileNotFound` (exit 2),
+/// distinct from the exit-1 "key didn't work" outcome.
+#[test]
+fn test_unknown_id_still_not_found_with_a_cache_present() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    let _ = paksmith(cfg.path())
+        .args(["profile", "test", "absent"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(2);
+}
+
+/// A corrupt cache must not make a LOCAL profile unshowable. `show` and `test`
+/// now depend on `load_cache_lenient`'s degradation, which only `list` covered
+/// (`list_degrades_on_corrupt_cache`) — swapping it for a hard `load()?` would
+/// turn a corrupt cache into exit 2 for local ids and nothing would catch it.
+#[test]
+fn show_and_test_degrade_on_corrupt_cache_for_a_local_id() {
+    let cfg = tempdir().unwrap();
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "mine", "--name", "Mine"])
+        .assert()
+        .success();
+    std::fs::write(base.join("registry-cache.json"), b"not json {{{").unwrap();
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "mine"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(txt.contains("source: local"), "{txt}");
+
+    // Give the profile the fixture's key so the degraded path exits 0. A hard
+    // `RegistryCache::load()?` would fail with `CacheCorrupt` — ALSO exit 2 —
+    // so asserting `.code(2)` here would pass against the very regression this
+    // test documents.
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "mine", "--key", KEY])
+        .assert()
+        .success();
+    let out = paksmith(cfg.path())
+        .args(["profile", "test", "mine"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(txt.contains("verified"), "{txt}");
+}
+
+/// The mutating commands are read-only w.r.t. registry profiles, and say so
+/// instead of claiming the profile does not exist (#658). Exit code stays 2;
+/// only the wording gained the remediation hint.
+#[test]
+fn mutating_commands_hint_that_registry_profiles_are_read_only() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    for args in [
+        vec!["profile", "remove", "reg-only"],
+        vec![
+            "profile",
+            "key",
+            "remove",
+            "reg-only",
+            "--guid",
+            &"00".repeat(16),
+        ],
+        vec!["profile", "key", "add", "reg-only", "--key", KEY],
+    ] {
+        let out = paksmith(cfg.path()).args(&args).assert().code(2);
+        let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+        assert!(
+            err.contains("signed registry document") && err.contains("cannot"),
+            "{args:?} must explain the id cannot be edited locally: {err}"
+        );
+    }
+
+    // An id in NEITHER layer gets no such hint — the plain not-found stands.
+    let out = paksmith(cfg.path())
+        .args(["profile", "remove", "nowhere"])
+        .assert()
+        .code(2);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        !err.contains("signed registry document"),
+        "an absent id must not be described as a registry profile: {err}"
+    );
+}
+
+/// `--quiet` is documented as "no advisory notes". All three `note:` lines
+/// added for #658 route through the same guarded helper as the pre-existing
+/// one, so they gate too — errors still print, since those are not notes.
+/// (The third, `test`'s stale-cache note, is covered in
+/// `test_warns_only_when_a_wrong_key_came_from_the_registry`.)
+#[test]
+fn quiet_suppresses_the_advisory_notes_but_not_the_error() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
+
+    // The read-only hint on a mutating command.
+    let out = paksmith(cfg.path())
+        .args(["--quiet", "profile", "remove", "reg-only"])
+        .assert()
+        .code(2);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        !err.contains("note:"),
+        "advisory note must be silenced: {err}"
+    );
+    assert!(
+        err.contains("paksmith: error:"),
+        "the error itself must still print: {err}"
+    );
+
+    // The `profile fetch` hint on an unresolvable id.
+    let out = paksmith(cfg.path())
+        .args(["--quiet", "profile", "show", "absent"])
+        .assert()
+        .code(2);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        !err.contains("note:"),
+        "advisory note must be silenced: {err}"
+    );
+
+    // Without --quiet both notes appear (otherwise the gate proves nothing).
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "absent"])
+        .assert()
+        .code(2);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        err.contains("note:"),
+        "the note must appear unquieted: {err}"
+    );
+}
+
+/// `test` warns that a REGISTRY-sourced key came from a cache these commands
+/// never refresh — the disclosure that stops `profile test` contradicting
+/// `extract --game` inside the staleness window.
+///
+/// Fires for registry+wrong; silent for local+wrong, where `profile fetch`
+/// would be useless advice pointing away from the real cause; silenced by
+/// `--quiet`. The remaining term — a registry key that WORKS — is negated in
+/// `test_resolves_cached_registry_profile`.
+#[test]
+fn test_warns_only_when_a_wrong_key_came_from_the_registry() {
+    let wrong = "00".repeat(32);
+
+    // (a) registry + wrong key → exit 1, note present.
+    let cfg = tempdir().unwrap();
+    seed_registry_cache_with_key(cfg.path(), "reg-bad", "RegBad", &wrong);
+    let out = paksmith(cfg.path())
+        .args(["profile", "test", "reg-bad"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(1);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        err.contains("cached registry document"),
+        "a registry-sourced wrong key must name the stale cache: {err}"
+    );
+
+    // (b) local + wrong key → exit 1, note ABSENT. `profile fetch` cannot help
+    // a local profile, so firing here would send the user the wrong way.
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "loc", "--name", "Loc"])
+        .assert()
+        .success();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "loc", "--key", &wrong])
+        .assert()
+        .success();
+    let out = paksmith(cfg.path())
+        .args(["profile", "test", "loc"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(1);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        !err.contains("cached registry document"),
+        "a LOCAL wrong key must not be blamed on the registry cache: {err}"
+    );
+
+    // (c) --quiet silences it; the exit code is unchanged.
+    let cfg = tempdir().unwrap();
+    seed_registry_cache_with_key(cfg.path(), "reg-bad", "RegBad", &wrong);
+    let out = paksmith(cfg.path())
+        .args(["--quiet", "profile", "test", "reg-bad"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(1);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(!err.contains("cached registry document"), "{err}");
+}

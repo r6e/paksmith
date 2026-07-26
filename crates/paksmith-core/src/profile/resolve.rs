@@ -222,10 +222,7 @@ pub async fn resolve_pak_context(
     //    the cache.
     match resolve_profile_layered(&store, cache.as_ref(), id) {
         Some(p) => {
-            let key = match &p {
-                ResolvedProfile::Local(p) => resolve_within(&p.keys, id, pak_guid)?,
-                ResolvedProfile::Registry(p) => resolve_within(&p.keys, id, pak_guid)?,
-            };
+            let key = resolve_within(p.keys(), id, pak_guid)?;
             Ok(ProfileParseInputs::from_resolved(&p, id).into_context(key))
         }
         None => Err(PaksmithError::Profile {
@@ -453,15 +450,15 @@ impl ProfileParseInputs {
     /// carry `engine_version`: it is the one parse input that survives
     /// the local/registry split (#656).
     fn from_resolved(profile: &ResolvedProfile<'_>, id: &str) -> Self {
-        match profile {
-            ResolvedProfile::Local(p) => Self {
-                mappings: p.mappings.clone(),
-                engine_version: parse_engine_version(p.engine_version.as_deref(), id),
+        Self {
+            // Only `mappings` differs: a registry profile structurally cannot
+            // carry one (see `MappingsSource`'s registry note). The explicit
+            // match is what keeps that asymmetry visible.
+            mappings: match profile {
+                ResolvedProfile::Local(p) => p.mappings.clone(),
+                ResolvedProfile::Registry(_) => None,
             },
-            ResolvedProfile::Registry(p) => Self {
-                mappings: None,
-                engine_version: parse_engine_version(p.engine_version.as_deref(), id),
-            },
+            engine_version: parse_engine_version(profile.engine_version(), id),
         }
     }
 
@@ -558,11 +555,12 @@ async fn try_fetch(cfg: &RegistryConfig, now: u64) -> crate::Result<RegistryCach
 ///
 /// An EMPTY key map is `Ok(None)`: the profile configures no keys at all
 /// (legitimate since #651 — a mappings-only profile for an unencrypted
-/// game), matching `resolve_key`'s `None` for an empty map; an encrypted
+/// game), matching `resolve_key_in`'s `None` for an empty map; an encrypted
 /// pak then fails loudly downstream at `PakReader::open`. A POPULATED
 /// map resolves exact GUID match → zero-default (`KeyGuid::ZERO`) →
-/// `NoKeyForGuid` error (a genuine key/GUID mismatch — here the two
-/// helpers diverge: `resolve_key` stays `None`, this path errors).
+/// `NoKeyForGuid` error (a genuine key/GUID mismatch — here this wrapper
+/// diverges from the shared rule: `resolve_key_in` stays `None`, this
+/// path errors).
 fn resolve_within(
     keys: &BTreeMap<KeyGuid, AesKey>,
     id: &str,
@@ -571,16 +569,14 @@ fn resolve_within(
     if keys.is_empty() {
         return Ok(None);
     }
-    let guid = pak_guid.map_or(KeyGuid::ZERO, KeyGuid::from_bytes);
-    let key = keys
-        .get(&guid)
-        .or_else(|| keys.get(&KeyGuid::ZERO))
-        .ok_or_else(|| PaksmithError::Profile {
+    let key = crate::profile::resolve_key_in(keys, pak_guid.as_ref()).ok_or_else(|| {
+        PaksmithError::Profile {
             fault: ProfileFault::NoKeyForGuid {
                 id: id.to_string(),
                 guid: display_guid(pak_guid),
             },
-        })?;
+        }
+    })?;
     Ok(Some(key.clone()))
 }
 

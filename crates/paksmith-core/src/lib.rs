@@ -123,8 +123,12 @@ pub use localization::{LocresEntry, LocresNamespace, LocresResource, LocresVersi
 // Phase 5b: game-profile public API. `GameProfile`, `KeyGuid`, and
 // `ProfileStore` are the load-bearing types that consumers need to manage
 // encryption keys and resolve pak-GUID → AesKey lookups. `resolve_key` is
-// the pure resolution function; disk I/O (Task 3) and key-testing (Task 4)
-// land in the `profile::store` and `profile::key_test` sub-modules.
+// the pure resolution function for a `GameProfile`; a profile that may have
+// come from the registry cache resolves through
+// `ResolvedProfile::resolve_key` instead (#658), and both share one
+// crate-internal implementation of the GUID→key rule. Disk I/O (Task 3) and
+// key-testing (Task 4) land in the `profile::store` and `profile::key_test`
+// sub-modules.
 pub use profile::{
     GameProfile, KeyGuid, KeyGuidHexError, MappingsSource, ProfileStore, display_guid, resolve_key,
 };
