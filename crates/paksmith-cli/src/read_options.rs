@@ -9,8 +9,13 @@
 //! wiring that delivers this whole feature was pinned by nothing: the
 //! `.with_engine_version_hint(..)` call could be deleted from either
 //! site and the entire gate battery stayed green. Here it is one
-//! function with direct unit tests, and it is inside `paksmith-cli`,
-//! which cargo-mutants covers.
+//! function with direct unit tests.
+//!
+//! Note on mutation coverage: CI's cargo-mutants job triggers on a
+//! `paksmith-core*` path filter, so a CLI-ONLY change never re-runs it.
+//! When it does run it is workspace-scoped and `--in-diff`, so these
+//! lines are mutated whenever the same PR also touches core. The unit
+//! tests below are therefore the primary guard, not the mutation run.
 
 use std::sync::Arc;
 

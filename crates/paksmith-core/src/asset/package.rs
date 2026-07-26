@@ -458,6 +458,12 @@ fn companion_loader<R: crate::container::ContainerReader + ?Sized + 'static>(
 /// gates OVER-fire rather than under-fire, so they need a different
 /// resolver — see `engine_hint::resolve_engine_gate`'s scope note.)
 ///
+/// Convention for the NEXT profile-borne parse input: add a field
+/// here and thread it through the CLI's `read_options::build`, which
+/// both delivery paths already call. Adding it at the call sites
+/// instead is what left the #656 wiring untested — the bare entry
+/// points cannot force that audit the way a signature change would.
+///
 /// `#[non_exhaustive]`: construct with [`ReadOptions::new`] and the
 /// builder setters (a struct literal is blocked outside this crate).
 /// The fields are `pub` and readable — and settable directly on an
@@ -1515,6 +1521,13 @@ mod read_options_tests {
     /// outside the `__test_utils`-gated module below, which the
     /// package-scoped mutants baseline compiles out — without this
     /// their bodies are unpinned.
+    ///
+    /// TWIN: `engine_hint_seam.rs::read_options_fields_are_independent`
+    /// asserts the same composition from OUTSIDE the crate, proving the
+    /// symbols are public. This copy is the one cargo-mutants credits
+    /// (`paksmith-core-tests` is excluded from `default-members`), so
+    /// any rigor added there must be mirrored here — the reverse drift
+    /// is how a vacuous assertion survived on this side once already.
     #[test]
     fn builders_set_each_field_and_compose() {
         let hint = crate::asset::UeVersion::parse_lenient("5.3");
@@ -1524,10 +1537,14 @@ mod read_options_tests {
 
         let opts = ReadOptions::new().with_engine_version_hint(hint);
         assert_eq!(opts.engine_version_hint, hint);
-        // Setting mappings afterwards must preserve the hint.
-        let opts = opts.with_mappings(None);
+        // Setting mappings afterwards must preserve the hint. Uses a
+        // REAL registry: passing `None` leaves the field at its
+        // default, so the follow-up would hold even against a
+        // `with_mappings` that dropped its argument.
+        let usmap = std::sync::Arc::new(crate::asset::Usmap::default());
+        let opts = opts.with_mappings(Some(&usmap));
+        assert!(opts.mappings.is_some(), "with_mappings must set mappings");
         assert_eq!(opts.engine_version_hint, hint);
-        assert!(opts.mappings.is_none());
     }
 }
 

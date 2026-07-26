@@ -342,9 +342,10 @@ fn reads_serialize_mip_data(ctx: &AssetContext) -> bool {
 ///    than parsed.
 /// 2. `UTexture2D` `FStripDataFlags` (2 bytes; value unused).
 /// 3. Owner `bCooked` (`u32` `ReadBoolean` ∈ {0,1}), gated
-///    `Ar.Ver >= ADD_COOKED_TO_TEXTURE2D` (an early UE4 object version,
-///    ordered below `OLDEST_LOADABLE_PACKAGE` = 214 and so far below paksmith's 504
-///    floor → always present). `false` ⇒ no cooked platform data ⇒
+///    `Ar.Ver >= ADD_COOKED_TO_TEXTURE2D` (125, derived from the
+///    `ADD_PINTYPE_ARRAY = 108` anchor — the region carries no explicit
+///    values; far below paksmith's 504 floor → always present).
+///    `false` ⇒ no cooked platform data ⇒
 ///    [`AssetParseFault::TextureNotCooked`].
 /// 4. `bSerializeMipData` (`u32` `ReadBoolean` ∈ {0,1}) iff
 ///    `Ar.Game >= GAME_UE5_3` — an ENGINE-version gate, not an
@@ -515,8 +516,8 @@ fn read_mip_records(
 
     // `bCooked` is present only for UE4 cooked content
     // (`Ar.Ver >= TEXTURE_SOURCE_ART_REFACTOR && Ar.Game < GAME_UE5_0`).
-    // `TEXTURE_SOURCE_ART_REFACTOR` (unnumbered in the enum, ordered
-    // below `OLDEST_LOADABLE_PACKAGE` = 214) is far below paksmith's UE4
+    // `TEXTURE_SOURCE_ART_REFACTOR` (143, derived from the
+    // `ADD_PINTYPE_ARRAY = 108` anchor) is far below paksmith's UE4
     // floor (`VER_UE4_NAME_HASHES_SERIALIZED = 504`), so it's implied;
     // the live gate is just "is UE4" (`file_version_ue5.is_none()`).
     let has_bcooked = ctx.version.file_version_ue5.is_none();

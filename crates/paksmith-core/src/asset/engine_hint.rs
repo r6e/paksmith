@@ -32,23 +32,34 @@
 //!   themselves. A profile declaration is supplied out-of-band by the
 //!   user or a signed registry, so a crafted package cannot select its
 //!   own parse.
-//! - **It is frequently absent.** Cooked and stripped builds can zero
-//!   it — paksmith's own minimal fixture default is the empty
-//!   `0.0.0-0+""` stamp — so a gate keyed on it would silently take
-//!   the "older" branch for exactly the shipped content that matters.
+//! - **It can be absent or zero**, so a gate keyed on it would
+//!   silently take the "older" branch wherever it is unset. Note this
+//!   bullet is the WEAKEST of the four: the repo's real-shaped fixture
+//!   carries a fully populated `4.27.2-0+++UE4+Release-4.27`, and how
+//!   often shipped builds strip it is not measured here. The decision
+//!   rests on bullets 1 and 4.
 //! - **Licensee forks rewrite it.** A custom engine version is common
 //!   in shipped titles, which is the same reason the stamp cannot be
 //!   compared against stock version numbers.
 //! - **The reference parser does not use it.** CUE4Parse gates on
-//!   `Ar.Game`, a selection the user makes; it reads
-//!   `SavedByEngineVersion` for display and never for layout. If the
-//!   in-band stamp were dependable, an out-of-band game selection
-//!   would not be needed at all.
+//!   `Ar.Game`, a selection the user makes; it does not use
+//!   `SavedByEngineVersion` for layout in any path examined here. If
+//!   the in-band stamp were dependable, an out-of-band game selection
+//!   would not be needed at all. CUE4Parse goes further and ships
+//!   `FPackageFileSummary.FixCorruptEngineVersion`, a REPAIR for
+//!   stamps written by licensee builds — it treats the value as
+//!   unreliable data to be corrected, which is the same conclusion
+//!   reached independently by the bullet above.
 //!
-//! A future refinement could use the stamp as CORROBORATION (fire only
-//! when it agrees with the hint or is absent), which is strictly safer
-//! than either input alone. That is a separate design with its own
-//! safety argument, not a drop-in replacement for this one.
+//! A future refinement could use the stamp as CORROBORATION. Note this
+//! TRADES failure-mode classes rather than dominating: suppressing the
+//! hint whenever the stamp disagrees would break exactly the licensee
+//! forks bullet 3 describes, whose stamps are non-zero and non-stock,
+//! silently un-decoding content that works today. A corroboration
+//! design must therefore fire when the stamp is absent, zero, or
+//! agreeing, and at most WARN when it disagrees — never suppress. It is
+//! a separate design with its own safety argument, not a drop-in
+//! replacement for this one.
 
 /// A parsed `major.minor[.patch]` engine version from a profile.
 ///
@@ -73,7 +84,11 @@ pub struct UeVersion {
     pub major: u32,
     /// Engine minor version.
     pub minor: u32,
-    /// Optional patch component (`"5.3.2"`), display-only.
+    /// Optional patch component (`"5.3.2"`). Ignored by gates; carried
+    /// so [`Display`](std::fmt::Display) echoes the user's declared
+    /// value verbatim in `resolve_engine_gate`'s decision log, where
+    /// `5.3.2` vs `5.3` is what an operator matches against their
+    /// profile TOML.
     pub patch: Option<u32>,
 }
 

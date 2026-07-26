@@ -718,6 +718,14 @@ pub fn build_minimal_ue5_1009_texture2d_with_mip_flag() -> MinimalPackage {
     body.extend_from_slice(&0i64.to_le_bytes());
     // UE5 (>= 5.2) prefix: bUsingDerivedData flag + the 16-byte skip.
     body.push(0);
+    // The 0xFF filler is LOAD-BEARING, not arbitrary padding. A 5.2
+    // read of these 5.3-shaped bytes is desynced by `bSerializeMipData`'s
+    // four bytes, which lands this filler on `bUsingDerivedData` — a
+    // strict {0,1} bool that then rejects, so the mis-parse fails LOUD.
+    // Zero filler would let the desynced read succeed silently, and
+    // `same_bytes_parse_differently_under_5_2_and_5_3_profiles` would
+    // still pass while demonstrating far less. Do not "clean up" to
+    // zeros.
     body.extend_from_slice(&[0xFFu8; 15]);
     // FTexturePlatformData header.
     body.extend_from_slice(&64i32.to_le_bytes()); // SizeX
