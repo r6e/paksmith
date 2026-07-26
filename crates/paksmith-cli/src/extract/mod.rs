@@ -60,6 +60,13 @@ impl ExtractJob<'_> {
     }
 
     fn extract_asset(&self, entry_path: &str) -> EntryOutcome {
+        // The projection into `build` is the residual untested hop:
+        // deleting `self.engine_version` here fails to compile, but
+        // substituting `None` would not. Same structural limit as
+        // `open_and_collect`'s `engine_version = ctx.engine_version`
+        // — `PakOpenContext` has no public constructor, so neither
+        // read can be lifted into a unit-testable position without a
+        // core-side change.
         let opts = crate::read_options::build(self.mappings.as_ref(), self.engine_version);
         let pkg = match Package::read_from_reader_with(&self.reader, entry_path, &opts) {
             Ok(p) => p,

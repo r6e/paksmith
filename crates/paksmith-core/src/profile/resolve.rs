@@ -494,8 +494,8 @@ fn parse_engine_version(raw: Option<&str>, id: &str) -> Option<crate::asset::UeV
         tracing::warn!(
             profile = id,
             value = raw,
-            "profile engine_version is not a `major.minor[.patch]` version; \
-             continuing without an engine-version hint"
+            "profile engine_version is not a `major.minor[.patch]` version \
+             (e.g. \"5.3\"); continuing without an engine-version hint"
         );
     }
     parsed

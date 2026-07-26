@@ -138,11 +138,16 @@ pub struct MinimalPackageSpec {
     /// `CustomVersionContainer` to exercise the populated-container
     /// fixture.
     pub custom_versions: CustomVersionContainer,
-    /// `saved_by_engine_version`. Defaults to a `0.0.0-0+""` empty
-    /// engine version (matches the original UE 4.27 fixture's
-    /// equivalent of an empty cooked stamp).
+    /// `saved_by_engine_version`. Defaults to a POPULATED
+    /// `4.27.2-0+++UE4+Release-4.27`, matching the real UE 4.27
+    /// fixture's cooked stamp — not an empty value. (This doc claimed
+    /// an empty `0.0.0-0+""` default from #258 until #656; the stale
+    /// claim was cited as evidence in an unrelated design rationale
+    /// before anyone read the `Default` impl below.)
     pub saved_by_engine_version: EngineVersion,
-    /// `compatible_with_engine_version`. Same default as above.
+    /// `compatible_with_engine_version`. Also populated, and NOT
+    /// identical to the above: `4.27.0`, differing in the patch
+    /// component.
     pub compatible_with_engine_version: EngineVersion,
     /// `PersistentGuid` — only emitted at UE4 ≥ 518 with
     /// `!PKG_FilterEditorOnly`. The builder validates the gate state.
