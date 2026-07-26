@@ -2869,12 +2869,10 @@ mod tests {
         assert_eq!(pkg.names.names.len(), 4);
         assert_eq!(pkg.imports.imports.len(), 2);
 
-        // The filler bytes immediately preceding `SizeX` must be 0xFF.
-        // That is what makes the 5.2 mis-parse fail LOUD: reading four
-        // bytes early puts them in `SizeX`, which is then `-1` and
-        // fails its `[0, 16384]` range check. Zeroing them would let
-        // the desync slide past that check and fail later and less
-        // legibly, while the divergence assertions below still passed.
+        // The four bytes before `SizeX` must be 0xFF — that is what
+        // makes a 5.2 mis-parse fail loudly at `SizeX` rather than
+        // wandering on. Mechanism: see the filler comment in
+        // `build_minimal_ue5_1009_texture2d_with_mip_flag`.
         let sizex_preceded_by_filler = pkg
             .bytes
             .windows(8)
