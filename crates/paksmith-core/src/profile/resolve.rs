@@ -172,10 +172,15 @@ pub async fn resolve_pak_context(
 
     // 1. Local profiles.toml wins — no network ever when the id is local.
     if let Some(profile) = store.profiles.get(id) {
+        // Through `from_resolved` like every other site: the mapping
+        // from a resolved profile to its parse inputs lives in exactly
+        // one place (a duplicated arm here is what let the registry
+        // `--detect` path silently drop the engine version).
+        let inputs = ProfileParseInputs::from_resolved(&ResolvedProfile::Local(profile), id);
         return Ok(PakOpenContext {
             key: resolve_within(&profile.keys, id, pak_guid)?,
-            mappings: profile.mappings.clone(),
-            engine_version: parse_engine_version(profile.engine_version.as_deref(), id),
+            mappings: inputs.mappings,
+            engine_version: inputs.engine_version,
         });
     }
 
@@ -412,8 +417,8 @@ fn explicit_key_context(
 /// its mappings AND engine version; a CACHED registry id is a valid
 /// selection that yields its engine version but no mappings (see
 /// [`MappingsSource`]'s registry note); an unknown id is
-/// `ProfileNotFound`, exactly as in keyed resolution. No network — a registry-only id must already be
-/// cached (`profile fetch`).
+/// `ProfileNotFound`, exactly as in keyed resolution. No network — a
+/// registry-only id must already be cached (`profile fetch`).
 fn named_profile_inputs_in(
     store: &ProfileStore,
     cache: Option<&RegistryCache>,

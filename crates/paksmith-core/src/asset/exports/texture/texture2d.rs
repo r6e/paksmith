@@ -278,9 +278,12 @@ pub(crate) fn read_from_kind(
 /// those.
 ///
 /// Those bands hold for CUE4Parse's STOCK `EGame` arms. A custom arm
-/// can opt into the field below its nominal version (`GAME_TheFirst\
-/// Descendant` maps to object version `1002` yet satisfies the
-/// `Ar.Game` gate), which a `major.minor` hint cannot express — see
+/// can opt into the field below its nominal version
+/// (`GAME_TheFirstDescendant` sorts as `GAME_UE5_2 + 3` — so it is
+/// BELOW `GAME_UE5_3` and the `>=` clause misses it — and its explicit
+/// arm maps it to object version `1002`, yet the `||` clause still
+/// makes it write the field), which a `major.minor` hint cannot
+/// express — see
 /// [`crate::asset::engine_hint::resolve_engine_gate`]'s scope note.
 /// Such a title is `Denies` here, exactly as it was before #656.
 fn serialize_mip_data_verdict(ctx: &AssetContext) -> crate::asset::engine_hint::WireVerdict {

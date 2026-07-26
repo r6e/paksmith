@@ -109,7 +109,8 @@ bytes below it.
 **UE 5.2 vs 5.3 version-mapping note.** CUE4Parse's `EGame`→`FPackageFileVersion`
 table maps *both* `GAME_UE5_2` and `GAME_UE5_3` to UE5 object version
 `1009` (`< GAME_UE5_4 => (522, 1009)`); object versions `1010`
-(`SCRIPT_SERIALIZATION_OFFSET`) and `1011` are 5.4-preview. A parser without an engine-version signal therefore cannot distinguish a
+(`SCRIPT_SERIALIZATION_OFFSET`) and `1011` are 5.4-preview. A parser
+without an engine-version signal therefore cannot distinguish a
 5.2 texture (no `bSerializeMipData`) from a 5.3 texture
 (`bSerializeMipData` present) at object version `1009` — the field's
 4-byte *presence* is what shifts the layout. `Ar.Game >= GAME_UE5_3` is an
