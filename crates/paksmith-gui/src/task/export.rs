@@ -21,6 +21,8 @@ use crate::state::export::{ExportChoice, default_export_filename};
 /// match exactly what [`write_export`] can dispatch.
 #[allow(clippy::unused_async, reason = "async required by iced Task::perform")]
 pub async fn available(reader: Arc<dyn ContainerReader>, path: String) -> Vec<ExportFormat> {
+    // Bare entry point ⇒ no mappings and no engine-version hint (#706);
+    // see the seam note in `task/open.rs`.
     match Package::read_from_reader(&reader, &path, None) {
         Ok(pkg) => available_formats(&pkg, &HandlerRegistry::all_default_handlers()),
         Err(_) => Vec::new(),
@@ -141,6 +143,11 @@ fn write_payload_to(
             payload_idx,
             extension,
         } => {
+            // Bare entry point ⇒ no mappings and no engine-version
+            // hint (#706). This is the GUI path that writes artifacts,
+            // so until #706 lands it and CLI `extract` can decode the
+            // same bytes differently when a profile declares an engine
+            // version — see the seam note in `task/open.rs`.
             let pkg = Package::read_from_reader(reader, src_path, None)?;
             let registry = HandlerRegistry::all_default_handlers();
             let bytes = export_payload(&pkg, *payload_idx, extension, &registry)?;

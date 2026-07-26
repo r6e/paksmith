@@ -248,8 +248,8 @@ pub(crate) const VER_UE4_GAME_UE4_25_OBJECT_PROXY: i32 = 518;
 /// does not consult the #656 profile hint (it is an over-approximation, which
 /// that hint cannot correct — see `engine_hint::resolve_engine_gate`'s scope
 /// note), so whether stock 4.26 VT content is reachable here (and on-disk
-/// `u16`) is untested; `>= 522` is the
-/// tightest object-version threshold available and is exact from 4.27 up.
+/// `u16`) is untested; `>= 522` is the tightest object-version threshold
+/// available and is exact from 4.27 up.
 /// See [`AssetVersion::is_ue4_27_or_later`].
 pub(crate) const VER_UE4_GAME_UE4_27_OBJECT_PROXY: i32 = 522;
 

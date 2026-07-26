@@ -98,7 +98,7 @@ gates whether the platform data is even present.
 |-------|------|--------|------|-----------|
 | `UTexture` `FStripDataFlags` | 2 | — | `u8` `GlobalStripFlags` + `u8` `ClassStripFlags` | `IsEditorDataStripped() = (GlobalStripFlags & 1) != 0`. Cooked content has editor data stripped; when **not** stripped, an editor `FByteBulkData` / `FEditorBulkData` (version-gated by `FUE5MainStreamObjectVersion`) follows here, which a cooked-only parser will not encounter. |
 | `UTexture2D` `FStripDataFlags` | 2 | — | `u8` + `u8` | A second strip-flags pair; value otherwise unused by the reader. |
-| `bCooked` | 4 | LE | `u32` bool (`ReadBoolean` ∈ {0,1}) | Owner-level cooked flag, gated `Ar.Ver >= ADD_COOKED_TO_TEXTURE2D` (UE4 object version 227 — far below any modern floor, so always present). `DeserializeCookedPlatformData` (the `FTexturePlatformData`) runs **only** when `bCooked == true`; `false` ⇒ no platform data. |
+| `bCooked` | 4 | LE | `u32` bool (`ReadBoolean` ∈ {0,1}) | Owner-level cooked flag, gated `Ar.Ver >= ADD_COOKED_TO_TEXTURE2D` (an early UE4 object version ordered below `OLDEST_LOADABLE_PACKAGE` = 214 — far below any modern floor, so always present). `DeserializeCookedPlatformData` (the `FTexturePlatformData`) runs **only** when `bCooked == true`; `false` ⇒ no platform data. |
 | `bSerializeMipData` | 4 | LE | `u32` bool (`ReadBoolean` ∈ {0,1}) | **Version-conditional:** present only for `Ar.Game >= GAME_UE5_3` (and `GAME_TheFirstDescendant`). When `false`, the per-mip `FTexture2DMipMap` records carry **no** inline `FByteBulkData` (mip bytes live entirely in side files). Defaults `true` when absent. |
 
 `FStripDataFlags`'s single-argument constructor (`new FStripDataFlags(Ar)`)
@@ -110,16 +110,23 @@ bytes below it.
 table maps *both* `GAME_UE5_2` and `GAME_UE5_3` to UE5 object version
 `1009` (`< GAME_UE5_4 => (522, 1009)`); object versions `1010`
 (`SCRIPT_SERIALIZATION_OFFSET`) and `1011` are 5.4-preview. A parser
-without an engine-version signal therefore cannot distinguish a
-5.2 texture (no `bSerializeMipData`) from a 5.3 texture
+reading only the package's own object versions therefore cannot
+distinguish a 5.2 texture (no `bSerializeMipData`) from a 5.3 texture
 (`bSerializeMipData` present) at object version `1009` — the field's
-4-byte *presence* is what shifts the layout. `Ar.Game >= GAME_UE5_3` is an
-engine-version gate, not an object-version one. paksmith takes that signal
-from a game profile's declared engine version when one is selected
-(`--game` / `--detect`); with no profile it keeps the 5.2 reading. Note
-`1009` is the *only* ambiguous value — below it (UE 5.1, 5.0 and every
-UE4) the field is unambiguously absent, so a declared engine version does
-not change those reads.
+4-byte *presence* is what shifts the layout. `Ar.Game >= GAME_UE5_3` is
+an engine-version gate, not an object-version one. paksmith takes that
+signal from a game profile's declared engine version when one is
+selected (`--game` / `--detect`); with no profile it keeps the 5.2
+reading. The package's own `SavedByEngineVersion` stamp is deliberately
+NOT used as the tiebreaker — it is archive-controlled, frequently
+zeroed in cooked builds, and rewritten by licensee forks; the reasoning
+is recorded in the `asset::engine_hint` module docs. Note `1009` is the
+*only* ambiguous value: at `1010` and above the field is always read,
+and below `1009` no STOCK engine version writes it, so a declared
+engine version does not change those reads. (A custom title can write
+it from far below that band via the gate's `|| Ar.Game == ...` clause,
+but resolving that needs game identity, which a `major.minor` hint
+cannot express.)
 
 ### Segment-2 platform-data key: `DeserializeCookedPlatformData` wrapper
 

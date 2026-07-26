@@ -145,11 +145,15 @@ pub async fn load(reader: Arc<dyn ContainerReader>, path: String) -> AssetLoad {
     let parsed = if let Some(e) = read_err {
         Err(e) // F2: surface the real read error
     } else if should_attempt_parse(&path) {
-        // `mappings = None`: the GUI does not load `.usmap` yet — issue
-        // #706 (see the seam note in `task/open.rs`). Unversioned assets
-        // that require a mapping return `UnversionedWithoutMappings`,
-        // surfaced here as a stringified parse error → Properties view
-        // shows the reason.
+        // Bare entry point ⇒ NEITHER parse input: the GUI does not
+        // load `.usmap` yet, and it does not carry a profile's engine
+        // version either — both are issue #706 (see the seam note in
+        // `task/open.rs`). Unversioned assets that require a mapping
+        // return `UnversionedWithoutMappings`, surfaced here as a
+        // stringified parse error → Properties view shows the reason.
+        // A UE 5.2-vs-5.3-ambiguous texture likewise keeps the
+        // unhinted default here while CLI inspect/extract can resolve
+        // it (#656).
         Package::read_from_reader(&reader, &path, None)
             .map(std::sync::Arc::new)
             .map_err(|e| e.to_string())
