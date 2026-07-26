@@ -46,10 +46,12 @@
 //!   `SavedByEngineVersion` for layout in any path examined here. If
 //!   the in-band stamp were dependable, an out-of-band game selection
 //!   would not be needed at all. CUE4Parse goes further and ships
-//!   `FPackageFileSummary.FixCorruptEngineVersion`, a REPAIR for
-//!   stamps written by licensee builds — it treats the value as
-//!   unreliable data to be corrected, which is the same conclusion
-//!   reached independently by the bullet above.
+//!   `FPackageFileSummary.FixCorruptEngineVersion` — narrowly guarded
+//!   (one known-corrupt 4.26.0 case), so it is not evidence that
+//!   stamps are broadly wrong. What it does establish is the weaker
+//!   and sufficient point: the reference parser treats this stamp as
+//!   data that CAN be wrong and needs correcting, rather than as a
+//!   value to gate on.
 //!
 //! A future refinement could use the stamp as CORROBORATION. Note this
 //! TRADES failure-mode classes rather than dominating: suppressing the

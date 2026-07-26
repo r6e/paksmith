@@ -2,6 +2,12 @@
 //! the `.usmap` schema registry (#651) and the profile's declared
 //! engine version (#656).
 //!
+//! ADDING THE NEXT PARSE INPUT: add the field to
+//! `paksmith_core::asset::ReadOptions`, then thread it through `build`
+//! here — not through the `inspect`/`extract` call sites, which is what
+//! left the #656 wiring untested. The same convention is recorded on
+//! `ReadOptions` itself, so it is reachable from either end.
+//!
 //! Extracted as a PURE fn on purpose. Both consumers — `inspect::run`
 //! and `ExtractJob::extract_asset` — are otherwise I/O-bound paths that
 //! a test can only reach with a fixture pak containing an asset at the

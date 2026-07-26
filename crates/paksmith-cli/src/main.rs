@@ -40,9 +40,8 @@ struct Cli {
     /// the profile still supplies whatever parse inputs it carries,
     /// and the id must exist. A registry-sourced profile supplies an
     /// engine version, but never mappings or `pak_paths`. When the pak
-    /// path is
-    /// omitted, the profile's `pak_paths` patterns select the archives
-    /// to operate on.
+    /// path is omitted, the profile's `pak_paths` patterns select the
+    /// archives to operate on.
     #[arg(long, global = true, value_name = "ID")]
     game: Option<String>,
 
