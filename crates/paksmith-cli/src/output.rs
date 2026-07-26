@@ -43,21 +43,20 @@ pub(crate) enum ResolvedFormat {
     Table,
 }
 
-/// Emit a one-line stderr note when `--format auto` silently resolved to JSON
-/// (stdout isn't a TTY), so users piping into head/jq aren't surprised.
-/// `--quiet` (#652) suppresses it — it is advisory chatter, not an error.
 /// Emit an advisory `note:` line to stderr unless `--quiet`.
 ///
-/// The single guarded site for the flag's "no advisory notes" half. Inline
-/// `if !quiet { eprintln!("note: …") }` at each call site made the contract
-/// depend on remembering the guard, and multiplied the `delete !` mutant by
-/// the number of sites.
+/// The single guarded site for the flag's "no advisory notes" half — every
+/// advisory note must route through here, or the contract depends on
+/// remembering an `if !quiet` at each new call site.
 pub(crate) fn note(quiet: bool, msg: &str) {
     if !quiet {
         eprintln!("note: {msg}");
     }
 }
 
+/// Emit a one-line stderr note when `--format auto` silently resolved to JSON
+/// (stdout isn't a TTY), so users piping into head/jq aren't surprised.
+/// `--quiet` (#652) suppresses it — it is advisory chatter, not an error.
 pub(crate) fn note_auto_resolved_to_json(
     format: OutputFormat,
     resolved: ResolvedFormat,

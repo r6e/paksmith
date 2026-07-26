@@ -1122,6 +1122,14 @@ fn test_resolves_cached_registry_profile() {
         txt.contains("verified"),
         "the registry-supplied key must VERIFY, not merely decrypt: {txt}"
     );
+    // Negates the stale-cache note's OUTCOME term: a registry key that WORKS
+    // must not be blamed on a stale cache. Without this, the note firing on
+    // every registry `test` goes unnoticed.
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        !err.contains("cached registry document"),
+        "a working registry key must not be called stale: {err}"
+    );
 }
 
 /// `profile test` on an id present nowhere stays `ProfileNotFound` (exit 2),
@@ -1269,10 +1277,10 @@ fn quiet_suppresses_the_advisory_notes_but_not_the_error() {
 /// never refresh — the disclosure that stops `profile test` contradicting
 /// `extract --game` inside the staleness window.
 ///
-/// All three legs are asserted, because each is a separate mutable term of the
-/// guard: it fires for registry+wrong, does NOT fire for local+wrong (where
-/// `profile fetch` would be useless advice pointing away from the real cause),
-/// and is silenced by `--quiet` like every other advisory note.
+/// Fires for registry+wrong; silent for local+wrong, where `profile fetch`
+/// would be useless advice pointing away from the real cause; silenced by
+/// `--quiet`. The remaining term — a registry key that WORKS — is negated in
+/// `test_resolves_cached_registry_profile`.
 #[test]
 fn test_warns_only_when_a_wrong_key_came_from_the_registry() {
     let wrong = "00".repeat(32);

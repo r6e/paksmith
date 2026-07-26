@@ -497,8 +497,6 @@ fn test(a: &TestArgs, quiet: bool) -> paksmith_core::Result<u8> {
     // read commands do not (see `resolve_layered_or_not_found`). So a
     // registry-sourced key can test WRONG here while `extract --game` refreshes
     // and succeeds — and this is the command a user reaches for to explain that
-    // very failure. Say it at the moment it happens; a contract recorded only in
-    // a planning doc is not disclosure to someone staring at "wrong key".
     // Discriminant, NOT `source() == "registry"`: that method's job is
     // rendering, so branching on it would let a label rename silently disable
     // the note across a crate boundary.

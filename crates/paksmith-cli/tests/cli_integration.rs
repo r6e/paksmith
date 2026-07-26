@@ -88,6 +88,25 @@ fn quiet_suppresses_auto_json_note() {
         "",
         "--quiet must silence the advisory note"
     );
+
+    // EXPLICIT `--format json`: the note's guard is `Auto && Json`, and both
+    // runs above have BOTH terms true, so they never exercise the conjunction
+    // with its terms disagreeing. Here `Json` holds and `Auto` does not, so a
+    // `&&`-to-`||` regression would emit a note about a resolution the user
+    // made explicitly.
+    let explicit = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env_remove("RUST_LOG")
+        .args(["--format", "json", "list", &fixture_path("minimal_v6.pak")])
+        .output()
+        .unwrap();
+    assert!(explicit.status.success());
+    assert!(
+        !String::from_utf8(explicit.stderr)
+            .unwrap()
+            .contains("note:"),
+        "an explicitly requested format must not be announced as auto-resolved"
+    );
 }
 
 #[test]
