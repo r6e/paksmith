@@ -2300,6 +2300,17 @@ mod tests {
         assert_eq!(bytes, body(&ctx_52), "the two readings see IDENTICAL bytes");
         let err = read_from(&bytes, &ctx_52, "tex.uasset")
             .expect_err("a 5.2 profile must NOT consume the flag");
+        // WHERE the desync surfaces, not merely that it does. The
+        // 4-byte shift is not caught at `bUsingDerivedData` — that
+        // reads a zero byte out of `skipOffset` and passes — but at
+        // `SizeX`, which lands on the 0xFF filler and reads `-1`.
+        // Pinned because a reader field-order or width change could
+        // move the failure elsewhere and silently falsify the
+        // mechanism documented at the fixture's filler.
+        assert!(
+            err.to_string().contains("texture_size_x"),
+            "expected the desync to surface at SizeX, got: {err}"
+        );
 
         // And no hint behaves exactly like the 5.2 profile — the
         // pre-#656 default is preserved for unhinted reads.
