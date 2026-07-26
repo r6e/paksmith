@@ -2815,6 +2815,58 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// Shape + behaviour pin for the #656 UE5-1009 texture fixture.
+    ///
+    /// In-source for the same reason as the #648 pins below:
+    /// `cargo-mutants` credits only default-members, and this
+    /// builder's only other consumer is the `engine_hint_seam`
+    /// capstone in `paksmith-core-tests` — so every
+    /// `MinimalPackageSpec` field here is invisible to mutation
+    /// testing unless something in THIS crate depends on it. Deleting
+    /// any of them silently falls back to `MinimalPackageSpec::
+    /// default()` (a UE 4.27 package), which is exactly the shape this
+    /// fixture must NOT be.
+    #[test]
+    fn ue5_1009_texture_fixture_pins_its_shape_and_hint_divergence() {
+        use crate::asset::{Asset, Package, ReadOptions, UeVersion};
+
+        let pkg = build_minimal_ue5_1009_texture2d_with_mip_flag();
+
+        // The ambiguous-version shape itself. `legacy_file_version`'s
+        // sign and `file_version_ue5`'s exact value are what make this
+        // fixture ambiguous rather than UE4 or 5.4-dev.
+        assert_eq!(pkg.summary.version.legacy_file_version, -8);
+        assert_eq!(pkg.summary.version.file_version_ue5, Some(1009));
+        // The engine stamps this fixture claims (UE 5.3).
+        assert_eq!(pkg.summary.saved_by_engine_version.major, 5);
+        assert_eq!(pkg.summary.saved_by_engine_version.minor, 3);
+        assert_eq!(pkg.summary.compatible_with_engine_version.minor, 3);
+        // Two exports (generic + texture) from the shared table
+        // builder — a dropped `exports`/`payloads`/`names`/`imports`
+        // collapses to the one-export default.
+        assert_eq!(pkg.exports.exports.len(), 2);
+        assert_eq!(pkg.names.names.len(), 4);
+        assert_eq!(pkg.imports.imports.len(), 2);
+
+        // And the divergence the fixture exists to demonstrate: the
+        // 5.3-shaped body decodes ONLY under a >= 5.3 hint.
+        let typed = |hint: Option<UeVersion>| {
+            Package::read_from_with(
+                &pkg.bytes,
+                None,
+                &ReadOptions::new().with_engine_version_hint(hint),
+                "Game/Tex.uasset",
+            )
+            .expect("the fixture header parses either way")
+            .payloads
+            .iter()
+            .any(|a| matches!(a, Asset::Texture2D(_)))
+        };
+        assert!(typed(UeVersion::parse_lenient("5.3")));
+        assert!(!typed(UeVersion::parse_lenient("5.2")));
+        assert!(!typed(None));
+    }
+
     /// Builder pins for the #648 multidim fixture bodies. In-source because
     /// `cargo-mutants` excludes the `texture_integration` capstone (it lives
     /// in `paksmith-core-tests`): a body replaced wholesale (`vec![]`) or a
