@@ -117,16 +117,20 @@ impl KeyGuid {
 /// (fetching the file from the remote profile registry) is a planned
 /// follow-up — it needs a registry schema-version story first:
 /// [`registry::RegistryProfile`] is `deny_unknown_fields` AND the
-/// registry document is ed25519-signed, so any new field there
-/// invalidates every already-signed document. Adding a variant HERE
+/// registry document is ed25519-signed, so a document USING a new field
+/// is rejected by every binary predating it. Direction matters: a
+/// `#[serde(default)]` field does NOT invalidate already-signed
+/// documents, which simply lack it and parse fine. Adding a variant HERE
 /// stays additive for the local store (serde externally-tagged enums
 /// reject unknown variants on OLD binaries, so new variants ship with
 /// a store-format note).
 ///
 /// #658 took that registry hazard once, deliberately, adding
-/// `DetectRules::byte_signatures` while the default endpoint is still a
-/// `.invalid` placeholder (#657) and no signed document from it exists.
-/// That window closes when #657 ships; see [`detection::DetectRules`].
+/// `DetectRules::byte_signatures` while the DEFAULT endpoint is still a
+/// `.invalid` placeholder (#657) and no signed document from it exists —
+/// which is not a claim anyone can make for the private endpoints
+/// `RegistryConfig` also supports. That window closes when #657 ships;
+/// see [`detection::DetectRules`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MappingsSource {

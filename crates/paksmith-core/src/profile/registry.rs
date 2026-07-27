@@ -106,17 +106,17 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
                 .find(|b| crate::profile::detection::decode_hex(&b.hex).is_none())
             {
                 // `bad.hex` is <= MAX_STR here (cap-before-parse above), and
-                // clamped again so the message stays readable. ESCAPING is
-                // deliberately NOT done here: the same text reaches the GUI
-                // (ANSI inert) and JSON output (exact bytes are the contract),
-                // so character-class handling belongs at each sink. The clamp
-                // is therefore what bounds the primitive — the sink is NOT
-                // uniformly the CLI's `output::sanitize_for_display`: in-core
-                // `%`-sigil warns emit this text RAW at `resolve.rs:44` (cache
-                // load) and `:213` (fetch failure, the route a hostile registry
-                // actually takes), neither of which traverses the CLI's error
-                // path. #708 covers both sink classes; a CLI-only fix would
-                // miss these.
+                // clamped so the message stays readable. The clamp bounds
+                // LENGTH, not capability — `ESC [2J` is four bytes — and `p.id`
+                // in this same message is interpolated unclamped at MAX_STR, so
+                // the clamp is emphatically not what makes this safe.
+                //
+                // ESCAPING belongs at each sink, not here: this text also
+                // reaches the GUI (where ANSI is inert) and JSON output (where
+                // exact bytes are the round-trip contract). Core's own terminal
+                // sinks are the `tracing` warns in `resolve.rs`, which bind the
+                // error as a plain `String` so `record_str` escapes it; the CLI
+                // writer is `output::sanitize_for_display` (#708).
                 return Err(format!(
                     "byte signature in `{}` is not an even-length unprefixed hex string: `{}`",
                     p.id,

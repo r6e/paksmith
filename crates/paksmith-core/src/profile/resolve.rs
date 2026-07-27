@@ -41,7 +41,14 @@ pub fn load_cache_lenient() -> Option<RegistryCache> {
     match RegistryCache::load() {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(error = %e, "ignoring unreadable registry cache");
+            // `e.to_string()` and NOT the `%` sigil, here and at every other
+            // warn in this file. `%` is `field::display()` and is written RAW;
+            // a plain `String` field records via `record_str` and is escaped.
+            // These faults interpolate untrusted text — registry-supplied ids,
+            // hex and paths — so a raw ESC here retitles or clears the user's
+            // terminal. Pinned by `detection::tests::
+            // warn_bounds_and_escapes_untrusted_hex` (#708).
+            tracing::warn!(error = e.to_string(), "ignoring unreadable registry cache");
             None
         }
     }
@@ -210,7 +217,7 @@ pub async fn resolve_pak_context(
             }
             Err(e) => {
                 tracing::warn!(
-                    error = %e,
+                    error = e.to_string(),
                     "registry fetch failed; using cached profiles if available"
                 );
             }
@@ -393,7 +400,7 @@ fn explicit_key_context(
             }
             Err(e) => {
                 tracing::warn!(
-                    error = %e,
+                    error = e.to_string(),
                     "profile store unreadable; --aes-key set, continuing \
                      without profile parse inputs"
                 );
@@ -516,7 +523,7 @@ fn detect_profile_inputs_in(
         Ok(id) => profile_inputs_in(store, cache, &id),
         Err(e) => {
             tracing::warn!(
-                error = %e,
+                error = e.to_string(),
                 "--detect found no unique profile; --aes-key set, continuing \
                  without profile parse inputs"
             );
@@ -696,7 +703,7 @@ mod tests {
                 detect: Some(DetectRules {
                     require_paths: vec!["Game/Paks".into()],
                     contains: vec![],
-                    byte_signatures: Vec::new(),
+                    ..Default::default()
                 }),
                 mappings,
                 pak_paths: Vec::new(),
@@ -807,7 +814,7 @@ mod tests {
                     detect: Some(DetectRules {
                         require_paths: vec!["Game/Paks".into()],
                         contains: vec![],
-                        byte_signatures: Vec::new(),
+                        ..Default::default()
                     }),
                 }],
             },
@@ -1139,7 +1146,7 @@ mod tests {
                 detect: Some(DetectRules {
                     require_paths: vec!["Game/Paks".into()],
                     contains: vec![],
-                    byte_signatures: Vec::new(),
+                    ..Default::default()
                 }),
                 mappings: None,
                 pak_paths: Vec::new(),
@@ -1158,7 +1165,7 @@ mod tests {
         let rules = DetectRules {
             require_paths: vec!["Game/Paks".into()],
             contains: vec![],
-            byte_signatures: Vec::new(),
+            ..Default::default()
         };
         let mut store = ProfileStore::default();
         let _ = store.profiles.insert(
@@ -1197,7 +1204,7 @@ mod tests {
         let rules = DetectRules {
             require_paths: vec!["Game/Paks".into()],
             contains: vec![],
-            byte_signatures: Vec::new(),
+            ..Default::default()
         };
         let store = ProfileStore::default(); // empty — no local profiles
         let cache = RegistryCache {

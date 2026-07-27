@@ -28,7 +28,10 @@ out-of-the-box for known games.
   `--detect <dir>` flag that resolves the detected game's key (exactly-one
   match required).
 - **Non-goal:** executable binary-signature scanning (fragile across game
-  updates, heavy, an arbitrary-binary-read surface — deferred); a CLI to *set*
+  updates, heavy, an arbitrary-binary-read surface — deferred). **AMENDED by
+  issue #658 item 3: shipped as `DetectRules.byte_signatures`. See
+  `docs/plans/ROADMAP.md` (Phase 5d) for which of the three objections
+  survived.** Also a non-goal: a CLI to *set*
   local detection rules (hand-edit `profiles.toml` or rely on the registry —
   `profile add` is unchanged); confidence ranking / auto-picking among ambiguous
   matches (resolution requires a single unambiguous match); any further Phase 5
@@ -38,7 +41,8 @@ out-of-the-box for known games.
 
 - **Rule kinds:** marker `require_paths` (relative file/dir paths that must ALL
   exist) + optional `contains` rules (a relative file must exist and hold a
-  substring). No exe-signatures.
+  substring), and since #658 item 3 `byte_signatures` rules (a hex-encoded
+  needle in the same bounded window) — there are THREE kinds, not two.
 - **Match semantics:** a profile matches iff **all** `require_paths` exist AND
   **all** `contains` rules pass (logical AND). No rules → never auto-detected.
 - **Exposure:** `profile detect <dir>` (lists every match) + a global
@@ -200,3 +204,6 @@ key); **zero** → a clear `Profile`/`InvalidArgument` error ("no game matched
 5d ships declarative path/content auto-detection + `profile detect` + `--detect`,
 completing Phase 5. Executable-signature detection and a local-rule-authoring CLI
 are explicitly out of scope; if ever wanted they are additive follow-ups.
+**Amended:** #658 item 3 took the executable-signature half up on that. The
+rule-authoring CLI remains out of scope, so no rule kind has a `profile add`
+flag.

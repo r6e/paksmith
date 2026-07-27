@@ -1,5 +1,7 @@
 //! Declarative game auto-detection: rules stored on a profile that recognise a
-//! game's install directory. Read-only, path-traversal-guarded, size-capped.
+//! game's install directory. Read-only, size-capped, and containment-checked —
+//! `safe_join` bounds a joined path to the target dir; in-directory symlinks and
+//! Windows device names are documented limits, not guarantees.
 //! Network registry (5c) ships these rules so detection works for known games.
 
 use std::path::{Component, Path, PathBuf};
@@ -30,18 +32,18 @@ pub(crate) const MAX_BYTE_SIGNATURES: usize = 64;
 /// # Adding a field here has a deadline
 ///
 /// `deny_unknown_fields` inside the ed25519-signed registry document means a
-/// document using a NEW field is rejected by any binary predating it — the
-/// constraint that also keeps [`crate::profile::MappingsSource`] off
-/// `RegistryProfile`. `byte_signatures` (#658) was payable only while
-/// `DEFAULT_REGISTRY_URL` is a `.invalid` placeholder (#657), untrue of the
-/// private endpoints `RegistryConfig` supports. Once #657 is live, a further
-/// field needs a schema-version story; #658 carries the measurements and
-/// `docs/plans/ROADMAP.md` the read-window deferral.
+/// document USING a new field is rejected by any binary predating it. Direction
+/// matters: a `#[serde(default)]` field does NOT invalidate already-signed
+/// documents, which lack it and parse fine. `byte_signatures` (#658) was payable
+/// only while `DEFAULT_REGISTRY_URL` is a `.invalid` placeholder (#657) — untrue
+/// of the private endpoints `RegistryConfig` supports. Once #657 is live, a
+/// further field needs a schema-version story.
 ///
-/// `#[non_exhaustive]` protects DOWNSTREAM literals from that next field
-/// (in-crate ones are unaffected). Adding it is ITSELF that break, so it lands
-/// in this window where one is already being taken. Construct via
-/// [`Default::default`].
+/// `#[non_exhaustive]` protects DOWNSTREAM literals from that next field;
+/// `paksmith-core`'s own are unaffected. Adding it is ITSELF that break, so it
+/// lands in this window where one is already being taken. Downstream cannot use
+/// a struct expression at all — `..Default::default()` is also `E0639` — so
+/// call [`Default::default`], then assign.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -53,6 +55,11 @@ pub struct DetectRules {
     #[serde(default)]
     pub contains: Vec<ContainsRule>,
     /// "file contains byte signature" rules; all must pass (#658).
+    ///
+    /// `skip_serializing_if` is load-bearing for the LOCAL store, the same way
+    /// it is for `pak_paths`: every store-mutating command rewrites all
+    /// profiles, so emitting `byte_signatures = []` would make a pre-#658 binary
+    /// reject the WHOLE store, `DetectRules` being `deny_unknown_fields`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub byte_signatures: Vec<ByteSignatureRule>,
 }
@@ -74,8 +81,11 @@ pub struct ContainsRule {
 /// not.
 ///
 /// This leaf stays exhaustive, unlike [`DetectRules`]: a rule KIND grows by
-/// gaining a field there, not here, so both leaves keep struct-literal
-/// construction rather than pay a break neither needs.
+/// gaining a field on `DetectRules`, not here — the deferred read window is a
+/// cumulative budget across the whole detection pass, not a per-rule cap — so
+/// both leaves keep struct-literal construction. Should a leaf field ever be
+/// added it costs BOTH a wire break (this type is `deny_unknown_fields` too) and
+/// a semver one, and the deadline above applies here as well.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ByteSignatureRule {
@@ -94,8 +104,8 @@ pub struct ByteSignatureRule {
     ///   empty `substring` is vacuously true — it returns before even opening
     ///   the file, so an empty one matches any directory. Not inherited.
     ///
-    /// On the REGISTRY path `validate_caps` caps this by `MAX_STR` (<=128 bytes)
-    /// AND hard-rejects malformed hex, failing the document as `keys_serde`
+    /// On the REGISTRY path `validate_caps` caps this by `MAX_STR`, so at most
+    /// `MAX_STR`/2 DECODED bytes, and hard-rejects malformed hex as `keys_serde`
     /// does — so the undecodable arm above is reachable ONLY from a hand-edited
     /// local store, never cap-validated and possibly carrying a longer needle.
     /// Harmless: a needle longer than the read window never matches.
@@ -147,9 +157,21 @@ pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Join a rule's RELATIVE path onto `dir`, rejecting any escape. Returns `None`
-/// for an absolute path, a root/drive prefix, a `..` parent component, or an
-/// empty string — such a rule can never match and triggers no FS access on an
-/// out-of-bounds path.
+/// for an absolute path, a root/drive prefix, a `..` parent component, an empty
+/// string, or anything that would land outside `dir`.
+///
+/// Containment is enforced as a POSTCONDITION, and has to be. On Windows a
+/// `Normal` component that re-parses as a drive prefix — `C:`, from a rule like
+/// `a/C:/Windows/win.ini` — makes [`PathBuf::push`] REPLACE the whole buffer:
+/// std specifies "if `path` has a prefix but no root, it replaces `self`". Since
+/// [`Component::Prefix`] is only produced at position 0, a LEADING `C:/…` is
+/// rejected by the match below while a non-leading one is classified `Normal`
+/// and passes it, so no per-component check can catch this. It was reachable
+/// from an untrusted rule string on both wires.
+///
+/// It does not bound what an in-`dir` symlink resolves to, nor Windows reserved
+/// device names — `dir\CON` starts with `dir` and still opens the console. See
+/// [`rules_match`] for both.
 fn safe_join(dir: &Path, rel: &str) -> Option<PathBuf> {
     if rel.is_empty() {
         return None;
@@ -158,24 +180,33 @@ fn safe_join(dir: &Path, rel: &str) -> Option<PathBuf> {
     for comp in Path::new(rel).components() {
         match comp {
             Component::Normal(c) => out.push(c),
-            Component::CurDir => {} // "." — harmless
+            // Resolves to `dir` itself, so a lone `.` matches any existing
+            // directory without opening a file — the cheapest universal-match
+            // shape. Pre-existing and recorded on #658.
+            Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
         }
     }
-    Some(out)
+    // Component-wise, so no separator or prefix confusion.
+    out.starts_with(dir).then_some(out)
 }
 
 /// True iff `rules` match the install directory `dir`. Read-only, bounded, and
 /// traversal-guarded. A profile with no rules never matches.
 ///
-/// **Symlink note:** `safe_join` rejects rule strings that encode a path escape
-/// (`..`, absolute, or root components), but an existing symlink *inside* `dir`
-/// that points outside is followed by the OS as usual. Any rule can therefore
-/// observe the existence or up-to-`MAX_CONTAINS_READ`
-/// bytes of a file reachable via an in-directory symlink — this is a documented
-/// limitation, not a traversal guard bypass. Applies identically to all three
-/// rule kinds: `require_paths` observes existence, `contains` and
-/// `byte_signatures` observe content.
+/// **What containment does not cover.** `safe_join` bounds a joined path to
+/// `dir`, but two shapes still reach the OS:
+///
+/// - an existing symlink *inside* `dir` that points outside is followed as
+///   usual;
+/// - on Windows a reserved device name (`CON`, `NUL`, `COM1`…) resolves to the
+///   device, not to a file under `dir`, so it passes containment and can even
+///   block on console input. Pre-existing for `contains` since 5d.
+///
+/// Either way a rule observes the existence, or up to `MAX_CONTAINS_READ` bytes,
+/// of something outside `dir`. Documented limits, not containment bypasses.
+/// Applies identically to all three rule kinds: `require_paths` observes
+/// existence, `contains` and `byte_signatures` observe content.
 pub fn rules_match(dir: &Path, rules: &DetectRules) -> bool {
     if rules.require_paths.is_empty()
         && rules.contains.is_empty()
@@ -254,9 +285,8 @@ fn file_contains_bytes(path: &Path, needle: &[u8]) -> bool {
         return false;
     };
     // Grow on demand (capped by `take` below) rather than reserving a full
-    // `MAX_CONTAINS_READ` up front — a tiny marker file shouldn't reserve 1 MiB,
-    // and across the contains-rule cap that eager reservation could total tens
-    // of MiB transiently.
+    // `MAX_CONTAINS_READ` up front: a tiny marker file shouldn't reserve 1 MiB.
+    // Only one buffer is ever live — the rule loops are sequential.
     let mut buf = Vec::new();
     if file
         .take(MAX_CONTAINS_READ as u64)
@@ -272,6 +302,8 @@ fn file_contains_bytes(path: &Path, needle: &[u8]) -> bool {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
+
+    use proptest::prelude::*;
 
     use super::*;
     use crate::profile::GameProfile;
@@ -341,12 +373,18 @@ mod tests {
     /// re-applying the `%` sigil, both survive every other test in this file
     /// and both reintroduce a raw-control-byte sink at the default log level.
     ///
-    /// Every assertion keys on a marker unique to this test, which is what makes
-    /// the pin per-FIELD. `KEPT` markers prove the event reached the buffer, so
-    /// the negatives below cannot pass vacuously; `CUT` markers prove each field
-    /// was clamped independently, which one value shared between both fields
-    /// cannot discriminate. It also fails a WIDENED `LOG_FIELD_MAX` — something
-    /// an assertion on the ellipsis alone cannot see.
+    /// Every assertion keys on a marker unique to this test. `KEPT` markers
+    /// prove the event reached the buffer, so the negatives cannot pass
+    /// vacuously; the two `CUT` markers prove each VALUE was clamped, which a
+    /// single value shared between both fields could not discriminate.
+    ///
+    /// Scope, because the obvious stronger reading is wrong: `logs_contain`
+    /// substring-matches the whole formatted line, so this pins WHICH VALUE was
+    /// clamped, not which field name it landed under — swapping the two field
+    /// names survives, and closing that needs a field-level capture API. It
+    /// fails a `LOG_FIELD_MAX` widened to 400, while a 64->65 off-by-one is
+    /// caught by `truncate_for_log_bounds_untrusted_values`, so the two remain
+    /// a pair.
     #[tracing_test::traced_test]
     #[test]
     fn warn_bounds_and_escapes_untrusted_hex() {
@@ -520,6 +558,101 @@ mod tests {
         }
     }
 
+    /// A NON-LEADING drive prefix must not escape `dir`. `PathBuf::push`
+    /// replaces the whole buffer when the pushed path has a prefix and no root,
+    /// and `Component::Prefix` is only produced at position 0 — so `a/C:/…`
+    /// arrives at `push` classified `Normal` and no per-component match can see
+    /// it. A LEADING `C:/…` was already rejected, which is exactly why every
+    /// other escape test in this file misses this shape.
+    #[cfg(windows)]
+    #[test]
+    fn drive_relative_path_does_not_escape_the_target_dir() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "game.exe", &[0xDE, 0xAD]);
+        for esc in ["a/C:/Windows/win.ini", "a/C:x", "C:/Windows/win.ini"] {
+            assert_eq!(safe_join(d.path(), esc), None, "{esc:?} must be rejected");
+            // All three rule kinds join through `safe_join`.
+            assert!(!rules_match(d.path(), &byte_signature_rules(esc, "dead")));
+            assert!(!rules_match(
+                d.path(),
+                &DetectRules {
+                    require_paths: vec![esc.into()],
+                    ..Default::default()
+                }
+            ));
+            assert!(!rules_match(
+                d.path(),
+                &DetectRules {
+                    contains: vec![ContainsRule {
+                        path: esc.into(),
+                        substring: "x".into(),
+                    }],
+                    ..Default::default()
+                }
+            ));
+        }
+    }
+
+    /// Both rule kinds populated at once. Nothing else covered this: the
+    /// round-trip below leaves `contains` empty and the omission test leaves
+    /// `byte_signatures` empty, so no test exercised the store shape a profile
+    /// using both kinds actually writes. Pins the TOML layout — two nested
+    /// table-arrays under `[detect]` alongside a value-typed `pak_paths` at
+    /// profile scope, which is the ordering a serializer can get wrong.
+    #[test]
+    fn both_rule_kinds_round_trip_together() {
+        let p = GameProfile {
+            name: "G".into(),
+            engine_version: None,
+            keys: BTreeMap::default(),
+            detect: Some(DetectRules {
+                require_paths: vec!["Game/Content".into()],
+                contains: vec![ContainsRule {
+                    path: "cfg.ini".into(),
+                    substring: "Engine=UE5".into(),
+                }],
+                byte_signatures: vec![ByteSignatureRule {
+                    path: "Game/Binaries/Win64/Game.exe".into(),
+                    hex: "DEADbeef".into(),
+                }],
+            }),
+            mappings: None,
+            pak_paths: vec!["Game/Content/Paks/*.pak".into()],
+        };
+        let text = toml::to_string_pretty(&p).unwrap();
+        let back: GameProfile = toml::from_str(&text).unwrap();
+        let d = back.detect.unwrap();
+        assert_eq!(d.require_paths, ["Game/Content"]);
+        assert_eq!(d.contains[0].substring, "Engine=UE5");
+        assert_eq!(d.byte_signatures[0].hex, "DEADbeef");
+        assert_eq!(back.pak_paths, ["Game/Content/Paks/*.pak"]);
+    }
+
+    proptest! {
+        /// The containment postcondition as an INVARIANT rather than a list of
+        /// known-bad shapes: anything `safe_join` returns is under `dir`. This
+        /// is the portable half — on Unix `C:` is an ordinary filename, so the
+        /// drive-prefix case cannot be written as one cross-platform assertion.
+        #[test]
+        fn safe_join_is_none_or_contained(
+            segments in proptest::collection::vec(
+                proptest::sample::select(vec![
+                    "a", "", ".", "..", "C:", "C:x", "c:", "/", "\\", "\\\\?\\C:", "x.y", "NUL",
+                ]),
+                0..6,
+            )
+        ) {
+            let rel = segments.join("/");
+            let d = tempfile::tempdir().unwrap();
+            if let Some(joined) = safe_join(d.path(), &rel) {
+                prop_assert!(
+                    joined.starts_with(d.path()),
+                    "escaped containment: {rel:?} -> {joined:?}"
+                );
+            }
+        }
+    }
+
     /// Bounded by the same window as `contains`: a signature past
     /// `MAX_CONTAINS_READ` is not found.
     #[test]
@@ -585,7 +718,7 @@ mod tests {
         let rules = DetectRules {
             require_paths: vec!["Game/Content/Paks".into(), "Game/Binaries".into()],
             contains: vec![],
-            byte_signatures: Vec::new(),
+            ..Default::default()
         };
         assert!(rules_match(d.path(), &rules));
     }
@@ -597,7 +730,7 @@ mod tests {
         let rules = DetectRules {
             require_paths: vec!["Game/Content/Paks".into(), "Game/Missing".into()],
             contains: vec![],
-            byte_signatures: Vec::new(),
+            ..Default::default()
         };
         assert!(!rules_match(d.path(), &rules));
     }
@@ -616,7 +749,7 @@ mod tests {
                 path: "Game/Game.uproject".into(),
                 substring: "FortniteGame".into(),
             }],
-            byte_signatures: Vec::new(),
+            ..Default::default()
         };
         assert!(rules_match(d.path(), &pass));
         let fail = DetectRules {
@@ -625,7 +758,7 @@ mod tests {
                 path: "Game/Game.uproject".into(),
                 substring: "NotPresent".into(),
             }],
-            byte_signatures: Vec::new(),
+            ..Default::default()
         };
         assert!(!rules_match(d.path(), &fail));
         let missing = DetectRules {
@@ -634,7 +767,7 @@ mod tests {
                 path: "Game/Nope".into(),
                 substring: "x".into(),
             }],
-            byte_signatures: Vec::new(),
+            ..Default::default()
         };
         assert!(!rules_match(d.path(), &missing));
     }
@@ -655,7 +788,7 @@ mod tests {
             let rules = DetectRules {
                 require_paths: vec![bad.to_string()],
                 contains: vec![],
-                byte_signatures: Vec::new(),
+                ..Default::default()
             };
             assert!(
                 !rules_match(d.path(), &rules),
@@ -684,7 +817,7 @@ mod tests {
                     path: bad.into(),
                     substring: "x".into(),
                 }],
-                byte_signatures: Vec::new(),
+                ..Default::default()
             };
             assert!(
                 !rules_match(d.path(), &rules),
@@ -713,7 +846,7 @@ mod tests {
                 path: "big.bin".into(),
                 substring: "PAST_CAP".into(),
             }],
-            byte_signatures: Vec::new(),
+            ..Default::default()
         };
         assert!(
             !rules_match(d.path(), &rules),
@@ -742,7 +875,7 @@ mod tests {
                 path: "straddle.bin".into(),
                 substring: String::from_utf8(needle.to_vec()).unwrap(),
             }],
-            byte_signatures: Vec::new(),
+            ..Default::default()
         };
         assert!(
             !rules_match(d.path(), &rules),
@@ -805,13 +938,9 @@ mod tests {
         assert!(d.require_paths.is_empty() && d.contains.is_empty());
     }
 
-    /// An EMPTY `byte_signatures` must not be emitted. Without
-    /// `skip_serializing_if`, any store-mutating command (`profile add`,
-    /// `key add`, `remove`) rewrites every profile and injects
-    /// `byte_signatures = []` — which a pre-#658 binary rejects with
-    /// `CorruptStore` for the WHOLE store, since `DetectRules` is
-    /// `deny_unknown_fields`. Same assertion the `pak_paths` and `mappings`
-    /// siblings make for the same reason.
+    /// An EMPTY `byte_signatures` must not be emitted — the field's own doc
+    /// carries why the whole store depends on it. Same assertion the `pak_paths`
+    /// and `mappings` siblings make.
     #[test]
     fn empty_byte_signatures_is_omitted_from_toml() {
         let p = GameProfile {
