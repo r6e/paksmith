@@ -106,10 +106,17 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
                 .find(|b| crate::profile::detection::decode_hex(&b.hex).is_none())
             {
                 // `bad.hex` is <= MAX_STR here (cap-before-parse above), and
-                // truncated again so the message stays readable. ESCAPING is
-                // deliberately not done here: core error strings reach the
-                // terminal through the CLI's single sink, which is where
-                // sanitization belongs and is tracked as #708.
+                // clamped again so the message stays readable. ESCAPING is
+                // deliberately NOT done here: the same text reaches the GUI
+                // (ANSI inert) and JSON output (exact bytes are the contract),
+                // so character-class handling belongs at each sink. The clamp
+                // is therefore what bounds the primitive — the sink is NOT
+                // uniformly the CLI's `output::sanitize_for_display`: in-core
+                // `%`-sigil warns emit this text RAW at `resolve.rs:44` (cache
+                // load) and `:213` (fetch failure, the route a hostile registry
+                // actually takes), neither of which traverses the CLI's error
+                // path. #708 covers both sink classes; a CLI-only fix would
+                // miss these.
                 return Err(format!(
                     "byte signature in `{}` is not an even-length unprefixed hex string: `{}`",
                     p.id,
@@ -728,6 +735,28 @@ mod tests {
         assert!(
             !err.contains("zzzz"),
             "an over-cap value must never be interpolated into the error: {err}"
+        );
+    }
+
+    /// An AT-cap malformed value is the only one that reaches the `format!`:
+    /// the over-cap test above returns at the length check, so despite reading
+    /// as adjacent it never exercises the clamp. This pins it on the value that
+    /// does arrive there.
+    #[test]
+    fn at_cap_malformed_hex_is_clamped_in_the_error() {
+        let at_cap = "z".repeat(MAX_STR); // exactly MAX_STR: passes length, fails decode
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"byte_signatures":[{{"path":"p","hex":"{at_cap}"}}]}}}}]"#
+        );
+        let err = parse_registry(json.as_bytes()).unwrap_err().to_string();
+        assert!(
+            err.contains("not an even-length unprefixed hex string"),
+            "must reach the decode rejection, not the length cap: {err}"
+        );
+        assert!(err.contains('…'), "the quoted value must be clamped: {err}");
+        assert!(
+            !err.contains(&"z".repeat(70)),
+            "at most 64 chars of the value may appear: {err}"
         );
     }
 

@@ -29,23 +29,19 @@ pub(crate) const MAX_BYTE_SIGNATURES: usize = 64;
 ///
 /// # Adding a field here has a deadline
 ///
-/// This type is `deny_unknown_fields` AND travels inside the ed25519-signed
-/// registry document, so a document using a NEW field is rejected outright by
-/// any binary built before that field existed — the constraint
-/// [`crate::profile::MappingsSource`] cites as its reason for staying off
-/// `RegistryProfile` entirely. `byte_signatures` (#658) was payable only
-/// because `DEFAULT_REGISTRY_URL` is still a `.invalid` placeholder (#657), so
-/// no signed document from the default registry is in circulation. That is not
-/// true of a private endpoint, which `RegistryConfig` supports.
+/// `deny_unknown_fields` inside the ed25519-signed registry document means a
+/// document using a NEW field is rejected by any binary predating it — the
+/// constraint that also keeps [`crate::profile::MappingsSource`] off
+/// `RegistryProfile`. `byte_signatures` (#658) was payable only while
+/// `DEFAULT_REGISTRY_URL` is a `.invalid` placeholder (#657), untrue of the
+/// private endpoints `RegistryConfig` supports. Once #657 is live, a further
+/// field needs a schema-version story; #658 carries the measurements and
+/// `docs/plans/ROADMAP.md` the read-window deferral.
 ///
-/// Once #657 stands up a live registry, any further field — the configurable
-/// read window deferred by #658 is the first in line — needs a schema-version
-/// story rather than a plain addition.
-///
-/// `#[non_exhaustive]` so the NEXT field is source-compatible for downstream
-/// struct literals: adding `byte_signatures` broke 15 in-repo literals, which
-/// is the same trade `asset::mappings` documents. Construct via
-/// [`Default::default`] and assign the `pub` fields.
+/// `#[non_exhaustive]` protects DOWNSTREAM literals from that next field
+/// (in-crate ones are unaffected). Adding it is ITSELF that break, so it lands
+/// in this window where one is already being taken. Construct via
+/// [`Default::default`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -76,6 +72,10 @@ pub struct ContainsRule {
 /// Exists because [`ContainsRule`]'s `substring` is a Rust `String`, so it can
 /// only express valid UTF-8 — and build-identifying signatures routinely are
 /// not.
+///
+/// This leaf stays exhaustive, unlike [`DetectRules`]: a rule KIND grows by
+/// gaining a field there, not here, so both leaves keep struct-literal
+/// construction rather than pay a break neither needs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ByteSignatureRule {
@@ -94,10 +94,11 @@ pub struct ByteSignatureRule {
     ///   empty `substring` is vacuously true — it returns before even opening
     ///   the file, so an empty one matches any directory. Not inherited.
     ///
-    /// On the REGISTRY path `validate_caps` bounds this string by `MAX_STR`,
-    /// so at most 128 decoded bytes. The local store is not cap-validated, so
-    /// a hand-edited `profiles.toml` may carry a longer one — harmless, since a
-    /// needle longer than the read window simply never matches.
+    /// On the REGISTRY path `validate_caps` caps this by `MAX_STR` (<=128 bytes)
+    /// AND hard-rejects malformed hex, failing the document as `keys_serde`
+    /// does — so the undecodable arm above is reachable ONLY from a hand-edited
+    /// local store, never cap-validated and possibly carrying a longer needle.
+    /// Harmless: a needle longer than the read window never matches.
     pub hex: String,
 }
 
@@ -302,12 +303,11 @@ mod tests {
 
     fn byte_signature_rules(path: &str, hex: &str) -> DetectRules {
         DetectRules {
-            require_paths: Vec::new(),
-            contains: Vec::new(),
             byte_signatures: vec![ByteSignatureRule {
                 path: path.into(),
                 hex: hex.into(),
             }],
+            ..Default::default()
         }
     }
 
@@ -340,21 +340,42 @@ mod tests {
     /// `9e5fe3e` exists to establish: dropping `truncate_for_log`, or
     /// re-applying the `%` sigil, both survive every other test in this file
     /// and both reintroduce a raw-control-byte sink at the default log level.
+    ///
+    /// Every assertion keys on a marker unique to this test, which is what makes
+    /// the pin per-FIELD. `KEPT` markers prove the event reached the buffer, so
+    /// the negatives below cannot pass vacuously; `CUT` markers prove each field
+    /// was clamped independently, which one value shared between both fields
+    /// cannot discriminate. It also fails a WIDENED `LOG_FIELD_MAX` — something
+    /// an assertion on the ellipsis alone cannot see.
     #[tracing_test::traced_test]
     #[test]
     fn warn_bounds_and_escapes_untrusted_hex() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "game.exe", &[0xDE, 0xAD]);
-        // 500 chars, malformed, opening with a raw ESC + CSI.
-        let hostile = format!("{}[2J{}", '\u{1b}', "z".repeat(495));
+        // Each value: raw ESC + CSI, a KEPT marker inside the 64-char window,
+        // filler, then a CUT marker starting exactly at char 64.
+        let esc = '\u{1b}';
+        let hostile_path = format!("{esc}[2J{}{}PATHCUT", "PATHKEPT", "p".repeat(52));
+        let hostile_hex = format!("{esc}[2J{}{}HEXCUT", "HEXKEPT", "z".repeat(53));
         assert!(!rules_match(
             d.path(),
-            &byte_signature_rules("game.exe", &hostile)
+            &byte_signature_rules(&hostile_path, &hostile_hex)
         ));
-        // Bounded: the ellipsis is present, so the 500-char value was clamped.
-        assert!(logs_contain("…"), "value must be truncated");
-        // Escaped: `record_str` renders ESC as `\u{1b}`, never a raw byte.
+        // Captured: without these the negative asserts below pass vacuously
+        // whenever this event is missing from the buffer.
+        assert!(logs_contain("PATHKEPT"), "`path` must reach the log");
+        assert!(logs_contain("HEXKEPT"), "`hex` must reach the log");
+        // Clamped, per field. Also kills a WIDENED `LOG_FIELD_MAX`, which the
+        // ellipsis form could not see.
+        assert!(!logs_contain("PATHCUT"), "`path` must be clamped at 64");
+        assert!(!logs_contain("HEXCUT"), "`hex` must be clamped at 64");
+        // Escaped: `record_str` renders ESC as `\u{1b}`. Asserting the RAW byte
+        // is ABSENT covers both fields — `%` on either one re-opens the sink.
         assert!(logs_contain("\\u{1b}"), "ESC must appear escaped, not raw");
+        assert!(
+            !logs_contain(&esc.to_string()),
+            "no raw ESC may reach the log record"
+        );
     }
 
     /// `truncate_for_log` bounds an untrusted value and keeps char boundaries.
