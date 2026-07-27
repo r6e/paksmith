@@ -115,8 +115,16 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
                 // reaches the GUI (where ANSI is inert) and JSON output (where
                 // exact bytes are the round-trip contract). Core's own terminal
                 // sinks are the `tracing` warns in `resolve.rs`, which bind the
-                // error as a plain `String` so `record_str` escapes it; the CLI
-                // writer is `output::sanitize_for_display` (#708).
+                // error as a plain `String` so `record_str` escapes it.
+                //
+                // The CLI sink is NOT covered, and it is worth being exact
+                // about that rather than gesturing at an issue: this message
+                // reaches a terminal through `main.rs`'s top-level `eprintln!`,
+                // which does no sanitizing. Measured on a hostile document,
+                // that string carries TWO raw ESC bytes — one from `p.id`, one
+                // from the clamped hex. `output::sanitize_for_display` covers
+                // the entries table and extract's FAILED lines, not this path.
+                // #708 tracks the gap; it does not close it.
                 return Err(format!(
                     "byte signature in `{}` is not an even-length unprefixed hex string: `{}`",
                     p.id,

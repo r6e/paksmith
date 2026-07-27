@@ -148,9 +148,10 @@ pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::with_capacity(s.len() / 2);
-    for pair in s.as_bytes().chunks(2) {
-        // Two nibbles are at most 0xFF, so this cannot overflow and needs no
-        // fallible conversion.
+    for pair in s.as_bytes().chunks_exact(2) {
+        // `chunks_exact` makes `pair[1]` structurally safe instead of safe only
+        // by way of the parity guard above. Two nibbles are at most 0xFF, so
+        // this cannot overflow and needs no fallible conversion.
         out.push(nibble(pair[0])? * 16 + nibble(pair[1])?);
     }
     Some(out)
@@ -173,7 +174,11 @@ pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
 /// device names — `dir\CON` starts with `dir` and still opens the console. See
 /// [`rules_match`] for both.
 fn safe_join(dir: &Path, rel: &str) -> Option<PathBuf> {
-    if rel.is_empty() {
+    // An empty `dir` would make the postcondition below VACUOUS — every path
+    // starts with "" — so it is rejected as a precondition. Unreachable via
+    // `--detect`, whose callers gate on `is_dir`, but `rules_match` is public
+    // and its doc promises containment.
+    if rel.is_empty() || dir.as_os_str().is_empty() {
         return None;
     }
     let mut out = dir.to_path_buf();
@@ -643,10 +648,13 @@ mod tests {
             )
         ) {
             let rel = segments.join("/");
-            let d = tempfile::tempdir().unwrap();
-            if let Some(joined) = safe_join(d.path(), &rel) {
+            // No filesystem: `safe_join` is pure. "/base" has a root and no
+            // drive prefix on both platforms, which is what a replacement
+            // escape has to fail against.
+            let base = Path::new("/base");
+            if let Some(joined) = safe_join(base, &rel) {
                 prop_assert!(
-                    joined.starts_with(d.path()),
+                    joined.starts_with(base),
                     "escaped containment: {rel:?} -> {joined:?}"
                 );
             }

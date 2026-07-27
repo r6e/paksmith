@@ -46,8 +46,9 @@ pub fn load_cache_lenient() -> Option<RegistryCache> {
             // a plain `String` field records via `record_str` and is escaped.
             // These faults interpolate untrusted text — registry-supplied ids,
             // hex and paths — so a raw ESC here retitles or clears the user's
-            // terminal. Pinned by `detection::tests::
-            // warn_bounds_and_escapes_untrusted_hex` (#708).
+            // terminal (#708). `detect_warn_escapes_an_untrusted_dir` below
+            // pins THIS file's warns; the analogous test in `detection` covers
+            // its own warn and does not reach here.
             tracing::warn!(error = e.to_string(), "ignoring unreadable registry cache");
             None
         }
@@ -689,6 +690,30 @@ mod tests {
     use super::*;
     use crate::GameProfile;
     use crate::profile::detection::DetectRules;
+
+    /// A raw control byte in an untrusted value must not reach this file's
+    /// warns raw. `--detect`'s fault interpolates the caller-supplied
+    /// directory, so an empty store plus no cache drives `DetectionNoMatch`
+    /// through the warn without touching the filesystem. Reverting any of this
+    /// file's four warns to the `%` sigil fails the raw-ESC assertion; the
+    /// `detection` module's equivalent test cannot catch that, because its call
+    /// graph never enters `resolve.rs`.
+    #[tracing_test::traced_test]
+    #[test]
+    fn detect_warn_escapes_an_untrusted_dir() {
+        let esc = '\u{1b}';
+        let dir = std::path::PathBuf::from(format!("{esc}[2JPWNED"));
+        let out = detect_profile_inputs_in(&ProfileStore::default(), None, &dir);
+        assert!(
+            out.mappings.is_none() && out.engine_version.is_none(),
+            "an empty store must yield no parse inputs, i.e. the warn arm ran"
+        );
+        assert!(logs_contain("\\u{1b}"), "ESC must appear escaped");
+        assert!(
+            !logs_contain(&esc.to_string()),
+            "no raw ESC may reach the log record"
+        );
+    }
 
     /// Store with one `hero` profile carrying detect rules for
     /// `Game/Paks` and a mappings source.
