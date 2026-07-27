@@ -48,12 +48,16 @@ pub fn load_cache_lenient() -> Option<RegistryCache> {
             // hex and paths — so a raw ESC here retitles or clears the user's
             // terminal (#708).
             //
-            // Coverage, stated exactly: TWO of this file's FIVE warns are
-            // pinned — `detect_warn_escapes_an_untrusted_dir` drives the
-            // `--detect` one, `unparsable_engine_version_degrades_to_no_hint`
-            // the `engine_version` one. THIS warn, the fetch-failure warn and
-            // the store-unreadable warn bind their fault identically but no
-            // test drives them; each needs an I/O failure to reach.
+            // Coverage, stated exactly: THREE of this file's FIVE warns are
+            // pinned. `detect_warn_escapes_an_untrusted_dir` drives the
+            // `--detect` one and `unparsable_engine_version_degrades_to_no_hint`
+            // the `engine_version` one, both in this file; the CLI's
+            // `game_offline_degrades_to_stale_cache` drives the fetch-failure
+            // one — and needs no I/O to do it, since an `http://` URL with
+            // `PAKSMITH_ALLOW_HTTP` unset fails on scheme before any socket
+            // opens. THIS warn and the store-unreadable one bind their fault
+            // identically but are undriven; both need an injected I/O failure,
+            // and the cache one is reachable from that same CLI harness.
             tracing::warn!(error = e.to_string(), "ignoring unreadable registry cache");
             None
         }

@@ -124,10 +124,14 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
                 // about that rather than gesturing at an issue: this message
                 // reaches a terminal through `main.rs`'s top-level `eprintln!`,
                 // which does no sanitizing. Measured on a hostile document,
-                // that string carries TWO raw ESC bytes — one from `p.id`, one
-                // from the clamped hex. `output::sanitize_for_display` covers
-                // the entries table and extract's FAILED lines, not this path.
-                // #708 tracks the gap; it does not close it.
+                // THIS message carries two raw ESC bytes — one from `p.id`, one
+                // from the clamped hex — but that is the small end of the sink:
+                // `ProfileFault::DetectionAmbiguous` joins profile ids with no
+                // cap at all, measured at 10,000 raw ESC on a single 2.58 MB
+                // stderr line at the documented caps.
+                // `output::sanitize_for_display` covers the entries table and
+                // extract's FAILED lines, not this path. #708 tracks the gap;
+                // it does not close it.
                 return Err(format!(
                     "byte signature in `{}` is not an even-length unprefixed hex string: `{}`",
                     p.id,

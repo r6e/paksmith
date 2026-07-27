@@ -47,11 +47,13 @@ pub(crate) const MAX_BYTE_SIGNATURES: usize = 64;
 /// a struct expression at all — `..Default::default()` is also `E0639` — so
 /// call [`Default::default`], then assign.
 ///
-/// Its CONTAINERS stay exhaustive on purpose. `GameProfile` and
-/// `RegistryProfile` are what a downstream consumer builds by hand, both derive
-/// `Default`, and their wire compatibility is governed by `#[serde(default)]`
-/// rather than by struct literals — so `E0639` there would cost more ergonomics
-/// than it buys.
+/// Its CONTAINERS stay exhaustive on purpose, and for two different reasons.
+/// `GameProfile` derives `Default`, so it is what a downstream consumer builds
+/// by hand and `E0639` would cost more ergonomics than it buys.
+/// `RegistryProfile` does NOT derive `Default`, which makes the case stronger
+/// rather than weaker: marking it `#[non_exhaustive]` would leave downstream
+/// with no construction route at all. Both get their wire compatibility from
+/// `#[serde(default)]` rather than from struct literals.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -64,10 +66,13 @@ pub struct DetectRules {
     pub contains: Vec<ContainsRule>,
     /// "file contains byte signature" rules; all must pass (#658).
     ///
-    /// `skip_serializing_if` is load-bearing for the LOCAL store, the same way
-    /// it is for `pak_paths`: every store-mutating command rewrites all
-    /// profiles, so emitting `byte_signatures = []` would make a pre-#658 binary
-    /// reject the WHOLE store, `DetectRules` being `deny_unknown_fields`.
+    /// `skip_serializing_if` is load-bearing on BOTH persisted wires, the same
+    /// way it is for `pak_paths`. Local store: every store-mutating command
+    /// rewrites all profiles, so emitting `byte_signatures = []` would make a
+    /// pre-#658 binary reject the WHOLE store, `DetectRules` being
+    /// `deny_unknown_fields`. Registry cache: `RegistryCache::save_to`
+    /// re-serializes `RegistryProfile`, so a NEW binary writing the cache would
+    /// otherwise leave a file an OLD binary rejects wholesale.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub byte_signatures: Vec<ByteSignatureRule>,
 }
@@ -171,30 +176,53 @@ pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
 /// for an absolute path, a root/drive prefix, a `..` parent component, an empty
 /// string, or anything that would land outside `dir`.
 ///
-/// Containment is enforced as a POSTCONDITION, and has to be. On Windows a
-/// `Normal` component that re-parses as a drive prefix — `C:`, from a rule like
-/// `a/C:/Windows/win.ini` — makes [`PathBuf::push`] REPLACE the whole buffer:
-/// std specifies "if `path` has a prefix but no root, it replaces `self`". Since
-/// [`Component::Prefix`] is only produced at position 0, a LEADING `C:/…` is
-/// rejected by the match below while a non-leading one is classified `Normal`
-/// and passes it, so no per-component check can catch this. It was reachable
-/// from an untrusted rule string on both wires.
+/// Containment is enforced twice, and both halves are load-bearing. On Windows
+/// a `Normal` component that re-parses as a drive prefix — `C:`, from a rule
+/// like `a/C:/Windows/win.ini` — makes [`PathBuf::push`] REPLACE the whole
+/// buffer: std specifies "if `path` has a prefix but no root, it replaces
+/// `self`". [`Component::Prefix`] is only produced at position 0, so a LEADING
+/// `C:/…` is rejected by the match below while a non-leading one arrives
+/// classified `Normal`. It was reachable from an untrusted rule string on both
+/// wires.
+///
+/// So the loop rejects any component that re-parses as a prefix (killing the
+/// replacement at its source, for ANY `dir`), and the postcondition then backs
+/// that up. The postcondition ALONE would not be enough: it is unconditionally
+/// sufficient only for an absolute `dir`, because a replacement buffer is
+/// `[Prefix, …]` with no `RootDir` while an absolute `dir` always has one — but
+/// `dir` may be relative, and a bare-drive `dir` of `C:` would match a replaced
+/// `C:..` component-wise.
 ///
 /// It does not bound what an in-`dir` symlink resolves to, nor Windows reserved
 /// device names — `dir\CON` starts with `dir` and still opens the console. See
 /// [`rules_match`] for both.
 fn safe_join(dir: &Path, rel: &str) -> Option<PathBuf> {
     // An empty `dir` would make the postcondition below VACUOUS — every path
-    // starts with "" — so it is rejected as a precondition. Unreachable via
-    // `--detect`, whose callers gate on `is_dir`, but `rules_match` is public
-    // and its doc promises containment.
+    // starts with "". What blocks it from the CLI is clap ("a value is
+    // required"), NOT the `is_dir` gates: the `--aes-key` + `--detect` path
+    // through `explicit_key_context` has no such gate. Either way `rules_match`
+    // is public and its doc promises containment, so this is a precondition
+    // rather than an assumption.
     if rel.is_empty() || dir.as_os_str().is_empty() {
         return None;
     }
     let mut out = dir.to_path_buf();
     for comp in Path::new(rel).components() {
         match comp {
-            Component::Normal(c) => out.push(c),
+            Component::Normal(c) => {
+                // A `Normal` that RE-PARSES as a prefix (`C:` on Windows) is
+                // what makes `push` replace the buffer. Rejecting it here means
+                // containment no longer depends on `dir` being absolute — with
+                // a bare-drive `dir` such as `C:`, a `C:..` component would
+                // otherwise replace the buffer with `C:..`, which genuinely
+                // DOES start with `C:` and so slips past the postcondition
+                // while resolving a level above the drive's cwd. On Unix a
+                // colon is an ordinary filename byte, so this never fires.
+                if Path::new(c).components().next() != Some(Component::Normal(c)) {
+                    return None;
+                }
+                out.push(c);
+            }
             // Resolves to `dir` itself, so a lone `.` matches any existing
             // directory without opening a file — the cheapest universal-match
             // shape. Pre-existing and recorded on #658.
@@ -453,6 +481,16 @@ mod tests {
     /// because making `file_contains_bytes` total removed the `windows(0)` panic
     /// that used to make losing that early return LOUD; without this, losing it
     /// silently flips the semantics to "matches nothing".
+    ///
+    /// Pinned as PRE-EXISTING behaviour, not endorsed. Note the asymmetry this
+    /// locks in: `ByteSignatureRule` deliberately fails CLOSED on an empty
+    /// needle while `contains` stays vacuously true, so the dangerous form is
+    /// the tested one. It is attacker-reachable — a registry profile carrying
+    /// `contains: [{path: "x", substring: ""}]` (or the cheaper
+    /// `require_paths: ["."]`) matches every directory, capturing `--detect`
+    /// for an arbitrary path and supplying its own key and `engine_version`.
+    /// Changing it is a fail-closed semver-relevant decision, tracked on #658
+    /// rather than taken here.
     #[test]
     fn empty_substring_is_vacuously_true() {
         let d = tempfile::tempdir().unwrap();
@@ -666,16 +704,19 @@ mod tests {
         fn safe_join_is_none_or_contained(
             segments in proptest::collection::vec(
                 proptest::sample::select(vec![
-                    "a", "", ".", "..", "C:", "C:x", "c:", "/", "\\", "\\\\?\\C:", "x.y", "NUL",
+                    "a", "", ".", "..", "C:", "C:x", "C:..", "c:", "/", "\\",
+                    "\\\\?\\C:", "x.y", "NUL",
                 ]),
                 0..6,
-            )
+            ),
+            base in proptest::sample::select(vec!["/base", "games", ".", "C:", "games/.."]),
         ) {
             let rel = segments.join("/");
-            // No filesystem: `safe_join` is pure. "/base" has a root and no
-            // drive prefix on both platforms, which is what a replacement
-            // escape has to fail against.
-            let base = Path::new("/base");
+            // No filesystem: `safe_join` is pure. Bases deliberately span
+            // absolute, relative, dot and bare-drive shapes — the postcondition
+            // alone is only provably sufficient for the absolute one, so the
+            // others are exactly where a regression would hide.
+            let base = Path::new(base);
             if let Some(joined) = safe_join(base, &rel) {
                 prop_assert!(
                     joined.starts_with(base),
