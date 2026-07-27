@@ -105,9 +105,15 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
                 .iter()
                 .find(|b| crate::profile::detection::decode_hex(&b.hex).is_none())
             {
+                // `bad.hex` is <= MAX_STR here (cap-before-parse above), and
+                // truncated again so the message stays readable. ESCAPING is
+                // deliberately not done here: core error strings reach the
+                // terminal through the CLI's single sink, which is where
+                // sanitization belongs and is tracked as #708.
                 return Err(format!(
                     "byte signature in `{}` is not an even-length unprefixed hex string: `{}`",
-                    p.id, bad.hex
+                    p.id,
+                    crate::profile::detection::truncate_for_log(&bad.hex)
                 ));
             }
         }
@@ -734,10 +740,11 @@ mod tests {
         assert!(parse_registry(json.as_bytes()).is_err());
     }
 
-    /// A registry document written BEFORE `byte_signatures` existed still parses
-    /// field is `#[serde(default)]`. This is the compatibility direction that
-    /// — the reverse (an old binary reading a document that USES the field)
-    /// does not, because `DetectRules` is `deny_unknown_fields`.
+    /// A registry document written BEFORE `byte_signatures` existed still
+    /// parses — the field is `#[serde(default)]`. That is the compatibility
+    /// direction that holds; the reverse (an old binary reading a document
+    /// that USES the field) does not, because `DetectRules` is
+    /// `deny_unknown_fields`.
     #[test]
     fn accepts_detect_without_a_byte_signatures_field() {
         let json = r#"[{"id":"x","name":"y","keys":{},"detect":{"require_paths":["Game/Paks"]}}]"#;

@@ -105,7 +105,7 @@ pub struct ByteSignatureRule {
 ///
 /// The local store is not cap-validated, so a hand-edited value can be
 /// arbitrarily long; `MAX_STR` bounds only the registry path.
-fn truncate_for_log(s: &str) -> String {
+pub(crate) fn truncate_for_log(s: &str) -> String {
     const LOG_FIELD_MAX: usize = 64;
     match s.char_indices().nth(LOG_FIELD_MAX) {
         Some((i, _)) => format!("{}…", &s[..i]),
@@ -210,10 +210,8 @@ pub fn rules_match(dir: &Path, rules: &DetectRules) -> bool {
             // RAW, while a plain `String` field records via `record_str` and is
             // escaped. These values are untrusted (a hand-edited store), and a
             // raw ESC sequence here clears the screen or retitles the terminal.
-            //
-            // Truncated because the local store is never cap-validated —
-            // `MAX_STR` bounds the registry path only — so `hex` can be
-            // megabytes here and this warn fires once per rule per profile.
+            // This is not hypothetical: `%` was applied here once for style
+            // consistency and measured as a live injection sink.
             tracing::warn!(
                 path = truncate_for_log(&rule.path),
                 hex = truncate_for_log(&rule.hex),
@@ -338,6 +336,27 @@ mod tests {
         }
     }
 
+    /// The warn escapes and BOUNDS its untrusted fields. Pins the property
+    /// `9e5fe3e` exists to establish: dropping `truncate_for_log`, or
+    /// re-applying the `%` sigil, both survive every other test in this file
+    /// and both reintroduce a raw-control-byte sink at the default log level.
+    #[tracing_test::traced_test]
+    #[test]
+    fn warn_bounds_and_escapes_untrusted_hex() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "game.exe", &[0xDE, 0xAD]);
+        // 500 chars, malformed, opening with a raw ESC + CSI.
+        let hostile = format!("{}[2J{}", '\u{1b}', "z".repeat(495));
+        assert!(!rules_match(
+            d.path(),
+            &byte_signature_rules("game.exe", &hostile)
+        ));
+        // Bounded: the ellipsis is present, so the 500-char value was clamped.
+        assert!(logs_contain("…"), "value must be truncated");
+        // Escaped: `record_str` renders ESC as `\u{1b}`, never a raw byte.
+        assert!(logs_contain("\\u{1b}"), "ESC must appear escaped, not raw");
+    }
+
     /// `truncate_for_log` bounds an untrusted value and keeps char boundaries.
     /// The local store is not cap-validated, so this is the only bound on a
     /// hand-edited `hex` reaching a log field.
@@ -433,11 +452,9 @@ mod tests {
     #[test]
     fn malformed_or_empty_hex_never_matches() {
         let d = tempfile::tempdir().unwrap();
-        // Contains a ZERO byte on purpose. A non-hex digit that decoded to 0
-        // instead of rejecting would yield a needle of `[0x00, …]`, which a
-        // file WITHOUT a zero byte would fail to contain anyway — masking the
-        // defect. With the zero byte present, only a genuine rejection keeps
-        // these from matching.
+        // Zero byte on purpose: a non-hex digit decoding to 0 rather than
+        // rejecting yields `[0x00, …]`, which a file without a zero byte would
+        // fail to contain anyway — masking the defect.
         write(d.path(), "game.exe", &[0x00, 0xDE, 0xAD, 0x00]);
         for bad in [
             "",      // empty: NOT vacuously true, unlike `substring`
