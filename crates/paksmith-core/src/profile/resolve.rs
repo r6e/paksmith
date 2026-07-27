@@ -46,9 +46,14 @@ pub fn load_cache_lenient() -> Option<RegistryCache> {
             // a plain `String` field records via `record_str` and is escaped.
             // These faults interpolate untrusted text — registry-supplied ids,
             // hex and paths — so a raw ESC here retitles or clears the user's
-            // terminal (#708). `detect_warn_escapes_an_untrusted_dir` below
-            // pins THIS file's warns; the analogous test in `detection` covers
-            // its own warn and does not reach here.
+            // terminal (#708).
+            //
+            // Coverage, stated exactly: TWO of this file's FIVE warns are
+            // pinned — `detect_warn_escapes_an_untrusted_dir` drives the
+            // `--detect` one, `unparsable_engine_version_degrades_to_no_hint`
+            // the `engine_version` one. THIS warn, the fetch-failure warn and
+            // the store-unreadable warn bind their fault identically but no
+            // test drives them; each needs an I/O failure to reach.
             tracing::warn!(error = e.to_string(), "ignoring unreadable registry cache");
             None
         }
@@ -691,13 +696,16 @@ mod tests {
     use crate::GameProfile;
     use crate::profile::detection::DetectRules;
 
-    /// A raw control byte in an untrusted value must not reach this file's
-    /// warns raw. `--detect`'s fault interpolates the caller-supplied
-    /// directory, so an empty store plus no cache drives `DetectionNoMatch`
-    /// through the warn without touching the filesystem. Reverting any of this
-    /// file's four warns to the `%` sigil fails the raw-ESC assertion; the
-    /// `detection` module's equivalent test cannot catch that, because its call
-    /// graph never enters `resolve.rs`.
+    /// A raw control byte in an untrusted value must not reach the `--detect`
+    /// warn raw. That fault interpolates the caller-supplied directory, so an
+    /// empty store plus no cache drives `DetectionNoMatch` through the warn
+    /// without touching the filesystem.
+    ///
+    /// Scope, because the wider reading is false: this pins the `--detect` warn
+    /// ONLY. The ESC enters through `dir`, which no other warn in this file
+    /// sees, so reverting one of those to `%` emits no ESC and both assertions
+    /// still pass. The `detection` module's equivalent test does not reach here
+    /// either — its call graph never enters `resolve.rs`.
     #[tracing_test::traced_test]
     #[test]
     fn detect_warn_escapes_an_untrusted_dir() {
@@ -880,21 +888,32 @@ mod tests {
         );
     }
 
+    #[tracing_test::traced_test]
     #[test]
     fn unparsable_engine_version_degrades_to_no_hint() {
         // Hand-edited or registry-authored garbage must never fail an
         // open — it degrades to "no hint", i.e. the pre-#656 parse.
+        //
+        // The value also carries a raw ESC, which makes this the pin for
+        // `parse_engine_version`'s warn: `value` is a plain `&str` field and
+        // records via `record_str`, which escapes. The `%` sigil would not.
+        let esc = '\u{1b}';
         let mut store = hero_store_with_detect(None);
         store
             .profiles
             .get_mut("hero")
             .expect("seeded")
-            .engine_version = Some("Fortnite Chapter 5".into());
+            .engine_version = Some(format!("{esc}[2JFortnite Chapter 5"));
         assert_eq!(
             named_profile_inputs_in(&store, None, "hero")
                 .expect("a malformed version is not an error")
                 .engine_version,
             None
+        );
+        assert!(logs_contain("\\u{1b}"), "ESC must appear escaped");
+        assert!(
+            !logs_contain(&esc.to_string()),
+            "no raw ESC may reach the log record"
         );
     }
 

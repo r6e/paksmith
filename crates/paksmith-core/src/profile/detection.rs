@@ -23,7 +23,9 @@ pub(crate) const MAX_CONTAINS_READ: usize = 1024 * 1024;
 /// Matches `MAX_CONTAINS`: each kind opens one file, reads up to
 /// `MAX_CONTAINS_READ`, and scans it once, so the WORST-CASE per-profile read
 /// doubles when both are at their caps. The achievable per-DOCUMENT cost is
-/// bounded elsewhere and barely moves — see #658 for the measurements.
+/// bounded by `registry::MAX_BODY_BYTES` (8 MiB, enforced on both fetch and
+/// cache-load) and rises roughly 7-20% — a byte rule is a cheaper wire encoding,
+/// not a bigger budget. See `docs/plans/ROADMAP.md` (Phase 5) and #658.
 pub(crate) const MAX_BYTE_SIGNATURES: usize = 64;
 
 /// Rules that recognise a game's install directory. All present rules must
@@ -35,7 +37,7 @@ pub(crate) const MAX_BYTE_SIGNATURES: usize = 64;
 /// document USING a new field is rejected by any binary predating it. Direction
 /// matters: a `#[serde(default)]` field does NOT invalidate already-signed
 /// documents, which lack it and parse fine. `byte_signatures` (#658) was payable
-/// only while `DEFAULT_REGISTRY_URL` is a `.invalid` placeholder (#657) — untrue
+/// only while the default registry endpoint is a `.invalid` placeholder (#657) — untrue
 /// of the private endpoints `RegistryConfig` supports. Once #657 is live, a
 /// further field needs a schema-version story.
 ///
@@ -44,6 +46,12 @@ pub(crate) const MAX_BYTE_SIGNATURES: usize = 64;
 /// lands in this window where one is already being taken. Downstream cannot use
 /// a struct expression at all — `..Default::default()` is also `E0639` — so
 /// call [`Default::default`], then assign.
+///
+/// Its CONTAINERS stay exhaustive on purpose. `GameProfile` and
+/// `RegistryProfile` are what a downstream consumer builds by hand, both derive
+/// `Default`, and their wire compatibility is governed by `#[serde(default)]`
+/// rather than by struct literals — so `E0639` there would cost more ergonomics
+/// than it buys.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -112,7 +120,9 @@ pub struct ByteSignatureRule {
     pub hex: String,
 }
 
-/// Clamp an untrusted string to a short prefix for a log field.
+/// Clamp an untrusted string to a short prefix for a log field OR an error
+/// message. `registry::validate_caps` uses it for the latter, which reaches
+/// stderr, the GUI and JSON rather than a `tracing` field.
 ///
 /// The local store is not cap-validated, so a hand-edited value can be
 /// arbitrarily long; `MAX_STR` bounds only the registry path.
@@ -374,7 +384,7 @@ mod tests {
     }
 
     /// The warn escapes and BOUNDS its untrusted fields. Pins the property
-    /// `9e5fe3e` exists to establish: dropping `truncate_for_log`, or
+    /// #658 established: dropping `truncate_for_log`, or
     /// re-applying the `%` sigil, both survive every other test in this file
     /// and both reintroduce a raw-control-byte sink at the default log level.
     ///
@@ -561,6 +571,20 @@ mod tests {
                 "path {esc:?} must not match"
             );
         }
+    }
+
+    /// The containment postcondition is VACUOUS against an empty base — every
+    /// path starts with "" — so an empty `dir` is refused as a precondition.
+    /// `--detect` gates on `is_dir` and cannot reach it, but `rules_match` is
+    /// public and its doc promises containment.
+    #[test]
+    fn safe_join_rejects_an_empty_dir() {
+        assert_eq!(safe_join(Path::new(""), "a"), None);
+        // Refused through the public entry point too, not only privately.
+        assert!(!rules_match(
+            Path::new(""),
+            &byte_signature_rules("a", "dead")
+        ));
     }
 
     /// A NON-LEADING drive prefix must not escape `dir`. `PathBuf::push`

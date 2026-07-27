@@ -1,6 +1,14 @@
 # Phase 5d — Game Auto-Detection Design
 
 **Status:** approved (brainstorming), pre-implementation
+
+> **Amended (issue #658 item 3):** the "no exe-signatures" non-goal was revisited
+> and `DetectRules.byte_signatures` shipped, so this document's TWO-kind rule set
+> is now THREE. Inline notes mark the three decision sites; the rest of the body
+> — the caps list, the security bullets, the `DetectRules` sketch, the
+> architecture line — still reads pre-#658 and is NOT individually annotated.
+> `docs/plans/ROADMAP.md` (Phase 5) carries the current argument and the
+> measurements, and the code is authoritative over both.
 **Date:** 2026-06-20
 **Roadmap:** Phase 5 (Game Profiles) — sub-phase 5d (auto-detection). **Completes Phase 5.**
 
@@ -44,7 +52,8 @@ out-of-the-box for known games.
   substring), and since #658 item 3 `byte_signatures` rules (a hex-encoded
   needle in the same bounded window) — there are THREE kinds, not two.
 - **Match semantics:** a profile matches iff **all** `require_paths` exist AND
-  **all** `contains` rules pass (logical AND). No rules → never auto-detected.
+  **all** `contains` rules pass — and, since #658 item 3, **all**
+  `byte_signatures` rules too (logical AND). No rules → never auto-detected.
 - **Exposure:** `profile detect <dir>` (lists every match) + a global
   `--detect <dir>` flag (resolution; requires exactly one match).
 - **Ambiguity:** the query lists 0/1/many; resolution errors on 0 ("no game
