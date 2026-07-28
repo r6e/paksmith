@@ -39,7 +39,7 @@ out-of-the-box for known games.
 - **Non-goal:** executable binary-signature scanning (fragile across game
   updates, heavy, an arbitrary-binary-read surface — deferred). **AMENDED by
   issue #658 item 3: shipped as `DetectRules.byte_signatures`. See
-  `docs/plans/ROADMAP.md` (Phase 5d) for which of the three objections
+  `docs/plans/ROADMAP.md` (Phase 5) for which of the three objections
   survived.** Also a non-goal: a CLI to *set*
   local detection rules (hand-edit `profiles.toml` or rely on the registry —
   `profile add` is unchanged); confidence ranking / auto-picking among ambiguous

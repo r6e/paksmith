@@ -73,9 +73,9 @@ pub struct DetectRules {
     /// way it is for `pak_paths`. Local store: every store-mutating command
     /// rewrites all profiles, so emitting `byte_signatures = []` would make a
     /// pre-#658 binary reject the WHOLE store, `DetectRules` being
-    /// `deny_unknown_fields`. Registry cache: `RegistryCache::save_to`
-    /// re-serializes `RegistryProfile`, so a NEW binary writing the cache would
-    /// otherwise leave a file an OLD binary rejects wholesale.
+    /// `deny_unknown_fields`. Registry cache: same, for the EMPTY vec — once a
+    /// registry ships signatures the cache is unreadable to a pre-#658 binary
+    /// regardless, which fails soft via `load_cache_lenient`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub byte_signatures: Vec<ByteSignatureRule>,
 }
@@ -183,10 +183,11 @@ pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
 /// for an absolute path, a root/drive prefix, a `..` parent component, an empty
 /// string, or anything that would land outside `dir`.
 ///
-/// The GUARANTEE is the in-loop prefix rejection. The `starts_with`
-/// postcondition is redundant BY CONSTRUCTION — once no component can re-parse
-/// as a prefix, [`PathBuf::push`] only ever appends — and is kept as defence in
-/// depth. Do NOT delete either on the strength of the other.
+/// The GUARANTEE is the in-loop prefix rejection; the `starts_with`
+/// postcondition is defence in depth. Do NOT delete either for the other.
+/// TWO COPIES cite this function: `extract::safe_path::safe_join` (untrusted
+/// entry paths, write sink) and `profile_paks::safe_join_pattern`; extract's
+/// all-`Normal` tail is why only THIS one needs the empty-`dir` precondition.
 ///
 /// The loop check exists because on Windows a `Normal` component that re-parses
 /// as a drive prefix (`C:`, from `a/C:/Windows/win.ini`) makes `push` REPLACE
@@ -194,14 +195,13 @@ pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
 /// and [`Component::Prefix`] is only produced at position 0, so a LEADING
 /// `C:/…` is rejected below while a non-leading one arrives as `Normal`.
 /// Reachable from an untrusted rule string on both wires. The postcondition
-/// cannot substitute for it: that is sufficient only for an ABSOLUTE `dir`, and
-/// with a bare-drive `dir` a replaced `C:..` starts with `C:` component-wise.
+/// cannot substitute: it is sufficient only for an ABSOLUTE `dir`, and with a
+/// bare-drive `dir` a replaced `C:..` starts with `C:` component-wise.
 ///
-/// Coverage, so that local green is not over-credited: the loop check's only
-/// EXECUTING pin is CI's `windows-latest` nextest run, and `mutants.yml` is
-/// `--in-diff` ubuntu-only, so a clean mutants run says nothing about it
-/// either. Containment is also one-directional here — `Some` implies contained
-/// — so nothing catches an OVER-broad guard.
+/// Coverage, so local green is not over-credited: the loop check's only
+/// EXECUTING pin is CI's `windows-latest` nextest run, `mutants.yml` is
+/// `--in-diff` ubuntu-only, and containment here is one-directional, so
+/// nothing catches an OVER-broad guard.
 ///
 /// It does not bound what an in-`dir` symlink resolves to, nor Windows reserved
 /// device names — `dir\CON` starts with `dir` and still opens the console. See
@@ -228,7 +228,7 @@ fn safe_join(dir: &Path, rel: &str) -> Option<PathBuf> {
                 // DOES start with `C:` and so slips past the postcondition
                 // while resolving a level above the drive's cwd. On Unix a
                 // colon is an ordinary filename byte, so this never fires.
-                if Path::new(c).components().next() != Some(Component::Normal(c)) {
+                if !matches!(Path::new(c).components().next(), Some(Component::Normal(_))) {
                     return None;
                 }
                 out.push(c);

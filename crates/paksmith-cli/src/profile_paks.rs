@@ -131,11 +131,9 @@ fn safe_join_pattern(dir: &Path, pattern: &str) -> Option<PathBuf> {
     let mut out = dir.to_path_buf();
     for comp in Path::new(pattern).components() {
         match comp {
-            // Mirrors detection's `safe_join`, including its re-parse guard: a
-            // `Normal` that re-parses as a prefix makes `push` REPLACE the
-            // buffer on Windows. Local-store input only, so this crosses no
-            // privilege boundary — but `expand_patterns` promises escaping
-            // patterns are rejected, and without this it did not keep that.
+            // Windows-only prefix re-parse guard; mechanism documented on
+            // detection's `safe_join` (#658). `expand_patterns` promises
+            // escaping patterns are rejected — this is what keeps that.
             Component::Normal(c) => {
                 if !matches!(Path::new(c).components().next(), Some(Component::Normal(_))) {
                     return None;
@@ -237,6 +235,21 @@ mod tests {
         touch(&dir.join("Paks/a.pak"));
         let got = expand_patterns("hero", &["Paks/*.pak".to_string()], Some(&dir)).unwrap();
         assert_eq!(got, vec![dir.join("Paks/a.pak")]);
+    }
+
+    /// The prefix re-parse guard, which nothing else pins. `expand_patterns`
+    /// promises escaping patterns are rejected; on Windows a non-leading `C:`
+    /// segment would otherwise make `push` replace the buffer.
+    #[cfg(windows)]
+    #[test]
+    fn drive_prefix_pattern_is_rejected() {
+        for evil in ["a/C:x", "a/C:..", "a/C:/Paks/*.pak"] {
+            assert_eq!(
+                safe_join_pattern(std::path::Path::new("C:/games/hero"), evil),
+                None,
+                "accepted {evil}"
+            );
+        }
     }
 
     #[test]

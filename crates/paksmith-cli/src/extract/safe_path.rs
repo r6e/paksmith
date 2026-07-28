@@ -70,14 +70,11 @@ pub(crate) fn safe_join(
 
     let mut candidate = output_root.to_path_buf();
     for part in chosen {
-        // A segment that RE-PARSES as a prefix (`C:` on Windows) makes
-        // `PathBuf::push` REPLACE the whole buffer — std: "if `path` has a
-        // prefix but no root, it replaces `self`". The leading-drive check
-        // above inspects offsets 0-1 of the WHOLE string, so a non-leading
-        // `a/C:/…` sails past it, and no segment holds a separator so the
-        // `..`/absolute arm never fires either. Same defect #658 fixed in
-        // `paksmith-core`'s detection `safe_join`; this is the copy that maps
-        // untrusted pak entry paths onto a write path.
+        // Windows-only prefix re-parse guard; the mechanism is documented on
+        // `paksmith_core`'s detection `safe_join` (#658). Site-specific reason
+        // it is needed HERE: the leading-drive check above inspects offsets 0-1
+        // of the WHOLE string, so a non-leading `a/C:/…` sails past it — and
+        // this is the copy that maps untrusted pak entry paths to a write.
         if !matches!(
             Path::new(part).components().next(),
             Some(Component::Normal(_))
@@ -87,12 +84,10 @@ pub(crate) fn safe_join(
         candidate.push(part);
     }
 
-    // A REAL containment postcondition, not a `debug_assert!`: the previous
-    // check compiled out in release, so release builds had none at all. It also
-    // only looked for `ParentDir`, which a replaced buffer need not contain.
-    // `strip_prefix` succeeding implies `starts_with`, and since that is purely
-    // LEXICAL (it accepts a `..` tail) every component past the root must be
-    // `Normal` too.
+    // Containment postcondition; like detection's, redundant by construction
+    // given the guard above and kept as defence in depth. Do not simplify it to
+    // `starts_with`: that is LEXICAL and accepts a `..` tail, so every component
+    // past the root must be `Normal` too.
     let contained = candidate
         .strip_prefix(output_root)
         .is_ok_and(|tail| tail.components().all(|c| matches!(c, Component::Normal(_))));
@@ -158,7 +153,6 @@ mod tests {
         ));
     }
 
-    #[test]
     /// A NON-LEADING drive prefix must not escape the output root. The leading
     /// check inspects offsets 0-1 of the whole string, so `a/C:/…` passes it and
     /// `push` then replaces the buffer. Only executes on `windows-latest`; a

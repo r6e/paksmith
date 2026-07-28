@@ -1,5 +1,10 @@
 # Phase 5d — Game Auto-Detection Implementation Plan
 
+> **Amended (issue #658 item 3):** a third rule kind, `byte_signatures`, shipped
+> after this plan was executed, so the two-kind prose below (match semantics, the
+> caps list) is stale. Struct literals self-correct — copy one and it will not
+> compile — but prose does not, hence this note.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Identify the game for a directory via declarative marker-path + file-content rules stored on profiles, exposed as `paksmith profile detect <dir>` and a `--detect <dir>` resolution flag. Completes Phase 5.
