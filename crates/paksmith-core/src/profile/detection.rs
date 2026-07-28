@@ -186,8 +186,8 @@ pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
 /// The GUARANTEE is the in-loop prefix rejection; the `starts_with`
 /// postcondition is defence in depth. Do NOT delete either for the other.
 /// TWO COPIES cite this function: `extract::safe_path::safe_join` (untrusted
-/// entry paths, write sink) and `profile_paks::safe_join_pattern`; extract's
-/// all-`Normal` tail is why only THIS one needs the empty-`dir` precondition.
+/// entry paths, write sink) and `profile_paks::safe_join_pattern`; both carry
+/// an all-`Normal` tail, so only THIS one needs the empty-`dir` precondition.
 ///
 /// The loop check exists because on Windows a `Normal` component that re-parses
 /// as a drive prefix (`C:`, from `a/C:/Windows/win.ini`) makes `push` REPLACE

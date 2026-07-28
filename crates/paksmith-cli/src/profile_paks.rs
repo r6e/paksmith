@@ -133,7 +133,8 @@ fn safe_join_pattern(dir: &Path, pattern: &str) -> Option<PathBuf> {
         match comp {
             // Windows-only prefix re-parse guard; mechanism documented on
             // detection's `safe_join` (#658). `expand_patterns` promises
-            // escaping patterns are rejected — this is what keeps that.
+            // escaping patterns are rejected; the postcondition below keeps
+            // that for every `dir` shape but a bare drive, where this is.
             Component::Normal(c) => {
                 if !matches!(Path::new(c).components().next(), Some(Component::Normal(_))) {
                     return None;
@@ -145,8 +146,7 @@ fn safe_join_pattern(dir: &Path, pattern: &str) -> Option<PathBuf> {
         }
     }
     // Same postcondition as `extract::safe_path::safe_join`, deliberately:
-    // `starts_with` is lexical and accepts a `..` tail. Divergent mirrors are
-    // what produced the bug this guard fixes.
+    // `starts_with` is lexical and accepts a `..` tail.
     out.strip_prefix(dir)
         .is_ok_and(|tail| tail.components().all(|c| matches!(c, Component::Normal(_))))
         .then_some(out)
@@ -248,6 +248,11 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn drive_prefix_pattern_is_rejected() {
+        // BARE-DRIVE base first: the only shape the postcondition cannot
+        // backstop, so it is what pins the LOOP guard. Deleting the guard makes
+        // this `Some("C:x")`. Not `a/C:..` — this copy's all-`Normal` tail
+        // catches that one regardless, which is why it cannot discriminate.
+        assert_eq!(safe_join_pattern(std::path::Path::new("C:"), "a/C:x"), None);
         for evil in ["a/C:x", "a/C:..", "a/C:/Paks/*.pak"] {
             assert_eq!(
                 safe_join_pattern(std::path::Path::new("C:/games/hero"), evil),

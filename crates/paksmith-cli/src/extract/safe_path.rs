@@ -160,6 +160,16 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn rejects_non_leading_drive_prefix() {
+        // BARE-DRIVE root first: the only shape the postcondition cannot
+        // backstop, so it is the one that pins the LOOP guard. With a rooted
+        // root like `/out` a replaced buffer fails `strip_prefix` anyway, so
+        // those cases cannot tell which guard fired. Deleting the loop guard
+        // makes this `Ok("C:x")`. Not `a/C:..` — the all-`Normal` tail would
+        // catch that one regardless.
+        assert!(matches!(
+            safe_join(Path::new("C:"), "a/C:x", false),
+            Err(SafePathError::Escapes(_))
+        ));
         // Nested: the drive segment replaces the buffer mid-join.
         for evil in ["a/C:/Windows/Temp/x.dll", "a/C:x", "a/C:../pwn.exe"] {
             assert!(
