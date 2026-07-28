@@ -83,8 +83,8 @@ pub(crate) fn load_cache_lenient() -> Option<RegistryCache> {
     match RegistryCache::load() {
         Ok(c) => c,
         Err(e) => {
-            // AMENDED (#658 item 3): the `%` sigil shown here was measured as
-            // a live terminal-injection sink and reverted. Do not copy it back.
+            // AMENDED (#658 item 3): this snippet READ `error = %e`, which was
+            // measured as a live terminal-injection sink; corrected in place here
             tracing::warn!(error = e.to_string(), "ignoring unreadable registry cache");
             None
         }
@@ -323,8 +323,8 @@ pub async fn resolve_pak_key(
                 cache = Some(fetched);
             }
             Err(e) => {
-                // AMENDED (#658 item 3): the `%` sigil shown here was measured as
-                // a live terminal-injection sink and reverted. Do not copy it back.
+                // AMENDED (#658 item 3): this snippet READ `error = %e`, which was
+                // measured as a live terminal-injection sink; corrected in place here
                 tracing::warn!(error = e.to_string(), "registry fetch failed; using cached profiles if available");
             }
         }

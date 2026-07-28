@@ -1193,8 +1193,8 @@ Expected: FAIL — auto-fetch not wired.
     if !fresh {
         match try_fetch(&cfg, now) {
             Ok(fetched) => { let _ = fetched.save(); cache = Some(fetched); }
-            // AMENDED (#658 item 3): the `%` sigil shown here was measured as
-            // a live terminal-injection sink and reverted. Do not copy it back.
+            // AMENDED (#658 item 3): this snippet READ `error = %e`, which was
+            // measured as a live terminal-injection sink; corrected in place here
             Err(e) => tracing::warn!(error = e.to_string(), "registry fetch failed; using cached profiles if available"),
         }
     }

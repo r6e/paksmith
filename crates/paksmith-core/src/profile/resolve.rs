@@ -42,8 +42,8 @@ pub fn load_cache_lenient() -> Option<RegistryCache> {
         Ok(c) => c,
         Err(e) => {
             // `e.to_string()` and NOT the `%` sigil, here and at every other
-            // warn in this file. CANONICAL statement of the mechanism, since
-            // three other sites reference it: `%` is `field::display()`, which
+            // warn in this file. CANONICAL statement of the mechanism, which
+            // other sites reference: `%` is `field::display()`, which
             // the default `fmt` subscriber writes RAW, while a plain `String`
             // field arrives at `record_str`. Escaping is the SUBSCRIBER's
             // choice rather than a property of `record_str` — `fmt`'s visitor

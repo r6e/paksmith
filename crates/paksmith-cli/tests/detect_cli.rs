@@ -81,11 +81,16 @@ fn fixture(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
-/// A NON-EMPTY `byte_signatures` must survive a store REWRITE. This is the path
-/// the `skip_serializing_if` decision rests on, and the one nothing covered: the
-/// core round-trips operate on a bare `GameProfile`, one nesting level shallower
-/// than `[[profiles.<id>.detect.byte_signatures]]` — which is exactly where a
-/// value-typed field emitted after a table-array lands in the wrong table.
+/// A NON-EMPTY `byte_signatures` must survive a store REWRITE: `profile key add`
+/// rewrites every profile, and nothing else exercises a rule at
+/// `[[profiles.<id>.detect.byte_signatures]]` depth.
+///
+/// Scope, measured rather than assumed. This does NOT pin the
+/// `skip_serializing_if` decision — dropping that attribute leaves this test
+/// green, and core's `empty_byte_signatures_is_omitted_from_toml` is what pins
+/// it. What fails here is the attribute made UNCONDITIONAL, i.e. a rewrite
+/// dropping a non-empty rule. There is no field-order hazard to catch either:
+/// the serializer emits values before tables whatever the declaration order.
 #[test]
 fn byte_signatures_survive_a_store_rewrite() {
     let cfg = tempdir().unwrap();

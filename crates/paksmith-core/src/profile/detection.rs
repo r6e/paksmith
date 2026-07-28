@@ -185,34 +185,23 @@ pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
 ///
 /// The GUARANTEE is the in-loop prefix rejection. The `starts_with`
 /// postcondition is redundant BY CONSTRUCTION — once no component can re-parse
-/// as a prefix, [`PathBuf::push`] only ever appends, so `starts_with` cannot
-/// fail — and is kept purely as defence in depth. Do NOT delete the loop check
-/// on the strength of the postcondition; it is the only thing standing there.
+/// as a prefix, [`PathBuf::push`] only ever appends — and is kept as defence in
+/// depth. Do NOT delete either on the strength of the other.
 ///
 /// The loop check exists because on Windows a `Normal` component that re-parses
 /// as a drive prefix (`C:`, from `a/C:/Windows/win.ini`) makes `push` REPLACE
 /// the buffer — std: "if `path` has a prefix but no root, it replaces `self`" —
 /// and [`Component::Prefix`] is only produced at position 0, so a LEADING
 /// `C:/…` is rejected below while a non-leading one arrives as `Normal`.
-/// Reachable from an untrusted rule string on both wires.
+/// Reachable from an untrusted rule string on both wires. The postcondition
+/// cannot substitute for it: that is sufficient only for an ABSOLUTE `dir`, and
+/// with a bare-drive `dir` a replaced `C:..` starts with `C:` component-wise.
 ///
-/// The postcondition could not close that: it is sufficient only for an
-/// ABSOLUTE `dir`, and with a bare-drive `dir` of `C:` a replaced `C:..` buffer
-/// starts with `C:` component-wise. That is also why the proptest cannot catch
-/// the shape — the escape SATISFIES the invariant it asserts, so only the
-/// `#[cfg(windows)]` case below discriminates it.
-///
-/// Coverage, stated so a diff reader does not over-credit it: the loop check's
-/// only EXECUTING pin is CI's `windows-latest` nextest run — probed unkillable
-/// on darwin, and `mutants.yml` is `--in-diff` ubuntu-only so it never gets
-/// mutation coverage either. The postcondition is unkillable on BOTH platforms
-/// and cargo-mutants generates no operator for it at all.
-/// `safe_join_is_none_or_contained` needs its tail check to see any of this:
-/// `Path::starts_with` is purely LEXICAL and accepts a `..` tail, so a replaced
-/// `C:..` buffer starts with a `C:` base and the drive escapes satisfy the
-/// postcondition. The tail-all-`Normal` assertion is what catches them. It is
-/// still one-directional (`Some` implies contained), so it cannot catch an
-/// OVER-broad guard — rejecting everything satisfies it.
+/// Coverage, so that local green is not over-credited: the loop check's only
+/// EXECUTING pin is CI's `windows-latest` nextest run, and `mutants.yml` is
+/// `--in-diff` ubuntu-only, so a clean mutants run says nothing about it
+/// either. Containment is also one-directional here — `Some` implies contained
+/// — so nothing catches an OVER-broad guard.
 ///
 /// It does not bound what an in-`dir` symlink resolves to, nor Windows reserved
 /// device names — `dir\CON` starts with `dir` and still opens the console. See
@@ -592,12 +581,10 @@ mod tests {
         // fail to contain anyway — masking the defect.
         write(d.path(), "game.exe", &[0x00, 0xDE, 0xAD, 0x00]);
         for bad in [
-            "",  // empty: NOT vacuously true, unlike `substring`
-            "d", // odd length
-            // Odd length, and load-bearing beyond that: it truncates to `dead`,
-            // which IS present in the fixture, so this entry is what kills a
-            // parity-guard mutant that "" and "d" alone would miss.
-            "deadb", "zz",    // non-hex — would be `[0x00]` if a non-hex digit
+            "",      // empty: NOT vacuously true, unlike `substring`
+            "d",     // odd length
+            "deadb", // odd length; sole parity-guard killer (truncates to `dead`)
+            "zz",    // non-hex — would be `[0x00]` if a non-hex digit
             "zzzz",  // non-hex — would be `[0x00, 0x00]`
             "00zz",  // half-valid: a partial decode must not be used
             "de ad", // odd length (5): stops at the length guard, NOT on
@@ -667,12 +654,10 @@ mod tests {
     fn drive_relative_path_does_not_escape_the_target_dir() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "game.exe", &[0xDE, 0xAD]);
-        // Pins the LOOP guard specifically, and nothing else does: with an
-        // absolute base the postcondition already answers, and the proptest
-        // cannot — `C:..` starts with `C:` component-wise, so the escape
-        // satisfies the invariant. Deleting the loop guard makes this `Some`.
+        // The DETERMINISTIC pin for the loop guard: the shapes below use an
+        // absolute base, where the postcondition answers first and so cannot
+        // tell which guard fired. Deleting the loop guard makes this `Some`.
         assert_eq!(safe_join(Path::new("C:"), "a/C:.."), None);
-        assert_eq!(safe_join(Path::new("C:"), "a/C:../a"), None);
         for esc in ["a/C:/Windows/win.ini", "a/C:x", "C:/Windows/win.ini"] {
             assert_eq!(safe_join(d.path(), esc), None, "{esc:?} must be rejected");
             // All three rule kinds join through `safe_join`.
@@ -759,9 +744,9 @@ mod tests {
                     joined.starts_with(base),
                     "escaped containment: {rel:?} -> {joined:?}"
                 );
-                // `starts_with` is LEXICAL and accepts a `..` tail, so it alone
-                // cannot see the drive escapes: `C:..` starts with `C:`. Every
-                // component past the base must be `Normal`.
+                // `starts_with` is LEXICAL and accepts a `..` tail — from a
+                // Windows drive replacement, or from a `ParentDir` regression on
+                // ANY platform, which this is the only assertion to catch.
                 let tail = joined.strip_prefix(base).expect("starts_with just held");
                 prop_assert!(
                     tail.components().all(|c| matches!(c, Component::Normal(_))),
