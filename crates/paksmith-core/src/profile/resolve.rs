@@ -42,8 +42,14 @@ pub fn load_cache_lenient() -> Option<RegistryCache> {
         Ok(c) => c,
         Err(e) => {
             // `e.to_string()` and NOT the `%` sigil, here and at every other
-            // warn in this file. `%` is `field::display()` and is written RAW;
-            // a plain `String` field records via `record_str` and is escaped.
+            // warn in this file. CANONICAL statement of the mechanism, since
+            // three other sites reference it: `%` is `field::display()`, which
+            // the default `fmt` subscriber writes RAW, while a plain `String`
+            // field arrives at `record_str`. Escaping is the SUBSCRIBER's
+            // choice rather than a property of `record_str` — `fmt`'s visitor
+            // Debug-renders the value and so escapes it, and this workspace
+            // ships a counter-example in `paksmith-gui`'s `log_buffer`, whose
+            // visitor deliberately captures a `message` field raw.
             // These faults interpolate untrusted text — registry-supplied ids,
             // hex and paths — so a raw ESC here retitles or clears the user's
             // terminal (#708).
@@ -739,7 +745,6 @@ mod tests {
                 keys: BTreeMap::new(),
                 detect: Some(DetectRules {
                     require_paths: vec!["Game/Paks".into()],
-                    contains: vec![],
                     ..Default::default()
                 }),
                 mappings,
@@ -850,7 +855,6 @@ mod tests {
                     keys: BTreeMap::new(),
                     detect: Some(DetectRules {
                         require_paths: vec!["Game/Paks".into()],
-                        contains: vec![],
                         ..Default::default()
                     }),
                 }],
@@ -1193,7 +1197,6 @@ mod tests {
                 keys: BTreeMap::new(),
                 detect: Some(DetectRules {
                     require_paths: vec!["Game/Paks".into()],
-                    contains: vec![],
                     ..Default::default()
                 }),
                 mappings: None,
@@ -1212,7 +1215,6 @@ mod tests {
         std::fs::create_dir_all(game.path().join("Game/Paks")).unwrap();
         let rules = DetectRules {
             require_paths: vec!["Game/Paks".into()],
-            contains: vec![],
             ..Default::default()
         };
         let mut store = ProfileStore::default();
@@ -1251,7 +1253,6 @@ mod tests {
         std::fs::create_dir_all(game.path().join("Game/Paks")).unwrap();
         let rules = DetectRules {
             require_paths: vec!["Game/Paks".into()],
-            contains: vec![],
             ..Default::default()
         };
         let store = ProfileStore::default(); // empty — no local profiles

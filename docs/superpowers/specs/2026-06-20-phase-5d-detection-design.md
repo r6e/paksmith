@@ -8,7 +8,8 @@
 > — the caps list, the security bullets, the `DetectRules` sketch, the
 > architecture line — still reads pre-#658 and is NOT individually annotated.
 > `docs/plans/ROADMAP.md` (Phase 5) carries the current argument and the
-> measurements, and the code is authoritative over both.
+> headline figures — #658 carries the measurements themselves — and the code is
+> authoritative over both.
 **Date:** 2026-06-20
 **Roadmap:** Phase 5 (Game Profiles) — sub-phase 5d (auto-detection). **Completes Phase 5.**
 

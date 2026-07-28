@@ -25,7 +25,10 @@ pub(crate) const MAX_CONTAINS_READ: usize = 1024 * 1024;
 /// doubles when both are at their caps. The achievable per-DOCUMENT cost is
 /// bounded by `registry::MAX_BODY_BYTES` (8 MiB, enforced on both fetch and
 /// cache-load) and rises roughly 7-20% — a byte rule is a cheaper wire encoding,
-/// not a bigger budget. See `docs/plans/ROADMAP.md` (Phase 5) and #658.
+/// not a bigger budget. "Bounded" is not the same as "small": an 8 MiB signed
+/// document still buys on the order of 340 GiB of reads per `--detect` sweep
+/// (~282 GiB pre-#658). A cumulative read budget across the pass is the deferred
+/// fix. See `docs/plans/ROADMAP.md` (Phase 5) and #658.
 pub(crate) const MAX_BYTE_SIGNATURES: usize = 64;
 
 /// Rules that recognise a game's install directory. All present rules must
@@ -92,6 +95,10 @@ pub struct ContainsRule {
 /// Exists because [`ContainsRule`]'s `substring` is a Rust `String`, so it can
 /// only express valid UTF-8 — and build-identifying signatures routinely are
 /// not.
+///
+/// Neither leaf derives `Default`, so the same criterion that keeps
+/// `RegistryProfile` exhaustive applies here with full force: `#[non_exhaustive]`
+/// would leave downstream no construction route at all.
 ///
 /// This leaf stays exhaustive, unlike [`DetectRules`]: a rule KIND grows by
 /// gaining a field on `DetectRules`, not here — the deferred read window is a
@@ -176,22 +183,36 @@ pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
 /// for an absolute path, a root/drive prefix, a `..` parent component, an empty
 /// string, or anything that would land outside `dir`.
 ///
-/// Containment is enforced twice, and both halves are load-bearing. On Windows
-/// a `Normal` component that re-parses as a drive prefix — `C:`, from a rule
-/// like `a/C:/Windows/win.ini` — makes [`PathBuf::push`] REPLACE the whole
-/// buffer: std specifies "if `path` has a prefix but no root, it replaces
-/// `self`". [`Component::Prefix`] is only produced at position 0, so a LEADING
-/// `C:/…` is rejected by the match below while a non-leading one arrives
-/// classified `Normal`. It was reachable from an untrusted rule string on both
-/// wires.
+/// The GUARANTEE is the in-loop prefix rejection. The `starts_with`
+/// postcondition is redundant BY CONSTRUCTION — once no component can re-parse
+/// as a prefix, [`PathBuf::push`] only ever appends, so `starts_with` cannot
+/// fail — and is kept purely as defence in depth. Do NOT delete the loop check
+/// on the strength of the postcondition; it is the only thing standing there.
 ///
-/// So the loop rejects any component that re-parses as a prefix (killing the
-/// replacement at its source, for ANY `dir`), and the postcondition then backs
-/// that up. The postcondition ALONE would not be enough: it is unconditionally
-/// sufficient only for an absolute `dir`, because a replacement buffer is
-/// `[Prefix, …]` with no `RootDir` while an absolute `dir` always has one — but
-/// `dir` may be relative, and a bare-drive `dir` of `C:` would match a replaced
-/// `C:..` component-wise.
+/// The loop check exists because on Windows a `Normal` component that re-parses
+/// as a drive prefix (`C:`, from `a/C:/Windows/win.ini`) makes `push` REPLACE
+/// the buffer — std: "if `path` has a prefix but no root, it replaces `self`" —
+/// and [`Component::Prefix`] is only produced at position 0, so a LEADING
+/// `C:/…` is rejected below while a non-leading one arrives as `Normal`.
+/// Reachable from an untrusted rule string on both wires.
+///
+/// The postcondition could not close that: it is sufficient only for an
+/// ABSOLUTE `dir`, and with a bare-drive `dir` of `C:` a replaced `C:..` buffer
+/// starts with `C:` component-wise. That is also why the proptest cannot catch
+/// the shape — the escape SATISFIES the invariant it asserts, so only the
+/// `#[cfg(windows)]` case below discriminates it.
+///
+/// Coverage, stated so a diff reader does not over-credit it: the loop check's
+/// only EXECUTING pin is CI's `windows-latest` nextest run — probed unkillable
+/// on darwin, and `mutants.yml` is `--in-diff` ubuntu-only so it never gets
+/// mutation coverage either. The postcondition is unkillable on BOTH platforms
+/// and cargo-mutants generates no operator for it at all.
+/// `safe_join_is_none_or_contained` needs its tail check to see any of this:
+/// `Path::starts_with` is purely LEXICAL and accepts a `..` tail, so a replaced
+/// `C:..` buffer starts with a `C:` base and the drive escapes satisfy the
+/// postcondition. The tail-all-`Normal` assertion is what catches them. It is
+/// still one-directional (`Some` implies contained), so it cannot catch an
+/// OVER-broad guard — rejecting everything satisfies it.
 ///
 /// It does not bound what an in-`dir` symlink resolves to, nor Windows reserved
 /// device names — `dir\CON` starts with `dir` and still opens the console. See
@@ -282,8 +303,10 @@ pub fn rules_match(dir: &Path, rules: &DetectRules) -> bool {
         let Some(needle) = decode_hex(&rule.hex) else {
             // Plain field bindings, NOT the `%` sigil: `%` is
             // `tracing::field::display()`, which the default subscriber writes
-            // RAW, while a plain `String` field records via `record_str` and is
-            // escaped. These values are untrusted (a hand-edited store), and a
+            // RAW, while a plain `String` field reaches `record_str`. Whether
+            // that ESCAPES is the subscriber's choice, not `record_str`'s — see
+            // `profile::resolve`'s warn for the full statement. These values are
+            // untrusted (a hand-edited store), and a
             // raw ESC sequence here clears the screen or retitles the terminal.
             // This is not hypothetical: `%` was applied here once for style
             // consistency and measured as a live injection sink.
@@ -569,10 +592,12 @@ mod tests {
         // fail to contain anyway — masking the defect.
         write(d.path(), "game.exe", &[0x00, 0xDE, 0xAD, 0x00]);
         for bad in [
-            "",      // empty: NOT vacuously true, unlike `substring`
-            "d",     // odd length
-            "deadb", // odd length
-            "zz",    // non-hex — would be `[0x00]` if a non-hex digit
+            "",  // empty: NOT vacuously true, unlike `substring`
+            "d", // odd length
+            // Odd length, and load-bearing beyond that: it truncates to `dead`,
+            // which IS present in the fixture, so this entry is what kills a
+            // parity-guard mutant that "" and "d" alone would miss.
+            "deadb", "zz",    // non-hex — would be `[0x00]` if a non-hex digit
             "zzzz",  // non-hex — would be `[0x00, 0x00]`
             "00zz",  // half-valid: a partial decode must not be used
             "de ad", // odd length (5): stops at the length guard, NOT on
@@ -613,8 +638,12 @@ mod tests {
 
     /// The containment postcondition is VACUOUS against an empty base — every
     /// path starts with "" — so an empty `dir` is refused as a precondition.
-    /// `--detect` gates on `is_dir` and cannot reach it, but `rules_match` is
-    /// public and its doc promises containment.
+    /// Same reason as at the guard itself, and stated the same way: clap rejects
+    /// an empty value before detection runs (measured: `--detect ""` and
+    /// `profile detect ""` both exit with "a value is required", because clap's
+    /// `PathBufValueParser` raises `empty_value`). The `is_dir` gates are a
+    /// SEPARATE and partial thing — `explicit_key_context` has none. Either way
+    /// `rules_match` is public and its doc promises containment.
     #[test]
     fn safe_join_rejects_an_empty_dir() {
         assert_eq!(safe_join(Path::new(""), "a"), None);
@@ -625,7 +654,9 @@ mod tests {
         ));
     }
 
-    /// A NON-LEADING drive prefix must not escape `dir`. `PathBuf::push`
+    /// A NON-LEADING drive prefix must not escape `dir`. Note the bare-drive
+    /// `dir` cases below: they are the only shapes the postcondition cannot
+    /// backstop, so they are what pins the in-loop guard. `PathBuf::push`
     /// replaces the whole buffer when the pushed path has a prefix and no root,
     /// and `Component::Prefix` is only produced at position 0 — so `a/C:/…`
     /// arrives at `push` classified `Normal` and no per-component match can see
@@ -636,6 +667,12 @@ mod tests {
     fn drive_relative_path_does_not_escape_the_target_dir() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "game.exe", &[0xDE, 0xAD]);
+        // Pins the LOOP guard specifically, and nothing else does: with an
+        // absolute base the postcondition already answers, and the proptest
+        // cannot — `C:..` starts with `C:` component-wise, so the escape
+        // satisfies the invariant. Deleting the loop guard makes this `Some`.
+        assert_eq!(safe_join(Path::new("C:"), "a/C:.."), None);
+        assert_eq!(safe_join(Path::new("C:"), "a/C:../a"), None);
         for esc in ["a/C:/Windows/win.ini", "a/C:x", "C:/Windows/win.ini"] {
             assert_eq!(safe_join(d.path(), esc), None, "{esc:?} must be rejected");
             // All three rule kinds join through `safe_join`.
@@ -722,6 +759,14 @@ mod tests {
                     joined.starts_with(base),
                     "escaped containment: {rel:?} -> {joined:?}"
                 );
+                // `starts_with` is LEXICAL and accepts a `..` tail, so it alone
+                // cannot see the drive escapes: `C:..` starts with `C:`. Every
+                // component past the base must be `Normal`.
+                let tail = joined.strip_prefix(base).expect("starts_with just held");
+                prop_assert!(
+                    tail.components().all(|c| matches!(c, Component::Normal(_))),
+                    "non-Normal component past the base: {rel:?} -> {joined:?}"
+                );
             }
         }
     }
@@ -790,7 +835,6 @@ mod tests {
         std::fs::create_dir_all(d.path().join("Game/Binaries")).unwrap();
         let rules = DetectRules {
             require_paths: vec!["Game/Content/Paks".into(), "Game/Binaries".into()],
-            contains: vec![],
             ..Default::default()
         };
         assert!(rules_match(d.path(), &rules));
@@ -802,7 +846,6 @@ mod tests {
         std::fs::create_dir_all(d.path().join("Game/Content/Paks")).unwrap();
         let rules = DetectRules {
             require_paths: vec!["Game/Content/Paks".into(), "Game/Missing".into()],
-            contains: vec![],
             ..Default::default()
         };
         assert!(!rules_match(d.path(), &rules));
@@ -817,7 +860,6 @@ mod tests {
             b"{\"name\":\"FortniteGame\"}",
         );
         let pass = DetectRules {
-            require_paths: vec![],
             contains: vec![ContainsRule {
                 path: "Game/Game.uproject".into(),
                 substring: "FortniteGame".into(),
@@ -826,7 +868,6 @@ mod tests {
         };
         assert!(rules_match(d.path(), &pass));
         let fail = DetectRules {
-            require_paths: vec![],
             contains: vec![ContainsRule {
                 path: "Game/Game.uproject".into(),
                 substring: "NotPresent".into(),
@@ -835,7 +876,6 @@ mod tests {
         };
         assert!(!rules_match(d.path(), &fail));
         let missing = DetectRules {
-            require_paths: vec![],
             contains: vec![ContainsRule {
                 path: "Game/Nope".into(),
                 substring: "x".into(),
@@ -860,7 +900,6 @@ mod tests {
         ] {
             let rules = DetectRules {
                 require_paths: vec![bad.to_string()],
-                contains: vec![],
                 ..Default::default()
             };
             assert!(
@@ -885,7 +924,6 @@ mod tests {
             "Game/../../escape",
         ] {
             let rules = DetectRules {
-                require_paths: vec![],
                 contains: vec![ContainsRule {
                     path: bad.into(),
                     substring: "x".into(),
@@ -914,7 +952,6 @@ mod tests {
         body.extend_from_slice(b"PAST_CAP");
         write(d.path(), "big.bin", &body);
         let rules = DetectRules {
-            require_paths: vec![],
             contains: vec![ContainsRule {
                 path: "big.bin".into(),
                 substring: "PAST_CAP".into(),
@@ -943,7 +980,6 @@ mod tests {
         // `overlap` bytes of it land within the cap window; the rest are cut off.
         write(d.path(), "straddle.bin", &body);
         let rules = DetectRules {
-            require_paths: vec![],
             contains: vec![ContainsRule {
                 path: "straddle.bin".into(),
                 substring: String::from_utf8(needle.to_vec()).unwrap(),

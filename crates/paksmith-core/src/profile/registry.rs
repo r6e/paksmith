@@ -129,9 +129,10 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
                 // `ProfileFault::DetectionAmbiguous` joins profile ids with no
                 // cap at all, measured at 10,000 raw ESC on a single 2.58 MB
                 // stderr line at the documented caps.
-                // `output::sanitize_for_display` covers the entries table and
-                // extract's FAILED lines, not this path. #708 tracks the gap;
-                // it does not close it.
+                // `output::sanitize_for_display` does not cover this path;
+                // its own doc carries the list of what it does cover, so that
+                // enumeration deliberately is not duplicated here. #708 tracks
+                // the gap; it does not close it.
                 return Err(format!(
                     "byte signature in `{}` is not an even-length unprefixed hex string: `{}`",
                     p.id,

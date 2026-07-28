@@ -81,6 +81,67 @@ fn fixture(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+/// A NON-EMPTY `byte_signatures` must survive a store REWRITE. This is the path
+/// the `skip_serializing_if` decision rests on, and the one nothing covered: the
+/// core round-trips operate on a bare `GameProfile`, one nesting level shallower
+/// than `[[profiles.<id>.detect.byte_signatures]]` — which is exactly where a
+/// value-typed field emitted after a table-array lands in the wrong table.
+#[test]
+fn byte_signatures_survive_a_store_rewrite() {
+    let cfg = tempdir().unwrap();
+    let game = tempdir().unwrap();
+    std::fs::write(game.path().join("game.exe"), [0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "fortnite", "--name", "Fortnite"])
+        .assert()
+        .success();
+    let store = cfg.path().join("paksmith/profiles.toml");
+    let mut s = std::fs::read_to_string(&store).unwrap();
+    write!(
+        s,
+        "\n[[profiles.fortnite.detect.byte_signatures]]\npath = \"game.exe\"\nhex = \"DEADBEEF\"\n"
+    )
+    .unwrap();
+    std::fs::write(&store, s).unwrap();
+
+    // Matches before any rewrite, so a later failure is the rewrite's doing.
+    let before = paksmith(cfg.path())
+        .args(["profile", "detect"])
+        .arg(game.path())
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8(before.get_output().stdout.clone())
+            .unwrap()
+            .contains("fortnite"),
+        "the hand-seeded byte signature must match"
+    );
+
+    // `key add` rewrites EVERY profile, nested table-array included.
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "fortnite", "--key", KEY])
+        .assert()
+        .success();
+
+    let after = std::fs::read_to_string(&store).unwrap();
+    assert!(
+        after.contains("byte_signatures") && after.contains("DEADBEEF"),
+        "the rewrite dropped the rule: {after}"
+    );
+    let out = paksmith(cfg.path())
+        .args(["profile", "detect"])
+        .arg(game.path())
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8(out.get_output().stdout.clone())
+            .unwrap()
+            .contains("fortnite"),
+        "the rule must still match after the rewrite"
+    );
+}
+
 #[test]
 fn detect_flag_resolves_single_match_key() {
     let cfg = tempdir().unwrap();

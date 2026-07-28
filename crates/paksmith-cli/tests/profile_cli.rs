@@ -746,9 +746,12 @@ fn game_offline_degrades_to_stale_cache() {
         stderr.contains("\\u{1b}"),
         "the ESC in the config URL must appear escaped: {stderr}"
     );
+    // Scoped deliberately: this holds only because `NO_COLOR=1` is set above,
+    // since the subscriber emits its own ANSI level tag otherwise. What it pins
+    // is that the INTERPOLATED field contributes no raw ESC.
     assert!(
         !stderr.contains('\u{1b}'),
-        "no raw ESC may reach the terminal: {stderr}"
+        "no raw ESC from the interpolated field: {stderr}"
     );
 }
 
