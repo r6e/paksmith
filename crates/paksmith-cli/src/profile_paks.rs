@@ -131,12 +131,22 @@ fn safe_join_pattern(dir: &Path, pattern: &str) -> Option<PathBuf> {
     let mut out = dir.to_path_buf();
     for comp in Path::new(pattern).components() {
         match comp {
-            Component::Normal(c) => out.push(c),
+            // Mirrors detection's `safe_join`, including its re-parse guard: a
+            // `Normal` that re-parses as a prefix makes `push` REPLACE the
+            // buffer on Windows. Local-store input only, so this crosses no
+            // privilege boundary — but `expand_patterns` promises escaping
+            // patterns are rejected, and without this it did not keep that.
+            Component::Normal(c) => {
+                if !matches!(Path::new(c).components().next(), Some(Component::Normal(_))) {
+                    return None;
+                }
+                out.push(c);
+            }
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
         }
     }
-    Some(out)
+    out.starts_with(dir).then_some(out)
 }
 
 /// The display form of each path, one element per path.

@@ -70,16 +70,35 @@ pub(crate) fn safe_join(
 
     let mut candidate = output_root.to_path_buf();
     for part in chosen {
+        // A segment that RE-PARSES as a prefix (`C:` on Windows) makes
+        // `PathBuf::push` REPLACE the whole buffer — std: "if `path` has a
+        // prefix but no root, it replaces `self`". The leading-drive check
+        // above inspects offsets 0-1 of the WHOLE string, so a non-leading
+        // `a/C:/…` sails past it, and no segment holds a separator so the
+        // `..`/absolute arm never fires either. Same defect #658 fixed in
+        // `paksmith-core`'s detection `safe_join`; this is the copy that maps
+        // untrusted pak entry paths onto a write path.
+        if !matches!(
+            Path::new(part).components().next(),
+            Some(Component::Normal(_))
+        ) {
+            return Err(SafePathError::Escapes(entry_path.to_string()));
+        }
         candidate.push(part);
     }
 
-    // Defensive: confirm no component re-introduced a parent escape.
-    debug_assert!(
-        !candidate
-            .components()
-            .any(|c| matches!(c, Component::ParentDir)),
-        "sanitized path still contains ParentDir"
-    );
+    // A REAL containment postcondition, not a `debug_assert!`: the previous
+    // check compiled out in release, so release builds had none at all. It also
+    // only looked for `ParentDir`, which a replaced buffer need not contain.
+    // `strip_prefix` succeeding implies `starts_with`, and since that is purely
+    // LEXICAL (it accepts a `..` tail) every component past the root must be
+    // `Normal` too.
+    let contained = candidate
+        .strip_prefix(output_root)
+        .is_ok_and(|tail| tail.components().all(|c| matches!(c, Component::Normal(_))));
+    if !contained {
+        return Err(SafePathError::Escapes(entry_path.to_string()));
+    }
 
     Ok(candidate)
 }
@@ -137,6 +156,38 @@ mod tests {
             safe_join(&root(), "/etc/passwd", false),
             Err(SafePathError::Escapes(_))
         ));
+    }
+
+    #[test]
+    /// A NON-LEADING drive prefix must not escape the output root. The leading
+    /// check inspects offsets 0-1 of the whole string, so `a/C:/…` passes it and
+    /// `push` then replaces the buffer. Only executes on `windows-latest`; a
+    /// colon is an ordinary filename byte elsewhere.
+    #[cfg(windows)]
+    #[test]
+    fn rejects_non_leading_drive_prefix() {
+        // Nested: the drive segment replaces the buffer mid-join.
+        for evil in ["a/C:/Windows/Temp/x.dll", "a/C:x", "a/C:../pwn.exe"] {
+            assert!(
+                matches!(
+                    safe_join(&root(), evil, false),
+                    Err(SafePathError::Escapes(_))
+                ),
+                "accepted {evil}"
+            );
+        }
+        // `--flat` keeps only the LAST segment, so it escapes exactly when that
+        // segment is the drive-like one — `a/C:/Windows/x.dll` flattens to
+        // `x.dll` and is contained, which is why it is not listed here.
+        for evil in ["a/C:x", "a/C:.."] {
+            assert!(
+                matches!(
+                    safe_join(&root(), evil, true),
+                    Err(SafePathError::Escapes(_))
+                ),
+                "accepted flat {evil}"
+            );
+        }
     }
 
     #[test]
