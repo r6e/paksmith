@@ -144,7 +144,12 @@ fn safe_join_pattern(dir: &Path, pattern: &str) -> Option<PathBuf> {
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
         }
     }
-    out.starts_with(dir).then_some(out)
+    // Same postcondition as `extract::safe_path::safe_join`, deliberately:
+    // `starts_with` is lexical and accepts a `..` tail. Divergent mirrors are
+    // what produced the bug this guard fixes.
+    out.strip_prefix(dir)
+        .is_ok_and(|tail| tail.components().all(|c| matches!(c, Component::Normal(_))))
+        .then_some(out)
 }
 
 /// The display form of each path, one element per path.

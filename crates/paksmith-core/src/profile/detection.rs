@@ -745,8 +745,8 @@ mod tests {
                     "escaped containment: {rel:?} -> {joined:?}"
                 );
                 // `starts_with` is LEXICAL and accepts a `..` tail — from a
-                // Windows drive replacement, or from a `ParentDir` regression on
-                // ANY platform, which this is the only assertion to catch.
+                // Windows drive replacement, or from a `ParentDir` regression,
+                // which no OTHER assertion in this proptest would catch.
                 let tail = joined.strip_prefix(base).expect("starts_with just held");
                 prop_assert!(
                     tail.components().all(|c| matches!(c, Component::Normal(_))),

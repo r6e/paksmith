@@ -116,9 +116,10 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
                 // exact bytes are the round-trip contract). Core's own terminal
                 // EMISSION sites are the `tracing` warns in `resolve.rs`,
                 // which bind the error as a plain `String`. Whether that
-                // ESCAPES is the subscriber's choice, not `record_str`'s. The terminal sink proper is whatever subscriber
-                // the frontend installs — worth the distinction, because #708's
-                // real fix lands at the subscriber and at `main.rs`, not here.
+                // ESCAPES is the subscriber's choice, not `record_str`'s — see
+                // `profile::resolve` for the canonical statement. That matters
+                // because #708's real fix lands at the subscriber and at
+                // `main.rs`, not here.
                 //
                 // The CLI sink is NOT covered, and it is worth being exact
                 // about that rather than gesturing at an issue: this message
