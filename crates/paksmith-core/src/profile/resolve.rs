@@ -41,7 +41,30 @@ pub fn load_cache_lenient() -> Option<RegistryCache> {
     match RegistryCache::load() {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(error = %e, "ignoring unreadable registry cache");
+            // `e.to_string()` and NOT the `%` sigil, here and at every other
+            // warn in this file. CANONICAL statement of the mechanism, which
+            // other sites reference: `%` is `field::display()`, which
+            // the default `fmt` subscriber writes RAW, while a plain `String`
+            // field arrives at `record_str`. Escaping is the SUBSCRIBER's
+            // choice rather than a property of `record_str` — `fmt`'s visitor
+            // Debug-renders the value and so escapes it, and this workspace
+            // ships a counter-example in `paksmith-gui`'s `log_buffer`, whose
+            // visitor deliberately captures a `message` field raw.
+            // These faults interpolate untrusted text — registry-supplied ids,
+            // hex and paths — so a raw ESC here retitles or clears the user's
+            // terminal (#708).
+            //
+            // Coverage, stated exactly: THREE of this file's FIVE warns are
+            // pinned. `detect_warn_escapes_an_untrusted_dir` drives the
+            // `--detect` one and `unparsable_engine_version_degrades_to_no_hint`
+            // the `engine_version` one, both in this file; the CLI's
+            // `game_offline_degrades_to_stale_cache` drives the fetch-failure
+            // one — and needs no I/O to do it, since an `http://` URL with
+            // `PAKSMITH_ALLOW_HTTP` unset fails on scheme before any socket
+            // opens. THIS warn and the store-unreadable one bind their fault
+            // identically but are undriven; both need an injected I/O failure,
+            // and the cache one is reachable from that same CLI harness.
+            tracing::warn!(error = e.to_string(), "ignoring unreadable registry cache");
             None
         }
     }
@@ -210,7 +233,7 @@ pub async fn resolve_pak_context(
             }
             Err(e) => {
                 tracing::warn!(
-                    error = %e,
+                    error = e.to_string(),
                     "registry fetch failed; using cached profiles if available"
                 );
             }
@@ -393,7 +416,7 @@ fn explicit_key_context(
             }
             Err(e) => {
                 tracing::warn!(
-                    error = %e,
+                    error = e.to_string(),
                     "profile store unreadable; --aes-key set, continuing \
                      without profile parse inputs"
                 );
@@ -516,7 +539,7 @@ fn detect_profile_inputs_in(
         Ok(id) => profile_inputs_in(store, cache, &id),
         Err(e) => {
             tracing::warn!(
-                error = %e,
+                error = e.to_string(),
                 "--detect found no unique profile; --aes-key set, continuing \
                  without profile parse inputs"
             );
@@ -683,6 +706,33 @@ mod tests {
     use crate::GameProfile;
     use crate::profile::detection::DetectRules;
 
+    /// A raw control byte in an untrusted value must not reach the `--detect`
+    /// warn raw. That fault interpolates the caller-supplied directory, so an
+    /// empty store plus no cache drives `DetectionNoMatch` through the warn
+    /// without touching the filesystem.
+    ///
+    /// Scope, because the wider reading is false: this pins the `--detect` warn
+    /// ONLY. The ESC enters through `dir`, which no other warn in this file
+    /// sees, so reverting one of those to `%` emits no ESC and both assertions
+    /// still pass. The `detection` module's equivalent test does not reach here
+    /// either — its call graph never enters `resolve.rs`.
+    #[tracing_test::traced_test]
+    #[test]
+    fn detect_warn_escapes_an_untrusted_dir() {
+        let esc = '\u{1b}';
+        let dir = std::path::PathBuf::from(format!("{esc}[2JPWNED"));
+        let out = detect_profile_inputs_in(&ProfileStore::default(), None, &dir);
+        assert!(
+            out.mappings.is_none() && out.engine_version.is_none(),
+            "an empty store must yield no parse inputs, i.e. the warn arm ran"
+        );
+        assert!(logs_contain("\\u{1b}"), "ESC must appear escaped");
+        assert!(
+            !logs_contain(&esc.to_string()),
+            "no raw ESC may reach the log record"
+        );
+    }
+
     /// Store with one `hero` profile carrying detect rules for
     /// `Game/Paks` and a mappings source.
     fn hero_store_with_detect(mappings: Option<crate::profile::MappingsSource>) -> ProfileStore {
@@ -695,7 +745,7 @@ mod tests {
                 keys: BTreeMap::new(),
                 detect: Some(DetectRules {
                     require_paths: vec!["Game/Paks".into()],
-                    contains: vec![],
+                    ..Default::default()
                 }),
                 mappings,
                 pak_paths: Vec::new(),
@@ -805,7 +855,7 @@ mod tests {
                     keys: BTreeMap::new(),
                     detect: Some(DetectRules {
                         require_paths: vec!["Game/Paks".into()],
-                        contains: vec![],
+                        ..Default::default()
                     }),
                 }],
             },
@@ -846,21 +896,32 @@ mod tests {
         );
     }
 
+    #[tracing_test::traced_test]
     #[test]
     fn unparsable_engine_version_degrades_to_no_hint() {
         // Hand-edited or registry-authored garbage must never fail an
         // open — it degrades to "no hint", i.e. the pre-#656 parse.
+        //
+        // The value also carries a raw ESC, which makes this the pin for
+        // `parse_engine_version`'s warn: `value` is a plain `&str` field and
+        // records via `record_str`, which escapes. The `%` sigil would not.
+        let esc = '\u{1b}';
         let mut store = hero_store_with_detect(None);
         store
             .profiles
             .get_mut("hero")
             .expect("seeded")
-            .engine_version = Some("Fortnite Chapter 5".into());
+            .engine_version = Some(format!("{esc}[2JFortnite Chapter 5"));
         assert_eq!(
             named_profile_inputs_in(&store, None, "hero")
                 .expect("a malformed version is not an error")
                 .engine_version,
             None
+        );
+        assert!(logs_contain("\\u{1b}"), "ESC must appear escaped");
+        assert!(
+            !logs_contain(&esc.to_string()),
+            "no raw ESC may reach the log record"
         );
     }
 
@@ -1136,7 +1197,7 @@ mod tests {
                 keys: BTreeMap::new(),
                 detect: Some(DetectRules {
                     require_paths: vec!["Game/Paks".into()],
-                    contains: vec![],
+                    ..Default::default()
                 }),
                 mappings: None,
                 pak_paths: Vec::new(),
@@ -1154,7 +1215,7 @@ mod tests {
         std::fs::create_dir_all(game.path().join("Game/Paks")).unwrap();
         let rules = DetectRules {
             require_paths: vec!["Game/Paks".into()],
-            contains: vec![],
+            ..Default::default()
         };
         let mut store = ProfileStore::default();
         let _ = store.profiles.insert(
@@ -1192,7 +1253,7 @@ mod tests {
         std::fs::create_dir_all(game.path().join("Game/Paks")).unwrap();
         let rules = DetectRules {
             require_paths: vec!["Game/Paks".into()],
-            contains: vec![],
+            ..Default::default()
         };
         let store = ProfileStore::default(); // empty — no local profiles
         let cache = RegistryCache {

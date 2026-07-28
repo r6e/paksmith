@@ -81,6 +81,72 @@ fn fixture(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+/// A NON-EMPTY `byte_signatures` must survive a store REWRITE: `profile key add`
+/// rewrites every profile, and nothing else exercises a rule at
+/// `[[profiles.<id>.detect.byte_signatures]]` depth.
+///
+/// Scope, measured rather than assumed. This does NOT pin the
+/// `skip_serializing_if` decision — dropping that attribute leaves this test
+/// green, and core's `empty_byte_signatures_is_omitted_from_toml` is what pins
+/// it. What fails here is the attribute made UNCONDITIONAL, i.e. a rewrite
+/// dropping a non-empty rule. There is no field-order hazard to catch either:
+/// the serializer emits values before tables whatever the declaration order.
+#[test]
+fn byte_signatures_survive_a_store_rewrite() {
+    let cfg = tempdir().unwrap();
+    let game = tempdir().unwrap();
+    std::fs::write(game.path().join("game.exe"), [0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "fortnite", "--name", "Fortnite"])
+        .assert()
+        .success();
+    let store = cfg.path().join("paksmith/profiles.toml");
+    let mut s = std::fs::read_to_string(&store).unwrap();
+    write!(
+        s,
+        "\n[[profiles.fortnite.detect.byte_signatures]]\npath = \"game.exe\"\nhex = \"DEADBEEF\"\n"
+    )
+    .unwrap();
+    std::fs::write(&store, s).unwrap();
+
+    // Matches before any rewrite, so a later failure is the rewrite's doing.
+    let before = paksmith(cfg.path())
+        .args(["profile", "detect"])
+        .arg(game.path())
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8(before.get_output().stdout.clone())
+            .unwrap()
+            .contains("fortnite"),
+        "the hand-seeded byte signature must match"
+    );
+
+    // `key add` rewrites EVERY profile, nested table-array included.
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "fortnite", "--key", KEY])
+        .assert()
+        .success();
+
+    let after = std::fs::read_to_string(&store).unwrap();
+    assert!(
+        after.contains("byte_signatures") && after.contains("DEADBEEF"),
+        "the rewrite dropped the rule: {after}"
+    );
+    let out = paksmith(cfg.path())
+        .args(["profile", "detect"])
+        .arg(game.path())
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8(out.get_output().stdout.clone())
+            .unwrap()
+            .contains("fortnite"),
+        "the rule must still match after the rewrite"
+    );
+}
+
 #[test]
 fn detect_flag_resolves_single_match_key() {
     let cfg = tempdir().unwrap();

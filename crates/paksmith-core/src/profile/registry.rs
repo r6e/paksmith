@@ -77,12 +77,68 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
             if d.contains.len() > crate::profile::detection::MAX_CONTAINS {
                 return Err(format!("too many contains rules in `{}`", p.id));
             }
+            if d.byte_signatures.len() > crate::profile::detection::MAX_BYTE_SIGNATURES {
+                return Err(format!("too many byte signatures in `{}`", p.id));
+            }
+            // CAP BEFORE PARSE, the order every other check in this fn uses
+            // (`p.id` is capped at the top, before any message interpolates
+            // it). `hex` is capped as a STRING, so an accepted signature is at
+            // most MAX_STR/2 bytes — and the well-formedness scan below then
+            // only ever sees, and only ever quotes, <= MAX_STR chars.
             if d.require_paths.iter().any(|s| s.len() > MAX_STR)
                 || d.contains
                     .iter()
                     .any(|c| c.path.len() > MAX_STR || c.substring.len() > MAX_STR)
+                || d.byte_signatures
+                    .iter()
+                    .any(|b| b.path.len() > MAX_STR || b.hex.len() > MAX_STR)
             {
                 return Err(format!("detect string field exceeds cap in `{}`", p.id));
+            }
+            // Structurally-invalid hex is a HARD rejection, matching how this
+            // same document's `keys` field treats bad hex (`keys_serde` fails
+            // the whole document via `D::Error::custom`). Accepting it would
+            // ship a signed profile that silently never detects anything — the
+            // `0x`-prefix form is the trap, since `keys` accepts that spelling.
+            if let Some(bad) = d
+                .byte_signatures
+                .iter()
+                .find(|b| crate::profile::detection::decode_hex(&b.hex).is_none())
+            {
+                // `bad.hex` is <= MAX_STR here (cap-before-parse above), and
+                // clamped so the message stays readable. The clamp bounds
+                // LENGTH, not capability — `ESC [2J` is four bytes — and `p.id`
+                // in this same message is interpolated unclamped at MAX_STR, so
+                // the clamp is emphatically not what makes this safe.
+                //
+                // ESCAPING belongs at each sink, not here: this text also
+                // reaches the GUI (where ANSI is inert) and JSON output (where
+                // exact bytes are the round-trip contract). Core's own terminal
+                // EMISSION sites are the `tracing` warns in `resolve.rs`,
+                // which bind the error as a plain `String`. Whether that
+                // ESCAPES is the subscriber's choice, not `record_str`'s — see
+                // `profile::resolve` for the canonical statement. That matters
+                // because #708's real fix lands at the subscriber and at
+                // `main.rs`, not here.
+                //
+                // The CLI sink is NOT covered, and it is worth being exact
+                // about that rather than gesturing at an issue: this message
+                // reaches a terminal through `main.rs`'s top-level `eprintln!`,
+                // which does no sanitizing. Measured on a hostile document,
+                // THIS message carries two raw ESC bytes — one from `p.id`, one
+                // from the clamped hex — but that is the small end of the sink:
+                // `ProfileFault::DetectionAmbiguous` joins profile ids with no
+                // cap at all, measured at 10,000 raw ESC on a single 2.58 MB
+                // stderr line at the documented caps.
+                // `output::sanitize_for_display` does not cover this path;
+                // its own doc carries the list of what it does cover, so that
+                // enumeration deliberately is not duplicated here. #708 tracks
+                // the gap; it does not close it.
+                return Err(format!(
+                    "byte signature in `{}` is not an even-length unprefixed hex string: `{}`",
+                    p.id,
+                    crate::profile::detection::truncate_for_log(&bad.hex)
+                ));
             }
         }
     }
@@ -611,10 +667,18 @@ mod tests {
         let cont: Vec<String> = (0..crate::profile::detection::MAX_CONTAINS)
             .map(|_| format!(r#"{{"path":"{at_str}","substring":"{at_str}"}}"#))
             .collect();
+        // `hex` is capped as a string, so exactly MAX_STR hex chars is at-cap
+        // (and decodes to MAX_STR/2 bytes).
+        let at_hex = "ab".repeat(MAX_STR / 2);
+        assert_eq!(at_hex.len(), MAX_STR);
+        let byte_sig_json: Vec<String> = (0..crate::profile::detection::MAX_BYTE_SIGNATURES)
+            .map(|_| format!(r#"{{"path":"{at_str}","hex":"{at_hex}"}}"#))
+            .collect();
         let json = format!(
-            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"require_paths":[{}],"contains":[{}]}}}}]"#,
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"require_paths":[{}],"contains":[{}],"byte_signatures":[{}]}}}}]"#,
             req.join(","),
-            cont.join(",")
+            cont.join(","),
+            byte_sig_json.join(",")
         );
         let doc = parse_registry(json.as_bytes()).unwrap();
         let d = doc.profiles[0].detect.as_ref().unwrap();
@@ -623,6 +687,134 @@ mod tests {
             crate::profile::detection::MAX_REQUIRE_PATHS
         );
         assert_eq!(d.contains.len(), crate::profile::detection::MAX_CONTAINS);
+        assert_eq!(
+            d.byte_signatures.len(),
+            crate::profile::detection::MAX_BYTE_SIGNATURES
+        );
+    }
+
+    #[test]
+    fn rejects_too_many_byte_signature_rules() {
+        let rules: Vec<String> = (0..=crate::profile::detection::MAX_BYTE_SIGNATURES)
+            .map(|i| format!(r#"{{"path":"p{i}","hex":"dead"}}"#))
+            .collect();
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"byte_signatures":[{}]}}}}]"#,
+            rules.join(",")
+        );
+        assert!(parse_registry(json.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn rejects_overlong_byte_signature_path() {
+        let long = "a".repeat(MAX_STR + 1);
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"byte_signatures":[{{"path":"{long}","hex":"dead"}}]}}}}]"#
+        );
+        assert!(parse_registry(json.as_bytes()).is_err());
+    }
+
+    /// Malformed hex is a HARD rejection on the registry wire, matching how
+    /// `keys_serde` treats bad key hex in the same document. The `0x` form is
+    /// the trap worth pinning: `keys` accepts that spelling, so a publisher
+    /// copying it into a signature would otherwise ship a signed profile that
+    /// silently never detects.
+    #[test]
+    fn rejects_malformed_byte_signature_hex() {
+        for bad in ["0xdead", "dea", "zz", "", "de ad"] {
+            let json = format!(
+                r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"byte_signatures":[{{"path":"p","hex":"{bad}"}}]}}}}]"#
+            );
+            assert!(
+                parse_registry(json.as_bytes()).is_err(),
+                "hex {bad:?} must be rejected at parse, not silently ignored"
+            );
+        }
+        // …and a well-formed one still parses, so the guard is not blanket.
+        let ok = r#"[{"id":"x","name":"y","keys":{},"detect":{"byte_signatures":[{"path":"p","hex":"DEADbeef"}]}}]"#;
+        assert!(parse_registry(ok.as_bytes()).is_ok());
+    }
+
+    /// Over-cap AND malformed must fail on LENGTH, not decode — pins the
+    /// cap-before-parse order, which `rejects_overlong_byte_signature_hex`
+    /// cannot because its value is valid hex that decodes fine.
+    #[test]
+    fn overlong_malformed_hex_fails_on_length_not_decode() {
+        let long_bad = "zz".repeat(MAX_STR);
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"byte_signatures":[{{"path":"p","hex":"{long_bad}"}}]}}}}]"#
+        );
+        let err = parse_registry(json.as_bytes()).unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds cap"),
+            "must be rejected on length before decode quotes it: {err}"
+        );
+        assert!(
+            !err.contains("zzzz"),
+            "an over-cap value must never be interpolated into the error: {err}"
+        );
+    }
+
+    /// An AT-cap malformed value is the only one that reaches the `format!`:
+    /// the over-cap test above returns at the length check, so despite reading
+    /// as adjacent it never exercises the clamp. This pins it on the value that
+    /// does arrive there.
+    #[test]
+    fn at_cap_malformed_hex_is_clamped_in_the_error() {
+        let at_cap = "z".repeat(MAX_STR); // exactly MAX_STR: passes length, fails decode
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"byte_signatures":[{{"path":"p","hex":"{at_cap}"}}]}}}}]"#
+        );
+        let err = parse_registry(json.as_bytes()).unwrap_err().to_string();
+        assert!(
+            err.contains("not an even-length unprefixed hex string"),
+            "must reach the decode rejection, not the length cap: {err}"
+        );
+        assert!(err.contains('…'), "the quoted value must be clamped: {err}");
+        assert!(
+            !err.contains(&"z".repeat(70)),
+            "at most 64 chars of the value may appear: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_overlong_byte_signature_hex() {
+        let long = "ab".repeat(MAX_STR); // 2*MAX_STR chars > MAX_STR
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"byte_signatures":[{{"path":"p","hex":"{long}"}}]}}}}]"#
+        );
+        assert!(parse_registry(json.as_bytes()).is_err());
+    }
+
+    /// A registry document written BEFORE `byte_signatures` existed still
+    /// parses — the field is `#[serde(default)]`. That is the compatibility
+    /// direction that holds; the reverse (an old binary reading a document
+    /// that USES the field) does not, because `DetectRules` is
+    /// `deny_unknown_fields`.
+    #[test]
+    fn accepts_detect_without_a_byte_signatures_field() {
+        let json = r#"[{"id":"x","name":"y","keys":{},"detect":{"require_paths":["Game/Paks"]}}]"#;
+        let doc = parse_registry(json.as_bytes()).unwrap();
+        let d = doc.profiles[0].detect.as_ref().unwrap();
+        assert!(
+            d.byte_signatures.is_empty(),
+            "absent `byte_signatures` must default to empty"
+        );
+    }
+
+    /// The wire shape: `byte_signatures` parses as a list of `{path, hex}`; an unknown
+    /// sibling key is refused, so a typo'd rule fails loudly rather than being
+    /// silently dropped from a signed document.
+    #[test]
+    fn byte_signature_wire_shape_is_path_and_hex_only() {
+        let ok = r#"[{"id":"x","name":"y","keys":{},"detect":{"byte_signatures":[{"path":"g.exe","hex":"DEADbeef"}]}}]"#;
+        let doc = parse_registry(ok.as_bytes()).unwrap();
+        let b = &doc.profiles[0].detect.as_ref().unwrap().byte_signatures[0];
+        assert_eq!(b.path, "g.exe");
+        assert_eq!(b.hex, "DEADbeef", "hex is carried verbatim, not normalized");
+
+        let unknown = r#"[{"id":"x","name":"y","keys":{},"detect":{"byte_signatures":[{"path":"g.exe","hex":"dead","offset":4}]}}]"#;
+        assert!(parse_registry(unknown.as_bytes()).is_err());
     }
 
     #[test]

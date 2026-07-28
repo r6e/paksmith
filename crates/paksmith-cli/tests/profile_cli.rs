@@ -698,7 +698,13 @@ fn game_offline_degrades_to_stale_cache() {
     let (_sk, pk) = test_keypair();
     std::fs::write(
         base.join("config.toml"),
-        format!("[registry]\nurl=\"http://127.0.0.1:1/dead.json\"\npublic_key=\"{pk}\"\n"),
+        // The URL carries a raw ESC (TOML `\u001B`) because `InsecureUrl`
+        // interpolates it: this test therefore also pins that the fetch-failure
+        // warn ESCAPES its untrusted field. `url` is the one attacker-influenced
+        // value among that warn's inputs and needs no signature to reach.
+        format!(
+            "[registry]\nurl=\"http://127.0.0.1:1/dead\\u001B[2JPWNED.json\"\npublic_key=\"{pk}\"\n"
+        ),
     )
     .unwrap();
 
@@ -716,6 +722,7 @@ fn game_offline_degrades_to_stale_cache() {
     let out = assert_cmd::Command::cargo_bin("paksmith")
         .unwrap()
         .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env("NO_COLOR", "1")
         .args(["--game", "reg", "list"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -732,6 +739,19 @@ fn game_offline_degrades_to_stale_cache() {
     assert!(
         stderr.contains("registry fetch failed"),
         "offline degradation must emit a WARN on stderr: {stderr}"
+    );
+    // The warn binds its fault as a plain `String`, so `record_str` escapes the
+    // URL. Re-applying the `%` sigil there would emit a live screen-clear.
+    assert!(
+        stderr.contains("\\u{1b}"),
+        "the ESC in the config URL must appear escaped: {stderr}"
+    );
+    // Scoped deliberately: this holds only because `NO_COLOR=1` is set above,
+    // since the subscriber emits its own ANSI level tag otherwise. What it pins
+    // is that the INTERPOLATED field contributes no raw ESC.
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "no raw ESC from the interpolated field: {stderr}"
     );
 }
 

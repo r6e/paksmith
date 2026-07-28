@@ -330,10 +330,14 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
 /// clears, output-hiding). No legitimate virtual path contains control
 /// characters.
 ///
-/// Consumers: the list/search entries table (here) and extract's
-/// summary FAILED lines. Two same-class surfaces remain, BOTH tracked
+/// Consumers: the `pak:` group header and the list/search entries
+/// table (both here), plus extract's "extracted from" and summary
+/// FAILED lines. THREE same-class surfaces remain, all tracked
 /// as issue #708 (many call sites; their own pass): inspect's table
-/// tree renderer, and the `profile` command family — `show`, `list`
+/// tree renderer; the top-level error print in `main`, which renders a
+/// `PaksmithError` whose `Display` can embed registry-authored ids and
+/// hex (measured: two raw ESC bytes from a hostile registry document);
+/// and the `profile` command family — `show`, `list`
 /// and `detect` render registry-authored `name`/`id`/`engine_version`,
 /// and `profile`'s not-found hints echo an id that may have been copied
 /// from a registry listing. Registry strings are length-capped

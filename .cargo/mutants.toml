@@ -95,8 +95,13 @@ exclude_re = [
     # cargo-mutants (wiremock + tokio are dev-deps of paksmith-core), so every
     # surviving async mutant is killed by a test, and the rest are auto-dropped
     # as unviable. Verified by a scoped run (`cargo mutants -f
-    # crates/paksmith-core/src/profile/registry.rs`): 38 mutants → 33 caught,
-    # 5 unviable, 0 missed. Specifically:
+    # crates/paksmith-core/src/profile/registry.rs`): 0 missed AS OF #635 — a
+    # verdict is as datable as a count, and #658 item 3 added detect-cap mutants
+    # the reasoning below does NOT enumerate. No mutant COUNT
+    # is recorded here on purpose — the previous "38 mutants" went stale twice
+    # (measured 55 at one point and 66 later) because the total moves with every
+    # edit to the file, while the per-mutant reasoning below does not.
+    # Specifically:
     #   * `get_capped` body-cap `>` (==/</>=) AND accumulator `+` (-/*) are killed
     #     by `body_exactly_at_cap_is_accepted` (exactly MAX_BODY_BYTES accepted)
     #     + `oversized_body_is_rejected` (cap+1 rejected).
