@@ -28,7 +28,7 @@ jobs:
     outputs:
       export: ${{ steps.filter.outputs.export }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         id: filter
         with:
@@ -55,7 +55,7 @@ jobs:
       GLTF_VALIDATOR_VERSION: 2.0.0-dev.3.10
       GLTF_VALIDATOR_SHA256: 168eba887964125abe17ae97899b38d0b3cfd73c266c78424c194929ddcbc522
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-rust
       - name: Emit cube + index-boundary + skinned .glb fixtures
         run: |
