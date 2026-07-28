@@ -65,7 +65,7 @@ flate2 = "1.1"
 # RUSTSEC-2026-0041 (reused-output-buffer memory disclosure in the
 # block API) is fixed in 0.12.1+ — don't loosen to "0.12", which
 # would readmit the vulnerable 0.12.0.
-lz4_flex = { version = "0.12.2", default-features = false, features = [
+lz4_flex = { version = "0.14.0", default-features = false, features = [
     "std",
     "safe-encode",
     "safe-decode",
