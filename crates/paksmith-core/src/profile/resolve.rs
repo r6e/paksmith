@@ -29,6 +29,11 @@ pub struct DetectMatch {
     /// Human-readable display name.
     pub name: String,
     /// Where the profile came from: `"local"` or `"registry"`.
+    ///
+    /// WIRE VOCABULARY, not a display label: since #658 this string is
+    /// emitted verbatim as `source` in `paksmith profile detect --format
+    /// json`. Renaming a token is a BREAKING change to that document.
+    /// Shares its spelling with [`crate::ResolvedProfile::source`].
     pub source: &'static str,
 }
 

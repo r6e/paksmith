@@ -1,13 +1,16 @@
 //! `paksmith profile detect <dir>` handler.
 
+use std::io::{self, Write};
 use std::path::Path;
 
 use serde::Serialize;
 
 use paksmith_core::profile::resolve::detect_matches;
 
-/// Own `schema_version`: `detect` returns a different document from `list`,
-/// and the repo versions each JSON surface separately (`inspect/mod.rs`).
+/// Own `schema_version`: the repo shares one only when the SHAPE is shared
+/// (`list`/`search` both emit `EntryRow`); `detect`'s document matches no
+/// other surface, so coupling it would make consumers re-check on unrelated
+/// changes.
 const DETECT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Serialize)]
@@ -51,24 +54,19 @@ pub(crate) fn run(dir: &Path, fmt: crate::output::ResolvedFormat) -> paksmith_co
                 })
                 .collect(),
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).map_err(|e| {
-                paksmith_core::PaksmithError::InvalidArgument {
-                    arg: "--format",
-                    reason: format!("could not serialize JSON output: {e}"),
-                }
-            })?
-        );
+        crate::output::print_json(&out)?;
         return Ok(0);
     }
     if matches.is_empty() {
-        println!("no profiles matched {}", dir.display());
+        crate::output::print_line(&format!("no profiles matched {}", dir.display()))?;
         return Ok(0);
     }
-    println!("matched {} profile(s):", matches.len());
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    writeln!(out, "matched {} profile(s):", matches.len())?;
     for m in &matches {
-        println!("  {}\t{}\t[{}]", m.id, m.name, m.source);
+        writeln!(out, "  {}\t{}\t[{}]", m.id, m.name, m.source)?;
     }
+    out.flush()?;
     Ok(0)
 }

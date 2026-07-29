@@ -280,6 +280,11 @@ impl<'a> ResolvedProfile<'a> {
     ///
     /// Matches the vocabulary [`crate::profile::resolve::DetectMatch::source`]
     /// already uses, so the two are not spelled differently for one concept.
+    ///
+    /// WIRE VOCABULARY, not a display label: since #658 these two strings are
+    /// emitted verbatim as the `source` field of `paksmith profile show`,
+    /// `list` and `detect` under `--format json`. Renaming either token is a
+    /// BREAKING change to those documents, not a cosmetic edit.
     #[must_use]
     pub fn source(self) -> &'static str {
         match self {

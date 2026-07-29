@@ -2,6 +2,7 @@
 //! plus key management (`key add` / `key remove`) and key testing (`test`).
 
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 
 use clap::{Args, Subcommand};
 
@@ -140,25 +141,31 @@ pub(crate) struct RemoveArgs {
 // `--format json` output shapes (#658)
 // ---------------------------------------------------------------------------
 //
-// Each surface carries its OWN `schema_version`, following the precedent
-// `inspect/mod.rs` states outright ("the two version separately"). `show` and
-// `list` return different documents, so coupling their versions would force
-// consumers of one to re-check whenever the other changed.
+// The repo's rule is SHARE a `schema_version` when the SHAPE is shared, keep
+// it command-local when the shapes differ — `output.rs` versions `list` and
+// `search` together *because* both emit the identical `EntryRow` through one
+// writer, while `inspect` and `extract` version separately. No two documents
+// below share a shape, so each carries its own. The four mutations DO share
+// one (`MutationOutput`) and so share one constant.
 //
 // `schema_version` is declared FIRST in every struct so serde emits it first;
 // the raw-byte POSITION is what the tests pin, because asserting the key
 // merely exists passes on any envelope.
 //
-// Key material cannot leak here by accident: `AesKey` implements no
-// `Serialize` at all (it derives only `Clone`/`ZeroizeOnDrop` and redacts
-// `Debug`), so deriving `Serialize` over a profile would not compile. Every
-// key reaching JSON does so through an explicit `key_hex` call gated on
-// `--show-keys`, exactly as the human path gates it.
+// Key material: the guard is THIS MODULE, not the compiler. `AesKey` itself
+// implements no `Serialize`, but that is not a barrier — `GameProfile` and
+// `RegistryProfile` both derive `Serialize` and route `keys` through
+// `keys_serde`, whose serializer calls `to_hex()`; that impl is what writes
+// the on-disk store, so `serde_json::to_string(&profile)` compiles and emits
+// every key. Never serialize a profile type directly here. Key material
+// reaches JSON only through the hand-written `KeyRow` below, via one explicit
+// `key_hex` call gated on `--show-keys`.
 
 const LIST_SCHEMA_VERSION: u32 = 1;
 const SHOW_SCHEMA_VERSION: u32 = 1;
 const TEST_SCHEMA_VERSION: u32 = 1;
 const FETCH_SCHEMA_VERSION: u32 = 1;
+const MUTATION_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Serialize)]
 struct ListOutput {
@@ -195,8 +202,11 @@ struct ShowOutput {
 struct KeyRow {
     guid: String,
     /// Present ONLY under `--show-keys`, mirroring the human path's deliberate
-    /// reveal. Omitted entirely otherwise, so a consumer cannot mistake a
-    /// redaction placeholder for a key.
+    /// reveal. OMITTED rather than `null` when redacted, unlike the absent
+    /// fields elsewhere in this document: presence of the field IS the
+    /// `--show-keys` signal, so a consumer tests `"key" in row` and needs no
+    /// separate flag. (`null` would be indistinguishable from a future
+    /// "profile has a key slot with no key".)
     #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<String>,
 }
@@ -221,13 +231,25 @@ struct FetchOutput {
     profiles: usize,
 }
 
-/// A `serde_json` failure while writing our own owned structs is not a
-/// user-facing condition; surface it rather than panicking.
-fn json_err(e: &serde_json::Error) -> PaksmithError {
-    PaksmithError::InvalidArgument {
-        arg: "--format",
-        reason: format!("could not serialize JSON output: {e}"),
-    }
+/// The receipt every store-mutating subcommand returns under `--format json`.
+///
+/// One shape for all four (`add`, `remove`, `key add`, `key remove`) because
+/// they answer the same question — what happened, to which profile — so they
+/// share one `schema_version` under the rule stated above.
+///
+/// These commands emitting a document at all is deliberate. The alternative
+/// (a confirmation line rerouted to stderr, leaving stdout empty) meant
+/// `--format json` produced ZERO bytes on stdout, which is not parseable
+/// JSON: `serde_json::from_reader` errors on empty input. It also forced the
+/// stream a message lands on to depend on a formatting flag, and made the
+/// "emitting JSON" advisory note say something untrue.
+#[derive(Serialize)]
+struct MutationOutput {
+    schema_version: u32,
+    /// A STABLE token, not the human sentence: `added`, `removed`,
+    /// `key_added`, `key_removed`.
+    action: &'static str,
+    id: String,
 }
 
 /// `ProfileNotFound` for `id`. Both wrappers below build it identically.
@@ -316,14 +338,13 @@ fn now_unix() -> paksmith_core::Result<u64> {
 
 /// Dispatch a [`ProfileCmd`] and return a process exit code byte.
 ///
-/// `--format json` (#658) covers the commands that return DATA — `list`,
-/// `show`, `detect` — and the two returning a RESULT a script would branch on,
-/// `test` and `fetch`. The mutations (`add`, `remove`, `key add`,
-/// `key remove`) deliberately emit no JSON: their output is a confirmation
-/// line, not a document, and success is already carried by the exit code.
-/// Under JSON they route that line to STDERR rather than printing a bare
-/// sentence onto a stdout the caller is parsing — the destination `note`
-/// already uses for advisory chatter.
+/// `--format json` (#658) covers EVERY subcommand: the ones returning data
+/// (`list`, `show`, `detect`), the ones returning a result a script branches
+/// on (`test`, `fetch`), and the four store mutations, which emit a
+/// [`MutationOutput`] receipt. Uniform coverage is what lets the advisory
+/// note below fire unconditionally and be true — a partially-JSON family
+/// would need the note gated per subcommand, and would leave `profile add
+/// --format json` writing zero unparseable bytes to stdout.
 pub(crate) fn run(
     cmd: &ProfileCmd,
     format: OutputFormat,
@@ -350,12 +371,20 @@ pub(crate) fn run(
     }
 }
 
-/// A mutation's confirmation line. Human-only by design (see [`run`]): under
-/// `--format json` it goes to stderr so stdout stays empty and parseable.
-fn confirm(fmt: ResolvedFormat, msg: &str) {
+/// Report a completed store mutation: the human sentence under `--format
+/// table`, a [`MutationOutput`] receipt under `--format json`.
+///
+/// `action` is the machine token and `msg` the prose; they are separate
+/// arguments rather than one derived from the other so that rewording the
+/// sentence cannot silently change the wire token.
+fn confirm(fmt: ResolvedFormat, msg: &str, action: &'static str, id: &str) -> io::Result<()> {
     match fmt {
-        ResolvedFormat::Table => println!("{msg}"),
-        ResolvedFormat::Json => eprintln!("{msg}"),
+        ResolvedFormat::Table => crate::output::print_line(msg),
+        ResolvedFormat::Json => crate::output::print_json(&MutationOutput {
+            schema_version: MUTATION_SCHEMA_VERSION,
+            action,
+            id: id.to_string(),
+        }),
     }
 }
 
@@ -396,87 +425,83 @@ fn add(a: &AddArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
         },
     );
     store.save()?;
-    confirm(fmt, &format!("added profile `{}`", a.id));
+    confirm(fmt, &format!("added profile `{}`", a.id), "added", &a.id)?;
     Ok(0)
+}
+
+/// Every profile the layered view exposes, in the order both arms render:
+/// local ids first (`BTreeMap`-sorted), then registry-only ids in
+/// registry-document order.
+///
+/// THE local-wins precedence rule, in one place. Both arms carried their own
+/// copy before this: the table `continue`d on a shadowed id while JSON
+/// `filter`ed it, so the rule could drift between the human and machine views
+/// of the same store. In JSON a drifted copy is worse than a cosmetic bug —
+/// a shadowed id would appear TWICE in an array consumers key by id.
+///
+/// `source` is likewise derived once. The table renders it as `[local]` /
+/// `[registry]` and the JSON row emits it verbatim, so the human label and
+/// the wire token cannot disagree.
+fn rows(store: &ProfileStore, cache: Option<&paksmith_core::RegistryCache>) -> Vec<ProfileRow> {
+    let mut rows: Vec<ProfileRow> = store
+        .profiles
+        .iter()
+        .map(|(id, p)| ProfileRow {
+            id: id.clone(),
+            name: p.name.clone(),
+            engine_version: p.engine_version.clone(),
+            key_count: p.keys.len(),
+            source: "local",
+        })
+        .collect();
+    if let Some(c) = cache {
+        rows.extend(
+            c.doc
+                .profiles
+                .iter()
+                .filter(|p| !store.profiles.contains_key(&p.id))
+                .map(|p| ProfileRow {
+                    id: p.id.clone(),
+                    name: p.name.clone(),
+                    engine_version: p.engine_version.clone(),
+                    key_count: p.keys.len(),
+                    source: "registry",
+                }),
+        );
+    }
+    rows
 }
 
 fn list(fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
     let store = ProfileStore::load()?;
     let cache = paksmith_core::profile::resolve::load_cache_lenient();
+    let profiles = rows(&store, cache.as_ref());
 
     if matches!(fmt, ResolvedFormat::Json) {
-        // Same local-wins precedence as the table arm: a registry id already
-        // present locally is skipped, not emitted twice.
-        let mut profiles: Vec<ProfileRow> = store
-            .profiles
-            .iter()
-            .map(|(id, p)| ProfileRow {
-                id: id.clone(),
-                name: p.name.clone(),
-                engine_version: p.engine_version.clone(),
-                key_count: p.keys.len(),
-                source: "local",
-            })
-            .collect();
-        if let Some(c) = &cache {
-            profiles.extend(
-                c.doc
-                    .profiles
-                    .iter()
-                    .filter(|p| !store.profiles.contains_key(&p.id))
-                    .map(|p| ProfileRow {
-                        id: p.id.clone(),
-                        name: p.name.clone(),
-                        engine_version: p.engine_version.clone(),
-                        key_count: p.keys.len(),
-                        source: "registry",
-                    }),
-            );
-        }
         let out = ListOutput {
             schema_version: LIST_SCHEMA_VERSION,
             profiles,
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).map_err(|e| json_err(&e))?
-        );
+        crate::output::print_json(&out)?;
         return Ok(0);
     }
 
-    let mut any = false;
-
-    // Local profiles first (always win over cache entries with the same id).
-    for (id, p) in &store.profiles {
-        let engine = p.engine_version.as_deref().unwrap_or("-");
-        println!(
-            "{id}\t{}\t{engine}\t{} key(s)\t[local]",
-            p.name,
-            p.keys.len()
-        );
-        any = true;
+    if profiles.is_empty() {
+        crate::output::print_line("no profiles")?;
+        return Ok(0);
     }
 
-    // Registry-only entries: skip any id that already appeared locally.
-    if let Some(c) = &cache {
-        for p in &c.doc.profiles {
-            if store.profiles.contains_key(&p.id) {
-                continue;
-            }
-            let engine = p.engine_version.as_deref().unwrap_or("-");
-            println!(
-                "{}\t{}\t{engine}\t{} key(s)\t[registry]",
-                p.id,
-                p.name,
-                p.keys.len()
-            );
-            any = true;
-        }
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    for r in &profiles {
+        let engine = r.engine_version.as_deref().unwrap_or("-");
+        writeln!(
+            out,
+            "{}\t{}\t{engine}\t{} key(s)\t[{}]",
+            r.id, r.name, r.key_count, r.source
+        )?;
     }
-
-    if !any {
-        println!("no profiles");
-    }
+    out.flush()?;
     Ok(0)
 }
 
@@ -514,49 +539,51 @@ fn show(a: &ShowArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
             pak_paths: pak_paths.iter().map(ToString::to_string).collect(),
             keys,
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).map_err(|e| json_err(&e))?
-        );
+        crate::output::print_json(&out)?;
         return Ok(0);
     }
 
-    println!("id: {}", a.id);
-    println!("source: {}", resolved.source());
-    println!("name: {}", resolved.name());
-    println!(
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    writeln!(out, "id: {}", a.id)?;
+    writeln!(out, "source: {}", resolved.source())?;
+    writeln!(out, "name: {}", resolved.name())?;
+    writeln!(
+        out,
         "engine_version: {}",
         resolved.engine_version().unwrap_or("-")
-    );
+    )?;
     match mappings {
         // Not key material — safe to show unredacted.
         Some(MappingsSource::Path(path)) => {
-            println!("mappings: {}", path.display());
+            writeln!(out, "mappings: {}", path.display())?;
         }
-        None => println!("mappings: -"),
+        None => writeln!(out, "mappings: -")?,
     }
     // Not key material — safe to show unredacted (mappings precedent).
     if pak_paths.is_empty() {
-        println!("pak_paths: -");
+        writeln!(out, "pak_paths: -")?;
     } else {
-        println!("pak_paths:");
+        writeln!(out, "pak_paths:")?;
         for pattern in pak_paths {
-            println!("  {pattern}");
+            writeln!(out, "  {pattern}")?;
         }
     }
-    println!("keys:");
+    writeln!(out, "keys:")?;
     for (guid, key) in resolved.keys() {
         if a.show_keys {
             // Deliberate reveal: only `--show-keys` renders key material.
-            println!(
+            writeln!(
+                out,
                 "  {} = {}",
                 guid.to_hex(),
                 paksmith_core::profile::key_hex(key)
-            );
+            )?;
         } else {
-            println!("  {} = <redacted>", guid.to_hex());
+            writeln!(out, "  {} = <redacted>", guid.to_hex())?;
         }
     }
+    out.flush()?;
     Ok(0)
 }
 
@@ -566,7 +593,12 @@ fn remove(a: &RemoveArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Re
         return Err(hint_read_only_then_not_found(&a.id, quiet));
     }
     store.save()?;
-    confirm(fmt, &format!("removed profile `{}`", a.id));
+    confirm(
+        fmt,
+        &format!("removed profile `{}`", a.id),
+        "removed",
+        &a.id,
+    )?;
     Ok(0)
 }
 
@@ -592,7 +624,9 @@ fn key_add(a: &KeyAddArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::R
     confirm(
         fmt,
         &format!("added key for GUID {} to `{}`", guid.to_hex(), a.id),
-    );
+        "key_added",
+        &a.id,
+    )?;
     Ok(0)
 }
 
@@ -618,7 +652,9 @@ fn key_remove(a: &KeyRemoveArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_c
     confirm(
         fmt,
         &format!("removed key for GUID {} from `{}`", guid.to_hex(), a.id),
-    );
+        "key_removed",
+        &a.id,
+    )?;
     Ok(0)
 }
 
@@ -652,16 +688,13 @@ fn fetch(a: &FetchArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
                 fetched: false,
                 profiles: existing.doc.profiles.len(),
             };
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&out).map_err(|e| json_err(&e))?
-            );
+            crate::output::print_json(&out)?;
             return Ok(0);
         }
-        println!(
+        crate::output::print_line(&format!(
             "registry cache is fresh ({} profiles); use --force to re-fetch",
             existing.doc.profiles.len()
-        );
+        ))?;
         return Ok(0);
     }
 
@@ -679,13 +712,10 @@ fn fetch(a: &FetchArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
             fetched: true,
             profiles: cache.doc.profiles.len(),
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).map_err(|e| json_err(&e))?
-        );
+        crate::output::print_json(&out)?;
         return Ok(0);
     }
-    println!("fetched {} profiles", cache.doc.profiles.len());
+    crate::output::print_line(&format!("fetched {} profiles", cache.doc.profiles.len()))?;
     Ok(0)
 }
 
@@ -746,10 +776,7 @@ fn test(a: &TestArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
             outcome: token,
             ok,
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).map_err(|e| json_err(&e))?
-        );
+        crate::output::print_json(&out)?;
         return Ok(u8::from(!ok));
     }
     let label = match outcome {
@@ -758,7 +785,7 @@ fn test(a: &TestArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
         KeyTestOutcome::WrongKey => "wrong key",
         KeyTestOutcome::Unsupported => "unsupported pak layout (key may be correct)",
     };
-    println!("{}: {label}", a.id);
+    crate::output::print_line(&format!("{}: {label}", a.id))?;
     // exit 1 if the key didn't work, 0 if it did
     Ok(u8::from(!ok))
 }
