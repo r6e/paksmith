@@ -25,7 +25,12 @@ fn fixture(name: &str) -> std::path::PathBuf {
 /// `profile add <id> --pak-path <pattern>` under `cfg`.
 fn add_pak_path_profile(cfg: &std::path::Path, id: &str, pattern: &str) {
     let _ = paksmith(cfg)
-        .args(["profile", "add", id, "--name", id, "--pak-path", pattern])
+        // `--format table`: `profile` honours --format since #658 and auto
+        // resolves to JSON off-TTY. Seeding asserts only on the exit code, but
+        // pinning keeps the whole suite on one shape.
+        .args([
+            "--format", "table", "profile", "add", id, "--name", id, "--pak-path", pattern,
+        ])
         .assert()
         .success();
 }
@@ -322,7 +327,9 @@ fn no_path_and_no_selector_is_a_loud_error() {
 fn profile_without_pak_paths_is_a_loud_error() {
     let cfg = tempdir().unwrap();
     let _ = paksmith(cfg.path())
-        .args(["profile", "add", "plain", "--name", "Plain"])
+        .args([
+            "--format", "table", "profile", "add", "plain", "--name", "Plain",
+        ])
         .assert()
         .success();
     let out = paksmith(cfg.path())

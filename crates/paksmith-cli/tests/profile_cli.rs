@@ -944,7 +944,13 @@ async fn profile_fetch_force_ignores_fresh_cache() {
         .unwrap()
         .env("PAKSMITH_CONFIG_DIR", cfg.path())
         .env("PAKSMITH_ALLOW_HTTP", "1")
-        .args(["profile", "fetch", "--force"])
+        // `--format table` like its two siblings above. Without it this
+        // invocation resolved to JSON (stdout is never a TTY under
+        // assert_cmd), and `contains("fetched")` then matched the FetchOutput
+        // KEY NAME rather than the table's "fetched N profiles" — so the
+        // `!a.force` guard this test exists to pin could be elided and both
+        // assertions still passed.
+        .args(["--format", "table", "profile", "fetch", "--force"])
         .assert()
         .success();
     let force_txt = String::from_utf8(force_out.get_output().stdout.clone()).unwrap();
@@ -1471,9 +1477,13 @@ fn profile_show_json_redacts_keys_unless_asked() {
     assert_eq!(v["source"], "local");
     assert_eq!(v["engine_version"], "5.3");
     assert!(v["keys"][0]["guid"].is_string(), "guid is always listed");
+    // OMITTED, not null. The disjunction this replaces (`is_none() ||
+    // is_null()`) accepted both, so deleting `skip_serializing_if` survived
+    // it — it could not pin the very choice its doc comment calls
+    // load-bearing. Presence of the field IS the --show-keys signal.
     assert!(
-        v["keys"][0].get("key").is_none() || v["keys"][0]["key"].is_null(),
-        "key field absent or null when redacted"
+        v["keys"][0].get("key").is_none(),
+        "key field must be ABSENT when redacted, not null: {stdout}"
     );
 
     // `--show-keys` is the deliberate reveal, mirroring the human path.
@@ -1542,20 +1552,297 @@ fn profile_test_json_uses_a_stable_outcome_token() {
     assert_eq!(v["ok"], false, "ok mirrors the non-zero exit");
 }
 
+/// The all-zero default encryption-key GUID, as `key remove` spells it.
+const ZERO_GUID: &str = "00000000000000000000000000000000";
+
 #[test]
-fn profile_mutations_stay_human_only_under_json() {
-    // Deliberate scope boundary: `add`/`remove` emit a confirmation line, not
-    // data — success is the exit code. They must NOT start emitting JSON just
-    // because --format json is set, and must not emit a bare human line onto
-    // a stdout a caller is parsing either; they print nothing to stdout.
+fn profile_mutations_emit_a_receipt_under_json() {
+    // All four store mutations return a MutationOutput document. Each leg
+    // pins the EXACT `action` token, so rewording one is caught.
+    //
+    // The assertion this replaces was `stdout.is_empty() ||
+    // from_str(..).is_ok()`, which passed under the human-only design AND
+    // under this one — a disjunction that cannot fail in the case it exists
+    // to catch. It also never looked at stderr.
     let cfg = tempdir().unwrap();
+    let key = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+    let cases: [(&[&str], &str); 4] = [
+        (&["profile", "add", "hero", "--name", "Hero"], "added"),
+        (
+            &["profile", "key", "add", "hero", "--key", key],
+            "key_added",
+        ),
+        (
+            &["profile", "key", "remove", "hero", "--guid", ZERO_GUID],
+            "key_removed",
+        ),
+        (&["profile", "remove", "hero"], "removed"),
+    ];
+
+    for (args, action) in cases {
+        let out = paksmith_json(cfg.path()).args(args).assert().success();
+        let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+        let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+
+        assert_envelope_first(&stdout, "action", action);
+        let v: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("{action}: stdout must be a JSON document ({e}): {stdout}"));
+        assert_eq!(v["schema_version"], 1, "{action}");
+        assert_eq!(v["action"], action, "exact token, not the prose sentence");
+        assert_eq!(v["id"], "hero", "{action}");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            3,
+            "{action}: receipt is exactly 3 keys"
+        );
+
+        // The human sentence must not ALSO appear — neither stream carries it
+        // under --format json, or a consumer teeing both gets both shapes.
+        assert!(
+            !stdout.contains("profile `hero`") && !stderr.contains("profile `hero`"),
+            "{action}: the prose confirmation must not accompany the receipt.\
+             \nstdout: {stdout}\nstderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn profile_list_json_applies_local_wins_precedence() {
+    // The local-wins rule lived in BOTH arms before `rows()`; the table copy
+    // was pinned and the JSON copy was not, so dropping the JSON `filter`
+    // emitted a shadowed id TWICE in an array consumers key by id.
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "hero", "Hero From Registry");
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "hero", "--name", "Hero Local"])
+        .assert()
+        .success();
+
     let out = paksmith_json(cfg.path())
-        .args(["profile", "add", "hero", "--name", "Hero"])
+        .args(["profile", "list"])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let rows = v["profiles"].as_array().unwrap();
+
+    let heroes: Vec<_> = rows.iter().filter(|r| r["id"] == "hero").collect();
+    assert_eq!(
+        heroes.len(),
+        1,
+        "a locally-shadowed registry id must appear ONCE: {stdout}"
+    );
+    assert_eq!(
+        heroes[0]["name"], "Hero Local",
+        "the LOCAL profile must win: {stdout}"
+    );
+    assert_eq!(heroes[0]["source"], "local");
+}
+
+#[test]
+fn profile_list_json_labels_registry_only_rows() {
+    // Pins the `"registry"` token itself — `source` is a wire vocabulary
+    // shared with the table's `[registry]` label, so rewriting it is a
+    // breaking change to the document, not a rename.
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "fromreg", "From Registry");
+
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let row = &v["profiles"][0];
+    assert_eq!(row["id"], "fromreg");
+    assert_eq!(row["source"], "registry", "exact token: {stdout}");
+}
+
+#[test]
+fn profile_show_json_reports_the_registry_layer() {
+    // The registry arm of `show`'s JSON hardcodes source/mappings/pak_paths in
+    // a match arm no JSON test reached. `RegistryProfile` structurally carries
+    // neither mappings nor pak_paths, so the asymmetry (null vs []) is
+    // deliberate and pinned here rather than left to drift.
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "fromreg", "From Registry");
+
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "show", "fromreg"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_envelope_first(&stdout, "id", "show/registry");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["id"], "fromreg");
+    assert_eq!(v["source"], "registry", "exact token: {stdout}");
     assert!(
-        stdout.trim().is_empty() || serde_json::from_str::<serde_json::Value>(&stdout).is_ok(),
-        "a mutation under --format json must emit nothing or valid JSON, got: {stdout}"
+        v["mappings"].is_null(),
+        "registry profiles carry no mappings"
+    );
+    assert_eq!(
+        v["pak_paths"].as_array().map(Vec::len),
+        Some(0),
+        "registry profiles carry no pak_paths"
+    );
+}
+
+#[test]
+fn profile_auto_format_resolves_to_json_off_tty_and_says_so() {
+    // The ONLY test exercising `--format auto` on this family: every other
+    // one now passes an explicit format, so deleting the `format.resolve()` /
+    // `note_auto_resolved_to_json` wiring in `run()` was invisible.
+    let cfg = tempdir().unwrap();
+    seed_one(cfg.path());
+
+    let mut cmd = Command::cargo_bin("paksmith").unwrap();
+    let out = cmd
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .args(["profile", "list"]) // no --format: auto, and stdout is a pipe
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+
+    assert_envelope_first(&stdout, "profiles", "auto");
+    assert!(
+        stderr.contains("stdout is not a terminal"),
+        "auto-resolution to JSON must be announced on stderr: {stderr}"
+    );
+
+    // --quiet suppresses the advisory note but NOT the document.
+    let mut cmd = Command::cargo_bin("paksmith").unwrap();
+    let out = cmd
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .args(["--quiet", "profile", "list"])
+        .assert()
+        .success();
+    let q_stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let q_stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert_envelope_first(&q_stdout, "profiles", "auto/quiet");
+    assert!(
+        !q_stderr.contains("stdout is not a terminal"),
+        "--quiet must silence the advisory note: {q_stderr}"
+    );
+}
+
+#[test]
+fn profile_json_with_closed_stdout_exits_cleanly() {
+    // `println!` panics (exit 101) when the reader closes the pipe; the shared
+    // `print_json` writer routes BrokenPipe to main.rs's clean exit instead.
+    // SPEC: "0 success, including BrokenPipe on stdout".
+    //
+    // Dropping the read end BEFORE the child writes makes this deterministic
+    // regardless of payload size — the real bug only shows past the 64 KiB
+    // pipe buffer, so a small-fixture test would pass on the broken code.
+    use std::io::Read;
+    use std::process::{Command as StdCommand, Stdio};
+    use std::thread;
+
+    let cfg = tempdir().unwrap();
+    seed_one(cfg.path());
+
+    for args in [
+        ["--format", "json", "profile", "list"],
+        ["--format", "table", "profile", "list"],
+    ] {
+        let mut child = StdCommand::new(env!("CARGO_BIN_EXE_paksmith"))
+            .env("PAKSMITH_CONFIG_DIR", cfg.path())
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take());
+        let mut stderr = child.stderr.take().unwrap();
+        let handle = thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf);
+            buf
+        });
+        let status = child.wait().unwrap();
+        let stderr_text = handle.join().unwrap();
+
+        assert!(
+            !stderr_text.contains("panicked"),
+            "{args:?} panicked on a closed stdout: {stderr_text}"
+        );
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "{args:?} must exit 0 on BrokenPipe, got {status:?}"
+        );
+    }
+}
+
+/// `fetch`'s JSON `fetched` flag, BOTH legs. Its own doc says it exists "so a
+/// script can tell 'already current' from 'downloaded'" — and neither leg had
+/// a test, so hardcoding it to either value survived the suite.
+#[tokio::test]
+async fn profile_fetch_json_distinguishes_downloaded_from_fresh() {
+    use wiremock::matchers::{method, path as wpath};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let cfg = tempdir().unwrap();
+    let (sk, pk) = test_keypair();
+    let body = r#"[{"id":"g","name":"G","keys":{}}]"#;
+    let sig = sk.sign(body.as_bytes()).to_bytes().to_vec();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/r.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_bytes()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wpath("/r.json.sig"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(sig))
+        .mount(&server)
+        .await;
+
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("config.toml"),
+        format!(
+            "[registry]\nurl = \"{}/r.json\"\npublic_key = \"{pk}\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let run = |args: &'static [&'static str]| {
+        let out = assert_cmd::Command::cargo_bin("paksmith")
+            .unwrap()
+            .env("PAKSMITH_CONFIG_DIR", cfg.path())
+            .env("PAKSMITH_ALLOW_HTTP", "1")
+            .args(args)
+            .assert()
+            .success();
+        String::from_utf8(out.get_output().stdout.clone()).unwrap()
+    };
+
+    // Cold cache -> a real download.
+    let first = run(&["--format", "json", "profile", "fetch"]);
+    assert_envelope_first(&first, "fetched", "fetch/downloaded");
+    let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(v["fetched"], true, "a cold fetch downloaded: {first}");
+    assert_eq!(v["profiles"], 1);
+
+    // Fresh cache -> the network is short-circuited; same shape, fetched=false.
+    let second = run(&["--format", "json", "profile", "fetch"]);
+    let v: serde_json::Value = serde_json::from_str(&second).unwrap();
+    assert_eq!(
+        v["fetched"], false,
+        "a fresh cache must report fetched=false: {second}"
+    );
+    assert_eq!(v["profiles"], 1);
+
+    // --force bypasses freshness and downloads again.
+    let forced = run(&["--format", "json", "profile", "fetch", "--force"]);
+    let v: serde_json::Value = serde_json::from_str(&forced).unwrap();
+    assert_eq!(
+        v["fetched"], true,
+        "--force must re-download even on a fresh cache: {forced}"
     );
 }

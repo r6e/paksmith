@@ -263,3 +263,84 @@ fn detect_query_nonexistent_dir_exits_nonzero() {
         "expected not-a-directory error in stderr, got: {stderr}"
     );
 }
+
+/// A `paksmith` invocation pinned to JSON output (#658).
+fn paksmith_json(cfg: &std::path::Path) -> Command {
+    let mut c = Command::cargo_bin("paksmith").unwrap();
+    let _ = c.env("PAKSMITH_CONFIG_DIR", cfg);
+    let _ = c.args(["--format", "json"]);
+    c
+}
+
+/// `schema_version` must be the FIRST key in the raw bytes, not merely
+/// present — asserting presence passes on any envelope, including one that
+/// emits it last. Mirrors `profile_cli::assert_envelope_first`.
+fn assert_envelope_first(stdout: &str, ctx: &str) {
+    let after_brace = stdout
+        .trim_start()
+        .strip_prefix('{')
+        .unwrap_or_else(|| panic!("{ctx}: not a JSON object: {stdout}"))
+        .trim_start();
+    assert!(
+        after_brace.starts_with("\"schema_version\""),
+        "{ctx}: schema_version must be the FIRST key, got: {stdout}"
+    );
+}
+
+#[test]
+fn detect_json_carries_envelope_dir_and_matches() {
+    // `detect --format json` had NO test at all: its schema constant, its
+    // `dir` field and its rows were entirely unpinned, so hardcoding any of
+    // them survived the suite.
+    let cfg = tempdir().unwrap();
+    let game = tempdir().unwrap();
+    std::fs::create_dir_all(game.path().join("FortniteGame/Content/Paks")).unwrap();
+    seed_profile_with_detect(cfg.path(), "FortniteGame/Content/Paks");
+
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "detect"])
+        .arg(game.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_envelope_first(&stdout, "detect");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(
+        v["dir"],
+        game.path().display().to_string(),
+        "dir echoes the probed directory: {stdout}"
+    );
+    let m = &v["matches"][0];
+    assert_eq!(m["id"], "fortnite");
+    assert_eq!(m["name"], "Fortnite");
+    assert_eq!(m["source"], "local", "exact wire token: {stdout}");
+}
+
+#[test]
+fn detect_json_emits_an_empty_array_when_nothing_matches() {
+    // The divergent case: the table prints "no profiles matched <dir>" and
+    // exits 0, so JSON must emit the SAME envelope with an empty array —
+    // not a message, not an error, not a bare `{}`.
+    let cfg = tempdir().unwrap();
+    let game = tempdir().unwrap();
+    seed_profile_with_detect(cfg.path(), "SomeOtherGame/Content/Paks");
+
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "detect"])
+        .arg(game.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_envelope_first(&stdout, "detect/empty");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        v["matches"].as_array().map(Vec::len),
+        Some(0),
+        "no matches is an empty array, not an absent key: {stdout}"
+    );
+    assert!(
+        !stdout.contains("no profiles matched"),
+        "the human message must not leak into the document: {stdout}"
+    );
+}
