@@ -5,16 +5,33 @@ use std::fmt::Write as _;
 use assert_cmd::Command;
 use tempfile::tempdir;
 
-/// A `paksmith` invocation pinned to TABLE output.
+/// A `paksmith` invocation pinned to TABLE output, for this file's
+/// `profile`-family assertions.
 ///
 /// `profile detect` honours `--format` since #658, and `--format auto`
 /// resolves to JSON whenever stdout is not a TTY — always true under
 /// `assert_cmd`. Tests asserting on human output must ask for the table
 /// explicitly, as `cli_integration`'s `list ... --format table` already does.
+///
+/// The `--detect … list <pak>` tests use [`paksmith_unpinned`] instead.
 fn paksmith(cfg: &std::path::Path) -> Command {
     let mut c = Command::cargo_bin("paksmith").unwrap();
     let _ = c.env("PAKSMITH_CONFIG_DIR", cfg);
     let _ = c.args(["--format", "table"]);
+    c
+}
+
+/// A `paksmith` invocation with NO `--format`, exercising the default
+/// resolution.
+///
+/// For the `--detect … list <pak>` tests, whose subject is the global
+/// `--detect` flag rather than `profile`. `list` already honoured `--format`
+/// before #658, so off-TTY these have always asserted against the JSON
+/// writer; pinning them to the table would be an undeclared coverage shift
+/// dressed as consistency.
+fn paksmith_unpinned(cfg: &std::path::Path) -> Command {
+    let mut c = Command::cargo_bin("paksmith").unwrap();
+    let _ = c.env("PAKSMITH_CONFIG_DIR", cfg);
     c
 }
 
@@ -166,7 +183,7 @@ fn detect_flag_resolves_single_match_key() {
         .assert()
         .success();
     // --detect <game-dir> list <encrypted-index fixture> → succeeds + lists entries.
-    let out = paksmith(cfg.path())
+    let out = paksmith_unpinned(cfg.path())
         .args(["--detect"])
         .arg(game.path())
         .arg("list")
@@ -187,7 +204,7 @@ fn detect_flag_no_match_exits_nonzero() {
     let game = tempdir().unwrap();
     // Marker path is NOT created in game dir — must not match.
     seed_profile_with_detect(cfg.path(), "FortniteGame/Content/Paks");
-    let out = paksmith(cfg.path())
+    let out = paksmith_unpinned(cfg.path())
         .args(["--detect"])
         .arg(game.path())
         .arg("list")
@@ -220,7 +237,7 @@ fn detect_flag_ambiguous_exits_nonzero() {
          [profiles.g2.detect]\nrequire_paths = [\"Common\"]\n",
     );
     std::fs::write(&store, s).unwrap();
-    let out = paksmith(cfg.path())
+    let out = paksmith_unpinned(cfg.path())
         .args(["--detect"])
         .arg(game.path())
         .arg("list")
@@ -237,7 +254,7 @@ fn detect_flag_ambiguous_exits_nonzero() {
 #[test]
 fn detect_flag_nonexistent_dir_exits_nonzero() {
     let cfg = tempdir().unwrap();
-    let out = paksmith(cfg.path())
+    let out = paksmith_unpinned(cfg.path())
         .args(["--detect", "/nonexistent/no/such/dir"])
         .arg("list")
         .arg(fixture("real_v8b_encrypted_index.pak"))

@@ -1474,6 +1474,9 @@ fn profile_show_json_redacts_keys_unless_asked() {
         "key material must not appear without --show-keys: {stdout}"
     );
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    // BY VALUE, not merely first: `assert_envelope_first` pins POSITION, so
+    // SHOW_SCHEMA_VERSION could ship as any number and stay green.
+    assert_eq!(v["schema_version"], 1);
     assert_eq!(v["source"], "local");
     assert_eq!(v["engine_version"], "5.3");
     assert!(v["keys"][0]["guid"].is_string(), "guid is always listed");
@@ -1520,6 +1523,10 @@ fn profile_test_json_uses_a_stable_outcome_token() {
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert_envelope_first(&stdout, "id", "test/ok");
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        v["schema_version"], 1,
+        "TEST_SCHEMA_VERSION pinned by value"
+    );
     assert_eq!(v["id"], "hero");
     assert_eq!(
         v["outcome"], "verified",
@@ -1566,20 +1573,39 @@ fn profile_mutations_emit_a_receipt_under_json() {
     // to catch. It also never looked at stderr.
     let cfg = tempdir().unwrap();
     let key = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
-    let cases: [(&[&str], &str); 4] = [
-        (&["profile", "add", "hero", "--name", "Hero"], "added"),
+    // Each case carries the EXACT prose its subcommand would have printed. The
+    // first version of this guard hardcoded "profile `hero`", which the two
+    // `key` sentences ("added key for GUID … to `hero`") never contain — so
+    // half the legs could not fail, in a test whose whole point is that the
+    // assertion it replaced could not fail.
+    let cases: [(&[&str], &str, Option<&str>, &str); 4] = [
+        (
+            &["profile", "add", "hero", "--name", "Hero"],
+            "added",
+            None,
+            "added profile `hero`",
+        ),
         (
             &["profile", "key", "add", "hero", "--key", key],
             "key_added",
+            Some(ZERO_GUID),
+            "added key for GUID",
         ),
         (
             &["profile", "key", "remove", "hero", "--guid", ZERO_GUID],
             "key_removed",
+            Some(ZERO_GUID),
+            "removed key for GUID",
         ),
-        (&["profile", "remove", "hero"], "removed"),
+        (
+            &["profile", "remove", "hero"],
+            "removed",
+            None,
+            "removed profile `hero`",
+        ),
     ];
 
-    for (args, action) in cases {
+    for (args, action, guid, prose) in cases {
         let out = paksmith_json(cfg.path()).args(args).assert().success();
         let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
         let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
@@ -1590,17 +1616,26 @@ fn profile_mutations_emit_a_receipt_under_json() {
         assert_eq!(v["schema_version"], 1, "{action}");
         assert_eq!(v["action"], action, "exact token, not the prose sentence");
         assert_eq!(v["id"], "hero", "{action}");
+        // The key subcommands name the slot they acted on; add/remove omit it
+        // rather than emitting null, so `"guid" in receipt` is the signal.
+        match guid {
+            Some(g) => assert_eq!(v["guid"], g, "{action} must report its key slot: {stdout}"),
+            None => assert!(
+                v.get("guid").is_none(),
+                "{action} has no key slot, so `guid` must be ABSENT: {stdout}"
+            ),
+        }
         assert_eq!(
             v.as_object().unwrap().len(),
-            3,
-            "{action}: receipt is exactly 3 keys"
+            if guid.is_some() { 4 } else { 3 },
+            "{action}: receipt carries exactly the documented keys"
         );
 
         // The human sentence must not ALSO appear — neither stream carries it
         // under --format json, or a consumer teeing both gets both shapes.
         assert!(
-            !stdout.contains("profile `hero`") && !stderr.contains("profile `hero`"),
-            "{action}: the prose confirmation must not accompany the receipt.\
+            !stdout.contains(prose) && !stderr.contains(prose),
+            "{action}: the prose confirmation ({prose:?}) must not accompany the receipt.\
              \nstdout: {stdout}\nstderr: {stderr}"
         );
     }
@@ -1676,6 +1711,17 @@ fn profile_show_json_reports_the_registry_layer() {
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(v["id"], "fromreg");
     assert_eq!(v["source"], "registry", "exact token: {stdout}");
+    // `seed_registry_cache` seeds a KEY-BEARING profile, so the redaction gate
+    // must hold on this arm too. The table arm and the LOCAL JSON arm each had
+    // this pin; the registry JSON arm did not.
+    assert!(
+        !stdout.contains(KEY),
+        "registry key material must not appear without --show-keys: {stdout}"
+    );
+    assert!(
+        v["keys"][0].get("key").is_none(),
+        "key field must be ABSENT when redacted: {stdout}"
+    );
     assert!(
         v["mappings"].is_null(),
         "registry profiles carry no mappings"
@@ -1684,6 +1730,18 @@ fn profile_show_json_reports_the_registry_layer() {
         v["pak_paths"].as_array().map(Vec::len),
         Some(0),
         "registry profiles carry no pak_paths"
+    );
+
+    // …and the deliberate reveal works on this arm too, so the assertion above
+    // pins the GATE rather than an arm that simply never emits keys.
+    let shown = paksmith_json(cfg.path())
+        .args(["profile", "show", "fromreg", "--show-keys"])
+        .assert()
+        .success();
+    let shown = String::from_utf8(shown.get_output().stdout.clone()).unwrap();
+    assert!(
+        shown.contains(KEY),
+        "--show-keys must reveal a registry profile's key: {shown}"
     );
 }
 
@@ -1826,6 +1884,10 @@ async fn profile_fetch_json_distinguishes_downloaded_from_fresh() {
     let first = run(&["--format", "json", "profile", "fetch"]);
     assert_envelope_first(&first, "fetched", "fetch/downloaded");
     let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(
+        v["schema_version"], 1,
+        "FETCH_SCHEMA_VERSION pinned by value"
+    );
     assert_eq!(v["fetched"], true, "a cold fetch downloaded: {first}");
     assert_eq!(v["profiles"], 1);
 
@@ -1894,4 +1956,226 @@ fn profile_test_json_reports_decrypted_when_the_hash_slot_is_zeroed() {
         v["ok"], true,
         "decrypted still opened the archive, so ok/exit stay 0"
     );
+}
+
+#[test]
+fn profile_show_json_carries_mappings_pak_paths_name_and_every_key() {
+    // The local arm of `show --format json` could blank `name`, `mappings` and
+    // `pak_paths` with the whole suite green: `seed_one` sets none of them, and
+    // this PR pinned every mappings/pak_paths test to `--format table`. The
+    // registry test cannot cover it either — there `null`/`[]` are the CORRECT
+    // values, so it cannot tell "registry has none" from "the local arm
+    // dropped them". Silent data loss on a machine interface.
+    let cfg = tempdir().unwrap();
+    let usmap = cfg.path().join("hero.usmap");
+    std::fs::write(&usmap, b"not a real usmap").unwrap();
+
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "hero", "--name", "Hero Display Name"])
+        .args(["--engine-version", "5.3"])
+        .arg("--mappings")
+        .arg(&usmap)
+        .args(["--pak-path", "/games/hero/Paks/*.pak"])
+        .args(["--pak-path", "/games/hero/Extra/*.pak"])
+        .assert()
+        .success();
+    // TWO keys: with one, `keys` survives a `.take(1)`-shaped truncation.
+    for guid in [
+        "00000000000000000000000000000000",
+        "11111111111111111111111111111111",
+    ] {
+        let _ = paksmith(cfg.path())
+            .args(["profile", "key", "add", "hero", "--guid", guid])
+            .args([
+                "--key",
+                "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de",
+            ])
+            .assert()
+            .success();
+    }
+
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "show", "hero"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(
+        v["name"], "Hero Display Name",
+        "name must survive: {stdout}"
+    );
+    assert_eq!(
+        v["mappings"],
+        usmap.display().to_string(),
+        "mappings must survive: {stdout}"
+    );
+    assert_eq!(
+        v["pak_paths"],
+        serde_json::json!(["/games/hero/Paks/*.pak", "/games/hero/Extra/*.pak"]),
+        "every pak_path, in order: {stdout}"
+    );
+    assert_eq!(
+        v["keys"].as_array().map(Vec::len),
+        Some(2),
+        "every key slot is listed: {stdout}"
+    );
+}
+
+#[test]
+fn profile_list_json_reports_registry_row_details_not_just_the_id() {
+    // `profile_rows`'s registry branch could blank name/engine_version/
+    // key_count and stay green: the JSON test asserted only id+source, and the
+    // table test's `!contains("Shadowed")` still holds when the name is blank.
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "fromreg", "From Registry");
+
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let row = &v["profiles"][0];
+    assert_eq!(row["name"], "From Registry", "registry name: {stdout}");
+    assert_eq!(row["engine_version"], "5.3", "registry engine: {stdout}");
+    assert_eq!(row["key_count"], 1, "registry key count: {stdout}");
+}
+
+#[test]
+fn profile_list_json_emits_a_duplicated_registry_id_once() {
+    // A registry document may repeat an id — `validate_caps` bounds the profile
+    // count and string lengths but never checks uniqueness. `RegistryCache::get`
+    // is a `.find()`, so `show` answers with the FIRST. `list` must agree, or
+    // the two surfaces disagree about the same store and the array gains a
+    // duplicate key.
+    let cfg = tempdir().unwrap();
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("registry-cache.json"),
+        r#"{"fetched_at_unix":9999999999,"profiles":[
+             {"id":"dup","name":"First","keys":{}},
+             {"id":"dup","name":"Second","keys":{}}]}"#,
+    )
+    .unwrap();
+
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let dups: Vec<_> = v["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["id"] == "dup")
+        .collect();
+    assert_eq!(
+        dups.len(),
+        1,
+        "a repeated registry id appears once: {stdout}"
+    );
+    assert_eq!(
+        dups[0]["name"], "First",
+        "first occurrence wins, as `show` does"
+    );
+
+    // The agreement itself, not just the count.
+    let shown = paksmith_json(cfg.path())
+        .args(["profile", "show", "dup"])
+        .assert()
+        .success();
+    let sv: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(shown.get_output().stdout.clone()).unwrap())
+            .unwrap();
+    assert_eq!(sv["name"], dups[0]["name"], "`list` and `show` must agree");
+}
+
+#[test]
+fn profile_mutations_print_their_confirmation_under_table() {
+    // `confirm()`'s Table arm was unexercised: no test anywhere asserted the
+    // four confirmation sentences, so `--format table profile add` could start
+    // emitting the JSON receipt and CI would stay green. Half of a brand-new
+    // two-arm function.
+    let cfg = tempdir().unwrap();
+    let key = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+    let cases: [(&[&str], &str); 4] = [
+        (
+            &["profile", "add", "hero", "--name", "Hero"],
+            "added profile `hero`",
+        ),
+        (
+            &["profile", "key", "add", "hero", "--key", key],
+            "added key for GUID 00000000000000000000000000000000 to `hero`",
+        ),
+        (
+            &["profile", "key", "remove", "hero", "--guid", ZERO_GUID],
+            "removed key for GUID 00000000000000000000000000000000 from `hero`",
+        ),
+        (&["profile", "remove", "hero"], "removed profile `hero`"),
+    ];
+
+    for (args, prose) in cases {
+        let out = paksmith(cfg.path()).args(args).assert().success();
+        let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+        assert_eq!(
+            stdout.trim_end(),
+            prose,
+            "the table arm must print the human sentence verbatim"
+        );
+        assert!(
+            !stdout.contains("schema_version"),
+            "the table arm must NOT emit the receipt: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn profile_single_line_table_output_survives_a_closed_stdout() {
+    // `print_line` is the sole writer for the SINGLE-LINE human messages —
+    // "no profiles", "no profiles matched <dir>", "registry cache is fresh …",
+    // "fetched N profiles", test's result line, and confirm's Table arm. The
+    // other closed-stdout test seeds a profile, so its table leg goes through
+    // `list()`'s own BufWriter loop and never reaches `print_line`: reverting
+    // that helper to `println!` survived the suite while `--format table
+    // profile list` on an EMPTY store exited 101.
+    //
+    // An empty config dir is the point — it forces the `no profiles` path.
+    use std::io::Read;
+    use std::process::{Command as StdCommand, Stdio};
+    use std::thread;
+
+    let cfg = tempdir().unwrap();
+    for args in [
+        ["--format", "table", "profile", "list"],
+        ["--format", "json", "profile", "list"],
+    ] {
+        let mut child = StdCommand::new(env!("CARGO_BIN_EXE_paksmith"))
+            .env("PAKSMITH_CONFIG_DIR", cfg.path())
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take());
+        let mut stderr = child.stderr.take().unwrap();
+        let handle = thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf);
+            buf
+        });
+        let status = child.wait().unwrap();
+        let stderr_text = handle.join().unwrap();
+        assert!(
+            !stderr_text.contains("panicked"),
+            "{args:?} panicked writing a single line to a closed stdout: {stderr_text}"
+        );
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "{args:?} must exit 0 on BrokenPipe, got {status:?}"
+        );
+    }
 }

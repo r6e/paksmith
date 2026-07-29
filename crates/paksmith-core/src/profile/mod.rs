@@ -281,10 +281,19 @@ impl<'a> ResolvedProfile<'a> {
     /// Matches the vocabulary [`crate::profile::resolve::DetectMatch::source`]
     /// already uses, so the two are not spelled differently for one concept.
     ///
-    /// WIRE VOCABULARY, not a display label: since #658 these two strings are
-    /// emitted verbatim as the `source` field of `paksmith profile show`,
-    /// `list` and `detect` under `--format json`. Renaming either token is a
-    /// BREAKING change to those documents, not a cosmetic edit.
+    /// WIRE VOCABULARY, not a display label: since #658 the `source` field of
+    /// `paksmith profile show` under `--format json` is this method's return
+    /// value verbatim, so renaming a token is a BREAKING change to that
+    /// document rather than a cosmetic edit.
+    ///
+    /// The same two tokens are emitted by `profile list` and `profile detect`,
+    /// but NOT through this method — `list` spells them as literals in its own
+    /// row builder and `detect` in [`crate::profile::resolve::DetectMatch`].
+    /// Changing the vocabulary therefore means changing every site in lockstep;
+    /// editing this method alone would leave the other two documents emitting
+    /// the old strings, which is precisely the drift this note exists to
+    /// prevent. Nothing in the type system couples them; the tests pinning the
+    /// exact tokens on each surface are what catches a partial rename.
     #[must_use]
     pub fn source(self) -> &'static str {
         match self {

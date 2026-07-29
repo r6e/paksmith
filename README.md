@@ -134,7 +134,7 @@ document:
 | `detect` | `{schema_version, dir, matches: [{id, name, source}]}` |
 | `test` | `{schema_version, id, outcome, ok}` |
 | `fetch` | `{schema_version, fetched, profiles}` |
-| `add`, `remove`, `key add`, `key remove` | `{schema_version, action, id}` |
+| `add`, `remove`, `key add`, `key remove` | `{schema_version, action, id, guid?}` |
 
 `source` is `local` or `registry`. `test.outcome` is a stable token —
 `verified`, `decrypted`, `wrong_key` or `unsupported` — deliberately not the
@@ -142,14 +142,20 @@ table's prose, which reads "decrypted (no index hash to verify)"; branch on
 `ok`, and treat an unrecognised `outcome` as informational.
 `fetch.fetched` is false when a fresh cache short-circuited the network, so a
 script can tell "already current" from "downloaded". The mutations return an
-`action` of `added`, `removed`, `key_added` or `key_removed`.
+`action` of `added`, `removed`, `key_added` or `key_removed`; the two `key`
+subcommands also report the `guid` slot they acted on, which `add` and `remove`
+omit because they have none.
 
 `show` renders key material only under `--show-keys`; when redacted the `key`
 field is **omitted entirely** rather than set to a placeholder, so the presence
 of the field is itself the signal.
 
-Errors are unchanged in every format: `paksmith: error: …` on stderr, exit 2,
-stdout empty. There is no JSON error envelope.
+Exit codes: **2** is a real error — `paksmith: error: …` on stderr, stdout
+empty, no document in either format. There is no JSON error envelope. **1** is
+not an error but `profile test` reporting a key that did not open the archive
+(`outcome` `wrong_key` or `unsupported`); the document is still written, so
+branch on `ok` rather than treating non-zero as failure. A closed stdout (`|
+head -1`) exits **0** and takes precedence over the 1.
 
 ### `paksmith inspect`
 

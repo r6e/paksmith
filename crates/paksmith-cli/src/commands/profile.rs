@@ -250,6 +250,16 @@ struct MutationOutput {
     /// `key_added`, `key_removed`.
     action: &'static str,
     id: String,
+    /// The key slot the two `key` subcommands acted on; omitted for `add` and
+    /// `remove`, which have none.
+    ///
+    /// Carried because without it the receipt is the ONE place in this family
+    /// where the machine output says less than the human line it replaces:
+    /// the table names the GUID, and `key add --guid` is optional, so an
+    /// omitted flag means the slot is computed in-handler (the all-zero
+    /// default) and would never reach the caller at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guid: Option<String>,
 }
 
 /// `ProfileNotFound` for `id`. Both wrappers below build it identically.
@@ -377,13 +387,20 @@ pub(crate) fn run(
 /// `action` is the machine token and `msg` the prose; they are separate
 /// arguments rather than one derived from the other so that rewording the
 /// sentence cannot silently change the wire token.
-fn confirm(fmt: ResolvedFormat, msg: &str, action: &'static str, id: &str) -> io::Result<()> {
+fn confirm(
+    fmt: ResolvedFormat,
+    msg: &str,
+    action: &'static str,
+    id: &str,
+    guid: Option<&KeyGuid>,
+) -> io::Result<()> {
     match fmt {
         ResolvedFormat::Table => crate::output::print_line(msg),
         ResolvedFormat::Json => crate::output::print_json(&MutationOutput {
             schema_version: MUTATION_SCHEMA_VERSION,
             action,
             id: id.to_string(),
+            guid: guid.map(KeyGuid::to_hex),
         }),
     }
 }
@@ -425,7 +442,13 @@ fn add(a: &AddArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
         },
     );
     store.save()?;
-    confirm(fmt, &format!("added profile `{}`", a.id), "added", &a.id)?;
+    confirm(
+        fmt,
+        &format!("added profile `{}`", a.id),
+        "added",
+        &a.id,
+        None,
+    )?;
     Ok(0)
 }
 
@@ -442,7 +465,17 @@ fn add(a: &AddArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
 /// `source` is likewise derived once. The table renders it as `[local]` /
 /// `[registry]` and the JSON row emits it verbatim, so the human label and
 /// the wire token cannot disagree.
-fn rows(store: &ProfileStore, cache: Option<&paksmith_core::RegistryCache>) -> Vec<ProfileRow> {
+///
+/// Ids are unique in the result, and that takes TWO rules, not one. A local id
+/// shadows a registry one; and a registry document may itself repeat an id,
+/// because `validate_caps` bounds the profile count and string lengths but
+/// never checks uniqueness. First occurrence wins, which is what
+/// `RegistryCache::get` already does (`.find()`) — so `list` and `show` answer
+/// with the same profile rather than disagreeing about the same store.
+fn profile_rows(
+    store: &ProfileStore,
+    cache: Option<&paksmith_core::RegistryCache>,
+) -> Vec<ProfileRow> {
     let mut rows: Vec<ProfileRow> = store
         .profiles
         .iter()
@@ -455,19 +488,21 @@ fn rows(store: &ProfileStore, cache: Option<&paksmith_core::RegistryCache>) -> V
         })
         .collect();
     if let Some(c) = cache {
-        rows.extend(
-            c.doc
-                .profiles
-                .iter()
-                .filter(|p| !store.profiles.contains_key(&p.id))
-                .map(|p| ProfileRow {
-                    id: p.id.clone(),
-                    name: p.name.clone(),
-                    engine_version: p.engine_version.clone(),
-                    key_count: p.keys.len(),
-                    source: "registry",
-                }),
-        );
+        // Seeded with the local ids so one pass enforces both rules.
+        let mut seen: std::collections::BTreeSet<&str> =
+            store.profiles.keys().map(String::as_str).collect();
+        for p in &c.doc.profiles {
+            if !seen.insert(p.id.as_str()) {
+                continue;
+            }
+            rows.push(ProfileRow {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                engine_version: p.engine_version.clone(),
+                key_count: p.keys.len(),
+                source: "registry",
+            });
+        }
     }
     rows
 }
@@ -475,7 +510,7 @@ fn rows(store: &ProfileStore, cache: Option<&paksmith_core::RegistryCache>) -> V
 fn list(fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
     let store = ProfileStore::load()?;
     let cache = paksmith_core::profile::resolve::load_cache_lenient();
-    let profiles = rows(&store, cache.as_ref());
+    let profiles = profile_rows(&store, cache.as_ref());
 
     if matches!(fmt, ResolvedFormat::Json) {
         let out = ListOutput {
@@ -598,6 +633,7 @@ fn remove(a: &RemoveArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Re
         &format!("removed profile `{}`", a.id),
         "removed",
         &a.id,
+        None,
     )?;
     Ok(0)
 }
@@ -626,6 +662,7 @@ fn key_add(a: &KeyAddArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::R
         &format!("added key for GUID {} to `{}`", guid.to_hex(), a.id),
         "key_added",
         &a.id,
+        Some(&guid),
     )?;
     Ok(0)
 }
@@ -654,6 +691,7 @@ fn key_remove(a: &KeyRemoveArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_c
         &format!("removed key for GUID {} from `{}`", guid.to_hex(), a.id),
         "key_removed",
         &a.id,
+        Some(&guid),
     )?;
     Ok(0)
 }
@@ -758,18 +796,19 @@ fn test(a: &TestArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
             ),
         );
     }
-    let ok = matches!(
-        outcome,
-        KeyTestOutcome::Verified | KeyTestOutcome::Decrypted
-    );
+    // ONE exhaustive match decides both the wire token and `ok`, so
+    // `TestOutput.ok`'s "mirrors the exit code" is structural rather than a
+    // convention two separate expressions have to keep agreeing on. A
+    // `matches!(outcome, Verified | Decrypted)` for `ok` is not
+    // exhaustiveness-checked: a fifth `KeyTestOutcome` variant would flag the
+    // token arm at compile time while silently becoming `ok: false` and exit 1.
+    let (token, ok) = match outcome {
+        KeyTestOutcome::Verified => ("verified", true),
+        KeyTestOutcome::Decrypted => ("decrypted", true),
+        KeyTestOutcome::WrongKey => ("wrong_key", false),
+        KeyTestOutcome::Unsupported => ("unsupported", false),
+    };
     if matches!(fmt, ResolvedFormat::Json) {
-        // A STABLE token, deliberately not the prose label below.
-        let token = match outcome {
-            KeyTestOutcome::Verified => "verified",
-            KeyTestOutcome::Decrypted => "decrypted",
-            KeyTestOutcome::WrongKey => "wrong_key",
-            KeyTestOutcome::Unsupported => "unsupported",
-        };
         let out = TestOutput {
             schema_version: TEST_SCHEMA_VERSION,
             id: a.id.clone(),
