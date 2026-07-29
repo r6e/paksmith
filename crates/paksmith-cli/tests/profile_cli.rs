@@ -1966,6 +1966,22 @@ fn profile_test_json_reports_decrypted_when_the_hash_slot_is_zeroed() {
         v["ok"], true,
         "decrypted still opened the archive, so ok/exit stay 0"
     );
+
+    // The TABLE label for the same outcome. Only `wrong key`'s prose was
+    // pinned, so rewriting this one to any other string — including another
+    // outcome's — survived the suite. Both spellings now come from one
+    // exhaustive match, which makes a single edit able to change either.
+    let out = paksmith(cfg.path())
+        .args(["profile", "test", "hero"])
+        .arg(&pak)
+        .assert()
+        .code(0);
+    let table = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_eq!(
+        table.trim_end(),
+        "hero: decrypted (no index hash to verify)",
+        "the human label must stay the prose the JSON token exists to replace"
+    );
 }
 
 #[test]
