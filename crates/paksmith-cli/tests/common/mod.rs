@@ -89,3 +89,38 @@ pub fn assert_envelope_first(stdout: &str, body_key: &str, ctx: &str) {
         "{ctx}: schema_version must be the FIRST key, got: {stdout}"
     );
 }
+
+/// A `paksmith` invocation pinned to TABLE output.
+///
+/// `profile` honours `--format` since #658, and `--format auto` resolves to
+/// JSON whenever stdout is not a TTY — always true under `assert_cmd`. Any
+/// test asserting on human output must ask for the table explicitly, as
+/// `cli_integration`'s `list ... --format table` already does.
+pub fn paksmith_table(config_dir: &std::path::Path) -> assert_cmd::Command {
+    let mut c = assert_cmd::Command::cargo_bin("paksmith").unwrap();
+    let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
+    let _ = c.args(["--format", "table"]);
+    c
+}
+
+/// A `paksmith` invocation pinned to JSON output (#658).
+pub fn paksmith_json(config_dir: &std::path::Path) -> assert_cmd::Command {
+    let mut c = assert_cmd::Command::cargo_bin("paksmith").unwrap();
+    let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
+    let _ = c.args(["--format", "json"]);
+    c
+}
+
+/// A `paksmith` invocation with NO `--format`, exercising the default
+/// resolution.
+///
+/// For tests whose subject is a CONTAINER command (`--game … list`,
+/// `--detect … list`) rather than the `profile` family. Those already honoured
+/// `--format` before #658, so off-TTY they have always asserted against the
+/// JSON writer; pinning them to the table through a shared helper would be an
+/// undeclared coverage shift dressed as consistency.
+pub fn paksmith_unpinned(config_dir: &std::path::Path) -> assert_cmd::Command {
+    let mut c = assert_cmd::Command::cargo_bin("paksmith").unwrap();
+    let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
+    c
+}

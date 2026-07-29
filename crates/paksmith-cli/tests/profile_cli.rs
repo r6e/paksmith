@@ -6,43 +6,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use tempfile::tempdir;
 
 mod common;
-use common::assert_envelope_first;
-
-/// A `paksmith` invocation pinned to TABLE output.
-///
-/// `profile` honours `--format` since #658, and `--format auto` resolves to
-/// JSON whenever stdout is not a TTY — which is always true under
-/// `assert_cmd`. Every test below that asserts on human output therefore has
-/// to ask for the table explicitly, exactly as `cli_integration`'s
-/// `list ... --format table` does. The JSON tests use [`paksmith_json`].
-fn paksmith(config_dir: &std::path::Path) -> Command {
-    let mut c = Command::cargo_bin("paksmith").unwrap();
-    let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
-    let _ = c.args(["--format", "table"]);
-    c
-}
-
-/// A `paksmith` invocation with NO `--format`, exercising the default
-/// resolution.
-///
-/// For this file's tests that drive the CONTAINER `list` via `--game`, not the
-/// `profile` family. `list` already honoured `--format` before #658, so off-TTY
-/// they have always asserted against the JSON writer; pinning them to the table
-/// through the shared helper would be an undeclared coverage shift dressed as
-/// consistency — the same carve-out `detect_cli.rs` makes.
-fn paksmith_unpinned(config_dir: &std::path::Path) -> Command {
-    let mut c = Command::cargo_bin("paksmith").unwrap();
-    let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
-    c
-}
-
-/// A `paksmith` invocation pinned to JSON output (#658).
-fn paksmith_json(config_dir: &std::path::Path) -> Command {
-    let mut c = Command::cargo_bin("paksmith").unwrap();
-    let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
-    let _ = c.args(["--format", "json"]);
-    c
-}
+use common::{assert_envelope_first, paksmith_json, paksmith_table, paksmith_unpinned};
 
 /// Deterministic test keypair (seed `[7u8; 32]`) + its verifying key as lowercase
 /// hex. Shared by every signed-registry test so the seed/fold isn't duplicated.
@@ -66,7 +30,7 @@ fn add_with_pak_paths_shows_patterns() {
     // patterns in order and `profile show` renders them unredacted
     // (not key material — mappings precedent).
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args([
             "profile",
             "add",
@@ -80,7 +44,7 @@ fn add_with_pak_paths_shows_patterns() {
         ])
         .assert()
         .success();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "show", "hero"])
         .assert()
         .success();
@@ -99,7 +63,7 @@ fn add_rejects_invalid_pak_path_glob() {
     // Validation at store time (defense in depth): a syntactically
     // invalid glob never reaches profiles.toml.
     let cfg = tempdir().unwrap();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args([
             "profile",
             "add",
@@ -118,7 +82,7 @@ fn add_rejects_invalid_pak_path_glob() {
         "the rejection names the defect: {stderr}"
     );
     // And nothing was stored: the id is free for a valid retry.
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "hero", "--name", "Hero"])
         .assert()
         .success();
@@ -129,7 +93,7 @@ fn add_rejects_empty_pak_path() {
     // `glob` compiles "" without complaint, so empty needs its own
     // store-time rejection.
     let cfg = tempdir().unwrap();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "add", "hero", "--name", "Hero", "--pak-path", ""])
         .assert()
         .failure()
@@ -144,11 +108,11 @@ fn add_rejects_empty_pak_path() {
 #[test]
 fn show_without_pak_paths_renders_dash() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "plain", "--name", "Plain"])
         .assert()
         .success();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "show", "plain"])
         .assert()
         .success();
@@ -164,7 +128,7 @@ fn add_with_mappings_shows_source_path() {
     // #651: `profile add --mappings <path>` persists the source and
     // `profile show` renders it unredacted (it is not key material).
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args([
             "profile",
             "add",
@@ -176,7 +140,7 @@ fn add_with_mappings_shows_source_path() {
         ])
         .assert()
         .success();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "show", "hero"])
         .assert()
         .success();
@@ -190,11 +154,11 @@ fn add_with_mappings_shows_source_path() {
 #[test]
 fn show_without_mappings_renders_dash() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "plain", "--name", "P"])
         .assert()
         .success();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "show", "plain"])
         .assert()
         .success();
@@ -209,7 +173,7 @@ fn show_without_mappings_renders_dash() {
 fn add_list_show_remove_roundtrip() {
     let cfg = tempdir().unwrap();
     // add
-    let _add = paksmith(cfg.path())
+    let _add = paksmith_table(cfg.path())
         .args([
             "profile",
             "add",
@@ -222,7 +186,7 @@ fn add_list_show_remove_roundtrip() {
         .assert()
         .success();
     // list shows it
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "list"])
         .assert()
         .success();
@@ -230,18 +194,18 @@ fn add_list_show_remove_roundtrip() {
     assert!(txt.contains("fortnite"), "list shows the id: {txt}");
     assert!(txt.contains("Fortnite"), "list shows the name: {txt}");
     // show
-    let shown = paksmith(cfg.path())
+    let shown = paksmith_table(cfg.path())
         .args(["profile", "show", "fortnite"])
         .assert()
         .success();
     let stxt = String::from_utf8(shown.get_output().stdout.clone()).unwrap();
     assert!(stxt.contains("5.3"), "show includes engine version: {stxt}");
     // remove
-    let _remove = paksmith(cfg.path())
+    let _remove = paksmith_table(cfg.path())
         .args(["profile", "remove", "fortnite"])
         .assert()
         .success();
-    let out2 = paksmith(cfg.path())
+    let out2 = paksmith_table(cfg.path())
         .args(["profile", "list"])
         .assert()
         .success();
@@ -255,7 +219,7 @@ fn add_list_show_remove_roundtrip() {
 #[test]
 fn show_unknown_profile_exits_2() {
     let cfg = tempdir().unwrap();
-    let _assert = paksmith(cfg.path())
+    let _assert = paksmith_table(cfg.path())
         .args(["profile", "show", "nope"])
         .assert()
         .code(2);
@@ -264,11 +228,11 @@ fn show_unknown_profile_exits_2() {
 #[test]
 fn add_duplicate_id_is_rejected() {
     let cfg = tempdir().unwrap();
-    let _add1 = paksmith(cfg.path())
+    let _add1 = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
-    let _add2 = paksmith(cfg.path())
+    let _add2 = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G2"])
         .assert()
         .code(2);
@@ -277,7 +241,7 @@ fn add_duplicate_id_is_rejected() {
 #[test]
 fn remove_unknown_profile_exits_2() {
     let cfg = tempdir().unwrap();
-    let _assert = paksmith(cfg.path())
+    let _assert = paksmith_table(cfg.path())
         .args(["profile", "remove", "nope"])
         .assert()
         .code(2);
@@ -286,12 +250,12 @@ fn remove_unknown_profile_exits_2() {
 #[test]
 fn show_redacts_keys_by_default() {
     let cfg = tempdir().unwrap();
-    let _add = paksmith(cfg.path())
+    let _add = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
     // Verify show on a no-key profile succeeds and contains a "keys:" section.
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "show", "g"])
         .assert()
         .success();
@@ -310,7 +274,7 @@ fn show_redacts_keys_by_default() {
 #[test]
 fn list_empty_is_success() {
     let cfg = tempdir().unwrap();
-    let _assert = paksmith(cfg.path())
+    let _assert = paksmith_table(cfg.path())
         .args(["profile", "list"])
         .assert()
         .success();
@@ -331,17 +295,17 @@ fn fixture(name: &str) -> std::path::PathBuf {
 #[test]
 fn key_add_then_show_redacts_then_reveals() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
     // add a default (zero-guid) key
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "g", "--key", KEY])
         .assert()
         .success();
     // show redacts by default
-    let red = paksmith(cfg.path())
+    let red = paksmith_table(cfg.path())
         .args(["profile", "show", "g"])
         .assert()
         .success();
@@ -352,7 +316,7 @@ fn key_add_then_show_redacts_then_reveals() {
         "default show must not leak the key: {rtxt}"
     );
     // --show-keys reveals
-    let rev = paksmith(cfg.path())
+    let rev = paksmith_table(cfg.path())
         .args(["profile", "show", "g", "--show-keys"])
         .assert()
         .success();
@@ -363,15 +327,15 @@ fn key_add_then_show_redacts_then_reveals() {
 #[test]
 fn profile_test_reports_verified_for_correct_key() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "g", "--key", KEY])
         .assert()
         .success();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "test", "g"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -386,11 +350,11 @@ fn profile_test_reports_verified_for_correct_key() {
 #[test]
 fn key_add_bad_hex_exits_2() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "g", "--key", "nothex"])
         .assert()
         .code(2);
@@ -401,17 +365,17 @@ fn key_add_bad_hex_exits_2() {
 #[test]
 fn key_remove_happy_path() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
     // add a default (zero-guid) key
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "g", "--key", KEY])
         .assert()
         .success();
     // remove by zero guid (32 zeros)
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args([
             "profile",
             "key",
@@ -423,7 +387,7 @@ fn key_remove_happy_path() {
         .assert()
         .success();
     // show must no longer contain the key material or <redacted>
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "show", "g"])
         .assert()
         .success();
@@ -438,12 +402,12 @@ fn key_remove_happy_path() {
 #[test]
 fn key_remove_missing_guid_exits_2() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
     // profile has no keys; attempt to remove a non-existent GUID → NoKeyForGuid → exit 2
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args([
             "profile",
             "key",
@@ -460,7 +424,7 @@ fn key_remove_missing_guid_exits_2() {
 fn key_remove_unknown_profile_exits_2() {
     let cfg = tempdir().unwrap();
     // no profiles at all — ProfileNotFound → exit 2
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args([
             "profile",
             "key",
@@ -478,16 +442,16 @@ fn key_remove_unknown_profile_exits_2() {
 #[test]
 fn profile_test_wrong_key_exits_1() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
     // 64 hex zeros = a valid AES key that is NOT the correct key for the fixture
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "g", "--key", &"00".repeat(32)])
         .assert()
         .success();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "test", "g"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -502,13 +466,13 @@ fn profile_test_wrong_key_exits_1() {
 #[test]
 fn profile_test_no_key_for_guid_exits_2() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
     // Add the correct key but under a NON-zero GUID only — no zero-default entry.
     // The fixture's GUID is all-zero, so resolve_key will find no entry → NoKeyForGuid → exit 2.
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args([
             "profile",
             "key",
@@ -521,7 +485,7 @@ fn profile_test_no_key_for_guid_exits_2() {
         ])
         .assert()
         .success();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "test", "g"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -533,11 +497,11 @@ fn profile_test_no_key_for_guid_exits_2() {
 #[test]
 fn game_flag_opens_encrypted_pak_via_profile() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "g", "--key", KEY])
         .assert()
         .success();
@@ -557,7 +521,7 @@ fn game_flag_opens_encrypted_pak_via_profile() {
 #[test]
 fn game_unknown_profile_exits_2() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["--game", "nope", "list"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -568,11 +532,11 @@ fn game_unknown_profile_exits_2() {
 fn aes_key_overrides_game() {
     let cfg = tempdir().unwrap();
     // profile `g` has the WRONG key; --aes-key supplies the RIGHT one and wins.
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "g", "--key", &"00".repeat(32)])
         .assert()
         .success();
@@ -588,11 +552,11 @@ fn aes_key_overrides_game() {
 #[test]
 fn key_add_bad_guid_exits_2() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args([
             "profile", "key", "add", "g", "--key", KEY, "--guid", "nothex",
         ])
@@ -798,7 +762,7 @@ fn profile_list_shows_cached_registry_profiles() {
     std::fs::create_dir_all(&base).unwrap();
 
     // One local profile.
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "local-game", "--name", "Local"])
         .assert()
         .success();
@@ -810,7 +774,7 @@ fn profile_list_shows_cached_registry_profiles() {
     );
     std::fs::write(base.join("registry-cache.json"), cache_json).unwrap();
 
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "list"])
         .assert()
         .success();
@@ -841,7 +805,7 @@ fn list_degrades_on_corrupt_cache() {
     std::fs::create_dir_all(&base).unwrap();
 
     // Create a local profile so we have something to confirm in the output.
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "my-local", "--name", "MyLocal"])
         .assert()
         .success();
@@ -850,7 +814,7 @@ fn list_degrades_on_corrupt_cache() {
     std::fs::write(base.join("registry-cache.json"), b"not json {{{").unwrap();
 
     // `profile list` must succeed and still show the local profile.
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "list"])
         .assert()
         .success();
@@ -866,7 +830,7 @@ fn list_degrades_on_corrupt_cache() {
 #[test]
 fn list_empty_prints_no_profiles_message() {
     let cfg = tempdir().unwrap();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "list"])
         .assert()
         .success();
@@ -882,11 +846,11 @@ fn list_empty_prints_no_profiles_message() {
 #[test]
 fn list_non_empty_suppresses_no_profiles_message() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "list"])
         .assert()
         .success();
@@ -961,12 +925,10 @@ async fn profile_fetch_force_ignores_fresh_cache() {
         .unwrap()
         .env("PAKSMITH_CONFIG_DIR", cfg.path())
         .env("PAKSMITH_ALLOW_HTTP", "1")
-        // `--format table` like its two siblings above. Without it this
-        // invocation resolved to JSON (stdout is never a TTY under
-        // assert_cmd), and `contains("fetched")` then matched the FetchOutput
-        // KEY NAME rather than the table's "fetched N profiles" — so the
-        // `!a.force` guard this test exists to pin could be elided and both
-        // assertions still passed.
+        // `--format table` like its two siblings: under JSON,
+        // `contains("fetched")` would match the document's KEY NAME rather
+        // than the table's "fetched N profiles", and the `!a.force` guard
+        // this test pins could be elided with both assertions still passing.
         .args(["--format", "table", "profile", "fetch", "--force"])
         .assert()
         .success();
@@ -1064,7 +1026,7 @@ fn show_resolves_cached_registry_profile() {
     let cfg = tempdir().unwrap();
     seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
 
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "show", "reg-only"])
         .assert()
         .success();
@@ -1091,7 +1053,7 @@ fn show_registry_profile_redacts_keys_by_default() {
     let cfg = tempdir().unwrap();
     seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
 
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "show", "reg-only"])
         .assert()
         .success();
@@ -1105,7 +1067,7 @@ fn show_registry_profile_redacts_keys_by_default() {
         "redaction marker expected: {txt}"
     );
 
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "show", "reg-only", "--show-keys"])
         .assert()
         .success();
@@ -1121,13 +1083,13 @@ fn show_registry_profile_redacts_keys_by_default() {
 #[test]
 fn show_local_shadows_cached_registry_entry() {
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "dual", "--name", "LocalWins"])
         .assert()
         .success();
     seed_registry_cache(cfg.path(), "dual", "RegistryLoses");
 
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "show", "dual"])
         .assert()
         .success();
@@ -1152,7 +1114,7 @@ fn show_unknown_id_still_not_found_with_a_cache_present() {
     let cfg = tempdir().unwrap();
     seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
 
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "show", "absent"])
         .assert()
         .code(2);
@@ -1165,7 +1127,7 @@ fn test_resolves_cached_registry_profile() {
     let cfg = tempdir().unwrap();
     seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
 
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "test", "reg-only"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -1198,7 +1160,7 @@ fn test_unknown_id_still_not_found_with_a_cache_present() {
     let cfg = tempdir().unwrap();
     seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
 
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "test", "absent"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -1214,13 +1176,13 @@ fn show_and_test_degrade_on_corrupt_cache_for_a_local_id() {
     let cfg = tempdir().unwrap();
     let base = cfg.path().join("paksmith");
     std::fs::create_dir_all(&base).unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "mine", "--name", "Mine"])
         .assert()
         .success();
     std::fs::write(base.join("registry-cache.json"), b"not json {{{").unwrap();
 
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "show", "mine"])
         .assert()
         .success();
@@ -1231,11 +1193,11 @@ fn show_and_test_degrade_on_corrupt_cache_for_a_local_id() {
     // `RegistryCache::load()?` would fail with `CacheCorrupt` — ALSO exit 2 —
     // so asserting `.code(2)` here would pass against the very regression this
     // test documents.
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "mine", "--key", KEY])
         .assert()
         .success();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "test", "mine"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -1264,7 +1226,7 @@ fn mutating_commands_hint_that_registry_profiles_are_read_only() {
         ],
         vec!["profile", "key", "add", "reg-only", "--key", KEY],
     ] {
-        let out = paksmith(cfg.path()).args(&args).assert().code(2);
+        let out = paksmith_table(cfg.path()).args(&args).assert().code(2);
         let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
         assert!(
             err.contains("signed registry document") && err.contains("cannot"),
@@ -1273,7 +1235,7 @@ fn mutating_commands_hint_that_registry_profiles_are_read_only() {
     }
 
     // An id in NEITHER layer gets no such hint — the plain not-found stands.
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "remove", "nowhere"])
         .assert()
         .code(2);
@@ -1295,7 +1257,7 @@ fn quiet_suppresses_the_advisory_notes_but_not_the_error() {
     seed_registry_cache(cfg.path(), "reg-only", "RegOnly");
 
     // The read-only hint on a mutating command.
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["--quiet", "profile", "remove", "reg-only"])
         .assert()
         .code(2);
@@ -1310,7 +1272,7 @@ fn quiet_suppresses_the_advisory_notes_but_not_the_error() {
     );
 
     // The `profile fetch` hint on an unresolvable id.
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["--quiet", "profile", "show", "absent"])
         .assert()
         .code(2);
@@ -1321,7 +1283,7 @@ fn quiet_suppresses_the_advisory_notes_but_not_the_error() {
     );
 
     // Without --quiet both notes appear (otherwise the gate proves nothing).
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "show", "absent"])
         .assert()
         .code(2);
@@ -1347,7 +1309,7 @@ fn test_warns_only_when_a_wrong_key_came_from_the_registry() {
     // (a) registry + wrong key → exit 1, note present.
     let cfg = tempdir().unwrap();
     seed_registry_cache_with_key(cfg.path(), "reg-bad", "RegBad", &wrong);
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "test", "reg-bad"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -1361,15 +1323,15 @@ fn test_warns_only_when_a_wrong_key_came_from_the_registry() {
     // (b) local + wrong key → exit 1, note ABSENT. `profile fetch` cannot help
     // a local profile, so firing here would send the user the wrong way.
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "loc", "--name", "Loc"])
         .assert()
         .success();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "loc", "--key", &wrong])
         .assert()
         .success();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "test", "loc"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -1383,7 +1345,7 @@ fn test_warns_only_when_a_wrong_key_came_from_the_registry() {
     // (c) --quiet silences it; the exit code is unchanged.
     let cfg = tempdir().unwrap();
     seed_registry_cache_with_key(cfg.path(), "reg-bad", "RegBad", &wrong);
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["--quiet", "profile", "test", "reg-bad"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -1399,7 +1361,7 @@ fn test_warns_only_when_a_wrong_key_came_from_the_registry() {
 /// Seed one local profile with an engine version and a key, so the JSON
 /// shapes below have every optional field populated.
 fn seed_one(cfg: &std::path::Path) {
-    let _ = paksmith(cfg)
+    let _ = paksmith_table(cfg)
         .args([
             "profile",
             "add",
@@ -1411,7 +1373,7 @@ fn seed_one(cfg: &std::path::Path) {
         ])
         .assert()
         .success();
-    let _ = paksmith(cfg)
+    let _ = paksmith_table(cfg)
         .args(["profile", "key", "add", "hero", "--key", KEY])
         .assert()
         .success();
@@ -1464,10 +1426,8 @@ fn profile_show_json_redacts_keys_unless_asked() {
     assert_eq!(v["source"], "local");
     assert_eq!(v["engine_version"], "5.3");
     assert!(v["keys"][0]["guid"].is_string(), "guid is always listed");
-    // OMITTED, not null. The disjunction this replaces (`is_none() ||
-    // is_null()`) accepted both, so deleting `skip_serializing_if` survived
-    // it — it could not pin the very choice its doc comment calls
-    // load-bearing. Presence of the field IS the --show-keys signal.
+    // OMITTED, not null: presence of the field IS the `--show-keys` signal,
+    // so a consumer tests `"key" in row` and needs no separate flag.
     assert!(
         v["keys"][0].get("key").is_none(),
         "key field must be ABSENT when redacted, not null: {stdout}"
@@ -1521,11 +1481,11 @@ fn profile_test_json_uses_a_stable_outcome_token() {
     // Wrong key -> "wrong_key" (underscored token, NOT the table's "wrong
     // key"), ok: false, exit 1.
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "g", "--name", "G"])
         .assert()
         .success();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "g", "--key", &"00".repeat(32)])
         .assert()
         .success();
@@ -1552,19 +1512,13 @@ const SECOND_GUID: &str = "11111111111111111111111111111111";
 #[test]
 fn profile_mutations_emit_a_receipt_under_json() {
     // All four store mutations return a MutationOutput document. Each leg
-    // pins the EXACT `action` token, so rewording one is caught.
-    //
-    // The assertion this replaces was `stdout.is_empty() ||
-    // from_str(..).is_ok()`, which passed under the human-only design AND
-    // under this one — a disjunction that cannot fail in the case it exists
-    // to catch. It also never looked at stderr.
+    // pins the EXACT `action` token and the EXACT prose that must NOT
+    // accompany it, on either stream.
     let cfg = tempdir().unwrap();
     let key = KEY;
-    // Each case carries the EXACT prose its subcommand would have printed. The
-    // first version of this guard hardcoded "profile `hero`", which the two
-    // `key` sentences ("added key for GUID … to `hero`") never contain — so
-    // half the legs could not fail, in a test whose whole point is that the
-    // assertion it replaced could not fail.
+    // Each case carries the EXACT prose its subcommand would have printed —
+    // per case, because the two `key` sentences ("added key for GUID … to
+    // `hero`") share no substring with the two profile ones.
     let cases: [(&[&str], &str, Option<&str>, &str); 4] = [
         (
             &["profile", "add", "hero", "--name", "Hero"],
@@ -1635,7 +1589,7 @@ fn profile_list_json_applies_local_wins_precedence() {
     // emitted a shadowed id TWICE in an array consumers key by id.
     let cfg = tempdir().unwrap();
     seed_registry_cache(cfg.path(), "hero", "Hero From Registry");
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "hero", "--name", "Hero Local"])
         .assert()
         .success();
@@ -1879,7 +1833,7 @@ fn profile_test_json_reports_decrypted_when_the_hash_slot_is_zeroed() {
     // pinned, so rewriting this one to any other string — including another
     // outcome's — survived the suite. Both spellings now come from one
     // exhaustive match, which makes a single edit able to change either.
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "test", "hero"])
         .arg(&pak)
         .assert()
@@ -1904,7 +1858,7 @@ fn profile_show_json_carries_mappings_pak_paths_name_and_every_key() {
     let usmap = cfg.path().join("hero.usmap");
     std::fs::write(&usmap, b"not a real usmap").unwrap();
 
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "hero", "--name", "Hero Display Name"])
         .args(["--engine-version", "5.3"])
         .arg("--mappings")
@@ -1915,7 +1869,7 @@ fn profile_show_json_carries_mappings_pak_paths_name_and_every_key() {
         .success();
     // TWO keys: with one, `keys` survives a `.take(1)`-shaped truncation.
     for guid in [ZERO_GUID, SECOND_GUID] {
-        let _ = paksmith(cfg.path())
+        let _ = paksmith_table(cfg.path())
             .args(["profile", "key", "add", "hero", "--guid", guid])
             .args(["--key", KEY])
             .assert()
@@ -2032,10 +1986,9 @@ fn profile_list_json_emits_a_duplicated_registry_id_once() {
 
 #[test]
 fn profile_mutations_print_their_confirmation_under_table() {
-    // `confirm()`'s Table arm was unexercised: no test anywhere asserted the
-    // four confirmation sentences, so `--format table profile add` could start
-    // emitting the JSON receipt and CI would stay green. Half of a brand-new
-    // two-arm function.
+    // The Table arm of `confirm()`: the four confirmation sentences, verbatim,
+    // and no receipt. Without this, `--format table profile add` could emit
+    // the JSON document instead.
     let cfg = tempdir().unwrap();
     let key = KEY;
     let cases: [(&[&str], &str); 4] = [
@@ -2043,19 +1996,24 @@ fn profile_mutations_print_their_confirmation_under_table() {
             &["profile", "add", "hero", "--name", "Hero"],
             "added profile `hero`",
         ),
+        // A NON-default slot. With only the all-zero GUID here, hardcoding the
+        // sentence's guid to zeros survived the suite — the JSON receipt's
+        // ALT_GUID coverage does not reach the table arm.
         (
-            &["profile", "key", "add", "hero", "--key", key],
-            "added key for GUID 00000000000000000000000000000000 to `hero`",
+            &[
+                "profile", "key", "add", "hero", "--guid", ALT_GUID, "--key", key,
+            ],
+            "added key for GUID 1a2b3c4d5e6f708192a3b4c5d6e7f809 to `hero`",
         ),
         (
-            &["profile", "key", "remove", "hero", "--guid", ZERO_GUID],
-            "removed key for GUID 00000000000000000000000000000000 from `hero`",
+            &["profile", "key", "remove", "hero", "--guid", ALT_GUID],
+            "removed key for GUID 1a2b3c4d5e6f708192a3b4c5d6e7f809 from `hero`",
         ),
         (&["profile", "remove", "hero"], "removed profile `hero`"),
     ];
 
     for (args, prose) in cases {
-        let out = paksmith(cfg.path()).args(args).assert().success();
+        let out = paksmith_table(cfg.path()).args(args).assert().success();
         let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
         assert_eq!(
             stdout.trim_end(),
@@ -2073,15 +2031,12 @@ fn profile_mutations_print_their_confirmation_under_table() {
 fn profile_single_line_table_output_survives_a_closed_stdout() {
     // `print_line` is the sole writer for the SINGLE-LINE human messages —
     // "no profiles", "no profiles matched <dir>", "registry cache is fresh …",
-    // "fetched N profiles", test's result line, and confirm's Table arm. The
-    // other closed-stdout test seeds a profile, so its table leg goes through
-    // `list()`'s own BufWriter loop and never reaches `print_line`: reverting
-    // that helper to `println!` survived the suite while `--format table
-    // profile list` on an EMPTY store exited 101.
+    // "fetched N profiles", test's result line, and confirm's Table arm.
     //
-    // An EMPTY config dir is the point — it forces the `no profiles` path.
-    // Table only: the JSON arm has no empty-store branch, so its leg here
-    // would exercise the same `print_json` path the seeded test already pins.
+    // An EMPTY config dir is the point: it forces the `no profiles` path.
+    // With rows, `list()` writes through its own BufWriter and this helper is
+    // never reached. Table only — the JSON arm has no empty-store branch, so
+    // that leg would duplicate the seeded test's `print_json` coverage.
     let cfg = tempdir().unwrap();
     assert_closed_stdout_exits_clean(cfg.path(), &["--format", "table", "profile", "list"]);
 }
@@ -2098,7 +2053,7 @@ fn profile_key_receipts_report_the_slot_they_acted_on() {
     // exercises a non-default slot, so a receipt that always claims the
     // default would misreport which key was touched.
     let cfg = tempdir().unwrap();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "hero", "--name", "Hero"])
         .assert()
         .success();
@@ -2135,11 +2090,11 @@ fn profile_test_masks_its_wrong_key_exit_when_stdout_closes() {
     // command in the family where 0-vs-1 discriminates.
     let cfg = tempdir().unwrap();
     let pak = fixture("real_v8b_encrypted_index.pak");
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "wrong", "--name", "Wrong"])
         .assert()
         .success();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "wrong", "--key", &"00".repeat(32)])
         .assert()
         .success();
@@ -2182,7 +2137,7 @@ fn profile_list_table_also_dedupes_a_repeated_registry_id() {
     )
     .unwrap();
 
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "list"])
         .assert()
         .success();
@@ -2255,7 +2210,7 @@ async fn profile_fetch_json_distinguishes_downloaded_from_fresh() {
         "FETCH_SCHEMA_VERSION pinned by value"
     );
     assert_eq!(v["fetched"], true, "a cold fetch downloaded: {first}");
-    assert_eq!(v["profiles"], 1);
+    assert_eq!(v["profile_count"], 1);
 
     // Fresh cache -> the network is short-circuited; same shape, fetched=false.
     let second = run(&["--format", "json", "profile", "fetch"]);
@@ -2264,7 +2219,7 @@ async fn profile_fetch_json_distinguishes_downloaded_from_fresh() {
         v["fetched"], false,
         "a fresh cache must report fetched=false: {second}"
     );
-    assert_eq!(v["profiles"], 1);
+    assert_eq!(v["profile_count"], 1);
 
     // --force bypasses freshness and downloads again.
     let forced = run(&["--format", "json", "profile", "fetch", "--force"]);
@@ -2273,4 +2228,96 @@ async fn profile_fetch_json_distinguishes_downloaded_from_fresh() {
         v["fetched"], true,
         "--force must re-download even on a fresh cache: {forced}"
     );
+}
+
+#[test]
+fn profile_list_json_on_an_empty_store_is_an_empty_array_not_a_message() {
+    // The highest-value gap the panel found, and the mirror of a test that
+    // WAS written for `detect`. Hoisting `list`'s `is_empty` check above the
+    // JSON branch survived the suite — and that mutation makes a fresh
+    // install piping `profile list` emit `no profiles`: zero JSON bytes,
+    // which `serde_json::from_reader` rejects. That is exactly the failure
+    // `MutationOutput`'s doc says this whole design exists to prevent, and
+    // every other JSON list test seeds the store first.
+    let cfg = tempdir().unwrap();
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_envelope_first(&stdout, "profiles", "list/empty");
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("an empty store must still emit JSON ({e}): {stdout}"));
+    assert_eq!(
+        v["profiles"].as_array().map(Vec::len),
+        Some(0),
+        "an empty store is an empty array, not a message: {stdout}"
+    );
+    assert!(
+        !stdout.contains("no profiles"),
+        "the human message must not leak into the document: {stdout}"
+    );
+}
+
+#[test]
+fn profile_list_json_emits_local_rows_before_registry_only_rows() {
+    // Emission order is a documented property of `profile_rows` and feeds BOTH
+    // arms, but no test had a local row and an UNSHADOWED registry row
+    // coexisting — the local-wins test shares one id, so nothing ever observed
+    // relative position. Ids are chosen so alphabetical order would REVERSE
+    // the expected result, making the assertion discriminate.
+    let cfg = tempdir().unwrap();
+    seed_registry_cache(cfg.path(), "aaa_reg", "Registry Row");
+    let _ = paksmith_table(cfg.path())
+        .args(["profile", "add", "zzz_local", "--name", "Local Row"])
+        .assert()
+        .success();
+
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let rows: Vec<(&str, &str)> = v["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["id"].as_str().unwrap(), r["source"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![("zzz_local", "local"), ("aaa_reg", "registry")],
+        "local rows first despite `zzz_local` sorting after `aaa_reg`: {stdout}"
+    );
+}
+
+#[test]
+fn profile_json_reports_a_missing_engine_version_as_null() {
+    // `ProfileRow.engine_version`'s doc calls `null` a deliberate wire choice
+    // over the table's `-` sentinel — but every JSON list/show test seeded
+    // `5.3`, so emitting the sentinel string into JSON survived the suite.
+    let cfg = tempdir().unwrap();
+    let _ = paksmith_table(cfg.path())
+        .args(["profile", "add", "bare", "--name", "Bare"])
+        .assert()
+        .success();
+
+    for (args, ctx) in [
+        (vec!["profile", "list"], "list"),
+        (vec!["profile", "show", "bare"], "show"),
+    ] {
+        let out = paksmith_json(cfg.path()).args(&args).assert().success();
+        let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        let ev = if ctx == "list" {
+            &v["profiles"][0]["engine_version"]
+        } else {
+            &v["engine_version"]
+        };
+        assert!(
+            ev.is_null(),
+            "{ctx}: an unset engine_version must be null, not the table's `-`: {stdout}"
+        );
+    }
 }

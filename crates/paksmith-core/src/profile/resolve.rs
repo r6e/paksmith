@@ -747,11 +747,25 @@ fn unshadowed_registry<'a>(
     cache: &'a RegistryCache,
 ) -> impl Iterator<Item = &'a RegistryProfile> {
     let mut seen: BTreeSet<&'a str> = store.profiles.keys().map(String::as_str).collect();
-    cache
-        .doc
-        .profiles
-        .iter()
-        .filter(move |p| seen.insert(p.id.as_str()))
+    cache.doc.profiles.iter().filter(move |p| {
+        if seen.insert(p.id.as_str()) {
+            return true;
+        }
+        // Warn, because otherwise a collapsed entry is invisible on EVERY
+        // surface: `list`, `show`, `detect` and the GUI all show one row, and
+        // only `fetch.profile_count` (the raw document count) differs. A
+        // publisher's accidental duplicate would otherwise resolve silently to
+        // whichever copy came first.
+        //
+        // `id.clone()` and NOT the `%` sigil — see `load_cache_lenient`'s
+        // canonical note at the top of this file: registry-authored text on a
+        // terminal sink (#708).
+        tracing::warn!(
+            id = p.id.clone(),
+            "registry document repeats a profile id; keeping the first occurrence"
+        );
+        false
+    })
 }
 
 #[cfg(test)]
@@ -1414,6 +1428,24 @@ mod tests {
             got.iter().find(|m| m.id == "reg1").unwrap().name,
             "R1",
             "first occurrence wins, as `RegistryCache::get` does"
+        );
+        // The `registry` token on THIS surface. `ResolvedProfile::source()`'s
+        // doc claims the per-surface pins are what catch a partial rename;
+        // without this one that claim was false for the GUI's path, which is
+        // the only consumer of `available_in`.
+        assert_eq!(
+            got.iter().find(|m| m.id == "reg1").unwrap().source,
+            "registry",
+            "registry-only rows carry the exact wire token"
+        );
+        // Local rows precede registry-only rows — the emission order the doc
+        // promises and the GUI's selector renders.
+        let first_registry = got.iter().position(|m| m.source == "registry").unwrap();
+        let last_local = got.iter().rposition(|m| m.source == "local").unwrap();
+        assert!(
+            last_local < first_registry,
+            "all local rows must precede registry-only rows: {:?}",
+            got.iter().map(|m| (&m.id, m.source)).collect::<Vec<_>>()
         );
         // Local profiles appear before registry-only ones.
         let local1_pos = ids.iter().position(|&id| id == "local1").unwrap();

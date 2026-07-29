@@ -162,7 +162,7 @@ pub(crate) struct RemoveArgs {
 // reaches JSON only through the hand-written `KeyRow` below, via one explicit
 // `key_hex` call gated on `--show-keys`.
 
-const LIST_SCHEMA_VERSION: u32 = 1;
+const PROFILE_LIST_SCHEMA_VERSION: u32 = 1;
 const SHOW_SCHEMA_VERSION: u32 = 1;
 const TEST_SCHEMA_VERSION: u32 = 1;
 const FETCH_SCHEMA_VERSION: u32 = 1;
@@ -193,7 +193,9 @@ struct ShowOutput {
     source: &'static str,
     name: String,
     engine_version: Option<String>,
-    /// Registry profiles structurally carry no mappings; `null` says so.
+    /// `null` when absent — which covers BOTH a local profile with no
+    /// mappings set and a registry profile, which cannot carry them at all.
+    /// The document does not distinguish those; `source` does.
     mappings: Option<String>,
     pak_paths: Vec<String>,
     keys: Vec<KeyRow>,
@@ -219,7 +221,12 @@ struct TestOutput {
     /// A STABLE token, deliberately not the human label — the table renders
     /// prose ("decrypted (no index hash to verify)") that no script can match.
     outcome: &'static str,
-    /// Mirrors the exit code: true iff the key opened the archive.
+    /// True iff the key opened the archive.
+    ///
+    /// NOT a mirror of the exit code, though it usually matches: a stdout that
+    /// closes before this document is written masks the wrong-key 1 as 0
+    /// (SPEC's BrokenPipe precedence), so `ok: false` can accompany exit 0.
+    /// Branch on this field, not on the exit status.
     ok: bool,
 }
 
@@ -229,10 +236,15 @@ struct FetchOutput {
     /// False when a fresh cache short-circuited the network call, so a script
     /// can tell "already current" from "downloaded".
     fetched: bool,
-    /// Profiles in the fetched DOCUMENT, which is not necessarily the number
-    /// `list` returns: `list` renders the layered view and collapses a local
-    /// shadow or a repeated id, while this counts what the registry shipped.
-    profiles: usize,
+    /// How many profiles the fetched DOCUMENT carries.
+    ///
+    /// NOT `list.profiles`, which is an array of rows — and not even the same
+    /// count: `list` renders the layered view and collapses a local shadow or
+    /// a repeated id, while this counts what the registry shipped. Named
+    /// distinctly so one word cannot mean an array on one surface and an
+    /// integer on another; it is also the only signal that a duplicate was
+    /// collapsed.
+    profile_count: usize,
 }
 
 /// The receipt every store-mutating subcommand returns under `--format json`.
@@ -481,11 +493,10 @@ fn add(a: &AddArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
 /// local ids first (`BTreeMap`-sorted), then registry-only ids in
 /// registry-document order.
 ///
-/// THE local-wins precedence rule, in one place. Both arms carried their own
-/// copy before this: the table `continue`d on a shadowed id while JSON
-/// `filter`ed it, so the rule could drift between the human and machine views
-/// of the same store. In JSON a drifted copy is worse than a cosmetic bug —
-/// a shadowed id would appear TWICE in an array consumers key by id.
+/// THE local-wins precedence rule, in one place, feeding both arms — so the
+/// human and machine views of one store cannot drift. In JSON a drifted copy
+/// is worse than cosmetic: a shadowed id would appear TWICE in an array
+/// consumers key by id.
 ///
 /// `source` is likewise derived once. The table renders it as `[local]` /
 /// `[registry]` and the JSON row emits it verbatim, so the human label and
@@ -500,10 +511,11 @@ fn add(a: &AddArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
 ///
 /// Core implements the same two rules in
 /// `profile::resolve::unshadowed_registry`, for `detect` and the GUI's profile
-/// list. They are separate because that helper yields `DetectMatch`, which
-/// carries no `engine_version` or `key_count`. If either side changes
-/// precedence, `list` and `detect` start naming different profiles for one id
-/// — change them together.
+/// list. They are separate because that helper is private to its module and
+/// unreachable across the crate boundary — not because of its item type, which
+/// is `&RegistryProfile` and carries everything this needs. If either side
+/// changes precedence, `list` and `detect` start naming different profiles for
+/// one id — change them together.
 fn profile_rows(
     store: &ProfileStore,
     cache: Option<&paksmith_core::RegistryCache>,
@@ -545,7 +557,7 @@ fn list(fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
 
     if matches!(fmt, ResolvedFormat::Json) {
         let out = ListOutput {
-            schema_version: LIST_SCHEMA_VERSION,
+            schema_version: PROFILE_LIST_SCHEMA_VERSION,
             profiles,
         };
         crate::output::print_json(&out)?;
@@ -737,7 +749,7 @@ fn fetch(a: &FetchArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
             let out = FetchOutput {
                 schema_version: FETCH_SCHEMA_VERSION,
                 fetched: false,
-                profiles: existing.doc.profiles.len(),
+                profile_count: existing.doc.profiles.len(),
             };
             crate::output::print_json(&out)?;
             return Ok(0);
@@ -761,7 +773,7 @@ fn fetch(a: &FetchArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
         let out = FetchOutput {
             schema_version: FETCH_SCHEMA_VERSION,
             fetched: true,
-            profiles: cache.doc.profiles.len(),
+            profile_count: cache.doc.profiles.len(),
         };
         crate::output::print_json(&out)?;
         return Ok(0);
@@ -781,15 +793,27 @@ fn fetch(a: &FetchArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
 /// contract unpinned. A mutant returning `("verified", true, …)` for it
 /// survived the entire workspace suite.
 ///
+/// Returns a NAMED struct rather than a `(token, ok, label)` triple: two of
+/// the three are `&'static str` and a positional pair is exactly the
+/// swappable-with-no-compile-error shape `Mutation` exists to avoid.
+///
 /// All three values come from ONE match so they cannot drift apart: a
 /// `matches!(outcome, Verified | Decrypted)` for `ok` is not
 /// exhaustiveness-checked, so a fifth variant would flag the token arm at
 /// compile time while silently becoming `ok: false` and exit 1.
-fn outcome_report(
-    outcome: &paksmith_core::profile::key_test::KeyTestOutcome,
-) -> (&'static str, bool, &'static str) {
+#[derive(Debug, PartialEq, Eq)]
+struct OutcomeReport {
+    /// The STABLE wire token.
+    token: &'static str,
+    /// Drives the exit code via `u8::from(!ok)`.
+    ok: bool,
+    /// The human sentence, deliberately prose the token is not.
+    label: &'static str,
+}
+
+fn outcome_report(outcome: &paksmith_core::profile::key_test::KeyTestOutcome) -> OutcomeReport {
     use paksmith_core::profile::key_test::KeyTestOutcome;
-    match outcome {
+    let (token, ok, label) = match outcome {
         KeyTestOutcome::Verified => ("verified", true, "verified"),
         KeyTestOutcome::Decrypted => ("decrypted", true, "decrypted (no index hash to verify)"),
         KeyTestOutcome::WrongKey => ("wrong_key", false, "wrong key"),
@@ -798,7 +822,8 @@ fn outcome_report(
             false,
             "unsupported pak layout (key may be correct)",
         ),
-    }
+    };
+    OutcomeReport { token, ok, label }
 }
 
 fn test(a: &TestArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result<u8> {
@@ -840,13 +865,7 @@ fn test(a: &TestArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
             ),
         );
     }
-    // ONE exhaustive match decides both the wire token and `ok`, so
-    // `TestOutput.ok`'s "mirrors the exit code" is structural rather than a
-    // convention two separate expressions have to keep agreeing on. A
-    // `matches!(outcome, Verified | Decrypted)` for `ok` is not
-    // exhaustiveness-checked: a fifth `KeyTestOutcome` variant would flag the
-    // token arm at compile time while silently becoming `ok: false` and exit 1.
-    let (token, ok, label) = outcome_report(&outcome);
+    let OutcomeReport { token, ok, label } = outcome_report(&outcome);
     if matches!(fmt, ResolvedFormat::Json) {
         let out = TestOutput {
             schema_version: TEST_SCHEMA_VERSION,
@@ -864,7 +883,7 @@ fn test(a: &TestArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
 
 #[cfg(test)]
 mod tests {
-    use super::outcome_report;
+    use super::{OutcomeReport, outcome_report};
     use paksmith_core::profile::key_test::KeyTestOutcome;
 
     /// Every arm of the key-test report, including the one no fixture reaches.
@@ -876,25 +895,26 @@ mod tests {
     /// SPEC's exit 1 for an untestable layout into a silent success.
     #[test]
     fn outcome_report_pins_every_arm() {
-        assert_eq!(
-            outcome_report(&KeyTestOutcome::Verified),
-            ("verified", true, "verified")
+        let expect = |outcome, token, ok, label| {
+            assert_eq!(
+                outcome_report(&outcome),
+                OutcomeReport { token, ok, label },
+                "report for {outcome:?}"
+            );
+        };
+        expect(KeyTestOutcome::Verified, "verified", true, "verified");
+        expect(
+            KeyTestOutcome::Decrypted,
+            "decrypted",
+            true,
+            "decrypted (no index hash to verify)",
         );
-        assert_eq!(
-            outcome_report(&KeyTestOutcome::Decrypted),
-            ("decrypted", true, "decrypted (no index hash to verify)")
-        );
-        assert_eq!(
-            outcome_report(&KeyTestOutcome::WrongKey),
-            ("wrong_key", false, "wrong key")
-        );
-        assert_eq!(
-            outcome_report(&KeyTestOutcome::Unsupported),
-            (
-                "unsupported",
-                false,
-                "unsupported pak layout (key may be correct)"
-            )
+        expect(KeyTestOutcome::WrongKey, "wrong_key", false, "wrong key");
+        expect(
+            KeyTestOutcome::Unsupported,
+            "unsupported",
+            false,
+            "unsupported pak layout (key may be correct)",
         );
     }
 
@@ -913,7 +933,7 @@ mod tests {
         ];
         let mut tokens = Vec::new();
         for (outcome, token_equals_label) in cases {
-            let (token, _, label) = outcome_report(&outcome);
+            let OutcomeReport { token, label, .. } = outcome_report(&outcome);
             assert!(
                 !token.contains(' '),
                 "a wire token must not be prose, got {token:?}"

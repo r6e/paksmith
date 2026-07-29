@@ -2,47 +2,16 @@
 #![allow(missing_docs)]
 use std::fmt::Write as _;
 
-use assert_cmd::Command;
 use tempfile::tempdir;
 
 mod common;
-use common::assert_envelope_first;
-
-/// A `paksmith` invocation pinned to TABLE output, for this file's
-/// `profile`-family assertions.
-///
-/// `profile detect` honours `--format` since #658, and `--format auto`
-/// resolves to JSON whenever stdout is not a TTY — always true under
-/// `assert_cmd`. Tests asserting on human output must ask for the table
-/// explicitly, as `cli_integration`'s `list ... --format table` already does.
-///
-/// The `--detect … list <pak>` tests use [`paksmith_unpinned`] instead.
-fn paksmith(cfg: &std::path::Path) -> Command {
-    let mut c = Command::cargo_bin("paksmith").unwrap();
-    let _ = c.env("PAKSMITH_CONFIG_DIR", cfg);
-    let _ = c.args(["--format", "table"]);
-    c
-}
-
-/// A `paksmith` invocation with NO `--format`, exercising the default
-/// resolution.
-///
-/// For the `--detect … list <pak>` tests, whose subject is the global
-/// `--detect` flag rather than `profile`. `list` already honoured `--format`
-/// before #658, so off-TTY these have always asserted against the JSON
-/// writer; pinning them to the table would be an undeclared coverage shift
-/// dressed as consistency.
-fn paksmith_unpinned(cfg: &std::path::Path) -> Command {
-    let mut c = Command::cargo_bin("paksmith").unwrap();
-    let _ = c.env("PAKSMITH_CONFIG_DIR", cfg);
-    c
-}
+use common::{assert_envelope_first, paksmith_json, paksmith_table, paksmith_unpinned};
 
 /// Add a profile via the CLI, then hand-append a `[profiles.<id>.detect]` table
 /// into `profiles.toml`. This exercises the append-TOML round-trip path; if the
 /// store rejects the hand-appended table, the seed step itself will panic.
 fn seed_profile_with_detect(cfg: &std::path::Path, marker: &str) {
-    let _ = paksmith(cfg)
+    let _ = paksmith_table(cfg)
         .args(["profile", "add", "fortnite", "--name", "Fortnite"])
         .assert()
         .success();
@@ -62,7 +31,7 @@ fn detect_lists_matching_local_profile() {
     let game = tempdir().unwrap();
     std::fs::create_dir_all(game.path().join("FortniteGame/Content/Paks")).unwrap();
     seed_profile_with_detect(cfg.path(), "FortniteGame/Content/Paks");
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "detect"])
         .arg(game.path())
         .assert()
@@ -80,7 +49,7 @@ fn detect_no_match_is_success_with_message() {
     let game = tempdir().unwrap();
     // marker path is NOT created in game dir — must not match
     seed_profile_with_detect(cfg.path(), "FortniteGame/Content/Paks");
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "detect"])
         .arg(game.path())
         .assert()
@@ -131,7 +100,7 @@ fn byte_signatures_survive_a_store_rewrite() {
     let game = tempdir().unwrap();
     std::fs::write(game.path().join("game.exe"), [0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
 
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "add", "fortnite", "--name", "Fortnite"])
         .assert()
         .success();
@@ -145,7 +114,7 @@ fn byte_signatures_survive_a_store_rewrite() {
     std::fs::write(&store, s).unwrap();
 
     // Matches before any rewrite, so a later failure is the rewrite's doing.
-    let before = paksmith(cfg.path())
+    let before = paksmith_table(cfg.path())
         .args(["profile", "detect"])
         .arg(game.path())
         .assert()
@@ -158,7 +127,7 @@ fn byte_signatures_survive_a_store_rewrite() {
     );
 
     // `key add` rewrites EVERY profile, nested table-array included.
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "fortnite", "--key", KEY])
         .assert()
         .success();
@@ -168,7 +137,7 @@ fn byte_signatures_survive_a_store_rewrite() {
         after.contains("byte_signatures") && after.contains("DEADBEEF"),
         "the rewrite dropped the rule: {after}"
     );
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "detect"])
         .arg(game.path())
         .assert()
@@ -188,7 +157,7 @@ fn detect_flag_resolves_single_match_key() {
     std::fs::create_dir_all(game.path().join("FortniteGame/Content/Paks")).unwrap();
     seed_profile_with_detect(cfg.path(), "FortniteGame/Content/Paks");
     // Give the profile the fixture's default key so --detect can decrypt it.
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_table(cfg.path())
         .args(["profile", "key", "add", "fortnite", "--key", KEY])
         .assert()
         .success();
@@ -235,7 +204,7 @@ fn detect_flag_ambiguous_exits_nonzero() {
     std::fs::create_dir_all(game.path().join("Common")).unwrap();
     // Two local profiles, both matching "Common".
     for id in ["g1", "g2"] {
-        let _ = paksmith(cfg.path())
+        let _ = paksmith_table(cfg.path())
             .args(["profile", "add", id, "--name", id])
             .assert()
             .success();
@@ -280,7 +249,7 @@ fn detect_flag_nonexistent_dir_exits_nonzero() {
 #[test]
 fn detect_query_nonexistent_dir_exits_nonzero() {
     let cfg = tempdir().unwrap();
-    let out = paksmith(cfg.path())
+    let out = paksmith_table(cfg.path())
         .args(["profile", "detect", "/nonexistent/no/such/dir"])
         .assert()
         .failure();
@@ -289,14 +258,6 @@ fn detect_query_nonexistent_dir_exits_nonzero() {
         stderr.contains("not a directory"),
         "expected not-a-directory error in stderr, got: {stderr}"
     );
-}
-
-/// A `paksmith` invocation pinned to JSON output (#658).
-fn paksmith_json(cfg: &std::path::Path) -> Command {
-    let mut c = Command::cargo_bin("paksmith").unwrap();
-    let _ = c.env("PAKSMITH_CONFIG_DIR", cfg);
-    let _ = c.args(["--format", "json"]);
-    c
 }
 
 #[test]
@@ -476,7 +437,7 @@ fn detect_ignores_rules_on_a_later_copy_of_a_duplicated_id() {
         base.join("registry-cache.json"),
         format!(
             r#"{{"fetched_at_unix":9999999999,"profiles":[
-                 {{"id":"dup","name":"First, no rules","keys":{{}}}},
+                 {{"id":"dup","name":"First, no rules","keys":{{"00000000000000000000000000000000":"{KEY}"}}}},
                  {{"id":"dup","name":"Second, matching rules","keys":{{}},"detect":{rules}}}]}}"#
         ),
     )
@@ -496,8 +457,13 @@ fn detect_ignores_rules_on_a_later_copy_of_a_duplicated_id() {
          fail closed rather than match on a copy whose key will not be used: {stdout}"
     );
 
-    // And the flag agrees: no match, exit 2, rather than resolving a key from a
-    // copy whose rules were never what matched.
+    // And the flag agrees. The first copy carries a VALID key deliberately:
+    // with both copies keyless, exit 2 arrived in both worlds by different
+    // routes — correct tree "no profile matched", mutated tree "matched, then
+    // failed to decrypt with an empty key map" — so the code alone could not
+    // discriminate. Now the correct tree exits 2 (no match) while the mutated
+    // tree would exit 0, matching on copy 2's rules and listing with copy 1's
+    // working key.
     let _ = paksmith_unpinned(cfg.path())
         .args(["--detect"])
         .arg(game.path())
@@ -505,4 +471,48 @@ fn detect_ignores_rules_on_a_later_copy_of_a_duplicated_id() {
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
         .code(2);
+}
+
+#[test]
+fn detect_table_also_dedupes_a_repeated_registry_id() {
+    // The dedupe feeds BOTH arms, so `matched N profile(s):` changes too. The
+    // ROADMAP discloses that as a deliberate human-arm behaviour change; this
+    // is what makes the claim pinned rather than asserted.
+    let cfg = tempdir().unwrap();
+    let game = tempdir().unwrap();
+    std::fs::create_dir_all(game.path().join("DupGame/Content/Paks")).unwrap();
+
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    let rules = r#"{"require_paths":["DupGame/Content/Paks"]}"#;
+    std::fs::write(
+        base.join("registry-cache.json"),
+        format!(
+            r#"{{"fetched_at_unix":9999999999,"profiles":[
+                 {{"id":"dup","name":"First Copy","keys":{{}},"detect":{rules}}},
+                 {{"id":"dup","name":"Second Copy","keys":{{}},"detect":{rules}}},
+                 {{"id":"uniq","name":"Unique","keys":{{}},"detect":{rules}}}]}}"#
+        ),
+    )
+    .unwrap();
+
+    let out = paksmith_table(cfg.path())
+        .args(["profile", "detect"])
+        .arg(game.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.starts_with("matched 2 profile(s):"),
+        "three entries under two ids must report 2, not 3: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("dup\t").count(),
+        1,
+        "the repeated id renders once: {stdout}"
+    );
+    assert!(
+        stdout.contains("First Copy") && !stdout.contains("Second Copy"),
+        "first occurrence wins in the table too: {stdout}"
+    );
 }

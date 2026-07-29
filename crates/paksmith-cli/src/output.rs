@@ -126,8 +126,10 @@ pub(crate) fn print_json<T: Serialize>(value: &T) -> io::Result<()> {
 /// Exists for the same reason as [`print_json`] — a bare `println!` panics
 /// with exit 101 on a closed pipe instead of routing `BrokenPipe` to
 /// `main.rs`'s clean-exit handler. The table renderers in `output.rs`
-/// already write through a `BufWriter`; the `profile` family did not, so
-/// `paksmith profile list --format table | head -1` panicked.
+/// already write through a `BufWriter`; the `profile` family did not, so its
+/// single-line messages panicked — e.g. `no profiles` on an empty store, or a
+/// mutation's confirmation. (`profile list` with rows goes through `list()`'s
+/// own `BufWriter`, not this helper.)
 pub(crate) fn print_line(line: &str) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
@@ -403,8 +405,9 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
 ///
 /// Since #658 the `profile` family emits JSON too, carrying the same
 /// registry-authored strings; neither its table nor its JSON arm calls this
-/// function, so both remain #708 surfaces and the piped case is now the
-/// C0-escaped one rather than the raw table.
+/// function, so both remain #708 surfaces. Under `--format auto` the piped
+/// case is now the C0-escaped JSON rather than the raw table; an explicit
+/// `--format table | less` still ships raw ESC, DEL and C1.
 pub(crate) fn sanitize_for_display(s: &str) -> std::borrow::Cow<'_, str> {
     if s.chars().any(char::is_control) {
         std::borrow::Cow::Owned(
