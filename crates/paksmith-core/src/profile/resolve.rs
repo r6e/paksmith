@@ -610,9 +610,11 @@ fn resolve_within(
 
 /// Return all profiles available for selection: all local profiles first
 /// (source `"local"`), then cached registry profiles whose id is NOT a local
-/// id (source `"registry"`).  Unlike `detect_in`, this function does NOT
-/// filter by detect rules — it lists every known profile regardless of whether
-/// it has a matching installation directory.
+/// id AND has not already been emitted (source `"registry"`).  Unlike
+/// `detect_in`, this function does NOT filter by detect rules — every known
+/// profile is listed regardless of whether it has a matching installation
+/// directory. It lists each ID once, though: a registry document may repeat
+/// one, and the GUI's profile list keys on id.
 ///
 /// Loads `ProfileStore` + the registry cache (degrading a missing/corrupt
 /// cache to `None`) and delegates to the pure `available_in` helper.
@@ -628,10 +630,17 @@ pub fn available_profiles() -> crate::Result<Vec<DetectMatch>> {
 }
 
 /// Pure: list all profiles from `store` (local) then from `cache` whose id is
-/// NOT already in `store` (registry-only). No detect-rule filtering.
+/// NOT already in `store` and NOT a repeat of an earlier registry id — TWO
+/// rules, both owned by [`unshadowed_registry`]. No detect-rule filtering.
 ///
 /// Emission order: local profiles first (BTreeMap iteration = alphabetical),
 /// then unshadowed registry profiles in their doc order.
+///
+/// The CLI's `profile list` implements the same two rules independently
+/// (`commands/profile.rs::profile_rows`), because it needs `engine_version`
+/// and `key_count`, which [`DetectMatch`] does not carry. If either side
+/// changes precedence, `profile list` and `profile detect` start disagreeing
+/// about which profile answers for an id — change them together.
 pub(crate) fn available_in(
     store: &ProfileStore,
     cache: Option<&RegistryCache>,
@@ -667,6 +676,12 @@ pub fn detect_matches(dir: &Path) -> crate::Result<Vec<DetectMatch>> {
 /// beyond `rules_match`'s bounded filesystem checks. Local profiles are emitted
 /// first and shadow a cached registry entry of the same id (match or not). Only
 /// profiles that carry detect rules can match. This is the unit-tested core.
+///
+/// A registry id repeated within one document is evaluated ONLY at its first
+/// occurrence, because [`unshadowed_registry`] consumes the id at candidate
+/// selection. So a later copy's rules never fire, even if the first copy
+/// carries none — deliberately, since resolution would hand back the first
+/// copy's key regardless.
 pub(crate) fn detect_in(
     store: &ProfileStore,
     cache: Option<&RegistryCache>,
@@ -711,8 +726,22 @@ pub(crate) fn detect_in(
 /// `detect_in` the `matches` array of `paksmith profile detect --format json`
 /// (#658). A duplicate there is not cosmetic: `--detect` requires exactly one
 /// match, so a repeated id used to fail with `matched multiple game profiles:
-/// dup, dup` — a profile reported ambiguous with itself, whose suggested
-/// remedy `--game dup` would have worked.
+/// dup, dup`.
+///
+/// Note what that old error was and was not. When the copies are IDENTICAL it
+/// was a false positive — a profile reported ambiguous with itself, whose
+/// suggested remedy `--game dup` would have worked. When they DIFFER it was a
+/// true positive, and collapsing them is a deliberate trade: resolution has
+/// always answered with the first copy (`RegistryCache::get` is a `.find()`),
+/// so surfacing the second only ever offered a choice that could not be
+/// honoured. Nothing checks id uniqueness — `validate_caps` bounds the profile
+/// count and string lengths, not distinctness — so a document carrying two
+/// entries with different names, keys AND rules under one id is accepted.
+///
+/// Because the id is consumed HERE, at candidate selection, only the first
+/// copy's rules are ever evaluated by `detect_in`. That is the point rather
+/// than an accident: matching on a later copy's rules and then decrypting with
+/// the first copy's key is the confusion this replaced.
 fn unshadowed_registry<'a>(
     store: &'a ProfileStore,
     cache: &'a RegistryCache,
@@ -1344,6 +1373,18 @@ mod tests {
                         keys: BTreeMap::new(),
                         detect: None,
                     },
+                    // A registry document may repeat an id — `validate_caps`
+                    // bounds count and string lengths, never uniqueness. This
+                    // half of the dedupe reaches the GUI's profile list, and
+                    // reverting `available_in` to a local-shadowing-only loop
+                    // used to survive the entire workspace suite.
+                    crate::profile::registry::RegistryProfile {
+                        id: "reg1".into(),
+                        name: "R1 Duplicate".into(),
+                        engine_version: None,
+                        keys: BTreeMap::new(),
+                        detect: None,
+                    },
                 ],
             },
         };
@@ -1361,6 +1402,19 @@ mod tests {
         // The shared entry that appears has local source.
         let shared = got.iter().find(|m| m.id == "shared").unwrap();
         assert_eq!(shared.source, "local");
+        // A repeated REGISTRY id collapses to its first occurrence, matching
+        // `RegistryCache::get`'s `.find()` so every layered view names the same
+        // profile.
+        assert_eq!(
+            got.iter().filter(|m| m.id == "reg1").count(),
+            1,
+            "a repeated registry id must appear exactly once"
+        );
+        assert_eq!(
+            got.iter().find(|m| m.id == "reg1").unwrap().name,
+            "R1",
+            "first occurrence wins, as `RegistryCache::get` does"
+        );
         // Local profiles appear before registry-only ones.
         let local1_pos = ids.iter().position(|&id| id == "local1").unwrap();
         let reg1_pos = ids.iter().position(|&id| id == "reg1").unwrap();

@@ -65,3 +65,27 @@ pub fn seed_hero_profile_with_detect(config_dir: &std::path::Path, usmap_path: &
         "\n[profiles.hero.detect]\nrequire_paths = [\"Game/Paks\"]\ncontains = []\n",
     );
 }
+
+/// Assert `stdout` is a JSON object whose FIRST key in the raw bytes is
+/// `schema_version`, and that `body_key` is present.
+///
+/// The raw-byte position is the point. `parsed["schema_version"] == 1` passes
+/// on any envelope, including one that emits the version LAST — the exact
+/// shape the check exists to catch. There is deliberately no separate
+/// "schema_version is present" assertion: it is subsumed by the `starts_with`
+/// below and so could not fail on its own. The `body_key` lookup is NOT
+/// subsumed — it names a different key.
+pub fn assert_envelope_first(stdout: &str, body_key: &str, ctx: &str) {
+    let _ = stdout
+        .find(&format!("\"{body_key}\""))
+        .unwrap_or_else(|| panic!("{ctx}: no {body_key} in {stdout}"));
+    let after_brace = stdout
+        .trim_start()
+        .strip_prefix('{')
+        .unwrap_or_else(|| panic!("{ctx}: not a JSON object: {stdout}"))
+        .trim_start();
+    assert!(
+        after_brace.starts_with("\"schema_version\""),
+        "{ctx}: schema_version must be the FIRST key, got: {stdout}"
+    );
+}

@@ -102,14 +102,15 @@ pub(crate) fn serde_json_to_io(e: serde_json::Error) -> io::Error {
 /// stdout for the whole command.
 ///
 /// It is NOT the only writer of the `to_writer_pretty` + `serde_json_to_io`
-/// pair, and deliberately so. `print_entries`, `print_entries_grouped` and
-/// `ExtractSummary::render` emit their JSON and table forms through ONE
-/// `BufWriter` acquired before the format match, so they cannot delegate
-/// without hoisting that lock into each arm — and calling this helper
-/// under a live outer `BufWriter` would take a second `stdout.lock()` and
-/// interleave the output (the lock is reentrant, so it would not even
-/// deadlock to warn you). `render` additionally takes a `&mut dyn Write`
-/// so its unit tests can capture it.
+/// pair, and deliberately so, for two different reasons.
+/// `print_entries`/`print_entries_grouped` acquire ONE `BufWriter` before
+/// the format match and emit both forms through it, so delegating would
+/// mean hoisting that lock into each arm — and calling this helper under a
+/// live outer `BufWriter` would take a second `stdout.lock()` and interleave
+/// the output (the lock is reentrant, so it would not even deadlock to warn
+/// you). `ExtractSummary::render` has no lock at all: it writes to a
+/// caller-supplied `&mut dyn Write` so its unit tests can capture the
+/// output, and this helper hardcodes stdout.
 pub(crate) fn print_json<T: Serialize>(value: &T) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
@@ -400,21 +401,10 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
 /// `id` into `--game`); for display-only fields (`name`,
 /// `engine_version`) the reason is only the machine-interface half.
 ///
-/// Since #658 the `profile` family emits JSON too — `list`, `show`,
-/// `detect`, `test`, `fetch` and the mutation receipts — carrying the
-/// same registry-authored strings under the same rule. Relative leakiness
-/// there, stated precisely because the obvious phrasing overstates it:
-/// NO profile-family arm calls this function, table or JSON, so the only
-/// difference between the two sinks is serde's own escaping, which covers
-/// C0 and nothing else. JSON is therefore never MORE leaky than the table
-/// beside it, and strictly less only when the hostile string contains C0.
-/// Measured in raw control CHARACTERS, which is the unit that matters to a
-/// terminal and not the same as bytes here — U+009B is two UTF-8 bytes, so
-/// the same samples counted in bytes read 4-vs-6 and 8-vs-8: a mixed C0/C1
-/// name yields 2 through JSON against 4 through the table, and an all-C1
-/// name yields 4 against 4. Note the counterfactual that shows the
-/// mechanism: were the table arms to start calling this function, the
-/// table would drop to 0 and JSON would be the leakier sink.
+/// Since #658 the `profile` family emits JSON too, carrying the same
+/// registry-authored strings; neither its table nor its JSON arm calls this
+/// function, so both remain #708 surfaces and the piped case is now the
+/// C0-escaped one rather than the raw table.
 pub(crate) fn sanitize_for_display(s: &str) -> std::borrow::Cow<'_, str> {
     if s.chars().any(char::is_control) {
         std::borrow::Cow::Owned(

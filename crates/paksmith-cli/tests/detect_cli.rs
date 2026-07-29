@@ -5,6 +5,9 @@ use std::fmt::Write as _;
 use assert_cmd::Command;
 use tempfile::tempdir;
 
+mod common;
+use common::assert_envelope_first;
+
 /// A `paksmith` invocation pinned to TABLE output, for this file's
 /// `profile`-family assertions.
 ///
@@ -94,6 +97,13 @@ fn detect_no_match_is_success_with_message() {
 // ---------------------------------------------------------------------------
 
 const KEY: &str = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+
+/// A DIFFERENT (wrong) key, so a duplicate-id test can distinguish first-wins
+/// from last-wins. With both copies on the same key the assertion passes under
+/// either order — and the order is the security-relevant half: `cache.get` is
+/// a `.find()`, so whichever copy answers must be the one whose key
+/// `--game`/`--detect` will actually use.
+const WRONG_KEY: &str = "11111111111111111111111111111111111111111111111111111111111111ff";
 
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -289,21 +299,6 @@ fn paksmith_json(cfg: &std::path::Path) -> Command {
     c
 }
 
-/// `schema_version` must be the FIRST key in the raw bytes, not merely
-/// present — asserting presence passes on any envelope, including one that
-/// emits it last. Mirrors `profile_cli::assert_envelope_first`.
-fn assert_envelope_first(stdout: &str, ctx: &str) {
-    let after_brace = stdout
-        .trim_start()
-        .strip_prefix('{')
-        .unwrap_or_else(|| panic!("{ctx}: not a JSON object: {stdout}"))
-        .trim_start();
-    assert!(
-        after_brace.starts_with("\"schema_version\""),
-        "{ctx}: schema_version must be the FIRST key, got: {stdout}"
-    );
-}
-
 #[test]
 fn detect_json_carries_envelope_dir_and_matches() {
     // `detect --format json` had NO test at all: its schema constant, its
@@ -320,7 +315,7 @@ fn detect_json_carries_envelope_dir_and_matches() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert_envelope_first(&stdout, "detect");
+    assert_envelope_first(&stdout, "matches", "detect");
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(v["schema_version"], 1);
     assert_eq!(
@@ -349,7 +344,7 @@ fn detect_json_emits_an_empty_array_when_nothing_matches() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert_envelope_first(&stdout, "detect/empty");
+    assert_envelope_first(&stdout, "matches", "detect/empty");
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(
         v["matches"].as_array().map(Vec::len),
@@ -370,8 +365,11 @@ fn detect_json_dedupes_a_repeated_registry_id_and_labels_it_registry() {
     //    `detect_in` only skipped ids shadowed by the LOCAL store — a registry
     //    document repeating an id (nothing validates uniqueness) produced two
     //    rows for one profile. `--detect` then failed with "matched multiple
-    //    game profiles: dup, dup" — a profile ambiguous with ITSELF, whose
-    //    suggested remedy `--game dup` would have worked.
+    //    game profiles: dup, dup". Where the copies are IDENTICAL, as here,
+    //    that was a profile ambiguous with itself and the suggested remedy
+    //    `--game dup` would have worked. Where they DIFFER it was a true
+    //    positive, and collapsing to the first copy is the deliberate trade —
+    //    resolution answers with that copy anyway.
     // 2. `source: "registry"` was pinned by no test on this surface, though a
     //    core doc claims the per-surface pins are what catch a partial rename.
     //    A registry-only match exercises both at once.
@@ -434,7 +432,7 @@ fn detect_flag_resolves_a_repeated_registry_id_instead_of_calling_it_ambiguous()
         format!(
             r#"{{"fetched_at_unix":9999999999,"profiles":[
                  {{"id":"dup","name":"First Copy","keys":{{"00000000000000000000000000000000":"{KEY}"}},"detect":{rules}}},
-                 {{"id":"dup","name":"Second Copy","keys":{{"00000000000000000000000000000000":"{KEY}"}},"detect":{rules}}}]}}"#
+                 {{"id":"dup","name":"Second Copy","keys":{{"00000000000000000000000000000000":"{WRONG_KEY}"}},"detect":{rules}}}]}}"#
         ),
     )
     .unwrap();
@@ -451,4 +449,60 @@ fn detect_flag_resolves_a_repeated_registry_id_instead_of_calling_it_ambiguous()
         stdout.contains("test.txt"),
         "the duplicated id must resolve to one profile and decrypt: {stdout}"
     );
+}
+
+#[test]
+fn detect_ignores_rules_on_a_later_copy_of_a_duplicated_id() {
+    // The ordering that makes the dedupe safe, and it is load-bearing.
+    //
+    // `unshadowed_registry` consumes an id at CANDIDATE selection, before
+    // `rules_match` runs, so only the FIRST copy's rules are ever consulted.
+    // That is deliberate: `RegistryCache::get` is a `.find()`, so the first
+    // copy is the one whose KEY `--game`/`--detect` will use. Honouring a later
+    // copy's rules would match on one profile and then decrypt with another's
+    // key — which is exactly what this command did before the dedupe.
+    //
+    // Both existing duplicate tests give BOTH copies matching rules, so moving
+    // the dedupe after the rules check leaves them green while silently
+    // reinstating that key confusion. This is the case that distinguishes them.
+    let cfg = tempdir().unwrap();
+    let game = tempdir().unwrap();
+    std::fs::create_dir_all(game.path().join("DupGame/Content/Paks")).unwrap();
+
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    let rules = r#"{"require_paths":["DupGame/Content/Paks"]}"#;
+    std::fs::write(
+        base.join("registry-cache.json"),
+        format!(
+            r#"{{"fetched_at_unix":9999999999,"profiles":[
+                 {{"id":"dup","name":"First, no rules","keys":{{}}}},
+                 {{"id":"dup","name":"Second, matching rules","keys":{{}},"detect":{rules}}}]}}"#
+        ),
+    )
+    .unwrap();
+
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "detect"])
+        .arg(game.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        v["matches"].as_array().map(Vec::len),
+        Some(0),
+        "the first copy declares no rules, so the id must NOT detect — \
+         fail closed rather than match on a copy whose key will not be used: {stdout}"
+    );
+
+    // And the flag agrees: no match, exit 2, rather than resolving a key from a
+    // copy whose rules were never what matched.
+    let _ = paksmith_unpinned(cfg.path())
+        .args(["--detect"])
+        .arg(game.path())
+        .arg("list")
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(2);
 }

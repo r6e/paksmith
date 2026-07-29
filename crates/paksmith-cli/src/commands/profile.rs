@@ -1,7 +1,7 @@
 //! `paksmith profile` subcommand — add / list / show / remove profiles,
 //! plus key management (`key add` / `key remove`) and key testing (`test`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 
 use clap::{Args, Subcommand};
@@ -229,6 +229,9 @@ struct FetchOutput {
     /// False when a fresh cache short-circuited the network call, so a script
     /// can tell "already current" from "downloaded".
     fetched: bool,
+    /// Profiles in the fetched DOCUMENT, which is not necessarily the number
+    /// `list` returns: `list` renders the layered view and collapses a local
+    /// shadow or a repeated id, while this counts what the registry shipped.
     profiles: usize,
 }
 
@@ -382,15 +385,12 @@ pub(crate) fn run(
     }
 }
 
-/// A completed store mutation, carrying everything both output arms need.
+/// A completed store mutation.
 ///
 /// An enum rather than parallel `msg` / `action` / `id` / `guid` arguments:
 /// those were four positional values, two of them `&str` and therefore
 /// swappable with no compile error, and nothing tied the prose to the wire
 /// token — `confirm(fmt, "removed profile `x`", "added", …)` was expressible.
-/// Here each variant owns both spellings, so a mismatched pair cannot be
-/// written, and `guid`'s presence follows from the variant rather than from
-/// remembering to pass `Some` at two call sites out of four.
 enum Mutation<'a> {
     Added { id: &'a str },
     Removed { id: &'a str },
@@ -398,61 +398,40 @@ enum Mutation<'a> {
     KeyRemoved { id: &'a str, guid: KeyGuid },
 }
 
-impl Mutation<'_> {
-    /// The STABLE wire token. Exhaustive, so a fifth mutation cannot ship
-    /// without choosing one.
-    fn token(&self) -> &'static str {
-        match self {
-            Self::Added { .. } => "added",
-            Self::Removed { .. } => "removed",
-            Self::KeyAdded { .. } => "key_added",
-            Self::KeyRemoved { .. } => "key_removed",
-        }
-    }
-
-    fn id(&self) -> &str {
-        match self {
-            Self::Added { id }
-            | Self::Removed { id }
-            | Self::KeyAdded { id, .. }
-            | Self::KeyRemoved { id, .. } => id,
-        }
-    }
-
-    /// The key slot acted on, for the two subcommands that have one.
-    fn guid(&self) -> Option<KeyGuid> {
-        match self {
-            Self::Added { .. } | Self::Removed { .. } => None,
-            Self::KeyAdded { guid, .. } | Self::KeyRemoved { guid, .. } => Some(*guid),
-        }
-    }
-
-    /// The human sentence, byte-identical to what these commands printed
-    /// before `--format` reached this family.
-    fn sentence(&self) -> String {
-        match self {
-            Self::Added { id } => format!("added profile `{id}`"),
-            Self::Removed { id } => format!("removed profile `{id}`"),
-            Self::KeyAdded { id, guid } => {
-                format!("added key for GUID {} to `{id}`", guid.to_hex())
-            }
-            Self::KeyRemoved { id, guid } => {
-                format!("removed key for GUID {} from `{id}`", guid.to_hex())
-            }
-        }
-    }
-}
-
 /// Report a completed store mutation: the human sentence under `--format
 /// table`, a [`MutationOutput`] receipt under `--format json`.
+///
+/// ONE exhaustive match yields the wire token, the id, the key slot and the
+/// prose together, so each token sits beside the sentence it corresponds to
+/// and a fifth mutation cannot ship without choosing all four. Four separate
+/// accessor matches would put the pairing back on convention — nothing would
+/// stop `Added => "removed"` in one of them — which is the same reason
+/// `test` derives `(token, ok, label)` from a single match rather than
+/// pairing an exhaustive match with a `matches!`.
 fn confirm(fmt: ResolvedFormat, m: &Mutation<'_>) -> io::Result<()> {
+    let (action, id, guid, sentence) = match *m {
+        Mutation::Added { id } => ("added", id, None, format!("added profile `{id}`")),
+        Mutation::Removed { id } => ("removed", id, None, format!("removed profile `{id}`")),
+        Mutation::KeyAdded { id, guid } => (
+            "key_added",
+            id,
+            Some(guid),
+            format!("added key for GUID {} to `{id}`", guid.to_hex()),
+        ),
+        Mutation::KeyRemoved { id, guid } => (
+            "key_removed",
+            id,
+            Some(guid),
+            format!("removed key for GUID {} from `{id}`", guid.to_hex()),
+        ),
+    };
     match fmt {
-        ResolvedFormat::Table => crate::output::print_line(&m.sentence()),
+        ResolvedFormat::Table => crate::output::print_line(&sentence),
         ResolvedFormat::Json => crate::output::print_json(&MutationOutput {
             schema_version: MUTATION_SCHEMA_VERSION,
-            action: m.token(),
-            id: m.id().to_string(),
-            guid: m.guid().map(|g| g.to_hex()),
+            action,
+            id: id.to_string(),
+            guid: guid.map(|g| g.to_hex()),
         }),
     }
 }
@@ -518,6 +497,13 @@ fn add(a: &AddArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
 /// never checks uniqueness. First occurrence wins, which is what
 /// `RegistryCache::get` already does (`.find()`) — so `list` and `show` answer
 /// with the same profile rather than disagreeing about the same store.
+///
+/// Core implements the same two rules in
+/// `profile::resolve::unshadowed_registry`, for `detect` and the GUI's profile
+/// list. They are separate because that helper yields `DetectMatch`, which
+/// carries no `engine_version` or `key_count`. If either side changes
+/// precedence, `list` and `detect` start naming different profiles for one id
+/// — change them together.
 fn profile_rows(
     store: &ProfileStore,
     cache: Option<&paksmith_core::RegistryCache>,
@@ -535,8 +521,7 @@ fn profile_rows(
         .collect();
     if let Some(c) = cache {
         // Seeded with the local ids so one pass enforces both rules.
-        let mut seen: std::collections::BTreeSet<&str> =
-            store.profiles.keys().map(String::as_str).collect();
+        let mut seen: BTreeSet<&str> = store.profiles.keys().map(String::as_str).collect();
         for p in &c.doc.profiles {
             if !seen.insert(p.id.as_str()) {
                 continue;

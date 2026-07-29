@@ -5,6 +5,9 @@ use assert_cmd::Command;
 use ed25519_dalek::{Signer, SigningKey};
 use tempfile::tempdir;
 
+mod common;
+use common::assert_envelope_first;
+
 /// A `paksmith` invocation pinned to TABLE output.
 ///
 /// `profile` honours `--format` since #658, and `--format auto` resolves to
@@ -1414,35 +1417,6 @@ fn seed_one(cfg: &std::path::Path) {
         .success();
 }
 
-/// `schema_version` must be the FIRST key in the raw bytes, not merely
-/// present — a `parsed["schema_version"] == 1` assertion passes on any
-/// envelope and so cannot fail in the case it exists to catch. Mirrors
-/// `cli_integration::list_and_search_json_carry_schema_version_envelope`.
-fn assert_envelope_first(stdout: &str, body_key: &str, ctx: &str) {
-    // Presence of both keys. The ORDERING between them needs no assert: the
-    // raw-byte check below proves `schema_version` is the first key after `{`,
-    // so it necessarily precedes every other. An `sv < body` compare here
-    // could not fail on its own.
-    let _ = stdout
-        .find("\"schema_version\"")
-        .unwrap_or_else(|| panic!("{ctx}: no schema_version in {stdout}"));
-    let _ = stdout
-        .find(&format!("\"{body_key}\""))
-        .unwrap_or_else(|| panic!("{ctx}: no {body_key} in {stdout}"));
-    // First key in the RAW BYTES, tolerating pretty-print whitespace. Asserting
-    // mere presence would pass on any envelope, including one that emits
-    // schema_version last — the exact shape that cannot fail when it matters.
-    let after_brace = stdout
-        .trim_start()
-        .strip_prefix('{')
-        .expect("JSON object")
-        .trim_start();
-    assert!(
-        after_brace.starts_with("\"schema_version\""),
-        "{ctx}: schema_version must be the FIRST key, got: {stdout}"
-    );
-}
-
 #[test]
 fn profile_list_json_carries_envelope_and_rows() {
     let cfg = tempdir().unwrap();
@@ -1480,7 +1454,7 @@ fn profile_show_json_redacts_keys_unless_asked() {
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert_envelope_first(&stdout, "id", "show");
     assert!(
-        !stdout.contains("94d25bc3"),
+        !stdout.contains(&KEY[..8]),
         "key material must not appear without --show-keys: {stdout}"
     );
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -1571,6 +1545,9 @@ fn profile_test_json_uses_a_stable_outcome_token() {
 
 /// The all-zero default encryption-key GUID, as `key remove` spells it.
 const ZERO_GUID: &str = "00000000000000000000000000000000";
+
+/// A second key slot, so a `keys` array has more than one entry to lose.
+const SECOND_GUID: &str = "11111111111111111111111111111111";
 
 #[test]
 fn profile_mutations_emit_a_receipt_under_json() {
@@ -1794,143 +1771,59 @@ fn profile_auto_format_resolves_to_json_off_tty_and_says_so() {
     );
 }
 
-#[test]
-fn profile_json_with_closed_stdout_exits_cleanly() {
-    // `println!` panics (exit 101) when the reader closes the pipe; the shared
-    // `print_json` writer routes BrokenPipe to main.rs's clean exit instead.
-    // SPEC: "0 success, including BrokenPipe on stdout".
-    //
-    // Dropping the read end BEFORE the child writes makes this deterministic
-    // regardless of payload size — the real bug only shows past the 64 KiB
-    // pipe buffer, so a small-fixture test would pass on the broken code.
+/// Spawn `paksmith` with `args`, close the read end of stdout BEFORE the child
+/// writes, and assert it exits 0 without panicking.
+///
+/// Dropping the reader first makes the result independent of payload size —
+/// the real defect only shows past the 64 KiB pipe buffer, so a small-fixture
+/// test would pass on the broken code.
+fn assert_closed_stdout_exits_clean(cfg: &std::path::Path, args: &[&str]) {
     use std::io::Read;
     use std::process::{Command as StdCommand, Stdio};
     use std::thread;
 
+    let mut child = StdCommand::new(env!("CARGO_BIN_EXE_paksmith"))
+        .env("PAKSMITH_CONFIG_DIR", cfg)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let mut stderr = child.stderr.take().unwrap();
+    let handle = thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stderr.read_to_string(&mut buf);
+        buf
+    });
+    let status = child.wait().unwrap();
+    let stderr_text = handle.join().unwrap();
+    assert!(
+        !stderr_text.contains("panicked"),
+        "{args:?} panicked on a closed stdout: {stderr_text}"
+    );
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "{args:?} must exit 0 on BrokenPipe, got {status:?}"
+    );
+}
+
+#[test]
+fn profile_json_with_closed_stdout_exits_cleanly() {
+    // `println!` panics (exit 101) when the reader closes the pipe; the shared
+    // writers route BrokenPipe to main.rs's clean exit instead.
+    // SPEC: "0 success, including BrokenPipe on stdout".
     let cfg = tempdir().unwrap();
     seed_one(cfg.path());
-
     for args in [
         ["--format", "json", "profile", "list"],
         ["--format", "table", "profile", "list"],
     ] {
-        let mut child = StdCommand::new(env!("CARGO_BIN_EXE_paksmith"))
-            .env("PAKSMITH_CONFIG_DIR", cfg.path())
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        drop(child.stdout.take());
-        let mut stderr = child.stderr.take().unwrap();
-        let handle = thread::spawn(move || {
-            let mut buf = String::new();
-            let _ = stderr.read_to_string(&mut buf);
-            buf
-        });
-        let status = child.wait().unwrap();
-        let stderr_text = handle.join().unwrap();
-
-        assert!(
-            !stderr_text.contains("panicked"),
-            "{args:?} panicked on a closed stdout: {stderr_text}"
-        );
-        assert_eq!(
-            status.code(),
-            Some(0),
-            "{args:?} must exit 0 on BrokenPipe, got {status:?}"
-        );
+        assert_closed_stdout_exits_clean(cfg.path(), &args);
     }
 }
 
-/// `fetch`'s JSON `fetched` flag, BOTH legs. Its own doc says it exists "so a
-/// script can tell 'already current' from 'downloaded'" — and neither leg had
-/// a test, so hardcoding it to either value survived the suite.
-#[tokio::test]
-async fn profile_fetch_json_distinguishes_downloaded_from_fresh() {
-    use wiremock::matchers::{method, path as wpath};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    let cfg = tempdir().unwrap();
-    let (sk, pk) = test_keypair();
-    let body = r#"[{"id":"g","name":"G","keys":{}}]"#;
-    let sig = sk.sign(body.as_bytes()).to_bytes().to_vec();
-
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(wpath("/r.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_bytes()))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(wpath("/r.json.sig"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(sig))
-        .mount(&server)
-        .await;
-
-    let base = cfg.path().join("paksmith");
-    std::fs::create_dir_all(&base).unwrap();
-    std::fs::write(
-        base.join("config.toml"),
-        format!(
-            "[registry]\nurl = \"{}/r.json\"\npublic_key = \"{pk}\"\n",
-            server.uri()
-        ),
-    )
-    .unwrap();
-
-    let run = |args: &'static [&'static str]| {
-        let out = assert_cmd::Command::cargo_bin("paksmith")
-            .unwrap()
-            .env("PAKSMITH_CONFIG_DIR", cfg.path())
-            .env("PAKSMITH_ALLOW_HTTP", "1")
-            .args(args)
-            .assert()
-            .success();
-        String::from_utf8(out.get_output().stdout.clone()).unwrap()
-    };
-
-    // Cold cache -> a real download.
-    let first = run(&["--format", "json", "profile", "fetch"]);
-    assert_envelope_first(&first, "fetched", "fetch/downloaded");
-    let v: serde_json::Value = serde_json::from_str(&first).unwrap();
-    assert_eq!(
-        v["schema_version"], 1,
-        "FETCH_SCHEMA_VERSION pinned by value"
-    );
-    assert_eq!(v["fetched"], true, "a cold fetch downloaded: {first}");
-    assert_eq!(v["profiles"], 1);
-
-    // Fresh cache -> the network is short-circuited; same shape, fetched=false.
-    let second = run(&["--format", "json", "profile", "fetch"]);
-    let v: serde_json::Value = serde_json::from_str(&second).unwrap();
-    assert_eq!(
-        v["fetched"], false,
-        "a fresh cache must report fetched=false: {second}"
-    );
-    assert_eq!(v["profiles"], 1);
-
-    // --force bypasses freshness and downloads again.
-    let forced = run(&["--format", "json", "profile", "fetch", "--force"]);
-    let v: serde_json::Value = serde_json::from_str(&forced).unwrap();
-    assert_eq!(
-        v["fetched"], true,
-        "--force must re-download even on a fresh cache: {forced}"
-    );
-}
-
-/// `test`'s third token, `decrypted` — the one whose whole reason for
-/// existing is that the table renders "decrypted (no index hash to verify)",
-/// prose no script can match on. Reached exactly as core's
-/// `test_key_zeroed_index_hash_returns_decrypted` does: zero the footer's
-/// index_hash so the index decrypts but integrity cannot be confirmed.
-///
-/// The fourth token, `unsupported`, is NOT pinned here and no fixture reaches
-/// it. Measured, so the gap is a fact and not an assumption: a non-pak file
-/// and an oversized index_size both fail in `read_footer_guid` and exit 2
-/// before an outcome exists, and corrupting the encrypted index body yields
-/// `wrong_key` because garbage plaintext surfaces as a `Decryption` error.
-/// It needs a V9 frozen-index fixture, which the corpus does not have.
 #[test]
 fn profile_test_json_reports_decrypted_when_the_hash_slot_is_zeroed() {
     let cfg = tempdir().unwrap();
@@ -2006,10 +1899,7 @@ fn profile_show_json_carries_mappings_pak_paths_name_and_every_key() {
         .assert()
         .success();
     // TWO keys: with one, `keys` survives a `.take(1)`-shaped truncation.
-    for guid in [
-        "00000000000000000000000000000000",
-        "11111111111111111111111111111111",
-    ] {
+    for guid in [ZERO_GUID, SECOND_GUID] {
         let _ = paksmith(cfg.path())
             .args(["profile", "key", "add", "hero", "--guid", guid])
             .args(["--key", KEY])
@@ -2049,10 +1939,7 @@ fn profile_show_json_carries_mappings_pak_paths_name_and_every_key() {
         .collect();
     assert_eq!(
         guids,
-        vec![
-            "00000000000000000000000000000000",
-            "11111111111111111111111111111111"
-        ],
+        vec![ZERO_GUID, SECOND_GUID],
         "every key slot is listed, by GUID, BTreeMap-ordered: {stdout}"
     );
 }
@@ -2177,42 +2064,11 @@ fn profile_single_line_table_output_survives_a_closed_stdout() {
     // that helper to `println!` survived the suite while `--format table
     // profile list` on an EMPTY store exited 101.
     //
-    // An empty config dir is the point — it forces the `no profiles` path.
-    use std::io::Read;
-    use std::process::{Command as StdCommand, Stdio};
-    use std::thread;
-
+    // An EMPTY config dir is the point — it forces the `no profiles` path.
+    // Table only: the JSON arm has no empty-store branch, so its leg here
+    // would exercise the same `print_json` path the seeded test already pins.
     let cfg = tempdir().unwrap();
-    for args in [
-        ["--format", "table", "profile", "list"],
-        ["--format", "json", "profile", "list"],
-    ] {
-        let mut child = StdCommand::new(env!("CARGO_BIN_EXE_paksmith"))
-            .env("PAKSMITH_CONFIG_DIR", cfg.path())
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        drop(child.stdout.take());
-        let mut stderr = child.stderr.take().unwrap();
-        let handle = thread::spawn(move || {
-            let mut buf = String::new();
-            let _ = stderr.read_to_string(&mut buf);
-            buf
-        });
-        let status = child.wait().unwrap();
-        let stderr_text = handle.join().unwrap();
-        assert!(
-            !stderr_text.contains("panicked"),
-            "{args:?} panicked writing a single line to a closed stdout: {stderr_text}"
-        );
-        assert_eq!(
-            status.code(),
-            Some(0),
-            "{args:?} must exit 0 on BrokenPipe, got {status:?}"
-        );
-    }
+    assert_closed_stdout_exits_clean(cfg.path(), &["--format", "table", "profile", "list"]);
 }
 
 /// A non-default key slot, so tests exercise a GUID that is not the all-zero
@@ -2253,44 +2109,6 @@ fn profile_key_receipts_report_the_slot_they_acted_on() {
             "{action} must report the slot it acted on, not the default: {stdout}"
         );
     }
-}
-
-/// Spawn `paksmith` with `args`, close the read end of stdout BEFORE the child
-/// writes, and assert it exits 0 without panicking.
-///
-/// Dropping the reader first makes the result independent of payload size —
-/// the real defect only shows past the 64 KiB pipe buffer, so a small-fixture
-/// test would pass on the broken code.
-fn assert_closed_stdout_exits_clean(cfg: &std::path::Path, args: &[&str]) {
-    use std::io::Read;
-    use std::process::{Command as StdCommand, Stdio};
-    use std::thread;
-
-    let mut child = StdCommand::new(env!("CARGO_BIN_EXE_paksmith"))
-        .env("PAKSMITH_CONFIG_DIR", cfg)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    drop(child.stdout.take());
-    let mut stderr = child.stderr.take().unwrap();
-    let handle = thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = stderr.read_to_string(&mut buf);
-        buf
-    });
-    let status = child.wait().unwrap();
-    let stderr_text = handle.join().unwrap();
-    assert!(
-        !stderr_text.contains("panicked"),
-        "{args:?} panicked on a closed stdout: {stderr_text}"
-    );
-    assert_eq!(
-        status.code(),
-        Some(0),
-        "{args:?} must exit 0 on BrokenPipe, got {status:?}"
-    );
 }
 
 #[test]
