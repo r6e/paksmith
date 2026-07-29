@@ -344,7 +344,7 @@ fn now_unix() -> paksmith_core::Result<u64> {
 /// [`MutationOutput`] receipt. Uniform coverage is what lets the advisory
 /// note below fire unconditionally and be true — a partially-JSON family
 /// would need the note gated per subcommand, and would leave `profile add
-/// --format json` writing zero unparseable bytes to stdout.
+/// --format json` writing zero unparsable bytes to stdout.
 pub(crate) fn run(
     cmd: &ProfileCmd,
     format: OutputFormat,

@@ -117,6 +117,40 @@ a versioned envelope shared with `search`:
 { "schema_version": 1, "entries": [ { "path": "...", "size": 123, "...": "..." } ] }
 ```
 
+### `paksmith profile`
+
+Every `profile` subcommand honours `--format`, resolving `auto` the same way
+`list` does — table on a terminal, JSON when piped or redirected. **Piping
+`profile list` therefore yields JSON, not the tab-separated table.** Pass
+`--format table` to keep the human shape in a script.
+
+Each subcommand carries its own `schema_version`, since no two return the same
+document:
+
+| command | shape |
+|---|---|
+| `list` | `{schema_version, profiles: [{id, name, engine_version, key_count, source}]}` |
+| `show` | `{schema_version, id, source, name, engine_version, mappings, pak_paths, keys}` |
+| `detect` | `{schema_version, dir, matches: [{id, name, source}]}` |
+| `test` | `{schema_version, id, outcome, ok}` |
+| `fetch` | `{schema_version, fetched, profiles}` |
+| `add`, `remove`, `key add`, `key remove` | `{schema_version, action, id}` |
+
+`source` is `local` or `registry`. `test.outcome` is a stable token —
+`verified`, `decrypted`, `wrong_key` or `unsupported` — deliberately not the
+table's prose, which reads "decrypted (no index hash to verify)"; branch on
+`ok`, and treat an unrecognised `outcome` as informational.
+`fetch.fetched` is false when a fresh cache short-circuited the network, so a
+script can tell "already current" from "downloaded". The mutations return an
+`action` of `added`, `removed`, `key_added` or `key_removed`.
+
+`show` renders key material only under `--show-keys`; when redacted the `key`
+field is **omitted entirely** rather than set to a placeholder, so the presence
+of the field is itself the signal.
+
+Errors are unchanged in every format: `paksmith: error: …` on stderr, exit 2,
+stdout empty. There is no JSON error envelope.
+
 ### `paksmith inspect`
 
 Dump a uasset's structural header (summary, name table, import/export

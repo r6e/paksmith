@@ -1846,3 +1846,52 @@ async fn profile_fetch_json_distinguishes_downloaded_from_fresh() {
         "--force must re-download even on a fresh cache: {forced}"
     );
 }
+
+/// `test`'s third token, `decrypted` — the one whose whole reason for
+/// existing is that the table renders "decrypted (no index hash to verify)",
+/// prose no script can match on. Reached exactly as core's
+/// `test_key_zeroed_index_hash_returns_decrypted` does: zero the footer's
+/// index_hash so the index decrypts but integrity cannot be confirmed.
+///
+/// The fourth token, `unsupported`, is NOT pinned here and no fixture reaches
+/// it. Measured, so the gap is a fact and not an assumption: a non-pak file
+/// and an oversized index_size both fail in `read_footer_guid` and exit 2
+/// before an outcome exists, and corrupting the encrypted index body yields
+/// `wrong_key` because garbage plaintext surfaces as a `Decryption` error.
+/// It needs a V9 frozen-index fixture, which the corpus does not have.
+#[test]
+fn profile_test_json_reports_decrypted_when_the_hash_slot_is_zeroed() {
+    let cfg = tempdir().unwrap();
+    seed_one(cfg.path());
+
+    // V8B+ footer: magic(4) version(4) index_offset(8) index_size(8)
+    // index_hash(20) — the hash field starts at footer_start + 24.
+    let src = std::fs::read(fixture("real_v8b_encrypted_index.pak")).unwrap();
+    let magic = b"\xe1\x12\x6f\x5a";
+    let footer = src
+        .windows(4)
+        .rposition(|w| w == magic)
+        .expect("footer magic present in fixture");
+    let mut patched = src.clone();
+    patched[footer + 24..footer + 44].fill(0);
+    assert_ne!(patched, src, "the patch must actually change the fixture");
+
+    let pak = cfg.path().join("zeroed_hash.pak");
+    std::fs::write(&pak, &patched).unwrap();
+
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "test", "hero"])
+        .arg(&pak)
+        .assert()
+        .code(0);
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        v["outcome"], "decrypted",
+        "exact token, not the table's prose: {stdout}"
+    );
+    assert_eq!(
+        v["ok"], true,
+        "decrypted still opened the archive, so ok/exit stay 0"
+    );
+}
