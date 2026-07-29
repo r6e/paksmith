@@ -1490,31 +1490,56 @@ fn profile_show_json_redacts_keys_unless_asked() {
 
 #[test]
 fn profile_test_json_uses_a_stable_outcome_token() {
-    // The human label is prose ("decrypted (no index hash to verify)"); the
-    // JSON token must be a stable machine value a script can match on.
+    // The human label is prose ("decrypted (no index hash to verify)", "wrong
+    // key"); the JSON token must be a stable machine value.
+    //
+    // Both legs are here because ONE is not enough: a test that only exercises
+    // the success path asserts nothing about the failure tokens, and a probe
+    // rewriting `wrong_key` to the prose `"wrong key"` survives it. Each leg
+    // pins the exact token for the outcome it produces.
+    let pak = fixture("real_v8b_encrypted_index.pak");
+
+    // Correct key -> "verified", ok: true, exit 0.
     let cfg = tempdir().unwrap();
     seed_one(cfg.path());
-    let pak = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("tests/fixtures/real_v8b_encrypted_index.pak");
     let out = paksmith_json(cfg.path())
         .args(["profile", "test", "hero"])
         .arg(&pak)
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    assert_envelope_first(&stdout, "id", "test");
+        .assert()
+        .code(0);
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_envelope_first(&stdout, "id", "test/ok");
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(v["id"], "hero");
-    let outcome = v["outcome"].as_str().unwrap();
-    assert!(
-        ["verified", "decrypted", "wrong_key", "unsupported"].contains(&outcome),
-        "outcome must be a stable token, got {outcome:?}"
+    assert_eq!(
+        v["outcome"], "verified",
+        "exact token, not merely one of a set"
     );
-    assert!(v["ok"].is_boolean(), "ok mirrors the exit code");
+    assert_eq!(v["ok"], true);
+
+    // Wrong key -> "wrong_key" (underscored token, NOT the table's "wrong
+    // key"), ok: false, exit 1.
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "g", "--name", "G"])
+        .assert()
+        .success();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "g", "--key", &"00".repeat(32)])
+        .assert()
+        .success();
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "test", "g"])
+        .arg(&pak)
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        v["outcome"], "wrong_key",
+        "stable token, not the prose label"
+    );
+    assert_eq!(v["ok"], false, "ok mirrors the non-zero exit");
 }
 
 #[test]
