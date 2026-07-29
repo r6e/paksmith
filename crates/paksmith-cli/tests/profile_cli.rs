@@ -1824,6 +1824,21 @@ fn profile_json_with_closed_stdout_exits_cleanly() {
     }
 }
 
+/// `test`'s third token, `decrypted` — the one whose whole reason for
+/// existing is that the table renders "decrypted (no index hash to verify)",
+/// prose no script can match on. Reached exactly as core's
+/// `test_key_zeroed_index_hash_returns_decrypted` does: zero the footer's
+/// index_hash so the index decrypts but integrity cannot be confirmed.
+///
+/// The fourth outcome, `unsupported`, is not reachable from this command with
+/// the current corpus — measured: a non-pak file and an oversized index_size
+/// both fail in `read_footer_guid` and exit 2 before an outcome exists, and
+/// corrupting the encrypted index body yields `wrong_key` because garbage
+/// plaintext surfaces as a `Decryption` error.
+///
+/// That is a limit of the FIXTURES, not of the coverage. Its token, label and
+/// `ok`/exit-1 contract are pinned on the pure `outcome_report` seam
+/// (`commands/profile.rs`), which is why that match was extracted.
 #[test]
 fn profile_test_json_reports_decrypted_when_the_hash_slot_is_zeroed() {
     let cfg = tempdir().unwrap();
@@ -2181,5 +2196,81 @@ fn profile_list_table_also_dedupes_a_repeated_registry_id() {
     assert!(
         stdout.lines().any(|l| l.starts_with("uniq\t")),
         "unrelated registry rows still render: {stdout}"
+    );
+}
+
+/// `fetch`'s JSON `fetched` flag, BOTH legs. Its own doc says it exists "so a
+/// script can tell 'already current' from 'downloaded'" — and neither leg had
+/// a test, so hardcoding it to either value survived the suite.
+#[tokio::test]
+async fn profile_fetch_json_distinguishes_downloaded_from_fresh() {
+    use wiremock::matchers::{method, path as wpath};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let cfg = tempdir().unwrap();
+    let (sk, pk) = test_keypair();
+    let body = r#"[{"id":"g","name":"G","keys":{}}]"#;
+    let sig = sk.sign(body.as_bytes()).to_bytes().to_vec();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/r.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_bytes()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wpath("/r.json.sig"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(sig))
+        .mount(&server)
+        .await;
+
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("config.toml"),
+        format!(
+            "[registry]\nurl = \"{}/r.json\"\npublic_key = \"{pk}\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let run = |args: &'static [&'static str]| {
+        let out = assert_cmd::Command::cargo_bin("paksmith")
+            .unwrap()
+            .env("PAKSMITH_CONFIG_DIR", cfg.path())
+            .env("PAKSMITH_ALLOW_HTTP", "1")
+            .args(args)
+            .assert()
+            .success();
+        String::from_utf8(out.get_output().stdout.clone()).unwrap()
+    };
+
+    // Cold cache -> a real download.
+    let first = run(&["--format", "json", "profile", "fetch"]);
+    assert_envelope_first(&first, "fetched", "fetch/downloaded");
+    let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(
+        v["schema_version"], 1,
+        "FETCH_SCHEMA_VERSION pinned by value"
+    );
+    assert_eq!(v["fetched"], true, "a cold fetch downloaded: {first}");
+    assert_eq!(v["profiles"], 1);
+
+    // Fresh cache -> the network is short-circuited; same shape, fetched=false.
+    let second = run(&["--format", "json", "profile", "fetch"]);
+    let v: serde_json::Value = serde_json::from_str(&second).unwrap();
+    assert_eq!(
+        v["fetched"], false,
+        "a fresh cache must report fetched=false: {second}"
+    );
+    assert_eq!(v["profiles"], 1);
+
+    // --force bypasses freshness and downloads again.
+    let forced = run(&["--format", "json", "profile", "fetch", "--force"]);
+    let v: serde_json::Value = serde_json::from_str(&forced).unwrap();
+    assert_eq!(
+        v["fetched"], true,
+        "--force must re-download even on a fresh cache: {forced}"
     );
 }

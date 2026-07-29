@@ -770,6 +770,37 @@ fn fetch(a: &FetchArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
     Ok(0)
 }
 
+/// The wire token, the `ok` flag and the human label for one key-test outcome.
+///
+/// A PURE function over the enum, in the seam style of
+/// [`crate::output::OutputFormat::resolve_with_tty`], because `test()` cannot
+/// reach every arm from a fixture. `Unsupported` comes from `test_key`'s
+/// catch-all `Err(_)` on a non-`Decryption` open failure, and the corpus has
+/// no pak that parses a footer and then fails that way — so routing every arm
+/// through the command left `Unsupported`'s token, its label AND its exit-1
+/// contract unpinned. A mutant returning `("verified", true, …)` for it
+/// survived the entire workspace suite.
+///
+/// All three values come from ONE match so they cannot drift apart: a
+/// `matches!(outcome, Verified | Decrypted)` for `ok` is not
+/// exhaustiveness-checked, so a fifth variant would flag the token arm at
+/// compile time while silently becoming `ok: false` and exit 1.
+fn outcome_report(
+    outcome: &paksmith_core::profile::key_test::KeyTestOutcome,
+) -> (&'static str, bool, &'static str) {
+    use paksmith_core::profile::key_test::KeyTestOutcome;
+    match outcome {
+        KeyTestOutcome::Verified => ("verified", true, "verified"),
+        KeyTestOutcome::Decrypted => ("decrypted", true, "decrypted (no index hash to verify)"),
+        KeyTestOutcome::WrongKey => ("wrong_key", false, "wrong key"),
+        KeyTestOutcome::Unsupported => (
+            "unsupported",
+            false,
+            "unsupported pak layout (key may be correct)",
+        ),
+    }
+}
+
 fn test(a: &TestArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result<u8> {
     use paksmith_core::container::pak::PakReader;
     use paksmith_core::profile::key_test::{KeyTestOutcome, test_key};
@@ -815,16 +846,7 @@ fn test(a: &TestArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
     // `matches!(outcome, Verified | Decrypted)` for `ok` is not
     // exhaustiveness-checked: a fifth `KeyTestOutcome` variant would flag the
     // token arm at compile time while silently becoming `ok: false` and exit 1.
-    let (token, ok, label) = match outcome {
-        KeyTestOutcome::Verified => ("verified", true, "verified"),
-        KeyTestOutcome::Decrypted => ("decrypted", true, "decrypted (no index hash to verify)"),
-        KeyTestOutcome::WrongKey => ("wrong_key", false, "wrong key"),
-        KeyTestOutcome::Unsupported => (
-            "unsupported",
-            false,
-            "unsupported pak layout (key may be correct)",
-        ),
-    };
+    let (token, ok, label) = outcome_report(&outcome);
     if matches!(fmt, ResolvedFormat::Json) {
         let out = TestOutput {
             schema_version: TEST_SCHEMA_VERSION,
@@ -838,4 +860,73 @@ fn test(a: &TestArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
     crate::output::print_line(&format!("{}: {label}", a.id))?;
     // exit 1 if the key didn't work, 0 if it did
     Ok(u8::from(!ok))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::outcome_report;
+    use paksmith_core::profile::key_test::KeyTestOutcome;
+
+    /// Every arm of the key-test report, including the one no fixture reaches.
+    ///
+    /// `Unsupported` is the point: through the command it is unreachable, so
+    /// its token, label and `ok` were all unpinned and a mutant claiming
+    /// `("verified", true, …)` for it passed the whole suite. `ok` is the
+    /// part that matters — it drives `Ok(u8::from(!ok))`, so flipping it turns
+    /// SPEC's exit 1 for an untestable layout into a silent success.
+    #[test]
+    fn outcome_report_pins_every_arm() {
+        assert_eq!(
+            outcome_report(&KeyTestOutcome::Verified),
+            ("verified", true, "verified")
+        );
+        assert_eq!(
+            outcome_report(&KeyTestOutcome::Decrypted),
+            ("decrypted", true, "decrypted (no index hash to verify)")
+        );
+        assert_eq!(
+            outcome_report(&KeyTestOutcome::WrongKey),
+            ("wrong_key", false, "wrong key")
+        );
+        assert_eq!(
+            outcome_report(&KeyTestOutcome::Unsupported),
+            (
+                "unsupported",
+                false,
+                "unsupported pak layout (key may be correct)"
+            )
+        );
+    }
+
+    /// The wire tokens and the human labels must stay distinct vocabularies:
+    /// the JSON token exists BECAUSE the table renders prose no script can
+    /// match on. A label edit that copied another outcome's text, or a token
+    /// that drifted into prose, would defeat that.
+    #[test]
+    fn outcome_tokens_are_machine_values_and_labels_are_not() {
+        // `Verified` is the one arm where token and label legitimately agree.
+        let cases = [
+            (KeyTestOutcome::Verified, true),
+            (KeyTestOutcome::Decrypted, false),
+            (KeyTestOutcome::WrongKey, false),
+            (KeyTestOutcome::Unsupported, false),
+        ];
+        let mut tokens = Vec::new();
+        for (outcome, token_equals_label) in cases {
+            let (token, _, label) = outcome_report(&outcome);
+            assert!(
+                !token.contains(' '),
+                "a wire token must not be prose, got {token:?}"
+            );
+            if token_equals_label {
+                assert_eq!(token, label);
+            } else {
+                assert_ne!(token, label, "token and label must differ: {token:?}");
+            }
+            tokens.push(token);
+        }
+        tokens.sort_unstable();
+        tokens.dedup();
+        assert_eq!(tokens.len(), 4, "all four tokens must be distinct");
+    }
 }
