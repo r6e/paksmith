@@ -5,9 +5,25 @@ use assert_cmd::Command;
 use ed25519_dalek::{Signer, SigningKey};
 use tempfile::tempdir;
 
+/// A `paksmith` invocation pinned to TABLE output.
+///
+/// `profile` honours `--format` since #658, and `--format auto` resolves to
+/// JSON whenever stdout is not a TTY — which is always true under
+/// `assert_cmd`. Every test below that asserts on human output therefore has
+/// to ask for the table explicitly, exactly as `cli_integration`'s
+/// `list ... --format table` does. The JSON tests use [`paksmith_json`].
 fn paksmith(config_dir: &std::path::Path) -> Command {
     let mut c = Command::cargo_bin("paksmith").unwrap();
     let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
+    let _ = c.args(["--format", "table"]);
+    c
+}
+
+/// A `paksmith` invocation pinned to JSON output (#658).
+fn paksmith_json(config_dir: &std::path::Path) -> Command {
+    let mut c = Command::cargo_bin("paksmith").unwrap();
+    let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
+    let _ = c.args(["--format", "json"]);
     c
 }
 
@@ -612,7 +628,7 @@ async fn profile_fetch_caches_signed_registry() {
     let _ = cmd
         .env("PAKSMITH_CONFIG_DIR", cfg.path())
         .env("PAKSMITH_ALLOW_HTTP", "1")
-        .args(["profile", "fetch"])
+        .args(["--format", "table", "profile", "fetch"])
         .assert()
         .success();
 
@@ -905,7 +921,7 @@ async fn profile_fetch_force_ignores_fresh_cache() {
         .unwrap()
         .env("PAKSMITH_CONFIG_DIR", cfg.path())
         .env("PAKSMITH_ALLOW_HTTP", "1")
-        .args(["profile", "fetch"])
+        .args(["--format", "table", "profile", "fetch"])
         .assert()
         .success();
 
@@ -914,7 +930,7 @@ async fn profile_fetch_force_ignores_fresh_cache() {
         .unwrap()
         .env("PAKSMITH_CONFIG_DIR", cfg.path())
         .env("PAKSMITH_ALLOW_HTTP", "1")
-        .args(["profile", "fetch"])
+        .args(["--format", "table", "profile", "fetch"])
         .assert()
         .success();
     let skip_txt = String::from_utf8(skip_out.get_output().stdout.clone()).unwrap();
@@ -985,7 +1001,7 @@ async fn profile_fetch_allow_http_still_verifies_signature() {
     let _ = cmd
         .env("PAKSMITH_CONFIG_DIR", cfg.path())
         .env("PAKSMITH_ALLOW_HTTP", "1")
-        .args(["profile", "fetch"])
+        .args(["--format", "table", "profile", "fetch"])
         .assert()
         .failure();
 
@@ -1351,4 +1367,170 @@ fn test_warns_only_when_a_wrong_key_came_from_the_registry() {
         .code(1);
     let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
     assert!(!err.contains("cached registry document"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// #658: `--format json` for the profile subcommands
+// ---------------------------------------------------------------------------
+
+/// Seed one local profile with an engine version and a key, so the JSON
+/// shapes below have every optional field populated.
+fn seed_one(cfg: &std::path::Path) {
+    let _ = paksmith(cfg)
+        .args([
+            "profile",
+            "add",
+            "hero",
+            "--name",
+            "Hero",
+            "--engine-version",
+            "5.3",
+        ])
+        .assert()
+        .success();
+    let _ = paksmith(cfg)
+        .args([
+            "profile",
+            "key",
+            "add",
+            "hero",
+            "--key",
+            "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de",
+        ])
+        .assert()
+        .success();
+}
+
+/// `schema_version` must be the FIRST key in the raw bytes, not merely
+/// present — a `parsed["schema_version"] == 1` assertion passes on any
+/// envelope and so cannot fail in the case it exists to catch. Mirrors
+/// `cli_integration::list_and_search_json_carry_schema_version_envelope`.
+fn assert_envelope_first(stdout: &str, body_key: &str, ctx: &str) {
+    let sv = stdout
+        .find("\"schema_version\"")
+        .unwrap_or_else(|| panic!("{ctx}: no schema_version in {stdout}"));
+    let body = stdout
+        .find(&format!("\"{body_key}\""))
+        .unwrap_or_else(|| panic!("{ctx}: no {body_key} in {stdout}"));
+    assert!(sv < body, "{ctx}: schema_version must precede {body_key}");
+    // First key in the RAW BYTES, tolerating pretty-print whitespace. Asserting
+    // mere presence would pass on any envelope, including one that emits
+    // schema_version last — the exact shape that cannot fail when it matters.
+    let after_brace = stdout
+        .trim_start()
+        .strip_prefix('{')
+        .expect("JSON object")
+        .trim_start();
+    assert!(
+        after_brace.starts_with("\"schema_version\""),
+        "{ctx}: schema_version must be the FIRST key, got: {stdout}"
+    );
+}
+
+#[test]
+fn profile_list_json_carries_envelope_and_rows() {
+    let cfg = tempdir().unwrap();
+    seed_one(cfg.path());
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_envelope_first(&stdout, "profiles", "list");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(
+        v.as_object().unwrap().len(),
+        2,
+        "envelope is exactly 2 keys"
+    );
+    let row = &v["profiles"][0];
+    assert_eq!(row["id"], "hero");
+    assert_eq!(row["name"], "Hero");
+    assert_eq!(row["engine_version"], "5.3");
+    assert_eq!(row["key_count"], 1);
+    assert_eq!(row["source"], "local");
+}
+
+#[test]
+fn profile_show_json_redacts_keys_unless_asked() {
+    let cfg = tempdir().unwrap();
+    seed_one(cfg.path());
+    // Default: the guid is listed, the key material is NOT present anywhere.
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "show", "hero"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_envelope_first(&stdout, "id", "show");
+    assert!(
+        !stdout.contains("94d25bc3"),
+        "key material must not appear without --show-keys: {stdout}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["source"], "local");
+    assert_eq!(v["engine_version"], "5.3");
+    assert!(v["keys"][0]["guid"].is_string(), "guid is always listed");
+    assert!(
+        v["keys"][0].get("key").is_none() || v["keys"][0]["key"].is_null(),
+        "key field absent or null when redacted"
+    );
+
+    // `--show-keys` is the deliberate reveal, mirroring the human path.
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "show", "hero", "--show-keys"])
+        .assert()
+        .success();
+    let shown = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        shown.contains("94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de"),
+        "--show-keys must reveal the key: {shown}"
+    );
+}
+
+#[test]
+fn profile_test_json_uses_a_stable_outcome_token() {
+    // The human label is prose ("decrypted (no index hash to verify)"); the
+    // JSON token must be a stable machine value a script can match on.
+    let cfg = tempdir().unwrap();
+    seed_one(cfg.path());
+    let pak = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/real_v8b_encrypted_index.pak");
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "test", "hero"])
+        .arg(&pak)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_envelope_first(&stdout, "id", "test");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["id"], "hero");
+    let outcome = v["outcome"].as_str().unwrap();
+    assert!(
+        ["verified", "decrypted", "wrong_key", "unsupported"].contains(&outcome),
+        "outcome must be a stable token, got {outcome:?}"
+    );
+    assert!(v["ok"].is_boolean(), "ok mirrors the exit code");
+}
+
+#[test]
+fn profile_mutations_stay_human_only_under_json() {
+    // Deliberate scope boundary: `add`/`remove` emit a confirmation line, not
+    // data — success is the exit code. They must NOT start emitting JSON just
+    // because --format json is set, and must not emit a bare human line onto
+    // a stdout a caller is parsing either; they print nothing to stdout.
+    let cfg = tempdir().unwrap();
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "add", "hero", "--name", "Hero"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.trim().is_empty() || serde_json::from_str::<serde_json::Value>(&stdout).is_ok(),
+        "a mutation under --format json must emit nothing or valid JSON, got: {stdout}"
+    );
 }

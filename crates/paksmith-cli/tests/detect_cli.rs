@@ -5,9 +5,16 @@ use std::fmt::Write as _;
 use assert_cmd::Command;
 use tempfile::tempdir;
 
+/// A `paksmith` invocation pinned to TABLE output.
+///
+/// `profile detect` honours `--format` since #658, and `--format auto`
+/// resolves to JSON whenever stdout is not a TTY — always true under
+/// `assert_cmd`. Tests asserting on human output must ask for the table
+/// explicitly, as `cli_integration`'s `list ... --format table` already does.
 fn paksmith(cfg: &std::path::Path) -> Command {
     let mut c = Command::cargo_bin("paksmith").unwrap();
     let _ = c.env("PAKSMITH_CONFIG_DIR", cfg);
+    let _ = c.args(["--format", "table"]);
     c
 }
 
