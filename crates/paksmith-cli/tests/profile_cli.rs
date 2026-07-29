@@ -19,6 +19,20 @@ fn paksmith(config_dir: &std::path::Path) -> Command {
     c
 }
 
+/// A `paksmith` invocation with NO `--format`, exercising the default
+/// resolution.
+///
+/// For this file's tests that drive the CONTAINER `list` via `--game`, not the
+/// `profile` family. `list` already honoured `--format` before #658, so off-TTY
+/// they have always asserted against the JSON writer; pinning them to the table
+/// through the shared helper would be an undeclared coverage shift dressed as
+/// consistency — the same carve-out `detect_cli.rs` makes.
+fn paksmith_unpinned(config_dir: &std::path::Path) -> Command {
+    let mut c = Command::cargo_bin("paksmith").unwrap();
+    let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
+    c
+}
+
 /// A `paksmith` invocation pinned to JSON output (#658).
 fn paksmith_json(config_dir: &std::path::Path) -> Command {
     let mut c = Command::cargo_bin("paksmith").unwrap();
@@ -525,7 +539,7 @@ fn game_flag_opens_encrypted_pak_via_profile() {
         .assert()
         .success();
     // --game resolves the key and `list` succeeds on the encrypted-index fixture
-    let out = paksmith(cfg.path())
+    let out = paksmith_unpinned(cfg.path())
         .args(["--game", "g", "list"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -559,7 +573,7 @@ fn aes_key_overrides_game() {
         .args(["profile", "key", "add", "g", "--key", &"00".repeat(32)])
         .assert()
         .success();
-    let _ = paksmith(cfg.path())
+    let _ = paksmith_unpinned(cfg.path())
         .args(["--game", "g", "--aes-key", KEY, "list"])
         .arg(fixture("real_v8b_encrypted_index.pak"))
         .assert()
@@ -1395,14 +1409,7 @@ fn seed_one(cfg: &std::path::Path) {
         .assert()
         .success();
     let _ = paksmith(cfg)
-        .args([
-            "profile",
-            "key",
-            "add",
-            "hero",
-            "--key",
-            "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de",
-        ])
+        .args(["profile", "key", "add", "hero", "--key", KEY])
         .assert()
         .success();
 }
@@ -1412,13 +1419,16 @@ fn seed_one(cfg: &std::path::Path) {
 /// envelope and so cannot fail in the case it exists to catch. Mirrors
 /// `cli_integration::list_and_search_json_carry_schema_version_envelope`.
 fn assert_envelope_first(stdout: &str, body_key: &str, ctx: &str) {
-    let sv = stdout
+    // Presence of both keys. The ORDERING between them needs no assert: the
+    // raw-byte check below proves `schema_version` is the first key after `{`,
+    // so it necessarily precedes every other. An `sv < body` compare here
+    // could not fail on its own.
+    let _ = stdout
         .find("\"schema_version\"")
         .unwrap_or_else(|| panic!("{ctx}: no schema_version in {stdout}"));
-    let body = stdout
+    let _ = stdout
         .find(&format!("\"{body_key}\""))
         .unwrap_or_else(|| panic!("{ctx}: no {body_key} in {stdout}"));
-    assert!(sv < body, "{ctx}: schema_version must precede {body_key}");
     // First key in the RAW BYTES, tolerating pretty-print whitespace. Asserting
     // mere presence would pass on any envelope, including one that emits
     // schema_version last — the exact shape that cannot fail when it matters.
@@ -1496,7 +1506,7 @@ fn profile_show_json_redacts_keys_unless_asked() {
         .success();
     let shown = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(
-        shown.contains("94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de"),
+        shown.contains(KEY),
         "--show-keys must reveal the key: {shown}"
     );
 }
@@ -1572,7 +1582,7 @@ fn profile_mutations_emit_a_receipt_under_json() {
     // under this one — a disjunction that cannot fail in the case it exists
     // to catch. It also never looked at stderr.
     let cfg = tempdir().unwrap();
-    let key = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+    let key = KEY;
     // Each case carries the EXACT prose its subcommand would have printed. The
     // first version of this guard hardcoded "profile `hero`", which the two
     // `key` sentences ("added key for GUID … to `hero`") never contain — so
@@ -1986,10 +1996,7 @@ fn profile_show_json_carries_mappings_pak_paths_name_and_every_key() {
     ] {
         let _ = paksmith(cfg.path())
             .args(["profile", "key", "add", "hero", "--guid", guid])
-            .args([
-                "--key",
-                "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de",
-            ])
+            .args(["--key", KEY])
             .assert()
             .success();
     }
@@ -2015,10 +2022,22 @@ fn profile_show_json_carries_mappings_pak_paths_name_and_every_key() {
         serde_json::json!(["/games/hero/Paks/*.pak", "/games/hero/Extra/*.pak"]),
         "every pak_path, in order: {stdout}"
     );
+    // BY VALUE, not just count: `guid: guid.to_hex()` could be blanked to
+    // `String::new()` and a length check would not notice — while the GUID is
+    // exactly what a consumer needs to call `key remove --guid`.
+    let guids: Vec<&str> = v["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["guid"].as_str().unwrap())
+        .collect();
     assert_eq!(
-        v["keys"].as_array().map(Vec::len),
-        Some(2),
-        "every key slot is listed: {stdout}"
+        guids,
+        vec![
+            "00000000000000000000000000000000",
+            "11111111111111111111111111111111"
+        ],
+        "every key slot is listed, by GUID, BTreeMap-ordered: {stdout}"
     );
 }
 
@@ -2100,7 +2119,7 @@ fn profile_mutations_print_their_confirmation_under_table() {
     // emitting the JSON receipt and CI would stay green. Half of a brand-new
     // two-arm function.
     let cfg = tempdir().unwrap();
-    let key = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+    let key = KEY;
     let cases: [(&[&str], &str); 4] = [
         (
             &["profile", "add", "hero", "--name", "Hero"],
@@ -2178,4 +2197,155 @@ fn profile_single_line_table_output_survives_a_closed_stdout() {
             "{args:?} must exit 0 on BrokenPipe, got {status:?}"
         );
     }
+}
+
+/// A non-default key slot, so tests exercise a GUID that is not the all-zero
+/// default every code path already produces.
+const ALT_GUID: &str = "1a2b3c4d5e6f708192a3b4c5d6e7f809";
+
+#[test]
+fn profile_key_receipts_report_the_slot_they_acted_on() {
+    // `MutationOutput.guid` could be hardcoded to the all-zero GUID and stay
+    // green: `key add` in the other tests omits `--guid` (so the default is
+    // what's expected anyway) and `key remove` passes the zero GUID. Neither
+    // exercises a non-default slot, so a receipt that always claims the
+    // default would misreport which key was touched.
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "hero", "--name", "Hero"])
+        .assert()
+        .success();
+
+    for (args, action) in [
+        (
+            vec![
+                "profile", "key", "add", "hero", "--guid", ALT_GUID, "--key", KEY,
+            ],
+            "key_added",
+        ),
+        (
+            vec!["profile", "key", "remove", "hero", "--guid", ALT_GUID],
+            "key_removed",
+        ),
+    ] {
+        let out = paksmith_json(cfg.path()).args(&args).assert().success();
+        let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(v["action"], action);
+        assert_eq!(
+            v["guid"], ALT_GUID,
+            "{action} must report the slot it acted on, not the default: {stdout}"
+        );
+    }
+}
+
+/// Spawn `paksmith` with `args`, close the read end of stdout BEFORE the child
+/// writes, and assert it exits 0 without panicking.
+///
+/// Dropping the reader first makes the result independent of payload size —
+/// the real defect only shows past the 64 KiB pipe buffer, so a small-fixture
+/// test would pass on the broken code.
+fn assert_closed_stdout_exits_clean(cfg: &std::path::Path, args: &[&str]) {
+    use std::io::Read;
+    use std::process::{Command as StdCommand, Stdio};
+    use std::thread;
+
+    let mut child = StdCommand::new(env!("CARGO_BIN_EXE_paksmith"))
+        .env("PAKSMITH_CONFIG_DIR", cfg)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let mut stderr = child.stderr.take().unwrap();
+    let handle = thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stderr.read_to_string(&mut buf);
+        buf
+    });
+    let status = child.wait().unwrap();
+    let stderr_text = handle.join().unwrap();
+    assert!(
+        !stderr_text.contains("panicked"),
+        "{args:?} panicked on a closed stdout: {stderr_text}"
+    );
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "{args:?} must exit 0 on BrokenPipe, got {status:?}"
+    );
+}
+
+#[test]
+fn profile_test_masks_its_wrong_key_exit_when_stdout_closes() {
+    // SPEC states BrokenPipe takes precedence over `test`'s wrong-key 1. That
+    // claim had NO coverage: both closed-stdout tests run `profile list`,
+    // which exits 0 regardless of pipe state, so neither can tell "BrokenPipe
+    // wins over 1" from "this command returns 0 anyway". `test` is the only
+    // command in the family where 0-vs-1 discriminates.
+    let cfg = tempdir().unwrap();
+    let pak = fixture("real_v8b_encrypted_index.pak");
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "wrong", "--name", "Wrong"])
+        .assert()
+        .success();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "wrong", "--key", &"00".repeat(32)])
+        .assert()
+        .success();
+
+    // Open stdout: the wrong key is a 1. This is the control — without it the
+    // assertions below would pass on a command that simply succeeds.
+    for fmt in ["json", "table"] {
+        let _ = paksmith_unpinned(cfg.path())
+            .args(["--format", fmt, "profile", "test", "wrong"])
+            .arg(&pak)
+            .assert()
+            .code(1);
+    }
+
+    // Closed stdout: BrokenPipe wins and the 1 is masked as 0.
+    let pak_s = pak.to_str().unwrap();
+    for fmt in ["json", "table"] {
+        assert_closed_stdout_exits_clean(
+            cfg.path(),
+            &["--format", fmt, "profile", "test", "wrong", pak_s],
+        );
+    }
+}
+
+#[test]
+fn profile_list_table_also_dedupes_a_repeated_registry_id() {
+    // The dedupe changed the HUMAN arm too, not just JSON — `profile_rows`
+    // feeds both. That makes the table output NOT byte-identical to pre-#658
+    // for this one input (three rows became two), which is deliberate but was
+    // documented as a JSON-only concern and pinned only on the JSON side.
+    let cfg = tempdir().unwrap();
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("registry-cache.json"),
+        r#"{"fetched_at_unix":9999999999,"profiles":[
+             {"id":"dup","name":"First","keys":{}},
+             {"id":"dup","name":"Second","keys":{}},
+             {"id":"uniq","name":"Unique","keys":{}}]}"#,
+    )
+    .unwrap();
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let dup_rows = stdout.lines().filter(|l| l.starts_with("dup\t")).count();
+    assert_eq!(dup_rows, 1, "one row for a repeated id: {stdout}");
+    assert!(
+        stdout.contains("First") && !stdout.contains("Second"),
+        "first occurrence wins in the table too: {stdout}"
+    );
+    assert!(
+        stdout.lines().any(|l| l.starts_with("uniq\t")),
+        "unrelated registry rows still render: {stdout}"
+    );
 }

@@ -407,9 +407,12 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
 /// NO profile-family arm calls this function, table or JSON, so the only
 /// difference between the two sinks is serde's own escaping, which covers
 /// C0 and nothing else. JSON is therefore never MORE leaky than the table
-/// beside it, and strictly less only when the hostile string contains C0
-/// (measured: 2 raw control bytes vs 4 for a mixed C0/C1 name; 4 vs 4
-/// when the string is all-C1). Note the counterfactual that shows the
+/// beside it, and strictly less only when the hostile string contains C0.
+/// Measured in raw control CHARACTERS, which is the unit that matters to a
+/// terminal and not the same as bytes here — U+009B is two UTF-8 bytes, so
+/// the same samples counted in bytes read 4-vs-6 and 8-vs-8: a mixed C0/C1
+/// name yields 2 through JSON against 4 through the table, and an all-C1
+/// name yields 4 against 4. Note the counterfactual that shows the
 /// mechanism: were the table arms to start calling this function, the
 /// table would drop to 0 and JSON would be the leakier sink.
 pub(crate) fn sanitize_for_display(s: &str) -> std::borrow::Cow<'_, str> {

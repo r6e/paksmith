@@ -1,7 +1,7 @@
 //! Frontend-agnostic key/profile resolution: shared by the CLI and GUI so the
 //! Phase 5 `--game`/`--detect` logic lives in exactly one place.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::container::pak::PakReader;
@@ -10,7 +10,7 @@ use crate::profile::MappingsSource;
 use crate::profile::cache::RegistryCache;
 use crate::profile::config::{RegistryConfig, ensure_key_matches_registry};
 use crate::profile::detection::rules_match;
-use crate::profile::registry::RegistryClient;
+use crate::profile::registry::{RegistryClient, RegistryProfile};
 use crate::{
     AesKey, KeyGuid, PaksmithError, ProfileStore, ResolvedProfile, display_guid,
     resolve_profile_layered,
@@ -645,10 +645,7 @@ pub(crate) fn available_in(
         });
     }
     let Some(c) = cache else { return out };
-    for p in &c.doc.profiles {
-        if store.profiles.contains_key(&p.id) {
-            continue;
-        }
+    for p in unshadowed_registry(store, c) {
         out.push(DetectMatch {
             id: p.id.clone(),
             name: p.name.clone(),
@@ -687,10 +684,7 @@ pub(crate) fn detect_in(
         }
     }
     let Some(c) = cache else { return out };
-    for p in &c.doc.profiles {
-        if store.profiles.contains_key(&p.id) {
-            continue;
-        }
+    for p in unshadowed_registry(store, c) {
         let Some(rules) = &p.detect else { continue };
         if rules_match(dir, rules) {
             out.push(DetectMatch {
@@ -701,6 +695,34 @@ pub(crate) fn detect_in(
         }
     }
     out
+}
+
+/// Registry profiles that survive layering: not shadowed by a local id, and
+/// not a repeat of an earlier registry id.
+///
+/// TWO rules, because a registry document can violate uniqueness by itself —
+/// `validate_caps` bounds the profile count and the string lengths but never
+/// checks that ids are distinct. First occurrence wins, matching
+/// [`RegistryCache::get`]'s `.find()`, so every layered view answers with the
+/// same profile.
+///
+/// Shared rather than repeated: both callers feed id-keyed collections that
+/// reach a machine interface — `available_in` the GUI's profile list, and
+/// `detect_in` the `matches` array of `paksmith profile detect --format json`
+/// (#658). A duplicate there is not cosmetic: `--detect` requires exactly one
+/// match, so a repeated id used to fail with `matched multiple game profiles:
+/// dup, dup` — a profile reported ambiguous with itself, whose suggested
+/// remedy `--game dup` would have worked.
+fn unshadowed_registry<'a>(
+    store: &'a ProfileStore,
+    cache: &'a RegistryCache,
+) -> impl Iterator<Item = &'a RegistryProfile> {
+    let mut seen: BTreeSet<&'a str> = store.profiles.keys().map(String::as_str).collect();
+    cache
+        .doc
+        .profiles
+        .iter()
+        .filter(move |p| seen.insert(p.id.as_str()))
 }
 
 #[cfg(test)]

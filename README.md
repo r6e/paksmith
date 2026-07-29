@@ -154,8 +154,11 @@ Exit codes: **2** is a real error — `paksmith: error: …` on stderr, stdout
 empty, no document in either format. There is no JSON error envelope. **1** is
 not an error but `profile test` reporting a key that did not open the archive
 (`outcome` `wrong_key` or `unsupported`); the document is still written, so
-branch on `ok` rather than treating non-zero as failure. A closed stdout (`|
-head -1`) exits **0** and takes precedence over the 1.
+branch on `ok` rather than treating non-zero as failure. A stdout that closes
+before the document is written masks the 1 as **0** — BrokenPipe takes
+precedence. Note this is not what `| head -1` does here: the `test` document is
+small enough to fit the pipe buffer, so the write succeeds and the 1 stands.
+Reaching the masked case takes a reader that closes first, such as `| true`.
 
 ### `paksmith inspect`
 

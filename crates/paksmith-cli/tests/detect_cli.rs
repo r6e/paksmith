@@ -361,3 +361,94 @@ fn detect_json_emits_an_empty_array_when_nothing_matches() {
         "the human message must not leak into the document: {stdout}"
     );
 }
+
+#[test]
+fn detect_json_dedupes_a_repeated_registry_id_and_labels_it_registry() {
+    // Two findings in one test, deliberately.
+    //
+    // 1. `detect.matches` is an array consumers key by id, and core's
+    //    `detect_in` only skipped ids shadowed by the LOCAL store — a registry
+    //    document repeating an id (nothing validates uniqueness) produced two
+    //    rows for one profile. `--detect` then failed with "matched multiple
+    //    game profiles: dup, dup" — a profile ambiguous with ITSELF, whose
+    //    suggested remedy `--game dup` would have worked.
+    // 2. `source: "registry"` was pinned by no test on this surface, though a
+    //    core doc claims the per-surface pins are what catch a partial rename.
+    //    A registry-only match exercises both at once.
+    let cfg = tempdir().unwrap();
+    let game = tempdir().unwrap();
+    std::fs::create_dir_all(game.path().join("DupGame/Content/Paks")).unwrap();
+
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    let rules = r#"{"require_paths":["DupGame/Content/Paks"]}"#;
+    std::fs::write(
+        base.join("registry-cache.json"),
+        format!(
+            r#"{{"fetched_at_unix":9999999999,"profiles":[
+                 {{"id":"dup","name":"First Copy","keys":{{}},"detect":{rules}}},
+                 {{"id":"dup","name":"Second Copy","keys":{{}},"detect":{rules}}}]}}"#
+        ),
+    )
+    .unwrap();
+
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "detect"])
+        .arg(game.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let matches = v["matches"].as_array().unwrap();
+
+    assert_eq!(
+        matches.len(),
+        1,
+        "a repeated registry id must match ONCE: {stdout}"
+    );
+    assert_eq!(matches[0]["id"], "dup");
+    assert_eq!(
+        matches[0]["name"], "First Copy",
+        "first occurrence wins, as RegistryCache::get's .find() does: {stdout}"
+    );
+    assert_eq!(
+        matches[0]["source"], "registry",
+        "exact wire token on the registry arm: {stdout}"
+    );
+}
+
+#[test]
+fn detect_flag_resolves_a_repeated_registry_id_instead_of_calling_it_ambiguous() {
+    // The user-visible half of the same defect: `--detect` requires exactly
+    // one match, so before the dedupe a duplicated id was reported ambiguous
+    // with itself and exited 2.
+    let cfg = tempdir().unwrap();
+    let game = tempdir().unwrap();
+    std::fs::create_dir_all(game.path().join("DupGame/Content/Paks")).unwrap();
+
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    let rules = r#"{"require_paths":["DupGame/Content/Paks"]}"#;
+    std::fs::write(
+        base.join("registry-cache.json"),
+        format!(
+            r#"{{"fetched_at_unix":9999999999,"profiles":[
+                 {{"id":"dup","name":"First Copy","keys":{{"00000000000000000000000000000000":"{KEY}"}},"detect":{rules}}},
+                 {{"id":"dup","name":"Second Copy","keys":{{"00000000000000000000000000000000":"{KEY}"}},"detect":{rules}}}]}}"#
+        ),
+    )
+    .unwrap();
+
+    let out = paksmith_unpinned(cfg.path())
+        .args(["--detect"])
+        .arg(game.path())
+        .arg("list")
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("test.txt"),
+        "the duplicated id must resolve to one profile and decrypt: {stdout}"
+    );
+}

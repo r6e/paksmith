@@ -5,14 +5,13 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use clap::{Args, Subcommand};
+use serde::Serialize;
 
 use paksmith_core::error::ProfileFault;
 use paksmith_core::{
     AesKey, GameProfile, KeyGuid, MappingsSource, PaksmithError, ProfileStore, ResolvedProfile,
     display_guid, resolve_profile_layered,
 };
-
-use serde::Serialize;
 
 use crate::output::{OutputFormat, ResolvedFormat};
 
@@ -144,9 +143,11 @@ pub(crate) struct RemoveArgs {
 // The repo's rule is SHARE a `schema_version` when the SHAPE is shared, keep
 // it command-local when the shapes differ — `output.rs` versions `list` and
 // `search` together *because* both emit the identical `EntryRow` through one
-// writer, while `inspect` and `extract` version separately. No two documents
-// below share a shape, so each carries its own. The four mutations DO share
-// one (`MutationOutput`) and so share one constant.
+// writer, while `inspect` and `extract` version separately. No two of the
+// READ documents below share a shape, so each carries its own. The four
+// mutations DO share one (`MutationOutput`) and so share one constant — the
+// `guid` two of them carry is an optional field on one shape, not a second
+// shape, so a consumer that keys on `action` sees one document either way.
 //
 // `schema_version` is declared FIRST in every struct so serde emits it first;
 // the raw-byte POSITION is what the tests pin, because asserting the key
@@ -381,26 +382,77 @@ pub(crate) fn run(
     }
 }
 
+/// A completed store mutation, carrying everything both output arms need.
+///
+/// An enum rather than parallel `msg` / `action` / `id` / `guid` arguments:
+/// those were four positional values, two of them `&str` and therefore
+/// swappable with no compile error, and nothing tied the prose to the wire
+/// token — `confirm(fmt, "removed profile `x`", "added", …)` was expressible.
+/// Here each variant owns both spellings, so a mismatched pair cannot be
+/// written, and `guid`'s presence follows from the variant rather than from
+/// remembering to pass `Some` at two call sites out of four.
+enum Mutation<'a> {
+    Added { id: &'a str },
+    Removed { id: &'a str },
+    KeyAdded { id: &'a str, guid: KeyGuid },
+    KeyRemoved { id: &'a str, guid: KeyGuid },
+}
+
+impl Mutation<'_> {
+    /// The STABLE wire token. Exhaustive, so a fifth mutation cannot ship
+    /// without choosing one.
+    fn token(&self) -> &'static str {
+        match self {
+            Self::Added { .. } => "added",
+            Self::Removed { .. } => "removed",
+            Self::KeyAdded { .. } => "key_added",
+            Self::KeyRemoved { .. } => "key_removed",
+        }
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            Self::Added { id }
+            | Self::Removed { id }
+            | Self::KeyAdded { id, .. }
+            | Self::KeyRemoved { id, .. } => id,
+        }
+    }
+
+    /// The key slot acted on, for the two subcommands that have one.
+    fn guid(&self) -> Option<KeyGuid> {
+        match self {
+            Self::Added { .. } | Self::Removed { .. } => None,
+            Self::KeyAdded { guid, .. } | Self::KeyRemoved { guid, .. } => Some(*guid),
+        }
+    }
+
+    /// The human sentence, byte-identical to what these commands printed
+    /// before `--format` reached this family.
+    fn sentence(&self) -> String {
+        match self {
+            Self::Added { id } => format!("added profile `{id}`"),
+            Self::Removed { id } => format!("removed profile `{id}`"),
+            Self::KeyAdded { id, guid } => {
+                format!("added key for GUID {} to `{id}`", guid.to_hex())
+            }
+            Self::KeyRemoved { id, guid } => {
+                format!("removed key for GUID {} from `{id}`", guid.to_hex())
+            }
+        }
+    }
+}
+
 /// Report a completed store mutation: the human sentence under `--format
 /// table`, a [`MutationOutput`] receipt under `--format json`.
-///
-/// `action` is the machine token and `msg` the prose; they are separate
-/// arguments rather than one derived from the other so that rewording the
-/// sentence cannot silently change the wire token.
-fn confirm(
-    fmt: ResolvedFormat,
-    msg: &str,
-    action: &'static str,
-    id: &str,
-    guid: Option<&KeyGuid>,
-) -> io::Result<()> {
+fn confirm(fmt: ResolvedFormat, m: &Mutation<'_>) -> io::Result<()> {
     match fmt {
-        ResolvedFormat::Table => crate::output::print_line(msg),
+        ResolvedFormat::Table => crate::output::print_line(&m.sentence()),
         ResolvedFormat::Json => crate::output::print_json(&MutationOutput {
             schema_version: MUTATION_SCHEMA_VERSION,
-            action,
-            id: id.to_string(),
-            guid: guid.map(KeyGuid::to_hex),
+            action: m.token(),
+            id: m.id().to_string(),
+            guid: m.guid().map(|g| g.to_hex()),
         }),
     }
 }
@@ -442,13 +494,7 @@ fn add(a: &AddArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
         },
     );
     store.save()?;
-    confirm(
-        fmt,
-        &format!("added profile `{}`", a.id),
-        "added",
-        &a.id,
-        None,
-    )?;
+    confirm(fmt, &Mutation::Added { id: &a.id })?;
     Ok(0)
 }
 
@@ -628,13 +674,7 @@ fn remove(a: &RemoveArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Re
         return Err(hint_read_only_then_not_found(&a.id, quiet));
     }
     store.save()?;
-    confirm(
-        fmt,
-        &format!("removed profile `{}`", a.id),
-        "removed",
-        &a.id,
-        None,
-    )?;
+    confirm(fmt, &Mutation::Removed { id: &a.id })?;
     Ok(0)
 }
 
@@ -657,13 +697,7 @@ fn key_add(a: &KeyAddArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::R
         .ok_or_else(|| hint_read_only_then_not_found(&a.id, quiet))?;
     let _ = p.keys.insert(guid, key);
     store.save()?;
-    confirm(
-        fmt,
-        &format!("added key for GUID {} to `{}`", guid.to_hex(), a.id),
-        "key_added",
-        &a.id,
-        Some(&guid),
-    )?;
+    confirm(fmt, &Mutation::KeyAdded { id: &a.id, guid })?;
     Ok(0)
 }
 
@@ -686,13 +720,7 @@ fn key_remove(a: &KeyRemoveArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_c
         });
     }
     store.save()?;
-    confirm(
-        fmt,
-        &format!("removed key for GUID {} from `{}`", guid.to_hex(), a.id),
-        "key_removed",
-        &a.id,
-        Some(&guid),
-    )?;
+    confirm(fmt, &Mutation::KeyRemoved { id: &a.id, guid })?;
     Ok(0)
 }
 
@@ -802,11 +830,15 @@ fn test(a: &TestArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
     // `matches!(outcome, Verified | Decrypted)` for `ok` is not
     // exhaustiveness-checked: a fifth `KeyTestOutcome` variant would flag the
     // token arm at compile time while silently becoming `ok: false` and exit 1.
-    let (token, ok) = match outcome {
-        KeyTestOutcome::Verified => ("verified", true),
-        KeyTestOutcome::Decrypted => ("decrypted", true),
-        KeyTestOutcome::WrongKey => ("wrong_key", false),
-        KeyTestOutcome::Unsupported => ("unsupported", false),
+    let (token, ok, label) = match outcome {
+        KeyTestOutcome::Verified => ("verified", true, "verified"),
+        KeyTestOutcome::Decrypted => ("decrypted", true, "decrypted (no index hash to verify)"),
+        KeyTestOutcome::WrongKey => ("wrong_key", false, "wrong key"),
+        KeyTestOutcome::Unsupported => (
+            "unsupported",
+            false,
+            "unsupported pak layout (key may be correct)",
+        ),
     };
     if matches!(fmt, ResolvedFormat::Json) {
         let out = TestOutput {
@@ -818,12 +850,6 @@ fn test(a: &TestArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
         crate::output::print_json(&out)?;
         return Ok(u8::from(!ok));
     }
-    let label = match outcome {
-        KeyTestOutcome::Verified => "verified",
-        KeyTestOutcome::Decrypted => "decrypted (no index hash to verify)",
-        KeyTestOutcome::WrongKey => "wrong key",
-        KeyTestOutcome::Unsupported => "unsupported pak layout (key may be correct)",
-    };
     crate::output::print_line(&format!("{}: {label}", a.id))?;
     // exit 1 if the key didn't work, 0 if it did
     Ok(u8::from(!ok))
