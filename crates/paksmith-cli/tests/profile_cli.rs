@@ -6,7 +6,10 @@ use ed25519_dalek::{Signer, SigningKey};
 use tempfile::tempdir;
 
 mod common;
-use common::{assert_envelope_first, paksmith_json, paksmith_table, paksmith_unpinned};
+use common::{
+    assert_envelope_first, paksmith_json, paksmith_table, paksmith_unpinned,
+    seed_registry_cache_json,
+};
 
 /// Deterministic test keypair (seed `[7u8; 32]`) + its verifying key as lowercase
 /// hex. Shared by every signed-registry test so the seed/fold isn't duplicated.
@@ -1014,12 +1017,12 @@ fn seed_registry_cache(config_dir: &std::path::Path, id: &str, name: &str) {
 /// As above, with an explicit key — lets a test seed a WRONG registry key,
 /// which is the only way to reach `test`'s stale-cache note.
 fn seed_registry_cache_with_key(config_dir: &std::path::Path, id: &str, name: &str, key: &str) {
-    let base = config_dir.join("paksmith");
-    std::fs::create_dir_all(&base).unwrap();
-    let cache_json = format!(
-        r#"{{"fetched_at_unix":9999999999,"profiles":[{{"id":"{id}","name":"{name}","engine_version":"5.3","keys":{{"00000000000000000000000000000000":"{key}"}}}}]}}"#
+    seed_registry_cache_json(
+        config_dir,
+        &format!(
+            r#"{{"id":"{id}","name":"{name}","engine_version":"5.3","keys":{{"00000000000000000000000000000000":"{key}"}}}}"#
+        ),
     );
-    std::fs::write(base.join("registry-cache.json"), cache_json).unwrap();
 }
 
 /// `profile show` resolves a registry-cached id and reports its provenance.
@@ -1943,15 +1946,12 @@ fn profile_list_json_emits_a_duplicated_registry_id_once() {
     // the two surfaces disagree about the same store and the array gains a
     // duplicate key.
     let cfg = tempdir().unwrap();
-    let base = cfg.path().join("paksmith");
-    std::fs::create_dir_all(&base).unwrap();
-    std::fs::write(
-        base.join("registry-cache.json"),
-        r#"{"fetched_at_unix":9999999999,"profiles":[
+    seed_registry_cache_json(
+        cfg.path(),
+        r#"
              {"id":"dup","name":"First","keys":{}},
-             {"id":"dup","name":"Second","keys":{}}]}"#,
-    )
-    .unwrap();
+             {"id":"dup","name":"Second","keys":{}}"#,
+    );
 
     let out = paksmith_json(cfg.path())
         .args(["profile", "list"])
@@ -2128,16 +2128,13 @@ fn profile_list_table_also_dedupes_a_repeated_registry_id() {
     // for this one input (three rows became two), which is deliberate but was
     // documented as a JSON-only concern and pinned only on the JSON side.
     let cfg = tempdir().unwrap();
-    let base = cfg.path().join("paksmith");
-    std::fs::create_dir_all(&base).unwrap();
-    std::fs::write(
-        base.join("registry-cache.json"),
-        r#"{"fetched_at_unix":9999999999,"profiles":[
+    seed_registry_cache_json(
+        cfg.path(),
+        r#"
              {"id":"dup","name":"First","keys":{}},
              {"id":"dup","name":"Second","keys":{}},
-             {"id":"uniq","name":"Unique","keys":{}}]}"#,
-    )
-    .unwrap();
+             {"id":"uniq","name":"Unique","keys":{}}"#,
+    );
 
     let out = paksmith_table(cfg.path())
         .args(["profile", "list"])

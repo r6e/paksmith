@@ -124,3 +124,19 @@ pub fn paksmith_unpinned(config_dir: &std::path::Path) -> assert_cmd::Command {
     let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
     c
 }
+
+/// Write a raw registry-cache document under `config_dir`, with `profiles`
+/// spliced in verbatim as the JSON array body.
+///
+/// Raw on purpose: the duplicate-id and shadowing tests need documents the
+/// typed seeders cannot express (repeated ids, per-entry detect rules), and
+/// six call sites were hand-rolling this identical create-dir + write.
+pub fn seed_registry_cache_json(config_dir: &std::path::Path, profiles: &str) {
+    let base = config_dir.join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("registry-cache.json"),
+        format!(r#"{{"fetched_at_unix":9999999999,"profiles":[{profiles}]}}"#),
+    )
+    .unwrap();
+}

@@ -129,8 +129,8 @@ profile id, `list` and `detect` now report it once rather than once per
 occurrence, in both formats. The first occurrence wins, matching which profile
 `--game` and `show` already resolved. The GUI's profile selector dedupes with
 them, and `profile detect` (plus that selector's loader) logs one warning per
-genuinely repeated id; `list` collapses silently, so the cross-check that works
-everywhere is `fetch.profile_count` against the rows `list` returns.
+genuinely repeated id; `list` collapses silently, so absent that warning the
+signal is the `fetch.profile_count` comparison described below.
 
 Each read surface carries its own `schema_version` — no two return the same
 document — and the four mutations share one, because they share one shape:
@@ -151,9 +151,10 @@ table's prose, which reads "decrypted (no index hash to verify)"; branch on
 `fetch.fetched` is false when a fresh cache short-circuited the network, so a
 script can tell "already current" from "downloaded". `fetch.profile_count` is
 how many profiles the registry document carries — deliberately not spelled
-`profiles`, which on `list` is an array, and not the same number: `list`
-collapses a local shadow or a repeated id, so a difference between the two is
-the signal that the document contains duplicates. The mutations return an
+`profiles`, which on `list` is an array. To detect collapsed entries, compare
+it with the number of `source: "registry"` rows `list` returns — not `list`'s
+total, which counts local rows too; any gap is entries collapsed by shadowing
+or repetition, and the counts alone cannot say which. The mutations return an
 `action` of `added`, `removed`, `key_added` or `key_removed`; the two `key`
 subcommands also report the `guid` slot they acted on, which `add` and `remove`
 omit because they have none. It is normalised to lowercase hex rather than

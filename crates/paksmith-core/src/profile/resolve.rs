@@ -771,8 +771,11 @@ fn unshadowed_registry<'a>(
             // its own copy (`commands/profile.rs::profile_rows`), and
             // `show`/`--game` resolve via `RegistryCache::get`'s `.find()`,
             // which never iterates far enough to notice one. The cross-check
-            // that works everywhere is `fetch.profile_count` (raw document
-            // count) against `list`'s deduped rows.
+            // that needs no warn is `fetch.profile_count` (raw document count)
+            // against the number of `source: "registry"` rows `list` returns —
+            // NOT `list`'s total, which counts local rows too. Any gap is
+            // entries collapsed by shadowing or repetition; the counts alone
+            // cannot say which.
             //
             // `id.clone()` binds a plain `String` and NOT the `%` sigil — see
             // `load_cache_lenient`'s canonical note at the top of this file:
@@ -800,16 +803,6 @@ mod tests {
     use crate::GameProfile;
     use crate::profile::detection::DetectRules;
 
-    /// A raw control byte in an untrusted value must not reach the `--detect`
-    /// warn raw. That fault interpolates the caller-supplied directory, so an
-    /// empty store plus no cache drives `DetectionNoMatch` through the warn
-    /// without touching the filesystem.
-    ///
-    /// Scope, because the wider reading is false: this pins the `--detect` warn
-    /// ONLY. The ESC enters through `dir`, which no other warn in this file
-    /// sees, so reverting one of those to `%` emits no ESC and both assertions
-    /// still pass. The `detection` module's equivalent test does not reach here
-    /// either — its call graph never enters `resolve.rs`.
     #[tracing_test::traced_test]
     #[test]
     fn duplicate_id_warn_fires_once_and_never_for_a_local_shadow() {
@@ -841,18 +834,25 @@ mod tests {
         // `shadowed` appears TWICE — only a repeat reaches the warn branch,
         // so the `contains_key` guard there is unobservable with a single
         // occurrence (removing it survived a probe until this second copy
-        // existed). `dup` appears THREE times, and the count assertion below
-        // pins ONE warn line, not two — the once-per-distinct-id flooding cap,
-        // which `logs_contain` alone cannot express.
+        // existed). The repeated id appears THREE times, and the count
+        // assertion below pins ONE warn line, not two — the once-per-distinct-
+        // id flooding cap, which `logs_contain` alone cannot express.
+        //
+        // The repeated id CARRIES A RAW ESC, making this the escaping pin for
+        // this warn: the id is registry-authored text on a terminal sink, and
+        // without it, reverting the `id = p.id.clone()` binding to the `%`
+        // sigil was caught by nothing in the workspace.
+        let esc = '\u{1b}';
+        let dup_id = format!("dup{esc}[2JX");
         let cache = RegistryCache {
             fetched_at_unix: 0,
             doc: crate::profile::registry::RegistryDoc {
                 profiles: vec![
                     reg("shadowed", "Reg Copy"),
-                    reg("dup", "First"),
-                    reg("dup", "Second"),
+                    reg(&dup_id, "First"),
+                    reg(&dup_id, "Second"),
                     reg("shadowed", "Reg Copy Again"),
-                    reg("dup", "Third"),
+                    reg(&dup_id, "Third"),
                 ],
             },
         };
@@ -862,12 +862,20 @@ mod tests {
             .collect();
         assert_eq!(
             kept,
-            vec!["dup"],
+            vec![dup_id.as_str()],
             "shadow dropped silently, repeat kept once"
         );
         assert!(
             logs_contain("repeats a profile id"),
             "a genuine intra-document repeat must warn"
+        );
+        assert!(
+            logs_contain("\\u{1b}"),
+            "the registry-authored id must reach the record ESCAPED"
+        );
+        assert!(
+            !logs_contain(&esc.to_string()),
+            "no raw ESC may reach the log record — the `%` sigil would"
         );
         logs_assert(|lines: &[&str]| {
             let n = lines
@@ -888,6 +896,16 @@ mod tests {
         );
     }
 
+    /// A raw control byte in an untrusted value must not reach the `--detect`
+    /// warn raw. That fault interpolates the caller-supplied directory, so an
+    /// empty store plus no cache drives `DetectionNoMatch` through the warn
+    /// without touching the filesystem.
+    ///
+    /// Scope, because the wider reading is false: this pins the `--detect` warn
+    /// ONLY. The ESC enters through `dir`, which no other warn in this file
+    /// sees, so reverting one of those to `%` emits no ESC and both assertions
+    /// still pass. The `detection` module's equivalent test does not reach here
+    /// either — its call graph never enters `resolve.rs`.
     #[tracing_test::traced_test]
     #[test]
     fn detect_warn_escapes_an_untrusted_dir() {

@@ -239,11 +239,12 @@ struct FetchOutput {
     /// How many profiles the fetched DOCUMENT carries.
     ///
     /// NOT `list.profiles`, which is an array of rows — and not even the same
-    /// count: `list` renders the layered view and collapses a local shadow or
-    /// a repeated id, while this counts what the registry shipped. Named
-    /// distinctly so one word cannot mean an array on one surface and an
-    /// integer on another; it is also the only signal that a duplicate was
-    /// collapsed.
+    /// count: `list` renders the layered view. Named distinctly so one word
+    /// cannot mean an array on one surface and an integer on another. The
+    /// comparison that means something is this against the number of
+    /// `source: "registry"` rows `list` returns (NOT `list`'s total, which
+    /// counts local rows too); any gap is entries collapsed by shadowing or
+    /// repetition, and the counts alone cannot say which.
     profile_count: usize,
 }
 
@@ -719,6 +720,30 @@ fn key_remove(a: &KeyRemoveArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_c
     Ok(0)
 }
 
+/// Report `fetch`'s outcome: the wire flag and its prose paired in ONE match,
+/// in the [`confirm`]/[`outcome_report`] style — the two emit paths repeated
+/// the `FetchOutput` construction and the format branch verbatim, differing
+/// only in the flag, the count and the sentence.
+fn report_fetch(fmt: ResolvedFormat, fetched: bool, profile_count: usize) -> io::Result<()> {
+    match fmt {
+        ResolvedFormat::Json => crate::output::print_json(&FetchOutput {
+            schema_version: FETCH_SCHEMA_VERSION,
+            fetched,
+            profile_count,
+        }),
+        ResolvedFormat::Table => {
+            let sentence = if fetched {
+                format!("fetched {profile_count} profiles")
+            } else {
+                format!(
+                    "registry cache is fresh ({profile_count} profiles); use --force to re-fetch"
+                )
+            };
+            crate::output::print_line(&sentence)
+        }
+    }
+}
+
 fn fetch(a: &FetchArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
     use paksmith_core::RegistryConfig;
     use paksmith_core::profile::cache::RegistryCache;
@@ -743,19 +768,7 @@ fn fetch(a: &FetchArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
         && let Some(existing) = paksmith_core::profile::resolve::load_cache_lenient()
         && !existing.is_stale(now, staleness_hours)
     {
-        if matches!(fmt, ResolvedFormat::Json) {
-            let out = FetchOutput {
-                schema_version: FETCH_SCHEMA_VERSION,
-                fetched: false,
-                profile_count: existing.doc.profiles.len(),
-            };
-            crate::output::print_json(&out)?;
-            return Ok(0);
-        }
-        crate::output::print_line(&format!(
-            "registry cache is fresh ({} profiles); use --force to re-fetch",
-            existing.doc.profiles.len()
-        ))?;
+        report_fetch(fmt, false, existing.doc.profiles.len())?;
         return Ok(0);
     }
 
@@ -767,16 +780,7 @@ fn fetch(a: &FetchArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
         doc,
     };
     cache.save()?;
-    if matches!(fmt, ResolvedFormat::Json) {
-        let out = FetchOutput {
-            schema_version: FETCH_SCHEMA_VERSION,
-            fetched: true,
-            profile_count: cache.doc.profiles.len(),
-        };
-        crate::output::print_json(&out)?;
-        return Ok(0);
-    }
-    crate::output::print_line(&format!("fetched {} profiles", cache.doc.profiles.len()))?;
+    report_fetch(fmt, true, cache.doc.profiles.len())?;
     Ok(0)
 }
 

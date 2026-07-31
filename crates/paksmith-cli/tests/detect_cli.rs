@@ -5,7 +5,10 @@ use std::fmt::Write as _;
 use tempfile::tempdir;
 
 mod common;
-use common::{assert_envelope_first, paksmith_json, paksmith_table, paksmith_unpinned};
+use common::{
+    assert_envelope_first, paksmith_json, paksmith_table, paksmith_unpinned,
+    seed_registry_cache_json,
+};
 
 /// Add a profile via the CLI, then hand-append a `[profiles.<id>.detect]` table
 /// into `profiles.toml`. This exercises the append-TOML round-trip path; if the
@@ -75,6 +78,17 @@ const KEY: &str = common::FIXTURE_AES_KEY_HEX;
 /// a `.find()`, so whichever copy answers must be the one whose key
 /// `--game`/`--detect` will actually use.
 const WRONG_KEY: &str = "11111111111111111111111111111111111111111111111111111111111111ff";
+
+/// The detect rules every duplicate-id test seeds, and the directory that
+/// satisfies them — four tests re-spelled both.
+const DUP_RULES: &str = r#"{"require_paths":["DupGame/Content/Paks"]}"#;
+
+/// A game dir matching [`DUP_RULES`].
+fn dup_game_dir() -> tempfile::TempDir {
+    let game = tempdir().unwrap();
+    std::fs::create_dir_all(game.path().join("DupGame/Content/Paks")).unwrap();
+    game
+}
 
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -337,21 +351,16 @@ fn detect_json_dedupes_a_repeated_registry_id_and_labels_it_registry() {
     //    core doc claims the per-surface pins are what catch a partial rename.
     //    A registry-only match exercises both at once.
     let cfg = tempdir().unwrap();
-    let game = tempdir().unwrap();
-    std::fs::create_dir_all(game.path().join("DupGame/Content/Paks")).unwrap();
+    let game = dup_game_dir();
 
-    let base = cfg.path().join("paksmith");
-    std::fs::create_dir_all(&base).unwrap();
-    let rules = r#"{"require_paths":["DupGame/Content/Paks"]}"#;
-    std::fs::write(
-        base.join("registry-cache.json"),
-        format!(
-            r#"{{"fetched_at_unix":9999999999,"profiles":[
-                 {{"id":"dup","name":"First Copy","keys":{{}},"detect":{rules}}},
-                 {{"id":"dup","name":"Second Copy","keys":{{}},"detect":{rules}}}]}}"#
+    seed_registry_cache_json(
+        cfg.path(),
+        &format!(
+            r#"
+                 {{"id":"dup","name":"First Copy","keys":{{}},"detect":{DUP_RULES}}},
+                 {{"id":"dup","name":"Second Copy","keys":{{}},"detect":{DUP_RULES}}}"#
         ),
-    )
-    .unwrap();
+    );
 
     let out = paksmith_json(cfg.path())
         .args(["profile", "detect"])
@@ -384,21 +393,16 @@ fn detect_flag_resolves_a_repeated_registry_id_instead_of_calling_it_ambiguous()
     // one match, so before the dedupe a duplicated id was reported ambiguous
     // with itself and exited 2.
     let cfg = tempdir().unwrap();
-    let game = tempdir().unwrap();
-    std::fs::create_dir_all(game.path().join("DupGame/Content/Paks")).unwrap();
+    let game = dup_game_dir();
 
-    let base = cfg.path().join("paksmith");
-    std::fs::create_dir_all(&base).unwrap();
-    let rules = r#"{"require_paths":["DupGame/Content/Paks"]}"#;
-    std::fs::write(
-        base.join("registry-cache.json"),
-        format!(
-            r#"{{"fetched_at_unix":9999999999,"profiles":[
-                 {{"id":"dup","name":"First Copy","keys":{{"00000000000000000000000000000000":"{KEY}"}},"detect":{rules}}},
-                 {{"id":"dup","name":"Second Copy","keys":{{"00000000000000000000000000000000":"{WRONG_KEY}"}},"detect":{rules}}}]}}"#
+    seed_registry_cache_json(
+        cfg.path(),
+        &format!(
+            r#"
+                 {{"id":"dup","name":"First Copy","keys":{{"00000000000000000000000000000000":"{KEY}"}},"detect":{DUP_RULES}}},
+                 {{"id":"dup","name":"Second Copy","keys":{{"00000000000000000000000000000000":"{WRONG_KEY}"}},"detect":{DUP_RULES}}}"#
         ),
-    )
-    .unwrap();
+    );
 
     let out = paksmith_unpinned(cfg.path())
         .args(["--detect"])
@@ -429,21 +433,16 @@ fn detect_ignores_rules_on_a_later_copy_of_a_duplicated_id() {
     // the dedupe after the rules check leaves them green while silently
     // reinstating that key confusion. This is the case that distinguishes them.
     let cfg = tempdir().unwrap();
-    let game = tempdir().unwrap();
-    std::fs::create_dir_all(game.path().join("DupGame/Content/Paks")).unwrap();
+    let game = dup_game_dir();
 
-    let base = cfg.path().join("paksmith");
-    std::fs::create_dir_all(&base).unwrap();
-    let rules = r#"{"require_paths":["DupGame/Content/Paks"]}"#;
-    std::fs::write(
-        base.join("registry-cache.json"),
-        format!(
-            r#"{{"fetched_at_unix":9999999999,"profiles":[
+    seed_registry_cache_json(
+        cfg.path(),
+        &format!(
+            r#"
                  {{"id":"dup","name":"First, no rules","keys":{{"00000000000000000000000000000000":"{KEY}"}}}},
-                 {{"id":"dup","name":"Second, matching rules","keys":{{}},"detect":{rules}}}]}}"#
+                 {{"id":"dup","name":"Second, matching rules","keys":{{}},"detect":{DUP_RULES}}}"#
         ),
-    )
-    .unwrap();
+    );
 
     let out = paksmith_json(cfg.path())
         .args(["profile", "detect"])
@@ -481,22 +480,17 @@ fn detect_table_also_dedupes_a_repeated_registry_id() {
     // ROADMAP discloses that as a deliberate human-arm behaviour change; this
     // is what makes the claim pinned rather than asserted.
     let cfg = tempdir().unwrap();
-    let game = tempdir().unwrap();
-    std::fs::create_dir_all(game.path().join("DupGame/Content/Paks")).unwrap();
+    let game = dup_game_dir();
 
-    let base = cfg.path().join("paksmith");
-    std::fs::create_dir_all(&base).unwrap();
-    let rules = r#"{"require_paths":["DupGame/Content/Paks"]}"#;
-    std::fs::write(
-        base.join("registry-cache.json"),
-        format!(
-            r#"{{"fetched_at_unix":9999999999,"profiles":[
-                 {{"id":"dup","name":"First Copy","keys":{{}},"detect":{rules}}},
-                 {{"id":"dup","name":"Second Copy","keys":{{}},"detect":{rules}}},
-                 {{"id":"uniq","name":"Unique","keys":{{}},"detect":{rules}}}]}}"#
+    seed_registry_cache_json(
+        cfg.path(),
+        &format!(
+            r#"
+                 {{"id":"dup","name":"First Copy","keys":{{}},"detect":{DUP_RULES}}},
+                 {{"id":"dup","name":"Second Copy","keys":{{}},"detect":{DUP_RULES}}},
+                 {{"id":"uniq","name":"Unique","keys":{{}},"detect":{DUP_RULES}}}"#
         ),
-    )
-    .unwrap();
+    );
 
     let out = paksmith_table(cfg.path())
         .args(["profile", "detect"])
