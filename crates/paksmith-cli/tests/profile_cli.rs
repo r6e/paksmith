@@ -280,7 +280,9 @@ fn list_empty_is_success() {
         .success();
 }
 
-const KEY: &str = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+/// The fixture key, by REFERENCE to the shared constant — re-spelling the
+/// 64 hex bytes here is how the two drift.
+const KEY: &str = common::FIXTURE_AES_KEY_HEX;
 
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

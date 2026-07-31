@@ -46,25 +46,28 @@ pub fn load_cache_lenient() -> Option<RegistryCache> {
     match RegistryCache::load() {
         Ok(c) => c,
         Err(e) => {
-            // `e.to_string()` and NOT the `%` sigil, here and at every other
-            // warn in this file. CANONICAL statement of the mechanism, which
-            // other sites reference: `%` is `field::display()`, which
-            // the default `fmt` subscriber writes RAW, while a plain `String`
-            // field arrives at `record_str`. Escaping is the SUBSCRIBER's
-            // choice rather than a property of `record_str` — `fmt`'s visitor
-            // Debug-renders the value and so escapes it, and this workspace
-            // ships a counter-example in `paksmith-gui`'s `log_buffer`, whose
-            // visitor deliberately captures a `message` field raw.
-            // These faults interpolate untrusted text — registry-supplied ids,
+            // A plain-`String` field (`e.to_string()` here, `id.clone()` at
+            // the dedupe warn) and NOT the `%` sigil, at every warn in this
+            // file. CANONICAL statement of the mechanism, which other sites
+            // reference: `%` is `field::display()`, which the default `fmt`
+            // subscriber writes RAW, while a plain `String` field arrives at
+            // `record_str`. Escaping is the SUBSCRIBER's choice rather than a
+            // property of `record_str` — `fmt`'s visitor Debug-renders the
+            // value and so escapes it, and this workspace ships a
+            // counter-example in `paksmith-gui`'s `log_buffer`, whose visitor
+            // deliberately captures a `message` field raw.
+            // These warns interpolate untrusted text — registry-supplied ids,
             // hex and paths — so a raw ESC here retitles or clears the user's
             // terminal (#708).
             //
-            // Coverage, stated exactly: THREE of this file's FIVE warns are
+            // Coverage, stated exactly: FOUR of this file's SIX warns are
             // pinned. `detect_warn_escapes_an_untrusted_dir` drives the
             // `--detect` one and `unparsable_engine_version_degrades_to_no_hint`
-            // the `engine_version` one, both in this file; the CLI's
-            // `game_offline_degrades_to_stale_cache` drives the fetch-failure
-            // one — and needs no I/O to do it, since an `http://` URL with
+            // the `engine_version` one, both in this file;
+            // `duplicate_id_warn_fires_once_and_never_for_a_local_shadow`
+            // drives `unshadowed_registry`'s dedupe warn in both polarities;
+            // and the CLI's `game_offline_degrades_to_stale_cache` drives the
+            // fetch-failure one — needing no I/O, since an `http://` URL with
             // `PAKSMITH_ALLOW_HTTP` unset fails on scheme before any socket
             // opens. THIS warn and the store-unreadable one bind their fault
             // identically but are undriven; both need an injected I/O failure,
@@ -746,25 +749,46 @@ fn unshadowed_registry<'a>(
     store: &'a ProfileStore,
     cache: &'a RegistryCache,
 ) -> impl Iterator<Item = &'a RegistryProfile> {
-    let mut seen: BTreeSet<&'a str> = store.profiles.keys().map(String::as_str).collect();
+    // TWO separate sets, because the two drop rules must not share a branch:
+    // seeding one set with the local ids made the ordinary local-shadows-
+    // registry path — which `hint_read_only_then_not_found` actively tells
+    // users to create — fire the "repeats a profile id" warn for a document
+    // that repeats nothing.
+    let mut seen_registry: BTreeSet<&'a str> = BTreeSet::new();
+    let mut warned: BTreeSet<&'a str> = BTreeSet::new();
     cache.doc.profiles.iter().filter(move |p| {
-        if seen.insert(p.id.as_str()) {
-            return true;
+        if !seen_registry.insert(p.id.as_str()) {
+            // A genuine intra-document repeat. Warn once per distinct id (a
+            // hostile document can carry ~10k entries under one id, and one
+            // line per occurrence would be its own flooding primitive), and
+            // only when the id is not ALSO locally shadowed — there the local
+            // profile wins, nothing registry-side is kept, and "keeping the
+            // first occurrence" would be false.
+            //
+            // Reach, stated exactly: this warn fires only on the two surfaces
+            // that route through this helper — `profile detect` and the GUI's
+            // profile list. `profile list` dedupes the same repeat SILENTLY in
+            // its own copy (`commands/profile.rs::profile_rows`), and
+            // `show`/`--game` resolve via `RegistryCache::get`'s `.find()`,
+            // which never iterates far enough to notice one. The cross-check
+            // that works everywhere is `fetch.profile_count` (raw document
+            // count) against `list`'s deduped rows.
+            //
+            // `id.clone()` binds a plain `String` and NOT the `%` sigil — see
+            // `load_cache_lenient`'s canonical note at the top of this file:
+            // registry-authored text on a terminal sink (#708).
+            if !store.profiles.contains_key(p.id.as_str()) && warned.insert(p.id.as_str()) {
+                tracing::warn!(
+                    id = p.id.clone(),
+                    "registry document repeats a profile id; keeping the first occurrence"
+                );
+            }
+            return false;
         }
-        // Warn, because otherwise a collapsed entry is invisible on EVERY
-        // surface: `list`, `show`, `detect` and the GUI all show one row, and
-        // only `fetch.profile_count` (the raw document count) differs. A
-        // publisher's accidental duplicate would otherwise resolve silently to
-        // whichever copy came first.
-        //
-        // `id.clone()` and NOT the `%` sigil — see `load_cache_lenient`'s
-        // canonical note at the top of this file: registry-authored text on a
-        // terminal sink (#708).
-        tracing::warn!(
-            id = p.id.clone(),
-            "registry document repeats a profile id; keeping the first occurrence"
-        );
-        false
+        // Locally shadowed: drop SILENTLY. This is the designed precedence
+        // mechanism, was silent before the dedupe existed, and the document
+        // did nothing wrong.
+        !store.profiles.contains_key(p.id.as_str())
     })
 }
 
@@ -786,6 +810,84 @@ mod tests {
     /// sees, so reverting one of those to `%` emits no ESC and both assertions
     /// still pass. The `detection` module's equivalent test does not reach here
     /// either — its call graph never enters `resolve.rs`.
+    #[tracing_test::traced_test]
+    #[test]
+    fn duplicate_id_warn_fires_once_and_never_for_a_local_shadow() {
+        // BOTH polarities of `unshadowed_registry`'s dedupe warn, pinned
+        // because each failed silently once: deleting the warn survived the
+        // whole workspace suite, and an earlier version seeded its `seen` set
+        // with the LOCAL store's ids, so the ordinary local-shadows-registry
+        // path — the designed precedence mechanism — logged "registry
+        // document repeats a profile id" for a document that repeats nothing.
+        let reg = |id: &str, name: &str| crate::profile::registry::RegistryProfile {
+            id: id.into(),
+            name: name.into(),
+            engine_version: None,
+            keys: BTreeMap::new(),
+            detect: None,
+        };
+        let mut store = ProfileStore::default();
+        let _ = store.profiles.insert(
+            "shadowed".into(),
+            GameProfile {
+                name: "Local".into(),
+                engine_version: None,
+                keys: BTreeMap::new(),
+                detect: None,
+                mappings: None,
+                pak_paths: Vec::new(),
+            },
+        );
+        // `shadowed` appears TWICE — only a repeat reaches the warn branch,
+        // so the `contains_key` guard there is unobservable with a single
+        // occurrence (removing it survived a probe until this second copy
+        // existed). `dup` appears THREE times, and the count assertion below
+        // pins ONE warn line, not two — the once-per-distinct-id flooding cap,
+        // which `logs_contain` alone cannot express.
+        let cache = RegistryCache {
+            fetched_at_unix: 0,
+            doc: crate::profile::registry::RegistryDoc {
+                profiles: vec![
+                    reg("shadowed", "Reg Copy"),
+                    reg("dup", "First"),
+                    reg("dup", "Second"),
+                    reg("shadowed", "Reg Copy Again"),
+                    reg("dup", "Third"),
+                ],
+            },
+        };
+
+        let kept: Vec<&str> = unshadowed_registry(&store, &cache)
+            .map(|p| p.id.as_str())
+            .collect();
+        assert_eq!(
+            kept,
+            vec!["dup"],
+            "shadow dropped silently, repeat kept once"
+        );
+        assert!(
+            logs_contain("repeats a profile id"),
+            "a genuine intra-document repeat must warn"
+        );
+        logs_assert(|lines: &[&str]| {
+            let n = lines
+                .iter()
+                .filter(|l| l.contains("repeats a profile id"))
+                .count();
+            if n == 1 {
+                Ok(())
+            } else {
+                Err(format!("expected exactly ONE dedupe warn line, got {n}"))
+            }
+        });
+        assert!(
+            !logs_contain("shadowed"),
+            "a locally-shadowed id must NOT be named by the warn, even when \
+             the document also repeats it — the local profile wins, nothing \
+             registry-side is kept, and the warn's own sentence would be false"
+        );
+    }
+
     #[tracing_test::traced_test]
     #[test]
     fn detect_warn_escapes_an_untrusted_dir() {

@@ -597,16 +597,21 @@ fn show(a: &ShowArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
         ResolvedProfile::Registry(_) => (None, [].as_slice()),
     };
 
+    // The `--show-keys` reveal gate, expressed ONCE and consumed by both
+    // arms. Two independent gates (one per arm) meant two `key_hex` call
+    // sites whose agreement was a convention; this is now the crate's only
+    // `key_hex` call, so the redaction story has a single place to audit.
+    let keys: Vec<KeyRow> = resolved
+        .keys()
+        .iter()
+        .map(|(guid, key)| KeyRow {
+            guid: guid.to_hex(),
+            // Deliberate reveal: only `--show-keys` renders key material.
+            key: a.show_keys.then(|| paksmith_core::profile::key_hex(key)),
+        })
+        .collect();
+
     if matches!(fmt, ResolvedFormat::Json) {
-        let keys = resolved
-            .keys()
-            .iter()
-            .map(|(guid, key)| KeyRow {
-                guid: guid.to_hex(),
-                // Deliberate reveal, gated exactly as the human path gates it.
-                key: a.show_keys.then(|| paksmith_core::profile::key_hex(key)),
-            })
-            .collect();
         let out = ShowOutput {
             schema_version: SHOW_SCHEMA_VERSION,
             id: a.id.clone(),
@@ -648,17 +653,10 @@ fn show(a: &ShowArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
         }
     }
     writeln!(out, "keys:")?;
-    for (guid, key) in resolved.keys() {
-        if a.show_keys {
-            // Deliberate reveal: only `--show-keys` renders key material.
-            writeln!(
-                out,
-                "  {} = {}",
-                guid.to_hex(),
-                paksmith_core::profile::key_hex(key)
-            )?;
-        } else {
-            writeln!(out, "  {} = <redacted>", guid.to_hex())?;
+    for row in &keys {
+        match &row.key {
+            Some(k) => writeln!(out, "  {} = {k}", row.guid)?,
+            None => writeln!(out, "  {} = <redacted>", row.guid)?,
         }
     }
     out.flush()?;
