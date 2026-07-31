@@ -767,8 +767,10 @@ fn unshadowed_registry<'a>(
             //
             // Reach: this warn fires wherever `detect_in`/`available_in`
             // run — every `--detect` resolution (the global flag on any
-            // container command, where the Profile dispatch arm drops the
-            // globals so `--detect … profile <cmd>` is inert; the
+            // container command; the Profile dispatch arm forwards `format`
+            // and `quiet` but drops the selector globals
+            // `--aes-key`/`--game`/`--detect`, so `--detect … profile <cmd>`
+            // is inert; the
             // `profile detect` subcommand; the GUI's install-dir open flow,
             // which reaches the same branch through `resolve_pak_key`;
             // pak_paths expansion; and parse-input resolution) plus the
