@@ -128,9 +128,10 @@ One change reaches the human output too: when a registry document repeats a
 profile id, `list` and `detect` now report it once rather than once per
 occurrence, in both formats. The first occurrence wins, matching which profile
 `--game` and `show` already resolved. The GUI's profile selector dedupes with
-them, and `profile detect` (plus that selector's loader) logs one warning per
-genuinely repeated id; `list` collapses silently, so absent that warning the
-signal is the `fetch.profile_count` comparison described below.
+them, and any `--detect` resolution — the global flag on any command, the
+`profile detect` subcommand, or the GUI selector's loader — logs one warning
+per genuinely repeated id; `list` collapses silently, so absent that warning
+the signal is the `fetch.profile_count` comparison described below.
 
 Each read surface carries its own `schema_version` — no two return the same
 document — and the four mutations share one, because they share one shape:

@@ -765,10 +765,13 @@ fn unshadowed_registry<'a>(
             // profile wins, nothing registry-side is kept, and "keeping the
             // first occurrence" would be false.
             //
-            // Reach, stated exactly: this warn fires only on the two surfaces
-            // that route through this helper — `profile detect` and the GUI's
-            // profile list. `profile list` dedupes the same repeat SILENTLY in
-            // its own copy (`commands/profile.rs::profile_rows`), and
+            // Reach: this warn fires wherever `detect_in`/`available_in`
+            // run — every `--detect` resolution (the global flag on any
+            // container command, the `profile detect` subcommand, pak_paths
+            // expansion, and parse-input resolution) plus the GUI's profile
+            // list. It does NOT fire from `profile list`, which dedupes the
+            // same repeat SILENTLY in its own copy
+            // (`commands/profile.rs::profile_rows`), and
             // `show`/`--game` resolve via `RegistryCache::get`'s `.find()`,
             // which never iterates far enough to notice one. The cross-check
             // that needs no warn is `fetch.profile_count` (raw document count)
