@@ -720,10 +720,14 @@ fn key_remove(a: &KeyRemoveArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_c
     Ok(0)
 }
 
-/// Report `fetch`'s outcome: the wire flag and its prose paired in ONE match,
-/// in the [`confirm`]/[`outcome_report`] style — the two emit paths repeated
-/// the `FetchOutput` construction and the format branch verbatim, differing
-/// only in the flag, the count and the sentence.
+/// Report `fetch`'s outcome on either format.
+///
+/// The prose is a pure function of `fetched`, computed inside this one seam —
+/// which is what keeps flag and sentence paired. Unlike [`confirm`]'s
+/// `Mutation` enum this takes plain arguments: `bool` and `usize` are not the
+/// swappable same-typed pair that enum exists to prevent. Before the seam,
+/// `fetch`'s two emit paths repeated the `FetchOutput` construction and the
+/// format branch verbatim.
 fn report_fetch(fmt: ResolvedFormat, fetched: bool, profile_count: usize) -> io::Result<()> {
     match fmt {
         ResolvedFormat::Json => crate::output::print_json(&FetchOutput {

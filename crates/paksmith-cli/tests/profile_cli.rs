@@ -763,8 +763,6 @@ fn game_offline_degrades_to_stale_cache() {
 #[test]
 fn profile_list_shows_cached_registry_profiles() {
     let cfg = tempfile::tempdir().unwrap();
-    let base = cfg.path().join("paksmith");
-    std::fs::create_dir_all(&base).unwrap();
 
     // One local profile.
     let _ = paksmith_table(cfg.path())
@@ -772,12 +770,14 @@ fn profile_list_shows_cached_registry_profiles() {
         .assert()
         .success();
 
-    // Pre-seed a cache with two entries: one unique registry-only, one shadowed by local.
-    // We use a fake (non-matching) local profile id for the shadowed entry.
-    let cache_json = format!(
-        r#"{{"fetched_at_unix":9999999999,"profiles":[{{"id":"reg-only","name":"RegOnly","keys":{{"00000000000000000000000000000000":"{KEY}"}}}},{{"id":"local-game","name":"Shadowed","keys":{{}}}}]}}"#
+    // Two cache entries: one unique registry-only, one shadowed by local.
+    seed_registry_cache_json(
+        cfg.path(),
+        &format!(
+            r#"{{"id":"reg-only","name":"RegOnly","keys":{{"00000000000000000000000000000000":"{KEY}"}}}},
+               {{"id":"local-game","name":"Shadowed","keys":{{}}}}"#
+        ),
     );
-    std::fs::write(base.join("registry-cache.json"), cache_json).unwrap();
 
     let out = paksmith_table(cfg.path())
         .args(["profile", "list"])

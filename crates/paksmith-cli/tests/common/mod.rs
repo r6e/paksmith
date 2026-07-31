@@ -130,7 +130,8 @@ pub fn paksmith_unpinned(config_dir: &std::path::Path) -> assert_cmd::Command {
 ///
 /// Raw on purpose: the duplicate-id and shadowing tests need documents the
 /// typed seeders cannot express (repeated ids, per-entry detect rules), and
-/// six call sites were hand-rolling this identical create-dir + write.
+/// eight call sites — seven tests plus the typed seeder — were hand-rolling
+/// this identical create-dir + write.
 pub fn seed_registry_cache_json(config_dir: &std::path::Path, profiles: &str) {
     let base = config_dir.join("paksmith");
     std::fs::create_dir_all(&base).unwrap();
