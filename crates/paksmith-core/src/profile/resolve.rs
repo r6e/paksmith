@@ -767,10 +767,15 @@ fn unshadowed_registry<'a>(
             //
             // Reach: this warn fires wherever `detect_in`/`available_in`
             // run — every `--detect` resolution (the global flag on any
-            // container command, the `profile detect` subcommand, pak_paths
-            // expansion, and parse-input resolution) plus the GUI's profile
-            // list. It does NOT fire from `profile list`, which dedupes the
-            // same repeat SILENTLY in its own copy
+            // container command, where the Profile dispatch arm drops the
+            // globals so `--detect … profile <cmd>` is inert; the
+            // `profile detect` subcommand; the GUI's install-dir open flow,
+            // which reaches the same branch through `resolve_pak_key`;
+            // pak_paths expansion; and parse-input resolution) plus the
+            // GUI's profile list, whose loader runs no detection and warns
+            // whenever it loads over such a cache. It does NOT fire from
+            // `profile list`, which dedupes the same repeat SILENTLY in its
+            // own copy
             // (`commands/profile.rs::profile_rows`), and
             // `show`/`--game` resolve via `RegistryCache::get`'s `.find()`,
             // which never iterates far enough to notice one. The cross-check
