@@ -146,3 +146,45 @@ pub fn seed_registry_cache_json(config_dir: &std::path::Path, profiles: &str) {
     )
     .unwrap();
 }
+
+/// The value-collision polarity of [`assert_envelope_first`]'s three pins: a
+/// document whose VALUE equals the key name, while that key is itself
+/// ABSENT, must panic at the key lookup. (With the real key also present,
+/// the token search rightly finds it and the document passes.)
+/// Committed because only an out-of-tree review probe distinguished the
+/// token search from the old quoted-string search — every real CLI envelope
+/// carries its real keys, so the whole suite stayed green with the colon
+/// reverted.
+///
+/// All three pins run once per test binary that declares `mod common`; that
+/// redundancy is cheaper than the false passes they pin against.
+#[test]
+#[should_panic(expected = "no `id` key")]
+fn envelope_helper_rejects_a_value_colliding_with_the_key_name() {
+    // The value IS the key name; the key is absent. The pre-fix search
+    // (`"id"` anywhere) accepted this document.
+    assert_envelope_first(r#"{ "schema_version": 1, "note": "id" }"#, "id", "pin");
+}
+
+/// The position polarity — the property the helper's own doc calls the
+/// point. Without this, weakening `starts_with` to `contains` survived the
+/// whole suite: the collision pin panics at the key lookup before the
+/// position assert runs, and every real envelope already puts
+/// `schema_version` first.
+#[test]
+#[should_panic(expected = "must be the FIRST key")]
+fn envelope_helper_rejects_schema_version_that_is_not_first() {
+    assert_envelope_first(r#"{"id":"x","schema_version":1}"#, "id", "pin");
+}
+
+#[test]
+fn envelope_helper_accepts_the_key_in_both_serde_forms() {
+    // Compact and pretty: serde's formatter puts the colon directly after
+    // the key quote in both, which is what the token search relies on.
+    assert_envelope_first(r#"{"schema_version":1,"id":"x"}"#, "id", "compact");
+    assert_envelope_first(
+        "{\n  \"schema_version\": 1,\n  \"id\": \"x\"\n}",
+        "id",
+        "pretty",
+    );
+}
