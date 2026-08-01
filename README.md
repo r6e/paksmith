@@ -130,13 +130,15 @@ occurrence, in both formats. The first occurrence wins, matching which profile
 `--game` and `show` already resolved. The GUI's profile selector dedupes with
 them. Any `--detect` resolution — the global flag on `paksmith list`,
 `search`, `inspect` or `extract`, the `profile detect` subcommand, or the
-GUI's install-dir detect flow — logs one warning per genuinely repeated id,
-and so does the GUI selector's loader, independent of `--detect`;
+GUI's install-dir detect flow — logs one warning per genuinely repeated id
+(unless a local profile shadows that id — then the local copy wins and the
+collapse is silent), and so does the GUI selector's loader, independent of
+`--detect`;
 `profile list` collapses silently, so absent that warning the signal is the
 `fetch.profile_count` comparison described below. (The selector globals
 `--game`/`--detect`/`--aes-key` are not used by `profile` subcommands,
-though `--aes-key` is still validated before dispatch; `--format` and
-`--quiet` apply there as everywhere.)
+though `--aes-key` is still validated before dispatch; `--format`,
+`--verbose` and `--quiet` apply there as everywhere.)
 
 Each read surface carries its own `schema_version` — no two return the same
 document — and the four mutations share one, because they share one shape:
