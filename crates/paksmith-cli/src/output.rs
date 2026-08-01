@@ -85,6 +85,58 @@ pub(crate) fn serde_json_to_io(e: serde_json::Error) -> io::Error {
         .map_or_else(|| io::Error::other(e.to_string()), io::Error::from)
 }
 
+/// Write `value` as pretty JSON to stdout, then a newline.
+///
+/// Streaming to a locked `BufWriter` rather than `println!("{}",
+/// to_string_pretty(..)?)` is load-bearing, not stylistic: `println!`
+/// PANICS when the downstream reader closes the pipe (`… | head -1`),
+/// exiting 101 — a code the shipped scheme does not contain (SPEC: "0
+/// success, including BrokenPipe on stdout"). Going through
+/// `serde_json_to_io` instead yields `Io(BrokenPipe)`, which `main.rs`
+/// maps to a clean 0.
+///
+/// The bug that motivates the doc is payload-size dependent: a document
+/// smaller than the 64 KiB pipe buffer lands before the reader exits and
+/// appears to work, so a small-fixture test passes while the field case
+/// panics. Reach for this helper for any new JSON surface that owns
+/// stdout for the whole command.
+///
+/// It is NOT the only writer of the `to_writer_pretty` + `serde_json_to_io`
+/// pair, and deliberately so, for two different reasons.
+/// `print_entries`/`print_entries_grouped` acquire ONE `BufWriter` before
+/// the format match and emit both forms through it, so delegating would
+/// mean hoisting that lock into each arm — and calling this helper under a
+/// live outer `BufWriter` would take a second `stdout.lock()` and interleave
+/// the output (the lock is reentrant, so it would not even deadlock to warn
+/// you). `ExtractSummary::render` has no lock at all: it writes to a
+/// caller-supplied `&mut dyn Write` so its unit tests can capture the
+/// output, and this helper hardcodes stdout.
+pub(crate) fn print_json<T: Serialize>(value: &T) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    serde_json::to_writer_pretty(&mut out, value).map_err(serde_json_to_io)?;
+    writeln!(out)?;
+    // Explicit: `BufWriter::drop` also flushes but SWALLOWS the error, so
+    // without this the pipe-closed signal is lost before `?` can see it.
+    out.flush()
+}
+
+/// Write one human-readable line to stdout.
+///
+/// Exists for the same reason as [`print_json`] — a bare `println!` panics
+/// with exit 101 on a closed pipe instead of routing `BrokenPipe` to
+/// `main.rs`'s clean-exit handler. The table renderers in `output.rs`
+/// already write through a `BufWriter`; the `profile` family did not, so its
+/// single-line messages panicked — e.g. `no profiles` on an empty store, or a
+/// mutation's confirmation. (`profile list` with rows goes through `list()`'s
+/// own `BufWriter`, not this helper.)
+pub(crate) fn print_line(line: &str) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    writeln!(out, "{line}")?;
+    out.flush()
+}
+
 /// `list`/`search` JSON schema version (#652). COMMAND-SHARED on
 /// purpose, unlike `inspect`/`extract`'s command-local versions: both
 /// commands emit the same `EntryRow` shape through the same
@@ -341,12 +393,24 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
 /// and `detect` render registry-authored `name`/`id`/`engine_version`,
 /// and `profile`'s not-found hints echo an id that may have been copied
 /// from a registry listing. Registry strings are length-capped
-/// (`MAX_STR`) but not character-class restricted. The JSON path
-/// deliberately has no equivalent — NOT
-/// because serde escapes everything (it escapes C0 only; DEL and C1
-/// incl. U+009B pass through as raw UTF-8) but because JSON is the
-/// machine interface: exact path bytes are the round-tripping
-/// contract, and machine consumers don't interpret terminal controls.
+/// (`MAX_STR`) but not character-class restricted.
+///
+/// The JSON path deliberately has no equivalent — NOT because serde
+/// escapes everything (it escapes C0 only; DEL and C1 incl. U+009B pass
+/// through as raw UTF-8) but because JSON is the machine interface and
+/// machine consumers don't interpret terminal controls. Round-tripping
+/// is the reason for the fields that ARE fed back (`path` into `inspect`,
+/// `id` into `--game`); for display-only fields (`name`,
+/// `engine_version`) the reason is only the machine-interface half.
+///
+/// Since #658 the `profile` family emits JSON too, carrying the same
+/// registry-authored strings; neither its table nor its JSON arm calls this
+/// function. The TABLE arm therefore remains a #708 surface; the JSON arm is
+/// not one — it is the machine interface the paragraph above exempts, and
+/// sanitizing it would break the round-tripping contract. Under
+/// `--format auto` the piped case is now the C0-escaped JSON rather than the
+/// raw table; an explicit `--format table | less` still ships raw ESC, DEL
+/// and C1.
 pub(crate) fn sanitize_for_display(s: &str) -> std::borrow::Cow<'_, str> {
     if s.chars().any(char::is_control) {
         std::borrow::Cow::Owned(

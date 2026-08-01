@@ -117,6 +117,73 @@ a versioned envelope shared with `search`:
 { "schema_version": 1, "entries": [ { "path": "...", "size": 123, "...": "..." } ] }
 ```
 
+### `paksmith profile`
+
+Every `profile` subcommand honours `--format`, resolving `auto` the same way
+`list` does — table on a terminal, JSON when piped or redirected. **Piping
+`profile list` therefore yields JSON, not the tab-separated table.** Pass
+`--format table` to keep the human shape in a script.
+
+One change reaches the human output too: when a registry document repeats a
+profile id, `list` and `detect` now report it once rather than once per
+occurrence, in both formats. The first occurrence wins, matching which profile
+`--game` and `show` already resolved. The GUI's profile selector dedupes with
+them. Any `--detect` resolution — the global flag on `paksmith list`,
+`search`, `inspect` or `extract`, the `profile detect` subcommand, or the
+GUI's install-dir detect flow — logs one warning per genuinely repeated id
+(unless a local profile shadows that id — then the local copy wins and the
+collapse is silent), and so does the GUI selector's loader, independent of
+`--detect`;
+`profile list` collapses silently, so absent that warning the signal is the
+`fetch.profile_count` comparison described below. (The selector globals
+`--game`/`--detect`/`--aes-key` are not used by `profile` subcommands,
+though `--aes-key` is still validated before dispatch; `--format`,
+`--verbose` and `--quiet` apply there as everywhere.)
+
+Each read surface carries its own `schema_version` — no two return the same
+document — and the four mutations share one, because they share one shape:
+
+| command | shape |
+|---|---|
+| `list` | `{schema_version, profiles: [{id, name, engine_version, key_count, source}]}` |
+| `show` | `{schema_version, id, source, name, engine_version, mappings, pak_paths, keys}` |
+| `detect` | `{schema_version, dir, matches: [{id, name, source}]}` |
+| `test` | `{schema_version, id, outcome, ok}` |
+| `fetch` | `{schema_version, fetched, profile_count}` |
+| `add`, `remove`, `key add`, `key remove` | `{schema_version, action, id, guid?}` |
+
+`source` is `local` or `registry`. `test.outcome` is a stable token —
+`verified`, `decrypted`, `wrong_key` or `unsupported` — deliberately not the
+table's prose, which reads "decrypted (no index hash to verify)"; branch on
+`ok`, and treat an unrecognised `outcome` as informational.
+`fetch.fetched` is false when a fresh cache short-circuited the network, so a
+script can tell "already current" from "downloaded". `fetch.profile_count` is
+how many profiles the registry document carries — deliberately not spelled
+`profiles`, which on `list` is an array. To detect collapsed entries, compare
+it with the number of `source: "registry"` rows `list` returns — not `list`'s
+total, which counts local rows too; any gap is entries collapsed by shadowing
+or repetition, and the counts alone cannot say which. The mutations return an
+`action` of `added`, `removed`, `key_added` or `key_removed`; the two `key`
+subcommands also report the `guid` slot they acted on, which `add` and `remove`
+omit because they have none. It is normalised to lowercase hex rather than
+echoed, so compare case-insensitively against a `--guid` you passed.
+
+`show` renders key material only under `--show-keys`; when redacted the `key`
+field is **omitted entirely** rather than set to a placeholder, so the presence
+of the field is itself the signal.
+
+Exit codes: **2** is a real error — `paksmith: error: …` on stderr, stdout
+empty, no document in either format. There is no JSON error envelope. **1** is
+not an error but `profile test` reporting a key that did not open the archive
+(`outcome` `wrong_key` or `unsupported`); the document is still written, so
+branch on `ok` rather than treating non-zero as failure. A stdout that closes
+before the document is written masks the 1 as **0** — BrokenPipe takes
+precedence. Note this is not what `| head -1` does here: the `test` document is
+small enough to fit the pipe buffer, so the write succeeds and the 1 stands.
+Reaching the masked case takes a reader that closes before the write; `| true`
+usually does, but that is a race rather than a guarantee, so do not rely on
+either shell recipe — rely on `ok`.
+
 ### `paksmith inspect`
 
 Dump a uasset's structural header (summary, name table, import/export

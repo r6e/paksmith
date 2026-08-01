@@ -16,7 +16,7 @@ use serde::Serialize;
 use paksmith_core::asset::Package;
 
 use crate::commands::inspect::InspectArgs;
-use crate::output::{OutputFormat, ResolvedFormat, serde_json_to_io};
+use crate::output::{OutputFormat, ResolvedFormat, print_json, serde_json_to_io};
 
 /// Schema version emitted as the first key of every `paksmith inspect` JSON
 /// response. Bump when the output shape changes in a backward-incompatible way.
@@ -96,7 +96,7 @@ pub(crate) fn emit(
             _ => serde_json::to_value(wrap(pkg)).map_err(serde_json_to_io)?,
         };
         let found = select::navigate(&doc, path).map_err(|reason| arg_error("--path", reason))?;
-        return write_json(found);
+        return Ok(print_json(found)?);
     }
 
     let resolved = format.resolve();
@@ -111,14 +111,14 @@ pub(crate) fn emit(
         // export subtree.  `OutputFormat::Auto` resolves here based on the
         // TTY — piped output stays JSON.
         ResolvedFormat::Json => match (export_idx, cached_pkg_val) {
-            (Some(idx), Some(pkg_val)) => write_json(&wrap(pkg_val["exports"][idx].clone())),
-            _ => write_json(&wrap(pkg)),
+            (Some(idx), Some(pkg_val)) => Ok(print_json(&wrap(pkg_val["exports"][idx].clone()))?),
+            _ => Ok(print_json(&wrap(pkg))?),
         },
     }
 }
 
 /// Render the human tree view to stdout through a `BufWriter`, mirroring
-/// [`write_json`]'s explicit `flush()` so `BrokenPipe` routes through `?`
+/// [`print_json`]'s explicit `flush()` so `BrokenPipe` routes through `?`
 /// (a `BufWriter` drop would swallow it).
 fn render_table(pkg: &Package, export_idx: Option<usize>) -> paksmith_core::Result<()> {
     let stdout = io::stdout();
@@ -134,16 +134,4 @@ fn arg_error(arg: &'static str, reason: impl Into<String>) -> paksmith_core::Pak
         arg,
         reason: reason.into(),
     }
-}
-
-/// Serialize `value` as pretty JSON to stdout through a `BufWriter`,
-/// preserving `BrokenPipe` via `serde_json_to_io` so `main.rs`'s
-/// clean-pipe-exit handler fires correctly.
-fn write_json<T: Serialize>(value: &T) -> paksmith_core::Result<()> {
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
-    serde_json::to_writer_pretty(&mut out, value).map_err(serde_json_to_io)?;
-    writeln!(out)?;
-    out.flush()?;
-    Ok(())
 }
