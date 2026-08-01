@@ -76,9 +76,14 @@ pub fn seed_hero_profile_with_detect(config_dir: &std::path::Path, usmap_path: &
 /// below and so could not fail on its own. The `body_key` lookup is NOT
 /// subsumed — it names a different key.
 pub fn assert_envelope_first(stdout: &str, body_key: &str, ctx: &str) {
+    // The trailing colon makes this match the KEY TOKEN, not a value that
+    // happens to equal the key name: `{"schema_version":1,"note":"id"}` must
+    // not satisfy `body_key = "id"`. A string VALUE cannot contain the
+    // unescaped sequence `"id":` — any literal quote inside a serde-emitted
+    // string is escaped to `\"`, so the raw bytes there are `\"id\":`.
     let _ = stdout
-        .find(&format!("\"{body_key}\""))
-        .unwrap_or_else(|| panic!("{ctx}: no {body_key} in {stdout}"));
+        .find(&format!("\"{body_key}\":"))
+        .unwrap_or_else(|| panic!("{ctx}: no `{body_key}` key in {stdout}"));
     let after_brace = stdout
         .trim_start()
         .strip_prefix('{')
