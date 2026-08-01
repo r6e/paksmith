@@ -79,8 +79,14 @@ pub struct App {
     pub filter: String,
     /// Whether the About banner is currently visible.
     pub about_visible: bool,
-    /// All profiles available in the toolbar selector (loaded at startup).
+    /// All profiles available in the toolbar selector (loaded at startup and
+    /// refreshed via [`refresh_profiles`]).
     pub profiles: Vec<ProfileChoice>,
+    /// The loader [`refresh_profiles`] reloads through — a seam in the
+    /// [`crate::state::profiles::available`] shape (fn pointer, not a closure,
+    /// so `App` stays generic-free) letting tests inject a fixed list instead
+    /// of reading the real config dir. The live value is always `available`.
+    pub(crate) profile_loader: fn() -> Vec<ProfileChoice>,
     /// The currently selected game profile, if any.
     ///
     /// When `Some`, `task::open::run` passes the profile id to key resolution
@@ -152,6 +158,7 @@ impl Default for App {
             filter: String::new(),
             about_visible: false,
             profiles: available(),
+            profile_loader: available,
             active_game: None,
             tabs: crate::state::tabs::Tabs::default(),
             archive_generation: 0,
@@ -232,6 +239,9 @@ pub enum Message {
     /// `Some(choice)` selects that profile; `None` is emitted when the
     /// sentinel "Auto" entry is chosen, clearing the active game.
     GameSelected(Option<ProfileChoice>),
+    /// The user pressed the toolbar's profile-refresh button: reload the
+    /// selector's list from the store + registry cache.
+    RefreshProfiles,
     /// A directory row was clicked — toggle expand/collapse.
     RowToggled(usize),
     /// A file row was clicked — update file selection.
@@ -405,6 +415,20 @@ fn console_refresh_interval(active: bool) -> std::time::Duration {
     std::time::Duration::from_millis(ms)
 }
 
+/// Reload the toolbar's profile list through the app's loader seam and
+/// reconcile the active selection.
+///
+/// A selection whose id survived the reload keeps its slot but takes the NEW
+/// entry (so a registry rename shows its fresh name in the picker rather than
+/// clearing the user's choice); a selection whose id vanished is cleared, so a
+/// dead id is never threaded into key resolution.
+fn refresh_profiles(app: &mut App) {
+    app.profiles = (app.profile_loader)();
+    if let Some(active) = &app.active_game {
+        app.active_game = app.profiles.iter().find(|p| p.id == active.id).cloned();
+    }
+}
+
 /// Processes a `Message` and updates the application state.
 #[allow(clippy::needless_pass_by_value)] // iced's UpdateFn trait requires Message by value
 #[allow(clippy::too_many_lines)] // single-match-all-messages fn; splitting would obscure the shape
@@ -442,6 +466,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // navigation attempt still stops playback (tab + device reset
             // together, so no desync).
             stop_active_playback(app);
+            // Key resolution's registry auto-fetch runs BEFORE the open
+            // resolves, so any of the three outcomes can leave a fresher
+            // cache behind — refresh outside the match, not in one arm.
+            refresh_profiles(app);
             match *boxed {
                 Ok(loaded) => {
                     app.error = None;
@@ -559,6 +587,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::GameSelected(choice) => {
             app.active_game = choice;
+            Task::none()
+        }
+        Message::RefreshProfiles => {
+            refresh_profiles(app);
             Task::none()
         }
         Message::RowToggled(i) => {
@@ -2322,6 +2354,122 @@ mod tests {
         app.context_row = Some(0);
         let _ = update(&mut app, Message::OpenAsset("file.txt".to_string()));
         assert_eq!(app.context_row, None, "opening an asset clears the menu");
+    }
+
+    /// Loader stubs for the refresh seam: fn pointers, deliberately not
+    /// touching the filesystem.
+    fn stub_profiles() -> Vec<super::ProfileChoice> {
+        vec![super::ProfileChoice {
+            id: "stub-a".into(),
+            name: "Stub A".into(),
+        }]
+    }
+
+    /// An `App` whose refresh seam is the given loader and whose list starts
+    /// empty — struct-update form because clippy's `field_reassign_with_default`
+    /// rejects assign-after-default.
+    fn app_with_loader(loader: fn() -> Vec<super::ProfileChoice>) -> App {
+        App {
+            profile_loader: loader,
+            profiles: Vec::new(),
+            ..App::default()
+        }
+    }
+
+    fn stub_profiles_renamed() -> Vec<super::ProfileChoice> {
+        vec![super::ProfileChoice {
+            id: "stub-a".into(),
+            name: "Stub A (renamed)".into(),
+        }]
+    }
+
+    /// The seam's blind spot, pinned: every refresh test injects a stub, so
+    /// flipping Default's loader to `Vec::new` survived the whole suite — the
+    /// feature's kill-switch (each refresh would wipe the selector) with no
+    /// coverage. Behavioural pinning cannot work here: under an isolated
+    /// config dir both `available()` and an empty stub return `[]`. Identity
+    /// is the property, so identity is what's asserted — the same genus
+    /// `boot_app_shares_the_injected_log_buffer` kills for the log seam.
+    #[test]
+    fn default_profile_loader_is_the_live_available_fn() {
+        assert!(
+            std::ptr::fn_addr_eq(
+                App::default().profile_loader,
+                crate::state::profiles::available as fn() -> Vec<super::ProfileChoice>,
+            ),
+            "Default must wire the seam to the LIVE loader, not a stub"
+        );
+    }
+
+    #[test]
+    fn archive_opened_refreshes_profiles_on_every_outcome() {
+        // Key resolution's registry auto-fetch runs BEFORE the open resolves,
+        // so ALL THREE outcomes can leave a fresher cache behind — the refresh
+        // must not live in just one arm.
+        type MkMessage = fn() -> Message;
+        let outcomes: [(&str, MkMessage); 3] = [
+            ("Core error", || {
+                Message::ArchiveOpened(Box::new(Err(OpenError::Core("nope".into()))))
+            }),
+            ("Locked", || {
+                Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
+                    path: PathBuf::from("x.pak"),
+                })))
+            }),
+            ("Ok", || {
+                let fresh = app_with_paths(&["new.uasset"]).archive.unwrap();
+                Message::ArchiveOpened(Box::new(Ok(fresh)))
+            }),
+        ];
+        for (label, mk) in outcomes {
+            let mut app = app_with_paths(&["old.uasset"]);
+            app.profile_loader = stub_profiles;
+            app.profiles = Vec::new();
+            let _ = update(&mut app, mk());
+            assert_eq!(
+                app.profiles,
+                stub_profiles(),
+                "{label}: the open outcome must refresh the selector list"
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_message_reloads_the_list() {
+        let mut app = app_with_loader(stub_profiles);
+        let _ = update(&mut app, Message::RefreshProfiles);
+        assert_eq!(app.profiles, stub_profiles());
+    }
+
+    #[test]
+    fn refresh_keeps_the_active_game_when_its_id_survives_and_takes_the_new_name() {
+        let mut app = app_with_loader(stub_profiles_renamed);
+        app.active_game = Some(super::ProfileChoice {
+            id: "stub-a".into(),
+            name: "Stub A".into(),
+        });
+        let _ = update(&mut app, Message::RefreshProfiles);
+        let active = app.active_game.expect("selection must survive a refresh");
+        assert_eq!(active.id, "stub-a");
+        assert_eq!(
+            active.name, "Stub A (renamed)",
+            "a rename must not clear the user's choice, and the picker must \
+             show the fresh name"
+        );
+    }
+
+    #[test]
+    fn refresh_clears_the_active_game_when_its_id_vanishes() {
+        let mut app = app_with_loader(stub_profiles);
+        app.active_game = Some(super::ProfileChoice {
+            id: "gone".into(),
+            name: "Removed Upstream".into(),
+        });
+        let _ = update(&mut app, Message::RefreshProfiles);
+        assert_eq!(
+            app.active_game, None,
+            "a dead id must never be threaded into key resolution"
+        );
     }
 
     #[test]
