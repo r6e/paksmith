@@ -10,22 +10,30 @@ use common::{
     seed_registry_cache_json,
 };
 
-/// Add a profile via the CLI, then hand-append a `[profiles.<id>.detect]` table
-/// into `profiles.toml`. This exercises the append-TOML round-trip path; if the
-/// store rejects the hand-appended table, the seed step itself will panic.
+/// Hand-append a `[profiles.<id>.detect]` table with a single `require_paths`
+/// marker into `profiles.toml` — the read/append/write idiom every
+/// hand-appended detect-rule seed in this file shares. If the store rejects
+/// the hand-appended table, the seeded test's own CLI run will fail on the
+/// corrupt store.
+fn append_detect_rule(cfg: &std::path::Path, id: &str, marker: &str) {
+    let store = cfg.join("paksmith/profiles.toml");
+    let mut s = std::fs::read_to_string(&store).unwrap();
+    write!(
+        s,
+        "\n[profiles.{id}.detect]\nrequire_paths = [\"{marker}\"]\n"
+    )
+    .unwrap();
+    std::fs::write(&store, s).unwrap();
+}
+
+/// Add a profile via the CLI, then append detect rules. This exercises the
+/// append-TOML round-trip path.
 fn seed_profile_with_detect(cfg: &std::path::Path, marker: &str) {
     let _ = paksmith_table(cfg)
         .args(["profile", "add", "fortnite", "--name", "Fortnite"])
         .assert()
         .success();
-    let store = cfg.join("paksmith/profiles.toml");
-    let mut s = std::fs::read_to_string(&store).unwrap();
-    write!(
-        s,
-        "\n[profiles.fortnite.detect]\nrequire_paths = [\"{marker}\"]\n"
-    )
-    .unwrap();
-    std::fs::write(&store, s).unwrap();
+    append_detect_rule(cfg, "fortnite", marker);
 }
 
 #[test]
@@ -79,14 +87,23 @@ const KEY: &str = common::FIXTURE_AES_KEY_HEX;
 /// `--game`/`--detect` will actually use.
 const WRONG_KEY: &str = "11111111111111111111111111111111111111111111111111111111111111ff";
 
-/// The detect rules every duplicate-id test seeds, and the directory that
-/// satisfies them — four tests re-spelled both.
-const DUP_RULES: &str = r#"{"require_paths":["DupGame/Content/Paks"]}"#;
+/// The marker path the duplicate-id and precedence seeds key on — the single
+/// source [`dup_game_dir`] creates, [`dup_rules`] embeds, and each
+/// precedence-test TOML seed references, so the two halves of "rules that
+/// match the dir" cannot drift.
+const DUP_MARKER: &str = "DupGame/Content/Paks";
 
-/// A game dir matching [`DUP_RULES`].
+/// The registry-JSON twin of [`DUP_MARKER`], built from it so the pairing is
+/// structural rather than by convention (a `const` couldn't be — `concat!`
+/// accepts literals only).
+fn dup_rules() -> String {
+    format!(r#"{{"require_paths":["{DUP_MARKER}"]}}"#)
+}
+
+/// A game dir matching [`DUP_MARKER`] (and so [`dup_rules`]).
 fn dup_game_dir() -> tempfile::TempDir {
     let game = tempdir().unwrap();
-    std::fs::create_dir_all(game.path().join("DupGame/Content/Paks")).unwrap();
+    std::fs::create_dir_all(game.path().join(DUP_MARKER)).unwrap();
     game
 }
 
@@ -224,14 +241,8 @@ fn detect_flag_ambiguous_exits_nonzero() {
             .args(["profile", "add", id, "--name", id])
             .assert()
             .success();
+        append_detect_rule(cfg.path(), id, "Common");
     }
-    let store = cfg.path().join("paksmith/profiles.toml");
-    let mut s = std::fs::read_to_string(&store).unwrap();
-    s.push_str(
-        "\n[profiles.g1.detect]\nrequire_paths = [\"Common\"]\n\
-         [profiles.g2.detect]\nrequire_paths = [\"Common\"]\n",
-    );
-    std::fs::write(&store, s).unwrap();
     let out = paksmith_unpinned(cfg.path())
         .args(["--detect"])
         .arg(game.path())
@@ -273,6 +284,149 @@ fn detect_query_nonexistent_dir_exits_nonzero() {
     assert!(
         stderr.contains("not a directory"),
         "expected not-a-directory error in stderr, got: {stderr}"
+    );
+}
+
+/// `--game` (explicit) wins over `--detect` (auto) when both are passed
+/// (issue #659; `resolve_pak_context`'s "effective profile id" branch).
+///
+/// Divergent by construction: `hero` (named by `--game`) carries the fixture
+/// key and no detect rules, while `decoy` matches the directory but carries a
+/// WRONG key. Game-first decrypts and lists; a flipped precedence would
+/// resolve `decoy` and fail to decrypt — so this pins the order itself, not
+/// merely "some profile resolved".
+#[test]
+fn game_flag_wins_over_detect_flag_for_key_resolution() {
+    let cfg = tempdir().unwrap();
+    let game = dup_game_dir();
+    for (id, key) in [("hero", KEY), ("decoy", WRONG_KEY)] {
+        let _ = paksmith_table(cfg.path())
+            .args(["profile", "add", id, "--name", id])
+            .assert()
+            .success();
+        let _ = paksmith_table(cfg.path())
+            .args(["profile", "key", "add", id, "--key", key])
+            .assert()
+            .success();
+    }
+    append_detect_rule(cfg.path(), "decoy", DUP_MARKER);
+
+    let out = paksmith_unpinned(cfg.path())
+        .args(["--game", "hero", "--detect"])
+        .arg(game.path())
+        .arg("list")
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8(out.get_output().stdout.clone())
+            .unwrap()
+            .contains("test.txt"),
+        "--game's profile must supply the key when --detect is also present"
+    );
+}
+
+/// The other polarity of the same precedence: `--game` keeps its hard
+/// contract (unknown id → `ProfileNotFound`, exit 2) even when the `--detect`
+/// directory WOULD match a profile whose key decrypts the fixture. Success
+/// here is the flipped-precedence signature — detect-rescue would resolve
+/// `decoy` and list cleanly.
+#[test]
+fn game_flag_unknown_id_is_not_rescued_by_detect_flag() {
+    let cfg = tempdir().unwrap();
+    let game = dup_game_dir();
+    let _ = paksmith_table(cfg.path())
+        .args(["profile", "add", "decoy", "--name", "decoy"])
+        .assert()
+        .success();
+    let _ = paksmith_table(cfg.path())
+        .args(["profile", "key", "add", "decoy", "--key", KEY])
+        .assert()
+        .success();
+    append_detect_rule(cfg.path(), "decoy", DUP_MARKER);
+
+    let out = paksmith_unpinned(cfg.path())
+        .args(["--game", "nosuch", "--detect"])
+        .arg(game.path())
+        .arg("list")
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("no profile named `nosuch`"),
+        "unknown --game must fail even though --detect would match: {stderr}"
+    );
+}
+
+/// Third polarity: the named profile wins even when it has NO key and
+/// `--detect`'s match carries the right one. This is the key-level twin of
+/// the id-level pins above — a "resolve the id by `--game` but rescue the
+/// KEY from `--detect`'s profile" fall-through would exit 0 here, while the
+/// correct tree fails to decrypt.
+#[test]
+fn game_flag_keyless_profile_is_not_rescued_by_detect_key() {
+    let cfg = tempdir().unwrap();
+    let game = dup_game_dir();
+    for id in ["hero", "decoy"] {
+        let _ = paksmith_table(cfg.path())
+            .args(["profile", "add", id, "--name", id])
+            .assert()
+            .success();
+    }
+    let _ = paksmith_table(cfg.path())
+        .args(["profile", "key", "add", "decoy", "--key", KEY])
+        .assert()
+        .success();
+    append_detect_rule(cfg.path(), "decoy", DUP_MARKER);
+
+    let out = paksmith_unpinned(cfg.path())
+        .args(["--game", "hero", "--detect"])
+        .arg(game.path())
+        .arg("list")
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("invalid or missing AES key"),
+        "keyless --game must fail even though --detect's match has the key: {stderr}"
+    );
+}
+
+/// Positive control for the precedence trio: `decoy`, seeded by the same
+/// recipe (add, key add, then [`append_detect_rule`] with [`DUP_MARKER`];
+/// the first trio test differs only in key value), is independently
+/// detectable and decryptable via `--detect` alone. Without
+/// this, the decoy apparatus could go inert — a broken rule append plus a
+/// future rescue fall-through would leave all three green having caught
+/// nothing.
+#[test]
+fn decoy_seed_is_detectable_and_decrypts_on_its_own() {
+    let cfg = tempdir().unwrap();
+    let game = dup_game_dir();
+    let _ = paksmith_table(cfg.path())
+        .args(["profile", "add", "decoy", "--name", "decoy"])
+        .assert()
+        .success();
+    let _ = paksmith_table(cfg.path())
+        .args(["profile", "key", "add", "decoy", "--key", KEY])
+        .assert()
+        .success();
+    append_detect_rule(cfg.path(), "decoy", DUP_MARKER);
+
+    let out = paksmith_unpinned(cfg.path())
+        .args(["--detect"])
+        .arg(game.path())
+        .arg("list")
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8(out.get_output().stdout.clone())
+            .unwrap()
+            .contains("test.txt"),
+        "decoy must be detectable and its key must decrypt on its own"
     );
 }
 
@@ -352,13 +506,14 @@ fn detect_json_dedupes_a_repeated_registry_id_and_labels_it_registry() {
     //    A registry-only match exercises both at once.
     let cfg = tempdir().unwrap();
     let game = dup_game_dir();
+    let rules = dup_rules();
 
     seed_registry_cache_json(
         cfg.path(),
         &format!(
             r#"
-                 {{"id":"dup","name":"First Copy","keys":{{}},"detect":{DUP_RULES}}},
-                 {{"id":"dup","name":"Second Copy","keys":{{}},"detect":{DUP_RULES}}}"#
+                 {{"id":"dup","name":"First Copy","keys":{{}},"detect":{rules}}},
+                 {{"id":"dup","name":"Second Copy","keys":{{}},"detect":{rules}}}"#
         ),
     );
 
@@ -394,13 +549,14 @@ fn detect_flag_resolves_a_repeated_registry_id_instead_of_calling_it_ambiguous()
     // with itself and exited 2.
     let cfg = tempdir().unwrap();
     let game = dup_game_dir();
+    let rules = dup_rules();
 
     seed_registry_cache_json(
         cfg.path(),
         &format!(
             r#"
-                 {{"id":"dup","name":"First Copy","keys":{{"00000000000000000000000000000000":"{KEY}"}},"detect":{DUP_RULES}}},
-                 {{"id":"dup","name":"Second Copy","keys":{{"00000000000000000000000000000000":"{WRONG_KEY}"}},"detect":{DUP_RULES}}}"#
+                 {{"id":"dup","name":"First Copy","keys":{{"00000000000000000000000000000000":"{KEY}"}},"detect":{rules}}},
+                 {{"id":"dup","name":"Second Copy","keys":{{"00000000000000000000000000000000":"{WRONG_KEY}"}},"detect":{rules}}}"#
         ),
     );
 
@@ -434,13 +590,14 @@ fn detect_ignores_rules_on_a_later_copy_of_a_duplicated_id() {
     // reinstating that key confusion. This is the case that distinguishes them.
     let cfg = tempdir().unwrap();
     let game = dup_game_dir();
+    let rules = dup_rules();
 
     seed_registry_cache_json(
         cfg.path(),
         &format!(
             r#"
                  {{"id":"dup","name":"First, no rules","keys":{{"00000000000000000000000000000000":"{KEY}"}}}},
-                 {{"id":"dup","name":"Second, matching rules","keys":{{}},"detect":{DUP_RULES}}}"#
+                 {{"id":"dup","name":"Second, matching rules","keys":{{}},"detect":{rules}}}"#
         ),
     );
 
@@ -481,14 +638,15 @@ fn detect_table_also_dedupes_a_repeated_registry_id() {
     // is what makes the claim pinned rather than asserted.
     let cfg = tempdir().unwrap();
     let game = dup_game_dir();
+    let rules = dup_rules();
 
     seed_registry_cache_json(
         cfg.path(),
         &format!(
             r#"
-                 {{"id":"dup","name":"First Copy","keys":{{}},"detect":{DUP_RULES}}},
-                 {{"id":"dup","name":"Second Copy","keys":{{}},"detect":{DUP_RULES}}},
-                 {{"id":"uniq","name":"Unique","keys":{{}},"detect":{DUP_RULES}}}"#
+                 {{"id":"dup","name":"First Copy","keys":{{}},"detect":{rules}}},
+                 {{"id":"dup","name":"Second Copy","keys":{{}},"detect":{rules}}},
+                 {{"id":"uniq","name":"Unique","keys":{{}},"detect":{rules}}}"#
         ),
     );
 
