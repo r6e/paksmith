@@ -405,9 +405,12 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
 ///
 /// Since #658 the `profile` family emits JSON too, carrying the same
 /// registry-authored strings; neither its table nor its JSON arm calls this
-/// function, so both remain #708 surfaces. Under `--format auto` the piped
-/// case is now the C0-escaped JSON rather than the raw table; an explicit
-/// `--format table | less` still ships raw ESC, DEL and C1.
+/// function. The TABLE arm therefore remains a #708 surface; the JSON arm is
+/// not one — it is the machine interface the paragraph above exempts, and
+/// sanitizing it would break the round-tripping contract. Under
+/// `--format auto` the piped case is now the C0-escaped JSON rather than the
+/// raw table; an explicit `--format table | less` still ships raw ESC, DEL
+/// and C1.
 pub(crate) fn sanitize_for_display(s: &str) -> std::borrow::Cow<'_, str> {
     if s.chars().any(char::is_control) {
         std::borrow::Cow::Owned(
