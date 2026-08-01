@@ -1,8 +1,10 @@
 //! Profile list for the toolbar game-selector dropdown.
 //!
 //! `ProfileChoice` is the GUI's view of a profile entry: an id + display name,
-//! with no dependency on core cache internals.  The list is loaded once at
-//! startup; refreshing after a registry fetch is not yet implemented.
+//! with no dependency on core cache internals.  The list is loaded at startup
+//! and refreshed by `app::refresh_profiles` — after every archive-open outcome
+//! (key resolution's registry auto-fetch can leave a fresher cache behind) and
+//! on the toolbar's refresh button.
 
 use std::fmt;
 
@@ -39,7 +41,20 @@ pub fn available() -> Vec<ProfileChoice> {
             })
             .collect(),
         Err(e) => {
-            tracing::warn!(error = %e, "failed to load profile list for toolbar selector");
+            // `e.to_string()` and NOT the `%` sigil — see `load_cache_lenient`'s
+            // canonical note in core's `profile/resolve.rs`: `%` is
+            // `field::display()` written RAW by the default subscriber, while a
+            // plain `String` field is escaped. Provenance at THIS site is
+            // local-store/OS-authored text, not registry text —
+            // `available_profiles` propagates only `ProfileStore::load`
+            // errors; a bad registry cache degrades to `None` inside core and
+            // never reaches here. Escape-by-default is the convention (#708)
+            // regardless, and this crate's own `log_buffer` visitor is the
+            // workspace's counter-example for `message` capture.
+            tracing::warn!(
+                error = e.to_string(),
+                "failed to load profile list for toolbar selector"
+            );
             Vec::new()
         }
     }

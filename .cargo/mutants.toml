@@ -149,6 +149,27 @@ exclude_re = [
     # functions therefore carry a `#[mutants::skip]` attribute (the supported
     # mechanism); their cosmetic style is validated by the UI/UX review + manual
     # runs, and their testable logic is extracted into separately-tested helpers.
+    #
+    # `game_selector_widgets` gained BEHAVIOURAL content in #658 box 4 (the
+    # refresh button pushed in both branches), so the bare entry below
+    # silences more than the styling math it was written for. Mechanism,
+    # stated exactly: the workflow's `changes` filter gates which PRs RUN it
+    # (core/core-tests paths, root Cargo.toml, Cargo.lock, and mutants.yml
+    # itself); a qualifying PR's shards then mutate the FULL in-diff surface
+    # of the workspace default-members — gui included; #633's run scored 93
+    # gui mutants. A gui-only PR like this one matches no filter entry, so
+    # nothing here is scored THAT time; on a mixed PR (gui lines plus any
+    # filter path — a lockfile bump suffices) this entry IS live and
+    # silences these mutants. The durable guarantee is the item-count pins
+    # (`selector_pushes_label_hint_and_refresh_when_empty`,
+    # `selector_pushes_label_picker_and_refresh_when_populated` in
+    # `panels/toolbar.rs`), which kill the whole-body-replacement mutant
+    # this entry silences — an emptied body pushes nothing, so `items.len()`
+    # is 0, not 3 — and which fail loud in ordinary `cargo test` on every
+    # PR. Kept
+    # bare rather than narrowed because a narrowed entry's residue cannot be
+    # verified without an off-policy local mutants run — narrow it at the
+    # first PR that actually brings this fn's lines into a scored diff.
     'replace <impl std::fmt::Display for PickItem>::fmt -> std::fmt::Result',
     'replace main -> iced::Result with Ok\(Default::default\(\)\)',
     'replace build -> Result<Menu, muda::Error> with Ok\(Default::default\(\)\)',

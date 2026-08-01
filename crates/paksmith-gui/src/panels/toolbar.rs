@@ -160,8 +160,8 @@ fn encryption_chip(is_decrypted: bool) -> impl Into<Element<'static, Message>> {
     .padding([SPACE_XS, SPACE_SM])
 }
 
-/// Push the "Game:" label plus either the pick-list (profiles present) or a
-/// muted "No profiles" hint (empty list) onto `items`.
+/// Push the "Game:" label, either the pick-list (profiles present) or a muted
+/// "No profiles" hint (empty list), and the refresh button onto `items`.
 fn game_selector_widgets<'a>(
     profiles: &'a [ProfileChoice],
     active_game: Option<&'a ProfileChoice>,
@@ -174,6 +174,15 @@ fn game_selector_widgets<'a>(
         });
     items.push(game_label.into());
 
+    // Reload affordance for the selector. Present in BOTH branches below: a
+    // registry fetch (the CLI's `profile fetch`, or core's auto-fetch during
+    // an open) can turn "No profiles" into a populated list, so the empty
+    // state needs the button most.
+    let refresh_btn = button(text("\u{21BB}").size(f32::from(TEXT_SM)))
+        .style(iced::widget::button::secondary)
+        .padding([SPACE_XS, SPACE_SM])
+        .on_press(Message::RefreshProfiles);
+
     if profiles.is_empty() {
         // No profiles configured — show a muted hint instead of a dead dropdown.
         let no_profiles =
@@ -183,6 +192,7 @@ fn game_selector_widgets<'a>(
                     color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
                 });
         items.push(no_profiles.into());
+        items.push(refresh_btn.into());
         return;
     }
 
@@ -208,4 +218,43 @@ fn game_selector_widgets<'a>(
     .width(Length::Fixed(GAME_PICKER_WIDTH));
 
     items.push(game_picker.into());
+    items.push(refresh_btn.into());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Item-count pins for `game_selector_widgets`, which sits under a
+    /// cargo-mutants exclusion whose rationale covers cosmetic styling — the
+    /// refresh button's presence in BOTH branches is behavioural, and the
+    /// empty branch is the load-bearing one (a fetch can turn "No profiles"
+    /// into a list). Counting each branch is enough to kill the
+    /// whole-body-replacement mutant — an emptied body pushes nothing, so
+    /// `items.len()` is 0, not 3 — without introspecting `Element` internals.
+    #[test]
+    fn selector_pushes_label_hint_and_refresh_when_empty() {
+        let mut items: Vec<Element<'_, Message>> = Vec::new();
+        game_selector_widgets(&[], None, &mut items);
+        assert_eq!(
+            items.len(),
+            3,
+            "empty branch: label + \"No profiles\" hint + refresh button"
+        );
+    }
+
+    #[test]
+    fn selector_pushes_label_picker_and_refresh_when_populated() {
+        let profiles = vec![ProfileChoice {
+            id: "g".into(),
+            name: "Game".into(),
+        }];
+        let mut items: Vec<Element<'_, Message>> = Vec::new();
+        game_selector_widgets(&profiles, None, &mut items);
+        assert_eq!(
+            items.len(),
+            3,
+            "populated branch: label + picker + refresh button"
+        );
+    }
 }
