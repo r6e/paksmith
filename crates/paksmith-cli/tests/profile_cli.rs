@@ -624,6 +624,80 @@ async fn profile_fetch_caches_signed_registry() {
     );
 }
 
+/// `profile fetch --registry <url>` overrides the configured URL for that one
+/// fetch (issue #659 — the flag had zero test occurrences).
+///
+/// Self-controlled: the config points at a path the server does NOT mount, so
+/// the no-flag fetch fails and leaves no cache — proving the configured URL
+/// alone cannot succeed — and the `--registry` fetch against the mounted path
+/// succeeds, caches, and surfaces the profile in `list`.
+#[tokio::test]
+async fn profile_fetch_registry_flag_overrides_configured_url() {
+    use wiremock::matchers::{method, path as wpath};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let cfg = tempdir().unwrap();
+    let (sk, pk) = test_keypair();
+    let body = r#"[{"id":"ovr","name":"Override","keys":{}}]"#;
+    let sig = sk.sign(body.as_bytes()).to_bytes().to_vec();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/override/r.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_bytes()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wpath("/override/r.json.sig"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(sig))
+        .mount(&server)
+        .await;
+
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("config.toml"),
+        format!(
+            "[registry]\nurl = \"{}/unmounted.json\"\npublic_key = \"{pk}\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    // Control: without the flag, the configured URL 404s and the fetch fails.
+    let _ = assert_cmd::Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env("PAKSMITH_ALLOW_HTTP", "1")
+        .args(["--format", "table", "profile", "fetch"])
+        .assert()
+        .code(2);
+    assert!(
+        !base.join("registry-cache.json").exists(),
+        "a failed fetch must not leave a cache file"
+    );
+
+    let _ = assert_cmd::Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env("PAKSMITH_ALLOW_HTTP", "1")
+        .args(["--format", "table", "profile", "fetch", "--registry"])
+        .arg(format!("{}/override/r.json", server.uri()))
+        .assert()
+        .success();
+
+    let listed = paksmith_table(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8(listed.get_output().stdout.clone())
+            .unwrap()
+            .contains("ovr"),
+        "the overridden fetch must land the registry profile in the cache"
+    );
+}
+
 // ── --game auto-fetch + offline degradation ───────────────────────────────────
 
 /// `--game` with an id that has no local profile and no cache triggers an
