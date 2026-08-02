@@ -7,6 +7,7 @@ pub mod keyflow;
 pub mod log_buffer;
 pub mod profiles;
 pub mod property_view;
+pub mod row_window;
 pub mod tabs;
 pub mod texture_view;
 pub mod toast;

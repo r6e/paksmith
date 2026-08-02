@@ -27,12 +27,15 @@ use crate::widgets::file_tree;
 /// * `selected_row` – keyboard cursor position.
 /// * `context_row` – visible-row index whose inline action strip is shown.
 /// * `export_menu` – the open Export As… picker, if any.
+/// * `scroll` – the tree viewport's last reported scroll geometry
+///   (forwarded to `file_tree::view` for row windowing).
 pub fn view<'a>(
     tree: &'a Tree,
     accent: iced::Color,
     selected_row: Option<usize>,
     context_row: Option<usize>,
     export_menu: Option<&'a crate::state::export::ExportMenu>,
+    scroll: crate::state::row_window::ScrollPos,
 ) -> Element<'a, Message> {
     let header = text("EXPLORER")
         .size(f32::from(TEXT_SM))
@@ -40,7 +43,7 @@ pub fn view<'a>(
             color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
         });
 
-    let tree_view = file_tree::view(tree, accent, selected_row, context_row, export_menu);
+    let tree_view = file_tree::view(tree, accent, selected_row, context_row, export_menu, scroll);
 
     container(
         column![header, tree_view]

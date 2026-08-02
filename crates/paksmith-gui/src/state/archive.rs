@@ -37,6 +37,11 @@ pub struct LoadedArchive {
     pub decrypted: bool,
     /// File-tree model built from the archive's entry paths.
     pub tree: Tree,
+    /// Last reported scroll geometry of the file-tree viewport (#660).
+    ///
+    /// Fed by `Message::TreeScrolled` and consumed by the windowed tree
+    /// view; lives here rather than on `App` so it resets with the archive.
+    pub tree_scroll: crate::state::row_window::ScrollPos,
     /// Per-entry metadata keyed by full entry path (forward-slash separated).
     ///
     /// Populated once at open time; the detail pane queries this for the
@@ -61,6 +66,7 @@ impl std::fmt::Debug for LoadedArchive {
             .field("entry_count", &self.entry_count)
             .field("decrypted", &self.decrypted)
             .field("tree", &self.tree)
+            .field("tree_scroll", &self.tree_scroll)
             .field("entries", &self.entries)
             .field("reader", &"<ContainerReader>")
             .finish()

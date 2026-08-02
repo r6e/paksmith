@@ -6,6 +6,17 @@
 use iced::widget::{button, column, container, pick_list, row, scrollable, text};
 use iced::{Background, Border, Element, Length};
 
+/// Stable [`iced::widget::Id`] for the zoomed-image pan surface, so the
+/// update layer can reset it when this pane is (re)shown.
+///
+/// Not the same inheritance path as the windowed lists: this view returns a
+/// `Column`, so switching in from the inspector (a bare `scrollable`) is a
+/// tag mismatch and iced rebuilds at zero. What does carry is a texture ->
+/// texture TAB switch, because the `Responsive` wrapper persists its content
+/// tree across the diff — so a second zoomed texture opens panned to the
+/// first one's position. See `app::restore_scroll_positions`.
+pub const TEXTURE_SCROLL_ID: iced::widget::Id = iced::widget::Id::new("texture-pan-scroll");
+
 use crate::app::{Message, readable_text_on};
 use crate::state::texture_view::{Channel, TextureState};
 use crate::theme::tokens::{
@@ -338,6 +349,7 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
                 // unreachable.  Mirrors the explicit-direction pattern in
                 // `tab_bar.rs`.
                 scrollable(image_container)
+                    .id(TEXTURE_SCROLL_ID.clone())
                     .direction(scrollable::Direction::Both {
                         vertical: scrollable::Scrollbar::new(),
                         horizontal: scrollable::Scrollbar::new(),

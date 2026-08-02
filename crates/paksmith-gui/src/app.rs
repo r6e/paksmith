@@ -248,6 +248,36 @@ pub enum Message {
     RowSelected(usize),
     /// A keyboard key was pressed while the archive is open.
     TreeKey(iced::keyboard::Key),
+    /// The file-tree scroll position changed; carries the absolute y offset
+    /// and viewport height in px so the windowing decision is testable
+    /// without constructing a non-public `scrollable::Viewport` (the
+    /// `ConsoleScrolled` scalar pattern).
+    TreeScrolled {
+        /// `Viewport::absolute_offset().y`.
+        y: f32,
+        /// `Viewport::bounds().height`.
+        viewport_h: f32,
+    },
+    /// The active tab's hex viewer scrolled (same scalar pattern as
+    /// [`Message::TreeScrolled`]).
+    HexScrolled {
+        /// `Viewport::absolute_offset().y`.
+        y: f32,
+        /// `Viewport::bounds().height`.
+        viewport_h: f32,
+    },
+    /// The active tab's property inspector scrolled (same scalar pattern as
+    /// [`Message::TreeScrolled`]).
+    PropsScrolled {
+        /// `Viewport::absolute_offset().y`.
+        y: f32,
+        /// `Viewport::bounds().height`.
+        viewport_h: f32,
+    },
+    /// The window was resized, so every stored viewport height is stale
+    /// (#660). Carries nothing: the panes' new heights are not knowable from
+    /// the window size, and the handler's job is to forget, not to update.
+    WindowResized,
     /// The toolbar filter text changed.
     FilterChanged(String),
     /// The pane_grid resize handle was dragged; carries the new split ratio.
@@ -429,10 +459,110 @@ fn refresh_profiles(app: &mut App) {
     }
 }
 
+/// Which messages leave a windowed surface in place but showing different
+/// content, and so need iced's retained scroll offsets reconciled.
+///
+/// This set covers displacement WITHIN the panes: a surface that inherits a
+/// stale offset, and one whose own subtree is rebuilt while the panes stay
+/// put (Properties returns a bare `scrollable` and Hex a `column`, so a view
+/// switch is a tag mismatch). Displacement
+/// OF the panes — something else taking their place in the root tree — turns
+/// on a state transition rather than a message class and is
+/// [`PaneLayout`]'s job.
+///
+/// A pure predicate rather than a call in each arm: WHAT to restore was
+/// already extracted into [`scroll_restore_targets`], but WHEN lived only
+/// inside opaque `Task` wiring, where deleting a call left the whole suite
+/// green. Declaring the set here makes it a value a test can assert over.
+///
+/// [`Message::ArchiveOpened`] is matched on the variant rather than the
+/// outcome, but only its `Ok` arm is load-bearing: it installs a new
+/// archive under a sidebar iced never tore down, and it is the one arm that
+/// leaves the key prompt. The error arms are inert, by whichever of three
+/// mechanisms applies: entering the prompt from unlocked, or raising the
+/// first toast, already moves [`PaneLayout`]; a failure while locked or
+/// with no archive leaves the prompt or the error banner in the panes'
+/// place, so no windowed scrollable is in the tree; and a second toast over
+/// an existing one tears nothing down, so the offsets pushed back are the
+/// ones iced already holds.
+///
+/// Residual, stated rather than left silent: this predicate,
+/// [`PaneLayout`] and [`shown_content`] are each pinned, but the lines in
+/// [`update`] that consult them return an opaque `Task`, so a mutation
+/// disabling the reconciliation — or forcing the texture reset
+/// unconditionally — is invisible to the suite. Narrowing that further
+/// would need a harness that can observe iced operations, which this crate
+/// does not have.
+fn restores_scroll(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::TabActivated(_)
+            | Message::TabClosed(_)
+            | Message::ViewModeSet(_)
+            | Message::OpenAsset(_)
+            | Message::ArchiveOpened(_)
+    )
+}
+
+/// The layout facts that decide WHICH widget occupies the windowed panes'
+/// position in the root tree.
+///
+/// iced keys a scrollable's retained offset by position and widget tag, so
+/// a change to any of these tears the panes down and rebuilds them at zero
+/// — including ones no message variant can express, because they turn on a
+/// state transition rather than a message class. A toast appearing is the
+/// sharpest example: the root becomes `stack([column, overlay])`, the panes
+/// move to a different child, and their state is discarded. That happens on
+/// a copy-path confirmation, an export result, an audio warning, and again
+/// when the last toast expires.
+///
+/// Compared before and after each update rather than enumerated, which is
+/// what makes the teardown coverage complete rather than a list to keep
+/// adding to. The console toggle is deliberately absent: it changes the
+/// root's child COUNT but not what sits at the panes' index, so the state
+/// survives (measured) — it invalidates viewport HEIGHTS, which is
+/// [`forget_viewport_heights`]'s job, not this one.
+// One named field per surface, so adding a surface is a visible edit here.
+// `archive.is_some()` is deliberately absent: it only ever flips on
+// `ArchiveOpened`, which the message set already covers, so tracking it
+// could never change the outcome.
+#[derive(Debug, PartialEq, Eq)]
+struct PaneLayout {
+    about_visible: bool,
+    key_prompt_visible: bool,
+    toasts_present: bool,
+}
+
+fn pane_layout(app: &App) -> PaneLayout {
+    PaneLayout {
+        about_visible: app.about_visible,
+        key_prompt_visible: app.keyflow.is_locked().is_some(),
+        toasts_present: !app.toasts.is_empty(),
+    }
+}
+
 /// Processes a `Message` and updates the application state.
 #[allow(clippy::needless_pass_by_value)] // iced's UpdateFn trait requires Message by value
-#[allow(clippy::too_many_lines)] // single-match-all-messages fn; splitting would obscure the shape
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
+    // Two directions, checked two ways. INHERIT: the panes keep their
+    // position and tag but show different content, which only the message
+    // identifies. TEARDOWN: something else took the panes' place, which only
+    // a before/after comparison catches — see [`PaneLayout`].
+    let layout_before = pane_layout(app);
+    let shown_before = shown_content(app);
+    let inherits = restores_scroll(&message);
+    let task = update_inner(app, message);
+    if inherits || pane_layout(app) != layout_before {
+        let reset_texture = shown_content(app) != shown_before;
+        Task::batch([task, restore_scroll_positions(app, reset_texture)])
+    } else {
+        task
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // iced's UpdateFn trait requires Message by value
+#[allow(clippy::too_many_lines)] // single-match-all-messages fn; splitting would obscure the shape
+fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::OpenRequested => {
             // Spawn the native file picker as an async task.
@@ -624,6 +754,35 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let scroll_task = handle_tree_key(app, key);
             scroll_task.unwrap_or_else(Task::none)
         }
+        Message::TreeScrolled { y, viewport_h } => {
+            let Some(archive) = app.archive.as_mut() else {
+                return Task::none();
+            };
+            let moved = (y - archive.tree_scroll.y).abs() > SCROLL_MENU_DISMISS_EPSILON_PX;
+            archive.tree_scroll = crate::state::row_window::ScrollPos { y, viewport_h };
+            if moved {
+                // The strip's row math is only valid while rows stay put; a
+                // real scroll dismisses it (same policy as keyboard nav).
+                dismiss_row_menus(app);
+            }
+            Task::none()
+        }
+        Message::WindowResized => {
+            forget_viewport_heights(app);
+            Task::none()
+        }
+        Message::HexScrolled { y, viewport_h } => {
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                tab.hex_scroll = crate::state::row_window::ScrollPos { y, viewport_h };
+            }
+            Task::none()
+        }
+        Message::PropsScrolled { y, viewport_h } => {
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                tab.props_scroll = crate::state::row_window::ScrollPos { y, viewport_h };
+            }
+            Task::none()
+        }
         Message::FilterChanged(query) => {
             dismiss_row_menus(app);
             app.filter.clone_from(&query);
@@ -779,6 +938,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::ConsoleToggled => {
             app.console_visible = !app.console_visible;
+            // The console is a fixed-height strip in the ROOT column, so
+            // toggling it resizes every pane without any window event.
+            forget_viewport_heights(app);
             if app.console_visible {
                 app.console_follow = true;
                 // Open in fast-refresh mode and baseline the change counter to
@@ -1511,18 +1673,37 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
 
     // Fix 8: if selected_row changed, scroll it into view.
     //
-    // Row height estimate: TEXT_MD (px) + 2 × SPACE_XS (vertical padding).
-    // This is an approximation — iced's actual rendered height may include
-    // fractional sub-pixel rounding — so the scroll target drifts slightly on
-    // very long lists.  The proportional `snap_to` variant would avoid drift
-    // but requires knowing the total scrollable content height, which isn't
-    // available here.  Absolute-offset is the simpler choice; the drift is
-    // acceptable (the cursor stays within ±1 row of the viewport edge).
+    // The target is `row_idx × file_tree::row_pixel_height()`, the same row
+    // height the windowed view lays its spacers out with. Sharing it is what
+    // keeps the two from diverging arbitrarily, but they do not agree exactly:
+    // `floor(i * h / h)` misses `i` for about a tenth of indices at this
+    // surface's row height (1.8% at the hex grid's) — mostly one row EARLY
+    // (`i - 1`: 7.1% / 1.1%), but from 2^23 also one row LATE (`i + 1`:
+    // 3.5% / 0.6%), so the drift consumes overscan on both sides of the
+    // window, not just the start. Past 2^24 rows the `i as f32` cast is
+    // itself lossy, so the gap grows
+    // with the magnitude of the index — measured at the tree's own row
+    // height, at most one row below 2^24, 3 rows by 20.5M and 12 by 82M
+    // (past the first row of disagreement the shorter hex rows reach each
+    // figure sooner). The overscan covers it until roughly 82M rows (69M in
+    // the hex grid), which
+    // is past the tens of millions a broad filter can reach but is a margin
+    // rather than a guarantee. The proportional `snap_to`
+    // variant would need the total content height, which isn't available
+    // here; absolute-offset is the simpler choice.
     // Two-guard form: avoids let-chains (`&&let`) which require Rust > 1.88.
     #[allow(clippy::collapsible_if)]
     if app.selected_row != prev_selected {
         if let Some(row_idx) = app.selected_row {
             let target_y = tree_scroll_offset(row_idx);
+            // Mirror the target into the stored scroll state in this same
+            // update: the on_scroll echo of the scroll_to below arrives one
+            // frame later, and the windowed view would otherwise build a
+            // stale range for that frame (a blank viewport on any jump
+            // larger than the overscan).
+            if let Some(archive) = app.archive.as_mut() {
+                archive.tree_scroll.y = target_y;
+            }
             let task = iced::widget::operation::scroll_to(
                 file_tree::TREE_SCROLL_ID.clone(),
                 iced::widget::scrollable::AbsoluteOffset {
@@ -1537,21 +1718,202 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
     None
 }
 
-/// Pixel height of one tree row (text height + vertical padding on both sides).
+/// Forget every stored viewport height, keeping the offsets.
 ///
-/// Used to map a row index to an absolute Y scroll offset. This is an
-/// approximation — iced's actual rendered height may include fractional
-/// sub-pixel rounding — but the drift is within ±1 row even at large list
-/// sizes, which is acceptable for keyboard auto-scroll.
-fn tree_row_pixel_height() -> f32 {
-    f32::from(crate::theme::tokens::TEXT_MD) + 2.0 * crate::theme::tokens::SPACE_XS
+/// INVARIANT: any path that GROWS a windowed pane by at least
+/// `OVERSCAN_ROWS × the smallest windowed row height` — about 125 px, set by
+/// the hex grid's 15.6 px rows — must call this. (The window's extra
+/// partial row is not spare capacity: a fractional scroll offset consumes
+/// it.) iced publishes a
+/// viewport only while content OVERFLOWS its bounds, so a pane that grows
+/// past its content never reports the new height, and the windowed views
+/// would keep building the old, smaller viewport's worth of rows with the
+/// rest as blank spacer and nothing able to correct it (no scrollbar means
+/// no scroll events either). Smaller growth is absorbed by the overscan,
+/// which is why the many paths that reflow a pane by a line or two — the
+/// status bar wrapping, the hex toolbar's truncation note wrapping, the tab
+/// bar appearing — need no call.
+///
+/// Two paths clear the threshold today: a window resize or rescale, and
+/// toggling the debug console, a fixed 200 px strip in the ROOT column that
+/// resizes every pane with no window event at all. Zeroing hands the
+/// surfaces back to [`crate::state::row_window::VIEWPORT_FALLBACK_PX`],
+/// which over-estimates, and over-estimating only over-renders. The offsets
+/// are kept: they stay meaningful, and `visible_window` re-clamps a stale
+/// one.
+fn forget_viewport_heights(app: &mut App) {
+    if let Some(archive) = app.archive.as_mut() {
+        archive.tree_scroll.viewport_h = 0.0;
+    }
+    for tab in &mut app.tabs.open {
+        tab.hex_scroll.viewport_h = 0.0;
+        tab.props_scroll.viewport_h = 0.0;
+    }
+}
+
+/// Which content the detail pane is showing: the active tab and its view
+/// mode.
+///
+/// Distinct from [`PaneLayout`], which asks whether the panes were replaced.
+/// This asks whether they are showing something DIFFERENT — the texture
+/// pane's pan is reset only when they are, since re-activating the tab you
+/// are already on, or re-picking the mode you are already in, should not
+/// throw away a zoom the user set up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShownContent {
+    /// The active tab's stable id, NOT its index: `Tabs::close` reuses
+    /// indices, so an index-keyed discriminant both misses a close that
+    /// swaps which tab sits at the active slot and fires on a close that
+    /// only shifts the slot.
+    tab: Option<u64>,
+    view: Option<crate::state::tabs::ViewMode>,
+}
+
+fn shown_content(app: &App) -> ShownContent {
+    let active = app.tabs.active_tab();
+    ShownContent {
+        tab: active.map(|t| t.id),
+        view: active.map(|t| t.view),
+    }
+}
+
+/// Which scrollable is restored to which offset, after a transition that
+/// changes what a windowed surface shows — the decision half of
+/// [`restore_scroll_positions`], split out so it can be unit-tested (a
+/// `Task` is opaque, so the wiring itself cannot be).
+///
+/// The PAIRING is part of the decision, not just the values: pushing the
+/// inspector's offset into the hex scrollable loses the restored position
+/// and renders a wrong slice until iced's next viewport publish. Returning
+/// id/offset pairs keeps that testable rather than leaving it inside the
+/// skipped wiring.
+///
+/// Every surface reads from where its scroll actually lives — the viewers
+/// from the ACTIVE tab, the tree from the archive — so a transition that
+/// changed which tab is active is reflected without the caller passing
+/// anything about it.
+///
+/// `reset_texture` sends the texture pane back to the origin. The caller
+/// sets it only when [`shown_content`] changed, so re-activating the tab
+/// you are already on does not discard a zoom.
+fn scroll_restore_targets(app: &App, reset_texture: bool) -> Vec<(iced::widget::Id, f32)> {
+    let (hex, props) = app
+        .tabs
+        .active_tab()
+        .map_or((0.0, 0.0), |t| (t.hex_scroll.y, t.props_scroll.y));
+    let tree = app.archive.as_ref().map_or(0.0, |a| a.tree_scroll.y);
+    let mut targets = vec![
+        (crate::widgets::hex_view::HEX_SCROLL_ID.clone(), hex),
+        (
+            crate::widgets::property_tree::PROPS_SCROLL_ID.clone(),
+            props,
+        ),
+        (crate::widgets::file_tree::TREE_SCROLL_ID.clone(), tree),
+    ];
+    if reset_texture {
+        targets.push((
+            crate::widgets::texture_viewer::TEXTURE_SCROLL_ID.clone(),
+            0.0,
+        ));
+    }
+    targets
+}
+
+/// Push the stored scroll offsets of whatever is now on screen back into
+/// iced's scrollables, after anything changes which content a windowed
+/// surface shows.
+///
+/// iced keeps a scrollable's offset in its widget tree keyed by position and
+/// widget *tag* — the id is not consulted — so the stored offset and the
+/// retained one drift apart in BOTH directions. A surface that keeps its
+/// position and tag inherits whatever offset was there before; one whose tag
+/// changes, or that is displaced within its parent (the About panel and key
+/// prompt replace the body; a toast wraps the root in a stack — see
+/// [`PaneLayout`] for the tracked set), has
+/// its offset dropped and rebuilt at zero while the app keeps a non-zero
+/// one. The two directions fail differently: an INHERITED offset is
+/// permanent, because iced republishes a viewport only when the geometry
+/// changed and two lists of equal row count lay out identically; a
+/// TORN-DOWN one self-corrects on the next redraw (the rebuilt state has no
+/// last-notified value, so it publishes immediately) and costs the user
+/// their position rather than leaving a blank pane. Three transitions INHERIT here: switching tabs (both
+/// `TabActivated` and re-opening an already-open asset), closing a tab, and
+/// opening a second archive over a first (the loaded branch of `view` wins
+/// over the resolving placeholder, so the sidebar is never torn down).
+///
+/// Unwindowed, an inherited offset merely showed the wrong part of the right
+/// content. Windowed, the view builds the slice for the offset it has STORED
+/// while iced translates to the one it KEPT, and past the overscan that
+/// renders blank — with nothing to correct it, because iced republishes a
+/// viewport only when the geometry actually changed and two lists of equal
+/// row count lay out identically. Two entries larger than `HEX_BYTES_CAP`
+/// both truncate to exactly the cap, so equal row counts are ordinary.
+///
+/// Not every transition inherits. Hex -> Properties does not, for one: the
+/// hex view returns a `column![toolbar, grid]` while the inspector returns a
+/// bare `scrollable`, so the tags differ and iced rebuilds the subtree at
+/// offset zero. (That pair is the one checked; the other view modes return
+/// containers and columns whose diff behaviour was not traced.) The restore
+/// runs on view switches anyway, for the opposite reason — to put the user
+/// back where they were rather than at the top.
+///
+/// Every id is targeted unconditionally: an operation naming a scrollable
+/// that is not currently in the tree is a no-op, which is cheaper than
+/// branching on the active view.
+// Thin scroll-operation glue returning an opaque `Task`, like the sibling
+// `snap_console_to_bottom`. The whole decision — which id, which offset —
+// is in the unit-tested `scroll_restore_targets`, so only the mapping into
+// operations sits behind the skip.
+#[mutants::skip]
+fn restore_scroll_positions(app: &App, reset_texture: bool) -> Task<Message> {
+    Task::batch(
+        scroll_restore_targets(app, reset_texture)
+            .into_iter()
+            .map(|(id, y)| {
+                iced::widget::operation::scroll_to(
+                    id,
+                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
+                )
+            }),
+    )
+}
+
+/// A tree viewport event whose y moved less than this keeps the row menus:
+/// iced republishes the viewport on any redraw whose geometry changed
+/// (resize, the strip itself opening), and sub-pixel jitter in those
+/// republications must not dismiss a menu the user just opened.
+const SCROLL_MENU_DISMISS_EPSILON_PX: f32 = 0.5;
+
+/// Does this event invalidate the stored viewport heights?
+///
+/// A pure seam rather than a closure body: unlike `scrollable::Viewport`,
+/// `window::Event` variants are public and constructible, so the decision
+/// is testable and nothing decidable is left inside the subscription.
+/// `Rescaled` counts because a scale-factor change alters the logical size
+/// iced lays out in, and whether winit pairs it with a `Resized` is
+/// platform-dependent.
+fn window_resize_message(event: &Event) -> Option<Message> {
+    match event {
+        Event::Window(iced::window::Event::Resized(_) | iced::window::Event::Rescaled(_)) => {
+            Some(Message::WindowResized)
+        }
+        _ => None,
+    }
 }
 
 /// Absolute Y scroll offset that brings visible-row `row_idx` to the viewport top.
+///
+/// Uses [`file_tree::row_pixel_height`] — the same height the windowed tree
+/// view lays its spacers out with, called directly so the agreement is
+/// structural rather than two copies kept in sync by a test. They must share
+/// one height, or the scroll target and the window would diverge
+/// arbitrarily; sharing it leaves a residual gap that grows with the row
+/// index (see the auto-scroll site for the measured figures), which the
+/// overscan absorbs well past any row count in practice.
 fn tree_scroll_offset(row_idx: usize) -> f32 {
     #[allow(clippy::cast_precision_loss)]
     {
-        row_idx as f32 * tree_row_pixel_height()
+        row_idx as f32 * file_tree::row_pixel_height()
     }
 }
 
@@ -1792,12 +2154,26 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         Subscription::none()
     };
 
+    // A window resize invalidates every stored viewport height (#660). iced
+    // publishes a viewport only while content OVERFLOWS its bounds, so a pane
+    // that grows past its content never reports the new height — the windowed
+    // views would keep building the old, smaller viewport's worth of rows and
+    // render the remainder as blank spacer, with no event able to correct it.
+    // Zeroing the stored heights hands them back to VIEWPORT_FALLBACK_PX,
+    // which over-estimates, and over-estimating only over-renders.
+    // `Rescaled` too: a scale-factor change keeps the physical size and
+    // changes the logical size iced lays out in, and whether winit also
+    // emits a `Resized` alongside is platform-dependent.
+    let resize_sub =
+        iced::event::listen_with(|event, _status, _window| window_resize_message(&event));
+
     if app.archive.is_none() {
         return Subscription::batch([
             menu_sub,
             console_toggle_sub,
             console_tick_sub,
             audio_tick_sub,
+            resize_sub,
         ]);
     }
 
@@ -1830,6 +2206,7 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         audio_tick_sub,
         tree_key_sub,
         hex_drag_sub,
+        resize_sub,
     ])
 }
 
@@ -1976,6 +2353,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         // emits `Message::PaneResized` only during an active drag.
         // Capture locals for the pane_grid closure (can't borrow `app` inside).
         let tree = &archive.tree;
+        let tree_scroll = archive.tree_scroll;
         let accent = app.accent;
         let selected_row = app.selected_row;
         let context_row = app.context_row;
@@ -1986,9 +2364,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
         pane_grid(&app.panes, move |_pane, kind, _maximized| {
             let content: Element<'_, Message> = match kind {
-                PaneKind::Sidebar => {
-                    sidebar::view(tree, accent, selected_row, context_row, export_menu)
-                }
+                PaneKind::Sidebar => sidebar::view(
+                    tree,
+                    accent,
+                    selected_row,
+                    context_row,
+                    export_menu,
+                    tree_scroll,
+                ),
                 PaneKind::Detail => content::view(tabs, entries, accent, audio_device_available),
             };
             pane_grid::Content::new(content)
@@ -2590,6 +2973,7 @@ mod tests {
             entry_count,
             decrypted: false,
             tree,
+            tree_scroll: crate::state::row_window::ScrollPos::default(),
             entries,
             reader,
         };
@@ -2601,6 +2985,705 @@ mod tests {
 
     fn named_key(n: Named) -> Key {
         Key::Named(n)
+    }
+
+    // ── hex / properties viewport windowing (#660) ────────────────────────────
+
+    #[test]
+    fn hex_scrolled_stores_on_the_active_tab() {
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("a/x.txt");
+        let _ = super::update(
+            &mut app,
+            super::Message::HexScrolled {
+                y: 64.0,
+                viewport_h: 500.0,
+            },
+        );
+        let tab = app.tabs.active_tab().unwrap();
+        assert_eq!(
+            tab.hex_scroll,
+            crate::state::row_window::ScrollPos {
+                y: 64.0,
+                viewport_h: 500.0
+            }
+        );
+        assert_eq!(
+            tab.props_scroll,
+            crate::state::row_window::ScrollPos::default(),
+            "the hex scroll must not bleed into the properties scroll"
+        );
+    }
+
+    #[test]
+    fn props_scrolled_stores_on_the_active_tab() {
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("a/x.txt");
+        let _ = super::update(
+            &mut app,
+            super::Message::PropsScrolled {
+                y: 96.0,
+                viewport_h: 450.0,
+            },
+        );
+        let tab = app.tabs.active_tab().unwrap();
+        assert_eq!(
+            tab.props_scroll,
+            crate::state::row_window::ScrollPos {
+                y: 96.0,
+                viewport_h: 450.0
+            }
+        );
+        assert_eq!(
+            tab.hex_scroll,
+            crate::state::row_window::ScrollPos::default(),
+            "the properties scroll must not bleed into the hex scroll"
+        );
+    }
+
+    /// The per-tab offsets must SURVIVE a tab switch — `restore_scroll_positions`
+    /// pushes them back into iced, so the update layer must not reset them.
+    /// (The push itself is an opaque `Task`; what is observable here is that
+    /// the values it reads are still the switched-to tab's.)
+    // Exact stored values, put there by the messages under test.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn tab_switches_keep_each_tabs_own_viewer_offsets() {
+        let mut app = App::default();
+        let _ = app.tabs.open_or_activate("a.txt");
+        let _ = super::update(
+            &mut app,
+            super::Message::HexScrolled {
+                y: 300.0,
+                viewport_h: 600.0,
+            },
+        );
+        let _ = app.tabs.open_or_activate("b.txt");
+        let _ = super::update(
+            &mut app,
+            super::Message::HexScrolled {
+                y: 900.0,
+                viewport_h: 600.0,
+            },
+        );
+
+        let _ = super::update(&mut app, super::Message::TabActivated(0));
+        assert_eq!(
+            app.tabs.active_tab().unwrap().hex_scroll.y,
+            300.0,
+            "tab A must come back to its own offset, not B's"
+        );
+        let _ = super::update(&mut app, super::Message::TabActivated(1));
+        assert_eq!(
+            app.tabs.active_tab().unwrap().hex_scroll.y,
+            900.0,
+            "tab B must still hold its own offset"
+        );
+    }
+
+    /// Re-opening an already-open asset is a tab switch by any other name
+    /// (double-click, Enter, the context strip's Open all route here), so it
+    /// must reconcile scroll like `TabActivated` does. What is observable
+    /// without an iced runtime is that the switch happened and each tab kept
+    /// its own offset for the restore to read.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn reopening_an_open_asset_switches_tabs_and_keeps_per_tab_offsets() {
+        let mut app = app_with_paths(&["a.txt", "b.txt"]);
+        let _ = app.tabs.open_or_activate("a.txt");
+        let _ = super::update(
+            &mut app,
+            super::Message::HexScrolled {
+                y: 250.0,
+                viewport_h: 600.0,
+            },
+        );
+        let _ = app.tabs.open_or_activate("b.txt");
+        let _ = super::update(
+            &mut app,
+            super::Message::HexScrolled {
+                y: 750.0,
+                viewport_h: 600.0,
+            },
+        );
+
+        let _ = super::update(&mut app, super::Message::OpenAsset("a.txt".into()));
+        assert_eq!(app.tabs.active, Some(0), "re-open must activate tab a");
+        assert_eq!(
+            app.tabs.active_tab().unwrap().hex_scroll.y,
+            250.0,
+            "tab a's own offset must be what the restore reads"
+        );
+    }
+
+    /// A resize must forget every stored viewport height, on every surface.
+    ///
+    /// iced publishes a viewport only while content OVERFLOWS its bounds, so
+    /// a pane that grows past its content never reports the new height — the
+    /// windowed views would keep building the old, smaller viewport's worth
+    /// of rows and show the rest as blank spacer, with no event able to
+    /// correct it. Zeroing hands them back to the fallback, which
+    /// over-estimates; the offsets are kept, since they stay meaningful.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn a_resize_forgets_every_stored_viewport_height_but_keeps_offsets() {
+        let mut app = app_with_paths(&["a.txt", "b.txt"]);
+        for path in ["a.txt", "b.txt"] {
+            let _ = app.tabs.open_or_activate(path);
+            let _ = super::update(
+                &mut app,
+                super::Message::HexScrolled {
+                    y: 500.0,
+                    viewport_h: 300.0,
+                },
+            );
+            let _ = super::update(
+                &mut app,
+                super::Message::PropsScrolled {
+                    y: 700.0,
+                    viewport_h: 300.0,
+                },
+            );
+        }
+        let _ = super::update(
+            &mut app,
+            super::Message::TreeScrolled {
+                y: 120.0,
+                viewport_h: 300.0,
+            },
+        );
+
+        let _ = super::update(&mut app, super::Message::WindowResized);
+
+        let archive = app.archive.as_ref().unwrap();
+        assert_eq!(archive.tree_scroll.viewport_h, 0.0, "tree height forgotten");
+        assert_eq!(archive.tree_scroll.y, 120.0, "tree offset kept");
+        for (i, tab) in app.tabs.open.iter().enumerate() {
+            assert_eq!(tab.hex_scroll.viewport_h, 0.0, "tab {i} hex height");
+            assert_eq!(tab.props_scroll.viewport_h, 0.0, "tab {i} props height");
+            assert_eq!(tab.hex_scroll.y, 500.0, "tab {i} hex offset kept");
+            assert_eq!(tab.props_scroll.y, 700.0, "tab {i} props offset kept");
+        }
+    }
+
+    /// Toggling the console resizes every pane by its fixed height with no
+    /// window event, so it must invalidate the stored viewport heights the
+    /// same way a resize does. Without this, closing the console grows the
+    /// panes past their content, iced stops publishing viewports entirely
+    /// (no overflow means no scrollbar and no scroll events), and the extra
+    /// rows stay unbuilt until the window itself is resized.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn toggling_the_console_forgets_the_stored_viewport_heights() {
+        let mut app = app_with_paths(&["a.txt"]);
+        let _ = app.tabs.open_or_activate("a.txt");
+        let _ = super::update(
+            &mut app,
+            super::Message::HexScrolled {
+                y: 500.0,
+                viewport_h: 300.0,
+            },
+        );
+        let _ = super::update(
+            &mut app,
+            super::Message::TreeScrolled {
+                y: 90.0,
+                viewport_h: 300.0,
+            },
+        );
+
+        let _ = super::update(&mut app, super::Message::ConsoleToggled);
+
+        assert_eq!(
+            app.tabs.active_tab().unwrap().hex_scroll.viewport_h,
+            0.0,
+            "the hex height must be forgotten when the console resizes the pane"
+        );
+        assert_eq!(
+            app.archive.as_ref().unwrap().tree_scroll.viewport_h,
+            0.0,
+            "the tree height must be forgotten too"
+        );
+        assert_eq!(
+            app.tabs.active_tab().unwrap().hex_scroll.y,
+            500.0,
+            "offsets stay meaningful across a pane resize"
+        );
+    }
+
+    /// The restore targets are what `restore_scroll_positions` pushes; with
+    /// the `Task` opaque, this is the only place the decision is observable.
+    /// A review probe replaced that fn's whole body with `Task::none()` and
+    /// the suite stayed green — this is what closes that.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn scroll_restore_targets_read_the_active_tab_and_the_open_archive() {
+        let mut app = app_with_paths(&["a.txt", "b.txt"]);
+        let _ = super::update(
+            &mut app,
+            super::Message::TreeScrolled {
+                y: 42.0,
+                viewport_h: 600.0,
+            },
+        );
+        let _ = app.tabs.open_or_activate("a.txt");
+        let _ = super::update(
+            &mut app,
+            super::Message::HexScrolled {
+                y: 100.0,
+                viewport_h: 600.0,
+            },
+        );
+        let _ = super::update(
+            &mut app,
+            super::Message::PropsScrolled {
+                y: 200.0,
+                viewport_h: 600.0,
+            },
+        );
+        let _ = app.tabs.open_or_activate("b.txt");
+        let _ = super::update(
+            &mut app,
+            super::Message::HexScrolled {
+                y: 300.0,
+                viewport_h: 600.0,
+            },
+        );
+
+        // Tab b is active: its offsets, not tab a's — and each offset must
+        // reach the id that owns it. Pushing the inspector's y into the hex
+        // scrollable would lose the position and render a wrong slice.
+        let expected_b = vec![
+            (crate::widgets::hex_view::HEX_SCROLL_ID.clone(), 300.0),
+            (crate::widgets::property_tree::PROPS_SCROLL_ID.clone(), 0.0),
+            (crate::widgets::file_tree::TREE_SCROLL_ID.clone(), 42.0),
+            (
+                crate::widgets::texture_viewer::TEXTURE_SCROLL_ID.clone(),
+                0.0,
+            ),
+        ];
+        assert_eq!(scroll_restore_targets(&app, true), expected_b);
+
+        // Switching back must switch the targets with it — the whole point.
+        let _ = super::update(&mut app, super::Message::TabActivated(0));
+        let expected_a = vec![
+            (crate::widgets::hex_view::HEX_SCROLL_ID.clone(), 100.0),
+            (
+                crate::widgets::property_tree::PROPS_SCROLL_ID.clone(),
+                200.0,
+            ),
+            (crate::widgets::file_tree::TREE_SCROLL_ID.clone(), 42.0),
+            (
+                crate::widgets::texture_viewer::TEXTURE_SCROLL_ID.clone(),
+                0.0,
+            ),
+        ];
+        assert_eq!(scroll_restore_targets(&app, true), expected_a);
+    }
+
+    /// The four ids must be DISTINCT. iced's scroll operation matches by id
+    /// against every scrollable it visits with no early exit, so two
+    /// entries sharing an id both hit the same surface and the last write
+    /// wins — the hex view would restore to the inspector's offset, exactly
+    /// what the pairing exists to prevent. A probe pointing
+    /// `PROPS_SCROLL_ID` at the hex id left the suite green, because the
+    /// pairing test builds its expectation from the same constants.
+    #[test]
+    fn the_four_scroll_ids_are_distinct() {
+        let ids: Vec<String> = scroll_restore_targets(&App::default(), true)
+            .iter()
+            .map(|(id, _)| format!("{id:?}"))
+            .collect();
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "colliding scroll ids make one surface's restore overwrite another: {ids:?}"
+        );
+    }
+
+    /// The epsilon must actually tolerate a sub-pixel republication. iced
+    /// republishes a viewport whenever the geometry changed — including
+    /// because the strip itself grew the content — and at zero tolerance
+    /// any such republication would dismiss the menu the user just opened.
+    /// A probe setting the epsilon to 0 left the suite green: the existing
+    /// tests only exercise deltas of exactly 0 and 40.
+    #[test]
+    fn a_sub_pixel_tree_republication_keeps_the_row_menus() {
+        let mut app = app_with_paths(&["a/x.txt"]);
+        let _ = super::update(&mut app, super::Message::RowToggled(0));
+        let _ = super::update(&mut app, super::Message::RowContextOpened(1));
+        assert!(app.context_row.is_some(), "harness: strip open");
+        let _ = super::update(
+            &mut app,
+            super::Message::TreeScrolled {
+                y: 0.25,
+                viewport_h: 600.0,
+            },
+        );
+        assert!(
+            app.context_row.is_some(),
+            "a sub-pixel y change must not dismiss the strip"
+        );
+    }
+
+    #[test]
+    fn scroll_restore_targets_are_all_origin_with_nothing_open() {
+        let app = App::default();
+        for (id, y) in scroll_restore_targets(&app, true) {
+            assert!(
+                y.abs() < f32::EPSILON,
+                "{id:?} must restore to the origin with nothing open, got {y}"
+            );
+        }
+    }
+
+    /// The SET of messages that reconcile scroll — the "when" half of the
+    /// design. A review probe deleted the restore call from four handlers
+    /// in turn and the whole suite stayed green each time, because the
+    /// decision lived only inside opaque `Task` wiring.
+    ///
+    /// Both directions are asserted: every transition that leaves a windowed
+    /// surface showing different content must be in the set, and ordinary
+    /// high-frequency messages must not be — restoring on every scroll event
+    /// would fight the user's own scrolling.
+    #[test]
+    fn the_inherit_direction_covers_content_changes_and_excludes_scrolling() {
+        let restores = [
+            Message::TabActivated(0),
+            Message::TabClosed(0),
+            Message::ViewModeSet(crate::state::tabs::ViewMode::Hex),
+            Message::OpenAsset("a.txt".into()),
+            // Matched on the variant, not the outcome: the `Ok` arm is the
+            // load-bearing one (a new archive under a sidebar iced never
+            // tore down), and the error arms are inert. Only an error is
+            // constructible here — `LoadedArchive` needs a real reader.
+            Message::ArchiveOpened(Box::new(Err(crate::state::archive::OpenError::Core(
+                "probe".to_string(),
+            )))),
+        ];
+        for m in restores {
+            assert!(
+                restores_scroll(&m),
+                "{m:?} changes what a windowed surface shows and must reconcile"
+            );
+        }
+
+        let must_not = [
+            Message::TreeScrolled {
+                y: 10.0,
+                viewport_h: 600.0,
+            },
+            Message::HexScrolled {
+                y: 10.0,
+                viewport_h: 600.0,
+            },
+            Message::PropsScrolled {
+                y: 10.0,
+                viewport_h: 600.0,
+            },
+            Message::WindowResized,
+            Message::RowSelected(0),
+            Message::RowToggled(0),
+            Message::ConsoleTick,
+            // About/Dismiss are teardown, not inheritance: they swap the
+            // body, so `PaneLayout::about_visible` already fires and a
+            // membership here could never change the outcome — the same
+            // de-duplication that kept `archive.is_some()` out of the
+            // discriminant.
+            Message::About,
+            Message::DismissAbout,
+        ];
+        for m in must_not {
+            assert!(
+                !restores_scroll(&m),
+                "{m:?} must not reconcile — pushing offsets back on a scroll \
+                 event would fight the user's own scrolling"
+            );
+        }
+    }
+
+    /// The TEARDOWN direction, which no message-variant set can express: a
+    /// toast appearing moves the windowed panes to a different place in the
+    /// root tree, so iced discards their retained scroll state. A review
+    /// probe measured that directly (the pane state's address changes),
+    /// with a positive control showing an unchanged rebuild preserves it.
+    ///
+    /// Everyday repro this closes: scroll the tree past the overscan, right
+    /// click a file, Copy path — the confirmation toast used to blank the
+    /// tree.
+    #[test]
+    fn a_toast_appearing_or_expiring_changes_the_pane_layout() {
+        let mut app = app_with_paths(&["a/x.txt"]);
+        // Row 0 is the collapsed dir; expand so row 1 is the file.
+        let _ = super::update(&mut app, super::Message::RowToggled(0));
+        let before = pane_layout(&app);
+        assert!(!before.toasts_present, "harness: no toast yet");
+
+        let _ = super::update(&mut app, super::Message::CopyPathRequested(1));
+        let during = pane_layout(&app);
+        assert!(
+            during.toasts_present,
+            "harness: the copy confirmation must raise a toast"
+        );
+        assert_ne!(
+            during, before,
+            "a toast appearing relocates the panes — the reconciliation must see it"
+        );
+
+        let ids: Vec<u64> = app.toasts.items().iter().map(|t| t.id).collect();
+        for id in ids {
+            let _ = super::update(&mut app, super::Message::ToastDismissed(id));
+        }
+        let after = pane_layout(&app);
+        assert!(!after.toasts_present, "harness: toasts cleared");
+        assert_ne!(
+            after, during,
+            "the last toast expiring relocates them back — also a teardown"
+        );
+    }
+
+    /// The other discriminant fields, each of which swaps what occupies the
+    /// panes' position: the About panel and the key prompt.
+    #[test]
+    fn pane_layout_tracks_every_surface_that_replaces_the_panes() {
+        let mut app = app_with_paths(&["a/x.txt"]);
+        let base = pane_layout(&app);
+
+        let _ = super::update(&mut app, super::Message::About);
+        assert_ne!(pane_layout(&app), base, "the About panel replaces the body");
+        let _ = super::update(&mut app, super::Message::DismissAbout);
+        assert_eq!(pane_layout(&app), base, "dismissing restores the layout");
+
+        app.keyflow.lock(std::path::PathBuf::from("locked.pak"));
+        assert_ne!(
+            pane_layout(&app),
+            base,
+            "the key prompt replaces the panes while it shows"
+        );
+    }
+
+    /// The texture pan is reset only when the content pane is showing
+    /// something DIFFERENT. A review probe found the reset fired
+    /// unconditionally, so re-clicking the tab you are already on, or
+    /// re-picking the mode you are already in, threw away a zoom the user
+    /// had set up.
+    #[test]
+    fn the_texture_pan_resets_only_when_the_shown_content_changes() {
+        let mut app = app_with_paths(&["a.txt", "b.txt"]);
+        let _ = app.tabs.open_or_activate("a.txt");
+        let _ = app.tabs.open_or_activate("b.txt");
+
+        let before = shown_content(&app);
+        // Re-activating the ALREADY-ACTIVE tab shows the same content.
+        let active = app.tabs.active.expect("harness: a tab is active");
+        let _ = super::update(&mut app, super::Message::TabActivated(active));
+        assert_eq!(
+            shown_content(&app),
+            before,
+            "re-activating the current tab must not count as new content"
+        );
+
+        // Switching to the other tab does.
+        let _ = super::update(&mut app, super::Message::TabActivated(0));
+        assert_ne!(
+            shown_content(&app),
+            before,
+            "a different tab is different content"
+        );
+
+        // So does changing the view mode within a tab.
+        let mid = shown_content(&app);
+        let _ = super::update(
+            &mut app,
+            super::Message::ViewModeSet(crate::state::tabs::ViewMode::Hex),
+        );
+        assert_ne!(shown_content(&app), mid, "a different view mode too");
+
+        // Closing reuses indices, so an index-keyed discriminant is wrong
+        // in BOTH directions here — the two cases that caught it:
+        let mut app = app_with_paths(&["a.txt", "b.txt", "c.txt"]);
+        for p in ["a.txt", "b.txt", "c.txt"] {
+            let _ = app.tabs.open_or_activate(p);
+        }
+        // (1) Closing a tab BEFORE the active one shifts its index but shows
+        //     the same asset — must NOT count as new content.
+        let _ = super::update(&mut app, super::Message::TabActivated(2));
+        let showing = shown_content(&app);
+        let _ = super::update(&mut app, super::Message::TabClosed(0));
+        assert_eq!(
+            shown_content(&app),
+            showing,
+            "closing an earlier tab shifts the index but shows the same tab"
+        );
+        // (2) Closing the ACTIVE tab can leave the index unchanged while a
+        //     DIFFERENT asset takes the slot — must count as new content.
+        let _ = super::update(&mut app, super::Message::TabActivated(0));
+        let showing = shown_content(&app);
+        let _ = super::update(&mut app, super::Message::TabClosed(0));
+        assert_ne!(
+            shown_content(&app),
+            showing,
+            "closing the active tab shows a different asset at that slot"
+        );
+
+        // And the targets carry the texture entry only in that case.
+        assert_eq!(
+            scroll_restore_targets(&app, false).len(),
+            3,
+            "unchanged content restores the three windowed lists only"
+        );
+        assert_eq!(
+            scroll_restore_targets(&app, true).len(),
+            4,
+            "changed content also resets the texture pan"
+        );
+    }
+
+    /// The epsilon must stay sub-pixel, as its name and doc claim. Bounded
+    /// only by the two test deltas it sits between (0.25 and 40), a probe
+    /// raising it to 30 — more than a whole row — stayed green.
+    #[test]
+    fn the_menu_dismiss_epsilon_is_sub_pixel() {
+        let eps = std::hint::black_box(SCROLL_MENU_DISMISS_EPSILON_PX);
+        assert!(eps > 0.0, "a zero epsilon dismisses on any republication");
+        assert!(
+            eps < 1.0,
+            "the tolerance is for sub-pixel jitter, not for real scrolling: {eps}"
+        );
+    }
+
+    /// The resize invalidation's PRODUCER, not just its handler. Probes
+    /// narrowing the match to `Resized` alone, or returning `None`
+    /// unconditionally, both stayed green — the handler was well tested and
+    /// nothing checked that the message is ever produced.
+    #[test]
+    fn window_resize_and_rescale_both_invalidate_viewport_heights() {
+        assert!(matches!(
+            window_resize_message(&Event::Window(iced::window::Event::Resized(
+                iced::Size::new(800.0, 600.0)
+            ))),
+            Some(Message::WindowResized)
+        ));
+        assert!(
+            matches!(
+                window_resize_message(&Event::Window(iced::window::Event::Rescaled(2.0))),
+                Some(Message::WindowResized)
+            ),
+            "a scale-factor change alters the logical size iced lays out in"
+        );
+        assert!(
+            window_resize_message(&Event::Window(iced::window::Event::CloseRequested)).is_none(),
+            "unrelated window events must not invalidate anything"
+        );
+    }
+
+    #[test]
+    fn viewer_scrolls_without_an_active_tab_are_ignored() {
+        let mut app = App::default();
+        let _ = super::update(
+            &mut app,
+            super::Message::HexScrolled {
+                y: 1.0,
+                viewport_h: 2.0,
+            },
+        );
+        let _ = super::update(
+            &mut app,
+            super::Message::PropsScrolled {
+                y: 1.0,
+                viewport_h: 2.0,
+            },
+        );
+        assert!(app.tabs.active_tab().is_none(), "no tab must have appeared");
+    }
+
+    // ── tree viewport windowing (#660) ────────────────────────────────────────
+
+    #[test]
+    fn tree_scrolled_stores_the_offset_and_viewport() {
+        let mut app = app_with_paths(&["a/x.txt", "a/y.txt"]);
+        let _ = super::update(
+            &mut app,
+            super::Message::TreeScrolled {
+                y: 120.0,
+                viewport_h: 600.0,
+            },
+        );
+        let archive = app.archive.as_ref().unwrap();
+        assert_eq!(
+            archive.tree_scroll,
+            crate::state::row_window::ScrollPos {
+                y: 120.0,
+                viewport_h: 600.0
+            }
+        );
+    }
+
+    #[test]
+    fn tree_scroll_that_moves_dismisses_the_row_menus() {
+        let mut app = app_with_paths(&["a/x.txt"]);
+        let _ = super::update(&mut app, super::Message::RowToggled(0));
+        let _ = super::update(&mut app, super::Message::RowContextOpened(1));
+        assert!(
+            app.context_row.is_some(),
+            "harness: the context strip must be open before the scroll"
+        );
+        let _ = super::update(
+            &mut app,
+            super::Message::TreeScrolled {
+                y: 40.0,
+                viewport_h: 600.0,
+            },
+        );
+        assert_eq!(
+            app.context_row, None,
+            "a scroll that moves the list must dismiss the strip — its row \
+             math is only valid while rows stay put"
+        );
+    }
+
+    /// iced republishes the viewport on any redraw whose geometry changed —
+    /// including the content growing because the strip itself opened. An
+    /// event that does NOT move y must keep the menu, or every strip would
+    /// dismiss itself one frame after opening.
+    #[test]
+    fn viewport_only_tree_event_keeps_the_row_menus() {
+        let mut app = app_with_paths(&["a/x.txt"]);
+        let _ = super::update(&mut app, super::Message::RowToggled(0));
+        let _ = super::update(&mut app, super::Message::RowContextOpened(1));
+        assert!(app.context_row.is_some(), "harness: strip open");
+        let _ = super::update(
+            &mut app,
+            super::Message::TreeScrolled {
+                y: 0.0,
+                viewport_h: 480.0,
+            },
+        );
+        assert!(
+            app.context_row.is_some(),
+            "an unmoved-y viewport event must not dismiss the strip"
+        );
+    }
+
+    /// The keyboard auto-scroll must write its target offset into the stored
+    /// scroll state in the same update: the `on_scroll` echo arrives one
+    /// frame later, and a jump larger than the overscan would otherwise
+    /// window a stale range and show a blank viewport for that frame.
+    // Both sides come from the same fn, so exact equality is the point.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn keyboard_auto_scroll_writes_the_stored_offset_immediately() {
+        let mut app = app_with_paths(&["a/x.txt", "a/y.txt"]);
+        let _ = super::update(&mut app, super::Message::RowToggled(0));
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowDown));
+        let selected = app.selected_row.expect("harness: cursor must exist");
+        let archive = app.archive.as_ref().unwrap();
+        assert_eq!(
+            archive.tree_scroll.y,
+            tree_scroll_offset(selected),
+            "the stored offset must match the scroll_to target immediately"
+        );
     }
 
     // ── clamp_selected_row ────────────────────────────────────────────────────
@@ -3091,18 +4174,24 @@ mod tests {
     // ── scroll-offset helpers ────────────────────────────────────────────────
 
     #[test]
-    fn tree_row_pixel_height_equals_text_plus_padding() {
+    fn tree_scroll_offset_row_height_is_text_plus_padding() {
         use crate::theme::tokens;
-        // Expected: TEXT_MD (as f32) + 2 * SPACE_XS
-        let expected = f32::from(tokens::TEXT_MD) + 2.0 * tokens::SPACE_XS;
+        // `tree_scroll_offset(1)` is exactly one row height (× 1.0 is exact
+        // in f32), so this pins the whole chain down to the formula:
+        // TEXT_MD through iced's line-height factor, + 2 * SPACE_XS.
+        // The factor is what #660 corrected: a `text` widget lays out at
+        // 1.3 × its size, so the bare sum under-measured every row by 30%
+        // of the font size.
+        let expected = f32::from(tokens::TEXT_MD) * crate::state::row_window::LINE_HEIGHT_FACTOR
+            + 2.0 * tokens::SPACE_XS;
         #[allow(clippy::float_cmp)]
         {
-            assert_eq!(tree_row_pixel_height(), expected);
+            assert_eq!(tree_scroll_offset(1), expected);
         }
         // Adding vertical padding must produce a value strictly greater than just
         // the text size alone — kills a `+ with -` mutant on the padding term.
         assert!(
-            tree_row_pixel_height() > f32::from(tokens::TEXT_MD),
+            tree_scroll_offset(1) > f32::from(tokens::TEXT_MD),
             "row height must be taller than bare text — vertical padding is additive"
         );
     }
@@ -3117,7 +4206,7 @@ mod tests {
 
     #[test]
     fn tree_scroll_offset_row_three_is_three_heights() {
-        let h = tree_row_pixel_height();
+        let h = crate::widgets::file_tree::row_pixel_height();
         // Exact equality: kills `* with /` and `* with +` mutants.
         #[allow(clippy::float_cmp)]
         {

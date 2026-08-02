@@ -8,11 +8,28 @@ use paksmith_core::container::ContainerReader;
 
 /// Maximum bytes retained from a streamed entry read for the Hex and Info views.
 ///
-/// The Hex view renders at most this many bytes per frame; retaining more would
-/// waste memory for every large texture or bulk-data entry that the user opens
-/// in a tab. The cap is enforced at read time (via [`CappedWriter`]) so the
-/// tab never holds more than this many raw bytes in memory.
-pub const HEX_BYTES_CAP: usize = 16 * 1024;
+/// Raised from 16 KiB to 8 MiB by #660: the old value was load-bearing for
+/// RENDER cost (the Hex view built a widget per byte cell for every row, so
+/// the cap was what kept a large entry from freezing the UI), and viewport
+/// windowing removed that half. What remains is retained memory — one buffer
+/// per open tab, for the tab's lifetime — so a cap still exists. Note that
+/// it bounds the PER-TAB term only: nothing limits how many tabs are open,
+/// so the aggregate is that many multiples of this value, and a user who
+/// opens fifty large entries retains fifty buffers. Bounding or evicting
+/// that is a separate concern from this cap.
+///
+/// 8 MiB is derived, not picked. The windowed hex view lays out spacers whose
+/// heights are `f32` pixel counts, and `f32` represents integers exactly only
+/// up to 2^24 (16,777,216). At [`BYTES_PER_ROW`][bpr] bytes per row and the
+/// grid's laid-out row height ([`row_pixel_height`][rph], 15.6 px), the
+/// virtual content height is `cap / 16 * 15.6` px, so staying inside that
+/// range requires `cap < 2^24 * 16 / 15.6` ≈ 16.4 MiB. 8 MiB keeps a ~2×
+/// margin, and its highest offset (`0x7F_FFF0`) still fits the gutter's
+/// 8 hex digits.
+///
+/// [bpr]: crate::state::hex_view::BYTES_PER_ROW
+/// [rph]: crate::state::hex_view::row_pixel_height
+pub const HEX_BYTES_CAP: usize = 8 * 1024 * 1024;
 
 /// A [`std::io::Write`] sink that collects at most `cap` bytes and tracks
 /// whether the underlying stream produced more data than that.
@@ -273,9 +290,14 @@ mod tests {
 
     #[test]
     fn capped_writer_accumulates_and_stops_on_the_overflowing_write() {
-        // Two 10-KiB writes at cap=16 KiB: first fills 10 KiB (fully consumed, no
-        // overflow), second fills the remaining 6 KiB then stops the stream.
-        let cap = HEX_BYTES_CAP; // 16 KiB
+        // Two 10-KiB writes at a 16-KiB cap: first fills 10 KiB (fully
+        // consumed, no overflow), second fills the remaining 6 KiB then stops
+        // the stream. The cap is spelled locally, not taken from
+        // HEX_BYTES_CAP: this pins CappedWriter's accumulate-then-stop
+        // mechanics, which must hold at any cap, and tying it to the shipped
+        // value made it silently stop exercising the crossing write when #660
+        // raised that value.
+        let cap = 16 * 1024;
         let mut w = CappedWriter::new(cap);
         w.write_all(&vec![0u8; 10 * 1024])
             .expect("first 10 KiB fits below the cap");
@@ -285,8 +307,27 @@ mod tests {
             .write_all(&vec![0u8; 10 * 1024])
             .expect_err("the write that crosses the cap must stop the stream");
         assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
-        assert_eq!(w.buf.len(), cap, "buf must be capped at HEX_BYTES_CAP");
+        assert_eq!(w.buf.len(), cap, "buf must be capped at the writer's cap");
         assert!(w.overflowed(), "total 20 KiB > 16 KiB must overflow");
+    }
+
+    /// The shipped cap's value and the `f32` bound [`HEX_BYTES_CAP`]'s own
+    /// doc derives — pinned rather than trusted to the comment, since a
+    /// future raise past that ceiling would put the windowed hex view's
+    /// virtual height outside `f32`'s exact-integer range. The ceiling
+    /// itself is not restated here: it moved once already when the row
+    /// height was corrected, and a second copy is a second thing to drift.
+    #[test]
+    fn hex_bytes_cap_keeps_virtual_height_in_f32_exact_range() {
+        assert_eq!(HEX_BYTES_CAP, 8 * 1024 * 1024);
+        let rows = HEX_BYTES_CAP / crate::state::hex_view::BYTES_PER_ROW;
+        #[allow(clippy::cast_precision_loss)]
+        let virtual_h = rows as f32 * crate::state::hex_view::row_pixel_height();
+        let f32_exact_int_max = 16_777_216.0_f32; // 2^24
+        assert!(
+            virtual_h < f32_exact_int_max,
+            "virtual height {virtual_h} must stay in f32's exact-integer range"
+        );
     }
 
     // ── read_outcome_error ─────────────────────────────────────────────────────

@@ -1,25 +1,23 @@
 //! File-tree widget: renders the pure `Tree` model as an interactive,
 //! scrollable, keyboard-navigable tree.
 //!
-//! # Virtualization note
+//! # Virtualization (#660)
 //!
-//! `Tree::visible_rows()` already contains ONLY currently-expanded nodes, so
-//! fully-collapsed sub-trees contribute a single row (their dir). The slice is
-//! rendered directly inside a `scrollable` + `column`. This is the pragmatic
-//! Phase 6 approach.
-//!
-//! **Known limitation:** if the user expands all directories of a very large
-//! archive (e.g. 100k entries, all expanded), `visible_rows()` will return
-//! 100k+ elements and each one is built into an Iced widget during every frame.
-//! True viewport virtualization (rendering only on-screen rows via a custom Iced
-//! `Widget`) is a follow-up item tracked in the performance review. For typical
-//! usage patterns (explore-by-navigation, not expand-all), the scrollable slice
-//! is bounded and the overhead is negligible.
+//! `Tree::visible_rows()` contains only currently-expanded (or
+//! filter-matched) nodes, and the view renders only the slice of those rows
+//! that the viewport can show — [`crate::state::row_window::visible_window`]
+//! maps the scroll offset to a row range, and spacers computed from the
+//! shared row-height helper stand in for everything outside it. A 100k-row
+//! expand-all or broad filter builds a viewport-bounded number of widgets
+//! per frame, not 100k. What the spacers can and cannot promise about the
+//! resulting scrollbar geometry is documented on
+//! [`crate::state::row_window`].
 
 use iced::widget::{button, column, mouse_area, scrollable, text};
 use iced::{Background, Color, Element, Length};
 
 use crate::app::Message;
+use crate::state::row_window::{OVERSCAN_ROWS, ScrollPos, visible_window};
 use crate::state::tree::{Tree, VisibleRow};
 use crate::theme::tokens;
 
@@ -45,6 +43,26 @@ pub fn row_indent(depth: usize) -> f32 {
 /// the parent directory's indent so the label aligns just after the chevron.
 pub fn file_row_indent(depth_indent: f32) -> f32 {
     depth_indent + tokens::TREE_INDENT
+}
+
+/// The tree's render window for `n_rows` rows at `scroll`.
+///
+/// The view calls this rather than [`visible_window`] directly, so which
+/// height and overscan this surface passes is a value a test can observe —
+/// the view itself is `#[mutants::skip]` and returns an opaque `Element`.
+#[must_use]
+pub fn window(n_rows: usize, scroll: ScrollPos) -> crate::state::row_window::RowWindow {
+    visible_window(n_rows, row_pixel_height(), scroll, OVERSCAN_ROWS)
+}
+
+/// Laid-out pixel height of one tree row — the shared label-row height, and
+/// the same value `app::tree_scroll_offset` maps a row index to a scroll
+/// offset with (it calls this fn, so the agreement is structural). Named per
+/// surface (like the hex grid's and the inspector's) so which height this
+/// surface uses is a pinnable value rather than an inline call.
+#[must_use]
+pub fn row_pixel_height() -> f32 {
+    crate::state::row_window::label_row_height()
 }
 
 /// Returns `true` when row index `row_idx` matches the current keyboard cursor.
@@ -118,14 +136,22 @@ pub fn glyph_for_row(row: &VisibleRow) -> Option<&'static str> {
 /// * `export_menu` — the open Export As… picker, or `None`. When `Some`, the
 ///   picker replaces the action strip for the matching row.
 ///
+/// * `scroll` — the last reported scroll geometry ([`Message::TreeScrolled`]);
+///   selects which row slice is built.
+///
 /// Each row emits:
 /// * `Message::RowToggled(i)` when a directory row is clicked.
 /// * `Message::RowSelected(i)` when a file row is clicked.
 /// * `Message::RowContextOpened(i)` when a file row is right-clicked.
+///
+/// `i` is always the GLOBAL visible-row index — the windowed loop iterates
+/// global indices directly, so windowing never shifts what a click means.
 // Pure iced view composition (like the sibling `tab_bar`/`hex_view`/`property_tree`
 // view fns). The decision of which inline band shows is extracted into the
-// unit-tested `row_menu_after`; this fn only wires the result into the
-// opaque scrollable `Element`, so there is nothing here a unit test can observe.
+// unit-tested `row_menu_after`, and the row-range decision into the
+// unit-tested `row_window::visible_window`; this fn only wires the results
+// into the opaque scrollable `Element`, so there is nothing here a unit
+// test can observe.
 #[mutants::skip]
 pub fn view<'a>(
     tree: &'a Tree,
@@ -133,16 +159,19 @@ pub fn view<'a>(
     selected_row: Option<usize>,
     context_row: Option<usize>,
     export_menu: Option<&'a crate::state::export::ExportMenu>,
+    scroll: ScrollPos,
 ) -> Element<'a, Message> {
     let rows = tree.visible_rows();
-    // `+ 1`: when a context menu is open the loop pushes one extra element (the
-    // action strip or picker), so reserving `rows.len() + 1` avoids a
-    // reallocation in that case. Safe to spell out the arithmetic here because
-    // `view` is `#[mutants::skip]` — an off-by-one in a capacity hint changes no
-    // behaviour and would otherwise be an unkillable mutant.
-    let mut items: Vec<Element<'a, Message>> = Vec::with_capacity(rows.len() + 1);
+    let win = window(rows.len(), scroll);
+    // `+ 3`: the two spacers plus, when a context menu is open, one extra
+    // element (the action strip or picker). Safe to spell out the arithmetic
+    // here because `view` is `#[mutants::skip]` — an off-by-one in a capacity
+    // hint changes no behaviour and would otherwise be an unkillable mutant.
+    let mut items: Vec<Element<'a, Message>> = Vec::with_capacity(win.range.len() + 3);
+    crate::widgets::push_spacer(&mut items, win.top_px);
     let export_menu_path = export_menu.map(|m| m.path.as_str());
-    for (i, row) in rows.iter().enumerate() {
+    for i in win.range.clone() {
+        let row = &rows[i];
         items.push(build_row(i, row, accent, selected_row, context_row));
         match row_menu_after(context_row, export_menu_path, i, row) {
             RowMenu::Actions => items.push(crate::widgets::context_menu::action_strip(i)),
@@ -155,9 +184,14 @@ pub fn view<'a>(
             RowMenu::None => {}
         }
     }
+    crate::widgets::push_spacer(&mut items, win.bottom_px);
 
     scrollable(column(items).width(Length::Fill))
         .id(TREE_SCROLL_ID.clone())
+        .on_scroll(|v| Message::TreeScrolled {
+            y: v.absolute_offset().y,
+            viewport_h: v.bounds().height,
+        })
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -349,6 +383,64 @@ mod tests {
     use super::*;
     use crate::state::tree::VisibleRow;
     use crate::theme::tokens;
+
+    /// The tree's rows are label rows. Keyboard auto-scroll shares this
+    /// exact fn (`app::tree_scroll_offset` calls it), so the window/scroll
+    /// agreement is structural; what remains to pin is the height itself
+    /// and that it differs from the hex grid's.
+    #[test]
+    fn tree_row_height_is_the_label_row_height() {
+        assert!(
+            (row_pixel_height() - crate::state::row_window::label_row_height()).abs()
+                < f32::EPSILON,
+            "tree rows are TEXT_MD labels with SPACE_XS padding"
+        );
+        assert!(
+            (row_pixel_height() - crate::state::hex_view::row_pixel_height()).abs() > f32::EPSILON,
+            "and must differ from the hex grid's row height"
+        );
+    }
+
+    /// The window this surface builds must use the TREE geometry — probes
+    /// swapped the height and zeroed the overscan at the view's call site
+    /// with the suite green, since the view is mutants-skipped.
+    #[test]
+    fn tree_window_uses_the_label_height_and_the_shipped_overscan() {
+        let scroll = ScrollPos {
+            y: 2620.0,
+            viewport_h: 600.0,
+        };
+        let got = window(10_000, scroll);
+        assert_eq!(
+            got,
+            visible_window(
+                10_000,
+                crate::state::row_window::label_row_height(),
+                scroll,
+                OVERSCAN_ROWS
+            )
+        );
+        assert_ne!(
+            got,
+            visible_window(
+                10_000,
+                crate::state::hex_view::row_pixel_height(),
+                scroll,
+                OVERSCAN_ROWS
+            ),
+            "the hex height must not produce the tree's window"
+        );
+        assert_ne!(
+            got,
+            visible_window(
+                10_000,
+                crate::state::row_window::label_row_height(),
+                scroll,
+                0
+            ),
+            "zero overscan must not produce the tree's window"
+        );
+    }
 
     #[test]
     fn indent_grows_with_depth() {

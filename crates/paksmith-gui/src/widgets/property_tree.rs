@@ -1,20 +1,17 @@
 //! Property-tree widget: renders the pure `PropRow` model as an interactive,
 //! scrollable, type-aware inspector.
 //!
-//! # Virtualization note
+//! # Virtualization (#660)
 //!
-//! `flatten()` already contains ONLY currently-expanded nodes, so
-//! fully-collapsed sub-trees contribute a single row (their branch header). The
-//! slice is rendered directly inside a `scrollable` + `column`. This is the
-//! pragmatic Phase 7a approach.
+//! `flatten_capped` contains only currently-expanded nodes, and the view
+//! renders only the slice of those rows the viewport can show
+//! ([`crate::state::row_window::visible_window`]), with spacers standing in
+//! for the rest — see [`crate::state::row_window`] for what that promises
+//! about scrollbar geometry. Expanding every branch of a deeply-nested asset
+//! therefore builds a viewport-bounded number of widgets per frame.
 //!
-//! **Known limitation:** if the user expands all branches of a deeply-nested
-//! asset (e.g. a large DataTable with many properties, all expanded), `flatten`
-//! will return many elements and each one is built into an Iced widget during
-//! every frame. True viewport virtualization (rendering only on-screen rows via a
-//! custom Iced `Widget`) is a follow-up item. For typical usage patterns
-//! (explore-by-navigation, not expand-all), the scrollable slice is bounded and
-//! the overhead is negligible.
+//! [`MAX_VISIBLE_PROP_ROWS`] survives windowing deliberately: it bounds the
+//! per-frame WALK, which windowing cannot — see its own documentation.
 
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Element, Length};
@@ -24,13 +21,26 @@ use crate::state::property_view::{NodeId, PropKind, flatten_capped};
 use crate::theme::tokens;
 use crate::widgets::file_tree::row_indent;
 
+/// Stable [`iced::widget::Id`] for the inspector's scrollable, so the update
+/// layer can push a tab's stored offset back after a tab or view switch —
+/// see `app::restore_scroll_positions` for why that is required.
+pub const PROPS_SCROLL_ID: iced::widget::Id = iced::widget::Id::new("property-tree-scroll");
+
 // ── row cap ───────────────────────────────────────────────────────────────────
 
-/// Maximum number of property rows rendered per frame. A crafted asset with
-/// hundreds of thousands of exports would build that many Iced widgets on the
-/// Properties view (no interaction required) and freeze the UI. This cap mirrors
-/// the [`crate::task::asset::HEX_BYTES_CAP`] read-time cap strategy:
-/// show a bounded slice and append a note when the asset exceeds it.
+/// Maximum number of property rows FLATTENED per frame.
+///
+/// Retained deliberately after viewport windowing landed (#660), because the
+/// two bound different costs. Windowing bounds widget construction — the
+/// expensive half — to what the viewport shows. It cannot bound the walk:
+/// [`flatten_capped`] runs on every frame to learn the row count the
+/// scrollbar needs, so without this cap a crafted asset with hundreds of
+/// thousands of exports would still walk (and allocate two `String`s per
+/// row for) all of them every frame.
+///
+/// The value is unchanged rather than raised: the walk is per-frame, so
+/// raising it trades a measured-safe bound for an unmeasured one. Raising it
+/// belongs with a measurement of the walk itself, not with this change.
 pub const MAX_VISIBLE_PROP_ROWS: usize = 2000;
 
 // ── color swatch size ─────────────────────────────────────────────────────────
@@ -50,26 +60,40 @@ const SWATCH_BORDER_ALPHA: f32 = 0.35;
 ///
 /// * `pkg`      — the parsed asset Package.
 /// * `expanded` — the set of currently-expanded node ids (from the active tab).
+/// * `scroll`   — the inspector viewport's last reported scroll geometry.
 ///
-/// # Rendering bound
+/// # Rendering bounds
 ///
-/// Uses [`flatten_capped`] so the walk itself stops once `MAX_VISIBLE_PROP_ROWS`
-/// rows are built — both allocation and CPU are bounded to `cap + 1` rows.
-/// A truncation note is shown when the cap is hit. A crafted asset with a huge
-/// export/property count cannot force an O(exports) per-frame build.
+/// Two layers, bounding different costs. [`flatten_capped`] stops the WALK at
+/// `MAX_VISIBLE_PROP_ROWS`, so a crafted asset cannot force an O(exports)
+/// per-frame flatten; a truncation note is shown when that cap is hit.
+/// [`crate::state::row_window::visible_window`] then bounds WIDGET
+/// construction to the rows the viewport shows, with spacers standing in for
+/// the rest so the scrollbar matches a full render (#660).
 #[mutants::skip]
 pub fn view<'a>(
     pkg: &'a paksmith_core::asset::Package,
     expanded: &std::collections::HashSet<NodeId>,
+    scroll: crate::state::row_window::ScrollPos,
 ) -> Element<'a, Message> {
     let rows = flatten_capped(pkg, expanded, MAX_VISIBLE_PROP_ROWS);
     let truncated = rows.len() > MAX_VISIBLE_PROP_ROWS;
 
-    let mut items: Vec<Element<'_, Message>> = rows
-        .into_iter()
-        .take(MAX_VISIBLE_PROP_ROWS)
-        .map(build_row)
-        .collect();
+    let shown = rows.len().min(MAX_VISIBLE_PROP_ROWS);
+    let win = window(shown, scroll);
+    // `+ 3`: the two spacers plus the optional truncation note.
+    let mut items: Vec<Element<'_, Message>> = Vec::with_capacity(win.range.len() + 3);
+    crate::widgets::push_spacer(&mut items, win.top_px);
+    // No `.take(shown)` cap here: `window(shown, ..)` already clamps
+    // `range.end` to `shown`, so this chain can never consume a row at or
+    // past the cap (pinned by `row_window`'s clamp tests).
+    items.extend(
+        rows.into_iter()
+            .skip(win.range.start)
+            .take(win.range.len())
+            .map(build_row),
+    );
+    crate::widgets::push_spacer(&mut items, win.bottom_px);
 
     if truncated {
         items.push(
@@ -89,9 +113,40 @@ pub fn view<'a>(
     }
 
     scrollable(column(items).width(Length::Fill))
+        .id(PROPS_SCROLL_ID.clone())
+        .on_scroll(|v| Message::PropsScrolled {
+            y: v.absolute_offset().y,
+            viewport_h: v.bounds().height,
+        })
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// The inspector's render window for `n_rows` rows at `scroll`.
+///
+/// The view calls this rather than
+/// [`crate::state::row_window::visible_window`] directly, so which height
+/// and overscan this surface passes is a value a test can observe — the
+/// view itself is `#[mutants::skip]` and returns an opaque `Element`.
+#[must_use]
+fn window(
+    n_rows: usize,
+    scroll: crate::state::row_window::ScrollPos,
+) -> crate::state::row_window::RowWindow {
+    crate::state::row_window::visible_window(
+        n_rows,
+        row_pixel_height(),
+        scroll,
+        crate::state::row_window::OVERSCAN_ROWS,
+    )
+}
+
+/// Laid-out pixel height of one property row — the same shape as a file-tree
+/// row (a `TEXT_MD` label inside `padding([SPACE_XS, SPACE_SM])`), so both
+/// come from the one shared helper.
+fn row_pixel_height() -> f32 {
+    crate::state::row_window::label_row_height()
 }
 
 /// Non-expandable branch row: indent + label, no chevron, no button.
@@ -241,6 +296,57 @@ fn build_row(row: crate::state::property_view::PropRow) -> Element<'static, Mess
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The inspector's rows are label rows, not hex rows. A review probe
+    /// swapped this for the hex height and the whole suite stayed green. This
+    /// pins what the helper returns; that the view passes it is pinned by
+    /// `props_window_uses_the_label_height_and_the_shipped_overscan`.
+    #[test]
+    fn property_row_height_is_the_shared_label_row_height() {
+        assert!(
+            (row_pixel_height() - crate::state::row_window::label_row_height()).abs()
+                < f32::EPSILON,
+            "property rows are the same shape as file-tree rows"
+        );
+        assert!(
+            (row_pixel_height() - crate::state::hex_view::row_pixel_height()).abs() > f32::EPSILON,
+            "and must differ from the hex grid's row height"
+        );
+    }
+
+    /// The window this surface builds must use the LABEL geometry — probes
+    /// swapped the height and zeroed the overscan at the view's call site
+    /// with the suite green, since the view is mutants-skipped.
+    #[test]
+    fn props_window_uses_the_label_height_and_the_shipped_overscan() {
+        use crate::state::row_window::{
+            OVERSCAN_ROWS, ScrollPos, label_row_height, visible_window,
+        };
+        let scroll = ScrollPos {
+            y: 2620.0,
+            viewport_h: 600.0,
+        };
+        let got = window(1_500, scroll);
+        assert_eq!(
+            got,
+            visible_window(1_500, label_row_height(), scroll, OVERSCAN_ROWS)
+        );
+        assert_ne!(
+            got,
+            visible_window(
+                1_500,
+                crate::state::hex_view::row_pixel_height(),
+                scroll,
+                OVERSCAN_ROWS
+            ),
+            "the hex height must not produce the inspector's window"
+        );
+        assert_ne!(
+            got,
+            visible_window(1_500, label_row_height(), scroll, 0),
+            "zero overscan must not produce the inspector's window"
+        );
+    }
 
     #[test]
     fn max_visible_prop_rows_is_2000() {

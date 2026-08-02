@@ -22,6 +22,55 @@ pub fn total_rows(len: usize) -> usize {
     len.div_ceil(BYTES_PER_ROW)
 }
 
+/// Render a byte count in binary units, picking the largest whole unit.
+///
+/// The hex view's truncation note names the cap, and a single fixed tier
+/// stops reading naturally as soon as the values outgrow it — the CLI hit
+/// that in #93, where a ladder topping out at MiB printed "8192.0 MiB" for
+/// 8 GiB. The GUI
+/// cannot reuse the CLI's formatter (the crates never share code directly),
+/// and the sibling `human_size` in `panels::detail` is DECIMAL, which would
+/// render a binary 8 MiB cap as "8.3 MB".
+#[must_use]
+pub fn binary_size_label(bytes: usize) -> String {
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * KIB;
+    const GIB: usize = 1024 * MIB;
+    match bytes {
+        b if b >= GIB && b % GIB == 0 => format!("{} GiB", b / GIB),
+        b if b >= MIB && b % MIB == 0 => format!("{} MiB", b / MIB),
+        b if b >= KIB && b % KIB == 0 => format!("{} KiB", b / KIB),
+        b => format!("{b} bytes"),
+    }
+}
+
+/// The hex grid's render window for `n_rows` rows at `scroll`.
+///
+/// The view calls this rather than [`crate::state::row_window::visible_window`]
+/// directly, so which height and overscan this surface passes is a value a
+/// test can observe — the view itself is `#[mutants::skip]` and returns an
+/// opaque `Element`, so an argument swapped there is invisible to the suite.
+#[must_use]
+pub fn window(
+    n_rows: usize,
+    scroll: crate::state::row_window::ScrollPos,
+) -> crate::state::row_window::RowWindow {
+    crate::state::row_window::visible_window(
+        n_rows,
+        row_pixel_height(),
+        scroll,
+        crate::state::row_window::OVERSCAN_ROWS,
+    )
+}
+
+/// Laid-out pixel height of one hex grid row for viewport windowing (#660):
+/// the monospace cell text at `TEXT_SM` through iced's line-height factor,
+/// with no vertical cell padding and no column spacing to add.
+#[must_use]
+pub fn row_pixel_height() -> f32 {
+    crate::state::row_window::row_height_px(crate::theme::tokens::TEXT_SM, 0.0)
+}
+
 #[must_use]
 pub fn row_bytes(bytes: &[u8], row: usize) -> &[u8] {
     let start = row * BYTES_PER_ROW;
@@ -65,6 +114,11 @@ impl HexState {
     }
 }
 
+/// Nibble lookup for [`copy_hex`]: infallible by construction (`u8 >> 4` and
+/// `u8 & 0x0F` are both < 16), where a `char::from_digit` chain would carry
+/// an unreachable error branch a reader has to rule out.
+const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+
 /// Selected bytes as uppercase, space-separated hex (`"C1 2A FF"`). Empty only
 /// when `bytes` is empty; any selection past the end clamps to the last byte.
 #[must_use]
@@ -73,11 +127,22 @@ pub fn copy_hex(bytes: &[u8], sel: Selection) -> String {
     if lo > hi {
         return String::new();
     }
-    bytes[lo..=hi]
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<Vec<_>>()
-        .join(" ")
+    // Streamed into one pre-sized buffer rather than a `String` per byte
+    // joined at the end: #660 raised `HEX_BYTES_CAP` 512x, and nothing
+    // bounds a selection below it — `Selection` holds global byte indices
+    // and `clamped_range` clamps only to the buffer end — so a cap-sized
+    // selection is reachable by construction, where the per-byte shape
+    // would allocate millions of times and block the UI thread for a third
+    // of a second.
+    let mut out = String::with_capacity((hi - lo + 1) * 3);
+    for (i, b) in bytes[lo..=hi].iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push(char::from(HEX_DIGITS[usize::from(b >> 4)]));
+        out.push(char::from(HEX_DIGITS[usize::from(b & 0x0F)]));
+    }
+    out
 }
 
 /// Selected bytes as ASCII, non-printable → `'.'`.
@@ -87,16 +152,16 @@ pub fn copy_ascii(bytes: &[u8], sel: Selection) -> String {
     if lo > hi {
         return String::new();
     }
-    bytes[lo..=hi]
-        .iter()
-        .map(|&b| {
-            if (0x20..0x7f).contains(&b) {
-                b as char
-            } else {
-                '.'
-            }
-        })
-        .collect()
+    // Pre-sized for the same reason as `copy_hex`: one byte in, one char out.
+    let mut out = String::with_capacity(hi - lo + 1);
+    for &b in &bytes[lo..=hi] {
+        out.push(if (0x20..0x7f).contains(&b) {
+            b as char
+        } else {
+            '.'
+        });
+    }
+    out
 }
 
 /// Inclusive [lo, hi] clamped to `[0, len)`. Returns `(1, 0)` (lo>hi) when empty.
@@ -111,6 +176,92 @@ fn clamped_range(len: usize, sel: Selection) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The truncation note names the cap, so its units must follow the cap
+    /// when the cap moves. Before #660 the note divided by 1024 and appended
+    /// a literal "KiB", which read naturally at 16 KiB and would have read
+    /// "8192 KiB" at the raised cap — the same defect the CLI fixed in #93.
+    #[test]
+    fn binary_size_label_promotes_to_the_largest_whole_unit() {
+        assert_eq!(
+            binary_size_label(crate::task::asset::HEX_BYTES_CAP),
+            "8 MiB",
+            "the shipped cap must render in whole MiB"
+        );
+        assert_eq!(binary_size_label(16 * 1024), "16 KiB");
+        assert_eq!(binary_size_label(2 * 1024 * 1024 * 1024), "2 GiB");
+        assert_eq!(binary_size_label(512), "512 bytes");
+        assert_eq!(
+            binary_size_label(1536 * 1024),
+            "1536 KiB",
+            "a non-whole MiB stays in KiB rather than rounding away detail"
+        );
+    }
+
+    /// The hex grid's row height must be the HEX one. A review probe swapped
+    /// this surface's height for the label row's (26.2 vs 15.6 px, a 68%
+    /// error in every spacer and window range) and the whole suite stayed
+    /// green. This pins what the helper RETURNS; that the view PASSES it is
+    /// pinned by `hex_window_uses_the_hex_height_and_the_shipped_overscan`.
+    #[test]
+    fn hex_row_height_is_the_monospace_cell_height_not_the_label_row() {
+        assert!(
+            (row_pixel_height()
+                - crate::state::row_window::row_height_px(crate::theme::tokens::TEXT_SM, 0.0))
+            .abs()
+                < f32::EPSILON,
+            "hex rows are TEXT_SM with no vertical padding"
+        );
+        assert!(
+            (row_pixel_height() - crate::state::row_window::label_row_height()).abs()
+                > f32::EPSILON,
+            "the hex height must differ from the label-row height, or the \
+             surfaces cannot have been given the right one"
+        );
+    }
+
+    /// The window this surface builds must use the HEX geometry. Probes
+    /// swapped the height and zeroed the overscan at the view's call site
+    /// and the suite stayed green, because the view is mutants-skipped and
+    /// returns an opaque `Element`; the seam is what makes those arguments
+    /// observable.
+    #[test]
+    fn hex_window_uses_the_hex_height_and_the_shipped_overscan() {
+        let scroll = crate::state::row_window::ScrollPos {
+            y: 1560.0,
+            viewport_h: 600.0,
+        };
+        let got = window(10_000, scroll);
+        assert_eq!(
+            got,
+            crate::state::row_window::visible_window(
+                10_000,
+                crate::state::row_window::row_height_px(crate::theme::tokens::TEXT_SM, 0.0),
+                scroll,
+                crate::state::row_window::OVERSCAN_ROWS,
+            )
+        );
+        assert_ne!(
+            got,
+            crate::state::row_window::visible_window(
+                10_000,
+                crate::state::row_window::label_row_height(),
+                scroll,
+                crate::state::row_window::OVERSCAN_ROWS,
+            ),
+            "the label-row height must not produce this surface's window"
+        );
+        assert_ne!(
+            got,
+            crate::state::row_window::visible_window(
+                10_000,
+                crate::state::row_window::row_height_px(crate::theme::tokens::TEXT_SM, 0.0),
+                scroll,
+                0,
+            ),
+            "zero overscan must not produce this surface's window"
+        );
+    }
 
     #[test]
     fn total_rows_ceil_divides() {
@@ -201,6 +352,19 @@ mod tests {
             cursor: 3,
         }; // bytes 1..=3
         assert_eq!(copy_hex(&data, sel), "C1 2A FF");
+    }
+
+    #[test]
+    fn copy_hex_zero_pads_bytes_below_0x10() {
+        // Every byte here has a zero high nibble — pins the padding half of
+        // the byte-for-byte match with the pre-#660 format!("{b:02X}") shape
+        // ("0A", never "A"), which no other copy_hex test exercises.
+        let data = vec![0x0A, 0x00, 0x0F];
+        let sel = Selection {
+            anchor: 0,
+            cursor: 2,
+        };
+        assert_eq!(copy_hex(&data, sel), "0A 00 0F");
     }
 
     #[test]
