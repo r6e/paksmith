@@ -57,15 +57,25 @@ pub fn memory_label(rss: Option<usize>) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Positive control for the dependency's capability on every platform CI
+    /// runs: if this fails the backend is broken — the label would silently
+    /// hide and nothing else in the suite would notice. The floor is 1 MiB,
+    /// not 0: a live test process is tens of MiB resident on every CI
+    /// target, and the tighter bound is what kills the value-stub mutants
+    /// (`Some(0)`, `Some(1)`) a bare is-positive check lets survive.
+    /// Gated to those three targets rather than asserting `None` elsewhere,
+    /// because `memory-stats` supports MORE platforms than CI runs (e.g.
+    /// FreeBSD), so on an untested target either outcome can be correct;
+    /// the None-hides UX is pinned platform-independently by
+    /// `memory_label_hides_when_there_is_no_reading`.
     #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     fn read_rss_reports_a_positive_reading_on_supported_platforms() {
-        // Positive control for the dependency's capability on every platform
-        // CI runs (macOS, Linux, Windows): a live process's RSS is never 0.
-        // If this fails, the backend is broken — the label would silently
-        // hide and nothing else in the suite would notice.
         assert!(
-            read_rss().is_some_and(|b| b > 0),
-            "read_rss must report a positive RSS on macOS/Linux/Windows"
+            read_rss().is_some_and(|b| b > MIB),
+            "read_rss must report a plausibly-sized RSS on macOS/Linux/Windows \
+             (a live test process is tens of MiB resident; at or below 1 MiB \
+             the backend — or a mutant of it — is lying)"
         );
     }
 

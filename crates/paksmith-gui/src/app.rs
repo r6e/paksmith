@@ -3433,7 +3433,13 @@ mod tests {
         }
     }
 
+    /// Gated to the CI targets for the same reason as
+    /// `state::memory`'s `read_rss` positive control: on a platform without
+    /// a `memory-stats` backend both readings are legitimately `None` (the
+    /// label hides), so `Some(>0)` is only a valid assertion where the
+    /// backend is known-supported.
     #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     fn app_starts_with_a_memory_reading_and_ticks_refresh_it() {
         let mut app = App::default();
         assert!(
