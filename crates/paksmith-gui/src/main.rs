@@ -41,11 +41,10 @@ fn main() -> iced::Result {
     // and before the iced event loop takes over — calling it here in `main()`
     // satisfies both requirements.
     //
-    // Windows / Linux: attaching a muda menu requires the raw window handle
-    // (HWND / GTK window), which iced 0.14 does not expose through its public
-    // API.  The menu is still built (so the subscription bridge is always
-    // active) but `init_for_nsapp` is skipped.  Actions remain reachable via
-    // the toolbar.  Full Windows/Linux native-menu support is a follow-up.
+    // Windows / Linux: the menu is still built (so the subscription bridge
+    // is always active) but never attached — see crate::menu's module doc
+    // for the per-platform attach story. Actions remain reachable via the
+    // toolbar buttons and the Ctrl+O listener.
     // `build()` returns `Err` only if the platform cannot construct the menu
     // (e.g. no GTK display on a Linux headless runner).  In that case we log a
     // warning and continue without the native menu; the toolbar actions remain

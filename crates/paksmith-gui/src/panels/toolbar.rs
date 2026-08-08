@@ -79,21 +79,16 @@ pub fn view<'a>(
     game_selector_widgets(profiles, active_game, &mut items);
 
     // On Windows / Linux the native muda menu is not attached to the window,
-    // so Toggle Theme and About are exposed here as compact toolbar buttons.
-    // On macOS these actions live in the View / Help menu bar; the toolbar
-    // buttons are omitted to avoid duplicating them.
+    // so Toggle Theme, the debug console, and About are exposed here as
+    // compact toolbar buttons. On macOS these actions live in the View /
+    // Help menu bar; the toolbar buttons are omitted to avoid duplicating
+    // them. (Console also has the F12 shortcut everywhere, but a shortcut
+    // alone is undiscoverable — #662.)
     #[cfg(not(target_os = "macos"))]
     {
-        let theme_btn = button(text("\u{2600}/\u{263E}").size(f32::from(TEXT_SM)))
-            .style(iced::widget::button::secondary)
-            .padding([SPACE_XS, SPACE_SM])
-            .on_press(Message::ToggleTheme);
-        let about_btn = button(text("About").size(f32::from(TEXT_SM)))
-            .style(iced::widget::button::secondary)
-            .padding([SPACE_XS, SPACE_SM])
-            .on_press(Message::About);
-        items.push(theme_btn.into());
-        items.push(about_btn.into());
+        items.push(secondary_btn("\u{2600}/\u{263E}", Message::ToggleTheme).into());
+        items.push(secondary_btn("Console", Message::ConsoleToggled).into());
+        items.push(secondary_btn("About", Message::About).into());
     }
 
     container(
@@ -111,6 +106,19 @@ pub fn view<'a>(
     })
     .width(Length::Fill)
     .into()
+}
+
+/// Compact secondary toolbar button — the shared shape of every auxiliary
+/// action (theme, console, about, profile refresh), so the styling is one
+/// decision instead of per-button copies kept in sync by hand.
+// Pure view glue (label + message → styled Button), same untested-by-design
+// category as the `#[mutants::skip]` view it feeds.
+#[mutants::skip]
+fn secondary_btn(label: &str, message: Message) -> iced::widget::Button<'_, Message> {
+    button(text(label).size(f32::from(TEXT_SM)))
+        .style(iced::widget::button::secondary)
+        .padding([SPACE_XS, SPACE_SM])
+        .on_press(message)
 }
 
 /// Build the encrypted/decrypted status chip.
@@ -178,10 +186,7 @@ fn game_selector_widgets<'a>(
     // registry fetch (the CLI's `profile fetch`, or core's auto-fetch during
     // an open) can turn "No profiles" into a populated list, so the empty
     // state needs the button most.
-    let refresh_btn = button(text("\u{21BB}").size(f32::from(TEXT_SM)))
-        .style(iced::widget::button::secondary)
-        .padding([SPACE_XS, SPACE_SM])
-        .on_press(Message::RefreshProfiles);
+    let refresh_btn = secondary_btn("\u{21BB}", Message::RefreshProfiles);
 
     if profiles.is_empty() {
         // No profiles configured — show a muted hint instead of a dead dropdown.

@@ -49,7 +49,10 @@ const WAVEFORM_COLUMNS: usize = 512;
 // the pedantic bool-count lint is a false positive here.
 #[allow(clippy::struct_excessive_bools)]
 pub struct App {
-    /// Active appearance mode, detected from the OS at startup.
+    /// Active appearance mode: seeded from the OS at startup
+    /// ([`theme::startup_mode`]), following live OS changes via the
+    /// edge-triggered theme poll (#662), and manually toggleable — an
+    /// override stands until the OS reading next changes.
     pub mode: theme::Mode,
     /// The currently-open archive, if any.
     pub archive: Option<LoadedArchive>,
@@ -137,6 +140,18 @@ pub struct App {
     /// [`crate::state::memory::MEMORY_TICK`] subscription. `None` when the
     /// platform backend has no reading — the label hides rather than guessing.
     pub memory_rss: Option<usize>,
+    /// The OS appearance as of the last SUCCESSFUL theme-follow poll (#662)
+    /// — the edge-trigger watermark [`theme::poll_decision`] compares
+    /// against, NOT the app's displayed mode: after a manual Toggle Theme the
+    /// two deliberately diverge until the OS reading itself next changes.
+    /// `None` until a read succeeds; failed polls leave it untouched.
+    pub last_os_reading: Option<theme::OsReading>,
+    /// Whether the user manually toggled the theme this session. Consulted
+    /// only by the RECOVERY regime of [`theme::poll_decision`] (watermark
+    /// still `None`): an explicit flag rather than a mode comparison,
+    /// because an even toggle count lands back on the default mode yet is
+    /// still a standing choice recovery must not revert (R5).
+    pub theme_user_chose: bool,
 }
 
 impl Default for App {
@@ -150,8 +165,14 @@ impl Default for App {
             a: Box::new(pane_grid::Configuration::Pane(PaneKind::Sidebar)),
             b: Box::new(pane_grid::Configuration::Pane(PaneKind::Detail)),
         });
+        // One read serves both fields: the displayed mode starts from the
+        // reading (via the startup contract), and the follow watermark starts
+        // EQUAL to that reading, so the first poll is a quiet tick rather
+        // than a spurious "transition".
+        let os_reading = theme::read_os();
+        let os_mode = theme::startup_mode(os_reading);
         Self {
-            mode: theme::detect_mode(),
+            mode: os_mode,
             archive: None,
             error: None,
             keyflow: KeyFlow::Idle,
@@ -183,6 +204,8 @@ impl Default for App {
             // bar shows a reading immediately instead of a blank first
             // MEMORY_TICK interval.
             memory_rss: crate::state::memory::read_rss(),
+            last_os_reading: os_reading,
+            theme_user_chose: false,
         }
     }
 }
@@ -416,6 +439,11 @@ pub enum Message {
     ConsoleTick,
     /// Coarse status-bar tick (#661): re-read the process RSS.
     MemoryTick,
+    /// The theme-follow poll read the OS appearance (#662). Carries the raw
+    /// tri-state reading (`None` = the read failed) so the update arm is
+    /// pure and fully testable — the `dark-light` read happens in the
+    /// subscription's map closure.
+    OsAppearancePolled(Option<theme::OsReading>),
     /// The console scroll position changed; carries the relative vertical
     /// offset (0.0 = top, 1.0 = bottom) so the follow decision is testable
     /// without constructing a non-public `scrollable::Viewport`.
@@ -814,6 +842,9 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 theme::Mode::Light => theme::Mode::Dark,
                 theme::Mode::Dark => theme::Mode::Light,
             };
+            // Any manual toggle is a standing choice, even one toggled
+            // back — blocks the recovery regime, see `theme_user_chose`.
+            app.theme_user_chose = true;
             Task::none()
         }
         Message::About => {
@@ -979,6 +1010,22 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::MemoryTick => {
             app.memory_rss = crate::state::memory::read_rss();
+            Task::none()
+        }
+        Message::OsAppearancePolled(reading) => {
+            // Live theme follow (#662). The three-regime decision (real OS
+            // edge / quiet tick / recovery-from-failed-reads) lives in
+            // `theme::poll_decision`; a failed read (None) is NOT a reading
+            // and is skipped entirely — treating it as a value fabricated
+            // theme flips (R1; the Linux backend times out at 25 ms).
+            if let Some(now) = reading {
+                if let Some(new_mode) =
+                    theme::poll_decision(app.last_os_reading, now, app.theme_user_chose)
+                {
+                    app.mode = new_mode;
+                }
+                app.last_os_reading = Some(now);
+            }
             Task::none()
         }
         Message::ConsoleScrolled(relative_y) => {
@@ -2189,6 +2236,33 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     let memory_tick_sub =
         iced::time::every(crate::state::memory::MEMORY_TICK).map(|_| Message::MemoryTick);
 
+    // Live OS theme follow (#662): poll the OS appearance on a coarse tick.
+    // The read runs HERE in the map closure so the update arm receives a
+    // value and stays pure/testable. Always on (both batches) — the theme
+    // applies with or without an archive open.
+    let theme_follow_sub = iced::time::every(crate::theme::THEME_FOLLOW_TICK)
+        .map(|_| Message::OsAppearancePolled(crate::theme::read_os()));
+
+    // Ctrl+O (#662): on Windows/Linux the muda menu is never attached (see
+    // crate::menu), so its Open accelerator never registers — this listener
+    // supplies it. On macOS AppKit consumes ⌘O during key-equivalent
+    // dispatch before winit sees it, so a listener there would be dead code;
+    // `Subscription::none()` keeps that explicit. Always on (both batches):
+    // opening a file is the PRIMARY action of the no-archive state.
+    #[cfg(not(target_os = "macos"))]
+    let open_accel_sub = iced::event::listen_with(|event, status, _window| match event {
+        Event::Keyboard(KeyboardEvent::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            repeat,
+            ..
+        }) => open_accelerator_message(&key, physical_key, modifiers, status, repeat),
+        _ => None,
+    });
+    #[cfg(target_os = "macos")]
+    let open_accel_sub = Subscription::none();
+
     if app.archive.is_none() {
         return Subscription::batch([
             menu_sub,
@@ -2197,6 +2271,8 @@ pub fn subscription(app: &App) -> Subscription<Message> {
             audio_tick_sub,
             resize_sub,
             memory_tick_sub,
+            theme_follow_sub,
+            open_accel_sub,
         ]);
     }
 
@@ -2231,6 +2307,8 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         hex_drag_sub,
         resize_sub,
         memory_tick_sub,
+        theme_follow_sub,
+        open_accel_sub,
     ])
 }
 
@@ -2259,6 +2337,61 @@ fn tree_key_for(key: iced::keyboard::Key, status: iced::event::Status) -> Option
         iced::event::Status::Ignored => Some(Message::TreeKey(key)),
         iced::event::Status::Captured => None,
     }
+}
+
+/// Ctrl+O → open the file picker, from a raw keyboard event (#662).
+///
+/// The decision behind the non-macOS Open accelerator listener: on Windows
+/// and Linux the muda menu is never attached (see [`crate::menu`]), so its
+/// Ctrl+O accelerator never registers and this listener supplies it.
+///
+/// Match rules, each load-bearing (R1/R3/R4 catches):
+/// - The key the LAYOUT calls O (`Key::Character("o"/"O")`), with the
+///   physical `KeyO` position as a fallback ONLY when the layout's key is
+///   not a Latin letter — the same conditional native accelerator tables
+///   use. Each simpler rule failed a layout class: logical-only was dead on
+///   non-Latin layouts (Russian Ctrl+O delivers `Key::Character("щ")`),
+///   physical-only inverted Dvorak (its O sits at the QWERTY-S position),
+///   and the unconditional union fired a phantom binding on remapped-Latin
+///   layouts (Dvorak's Ctrl+R / Colemak's Ctrl+Y sit at the QWERTY-O
+///   position).
+/// - `repeat` events are rejected: OS auto-repeat would fire one file
+///   dialog per repeat while the chooser is still mapping, stacking
+///   portal requests.
+/// - Command must be held; Shift and Alt must not be (Logo is deliberately
+///   ignored, matching native accelerator tables).
+/// - Only uncaptured events (`Status::Ignored`), mirroring
+///   [`tree_key_for`]'s capture rule.
+// Compiled (and unit-tested) on every target so the decision is pinned on
+// each CI platform; CONSUMED only by the `cfg(not(macos))` listener. On
+// macOS AppKit consumes ⌘O during key-equivalent dispatch — winit never
+// delivers the key press — so a listener there would be dead code, and
+// `Subscription::none()` keeps that explicit.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn open_accelerator_message(
+    key: &iced::keyboard::Key,
+    physical_key: iced::keyboard::key::Physical,
+    modifiers: iced::keyboard::Modifiers,
+    status: iced::event::Status,
+    repeat: bool,
+) -> Option<Message> {
+    use iced::keyboard::key::{Code, Physical};
+    if repeat || matches!(status, iced::event::Status::Captured) {
+        return None;
+    }
+    if !modifiers.command() || modifiers.shift() || modifiers.alt() {
+        return None;
+    }
+    let layout_o = matches!(key, iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("o"));
+    // A layout key that IS a Latin letter (just not O) suppresses the
+    // physical fallback: the user pressed a different Latin shortcut.
+    let latin_layout_key = matches!(
+        key,
+        iced::keyboard::Key::Character(c)
+            if !c.is_empty() && c.chars().all(|ch| ch.is_ascii_alphabetic())
+    );
+    let physical_o = matches!(physical_key, Physical::Code(Code::KeyO));
+    (layout_o || (physical_o && !latin_layout_key)).then_some(Message::OpenRequested)
 }
 
 /// Returns a button style closure that uses the system accent colour so that
@@ -2453,19 +2586,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
         // ── empty state: actionable CTA ────────────────────────────────────────
         // Forward-requirement from T3: primary action must be an Open button.
         //
-        // The "File → Open ⌘O" hint is shown only on macOS where the native
-        // menu bar (and ⌘O accelerator) exist.  On other platforms the hint
-        // is omitted because the File menu is not attached there yet.
+        // The shortcut hint names each platform's actual affordance: the
+        // native menu (and its ⌘O accelerator) on macOS, the Ctrl+O
+        // keyboard listener elsewhere (#662 — without a hint the listener
+        // was surfaced nowhere on the platforms that need it most).
         #[cfg(target_os = "macos")]
-        let hint_text: Option<iced::widget::Text<'_, iced::Theme, iced::Renderer>> = Some(
-            text("File \u{2192} Open  \u{2318}O")
-                .size(f32::from(crate::theme::tokens::TEXT_SM))
-                .style(|theme: &iced::Theme| iced::widget::text::Style {
-                    color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
-                }),
-        );
+        let hint_label = "File \u{2192} Open  \u{2318}O";
         #[cfg(not(target_os = "macos"))]
-        let hint_text: Option<iced::widget::Text<'_, iced::Theme, iced::Renderer>> = None;
+        let hint_label = "Ctrl+O";
+        let hint_text = text(hint_label)
+            .size(f32::from(crate::theme::tokens::TEXT_SM))
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
+            });
 
         let cta_text = text("Open a .pak file to begin exploring")
             .size(f32::from(crate::theme::tokens::TEXT_MD))
@@ -2473,19 +2606,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
             });
 
-        let mut cta_col = column![
+        let cta_col = column![
             button(text("Open\u{2026}").size(f32::from(crate::theme::tokens::TEXT_MD)))
                 .style(accent_button(app.accent))
                 .padding([SPACE_SM, SPACE_MD])
                 .on_press(Message::OpenRequested),
             cta_text,
+            hint_text,
         ]
         .spacing(SPACE_MD)
         .align_x(iced::Alignment::Center);
-
-        if let Some(hint) = hint_text {
-            cta_col = cta_col.push(hint);
-        }
 
         container(cta_col)
             .center_x(Length::Fill)
@@ -3416,6 +3546,7 @@ mod tests {
             Message::RowToggled(0),
             Message::ConsoleTick,
             Message::MemoryTick,
+            Message::OsAppearancePolled(Some(crate::theme::OsReading::Dark)),
             // About/Dismiss are teardown, not inheritance: they swap the
             // body, so `PaneLayout::about_visible` already fires and a
             // membership here could never change the outcome — the same
@@ -3431,6 +3562,291 @@ mod tests {
                  event would fight the user's own scrolling"
             );
         }
+    }
+
+    #[test]
+    fn os_appearance_poll_adopts_a_flip_and_updates_the_watermark() {
+        use crate::theme::{Mode, OsReading};
+        let mut app = App {
+            mode: Mode::Dark,
+            last_os_reading: Some(OsReading::Dark),
+            ..App::default()
+        };
+        let _ = update(
+            &mut app,
+            Message::OsAppearancePolled(Some(OsReading::Light)),
+        );
+        assert_eq!(app.mode, Mode::Light, "an OS flip is adopted");
+        assert_eq!(
+            app.last_os_reading,
+            Some(OsReading::Light),
+            "the watermark follows every successful reading"
+        );
+        // The GNOME edge (#662 R1): PreferDark → NoPreference is a real
+        // transition and lands Light.
+        app.last_os_reading = Some(OsReading::Dark);
+        app.mode = Mode::Dark;
+        let _ = update(
+            &mut app,
+            Message::OsAppearancePolled(Some(OsReading::NoPreference)),
+        );
+        assert_eq!(
+            app.mode,
+            Mode::Light,
+            "GNOME's Dark → NoPreference flip must land Light"
+        );
+    }
+
+    #[test]
+    fn failed_os_polls_change_nothing_at_all() {
+        use crate::theme::{Mode, OsReading};
+        // A transient dark-light error (None payload) is NOT a reading: it
+        // must touch neither the displayed mode nor the watermark — treating
+        // it as a value fabricated theme flips on loaded Linux systems (R1).
+        let mut app = App {
+            mode: Mode::Light,
+            last_os_reading: Some(OsReading::Light),
+            ..App::default()
+        };
+        let _ = update(&mut app, Message::OsAppearancePolled(None));
+        assert_eq!(app.mode, Mode::Light, "mode must survive an error poll");
+        assert_eq!(
+            app.last_os_reading,
+            Some(OsReading::Light),
+            "the watermark must survive an error poll"
+        );
+    }
+
+    #[test]
+    fn read_recovery_establishes_the_watermark_without_reverting_an_override() {
+        use crate::theme::{Mode, OsReading};
+        // Startup read failed (None watermark), the user overrode the dark
+        // default via a real toggle, and the OS never changed: the first
+        // SUCCESSFUL poll must not touch the mode — recovery is not an OS
+        // change (R2) — but must set the watermark so real later flips edge
+        // normally.
+        let mut app = App {
+            mode: Mode::Dark,
+            last_os_reading: None,
+            ..App::default()
+        };
+        let _ = update(&mut app, Message::ToggleTheme);
+        assert_eq!(app.mode, Mode::Light, "override in place");
+        let _ = update(&mut app, Message::OsAppearancePolled(Some(OsReading::Dark)));
+        assert_eq!(
+            app.mode,
+            Mode::Light,
+            "recovery must not revert the override"
+        );
+        assert_eq!(
+            app.last_os_reading,
+            Some(OsReading::Dark),
+            "recovery establishes the watermark"
+        );
+        // A real flip after recovery edges normally.
+        let _ = update(
+            &mut app,
+            Message::OsAppearancePolled(Some(OsReading::Light)),
+        );
+        assert_eq!(app.mode, Mode::Light);
+        let _ = update(&mut app, Message::OsAppearancePolled(Some(OsReading::Dark)));
+        assert_eq!(app.mode, Mode::Dark, "post-recovery flips are real edges");
+    }
+
+    #[test]
+    fn read_recovery_at_the_startup_default_adopts_the_startup_mapping() {
+        use crate::theme::{Mode, OsReading};
+        // Startup read failed and the user never toggled: recovery must
+        // bring the app to what a successful startup read would have shown,
+        // or a Light desktop whose startup read timed out once would stay
+        // Dark forever (R3).
+        let mut app = App {
+            mode: Mode::Dark,
+            last_os_reading: None,
+            ..App::default()
+        };
+        let _ = update(
+            &mut app,
+            Message::OsAppearancePolled(Some(OsReading::Light)),
+        );
+        assert_eq!(
+            app.mode,
+            Mode::Light,
+            "recovery at the untouched default adopts the startup mapping"
+        );
+        assert_eq!(app.last_os_reading, Some(OsReading::Light));
+    }
+
+    #[test]
+    fn read_recovery_respects_an_even_toggle_count_as_a_choice() {
+        use crate::theme::{Mode, OsReading};
+        // The R5 blind spot: the user peeks at Light and deliberately
+        // returns to Dark before the first successful read — the mode
+        // equals the startup default again, but it IS a standing choice,
+        // and recovery must not override it.
+        let mut app = App {
+            mode: Mode::Dark,
+            last_os_reading: None,
+            ..App::default()
+        };
+        let _ = update(&mut app, Message::ToggleTheme);
+        let _ = update(&mut app, Message::ToggleTheme);
+        assert_eq!(app.mode, Mode::Dark, "back at the default, by choice");
+        let _ = update(
+            &mut app,
+            Message::OsAppearancePolled(Some(OsReading::Light)),
+        );
+        assert_eq!(
+            app.mode,
+            Mode::Dark,
+            "an even toggle count is still a choice — recovery must not adopt"
+        );
+        assert_eq!(app.last_os_reading, Some(OsReading::Light));
+    }
+
+    #[test]
+    fn quiet_os_polls_leave_a_manual_theme_override_alone() {
+        // The regression this design exists to prevent: the user toggles the
+        // theme away from the OS value, and a poll that "re-matches the OS"
+        // would silently revert it within one tick interval.
+        use crate::theme::{Mode, OsReading};
+        let mut app = App {
+            mode: Mode::Dark,
+            last_os_reading: Some(OsReading::Dark),
+            ..App::default()
+        };
+        let _ = update(&mut app, Message::ToggleTheme);
+        assert_eq!(app.mode, Mode::Light, "manual override in place");
+        let _ = update(&mut app, Message::OsAppearancePolled(Some(OsReading::Dark)));
+        assert_eq!(
+            app.mode,
+            Mode::Light,
+            "an unchanged OS reading must not revert the override"
+        );
+        // A real OS change afterwards wins over the standing override.
+        let _ = update(
+            &mut app,
+            Message::OsAppearancePolled(Some(OsReading::Light)),
+        );
+        let _ = update(&mut app, Message::OsAppearancePolled(Some(OsReading::Dark)));
+        assert_eq!(
+            app.mode,
+            Mode::Dark,
+            "a fresh OS flip is newer intent than the old override"
+        );
+    }
+
+    #[test]
+    fn open_accelerator_fires_across_keyboard_layouts() {
+        use iced::event::Status;
+        use iced::keyboard::key::{Code, Physical};
+        use iced::keyboard::{Key, Modifiers};
+        let o_key = Key::Character("o".into());
+        let o_pos = Physical::Code(Code::KeyO);
+        // QWERTY: both halves match.
+        assert!(matches!(
+            open_accelerator_message(&o_key, o_pos, Modifiers::COMMAND, Status::Ignored, false),
+            Some(Message::OpenRequested)
+        ));
+        // Dvorak (R3): the layout's O sits at the physical QWERTY-S — the
+        // LOGICAL half must fire, matching native accelerator behavior.
+        assert!(matches!(
+            open_accelerator_message(
+                &o_key,
+                Physical::Code(Code::KeyS),
+                Modifiers::COMMAND,
+                Status::Ignored,
+                false
+            ),
+            Some(Message::OpenRequested)
+        ));
+        // Russian (R1): Ctrl+O delivers a non-Latin character — the
+        // PHYSICAL fallback must fire.
+        let shcha = Key::Character("\u{0449}".into());
+        assert!(matches!(
+            open_accelerator_message(&shcha, o_pos, Modifiers::COMMAND, Status::Ignored, false),
+            Some(Message::OpenRequested)
+        ));
+        // The R4 quadrant: the physical KeyO position with a DIFFERENT
+        // Latin letter on it (Dvorak's Ctrl+R, Colemak's Ctrl+Y) must NOT
+        // fire — the user pressed that letter's shortcut, not Open.
+        for taken in ["r", "y"] {
+            assert!(
+                open_accelerator_message(
+                    &Key::Character(taken.into()),
+                    o_pos,
+                    Modifiers::COMMAND,
+                    Status::Ignored,
+                    false
+                )
+                .is_none(),
+                "physical KeyO under layout letter {taken} must not fire"
+            );
+        }
+        // Logo held alongside is tolerated (native accelerator tables
+        // ignore the Win key).
+        assert!(matches!(
+            open_accelerator_message(
+                &o_key,
+                o_pos,
+                Modifiers::COMMAND | Modifiers::LOGO,
+                Status::Ignored,
+                false
+            ),
+            Some(Message::OpenRequested)
+        ));
+    }
+
+    #[test]
+    fn open_accelerator_rejects_wrong_keys_modifiers_capture_and_repeat() {
+        use iced::event::Status;
+        use iced::keyboard::key::{Code, NativeCode, Physical};
+        use iced::keyboard::{Key, Modifiers};
+        let o_key = Key::Character("o".into());
+        let o_pos = Physical::Code(Code::KeyO);
+        // Neither half matching (wrong letter at a wrong/unknown position).
+        for pos in [
+            Physical::Code(Code::KeyS),
+            Physical::Unidentified(NativeCode::Unidentified),
+        ] {
+            assert!(
+                open_accelerator_message(
+                    &Key::Character("r".into()),
+                    pos,
+                    Modifiers::COMMAND,
+                    Status::Ignored,
+                    false
+                )
+                .is_none()
+            );
+        }
+        // No command, shift/alt held, captured, or auto-repeat: no fire.
+        // Repeat rejection keeps a held Ctrl+O from stacking one file
+        // dialog per repeat event.
+        assert!(
+            open_accelerator_message(&o_key, o_pos, Modifiers::empty(), Status::Ignored, false)
+                .is_none()
+        );
+        for extra in [Modifiers::SHIFT, Modifiers::ALT] {
+            assert!(
+                open_accelerator_message(
+                    &o_key,
+                    o_pos,
+                    Modifiers::COMMAND | extra,
+                    Status::Ignored,
+                    false
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            open_accelerator_message(&o_key, o_pos, Modifiers::COMMAND, Status::Captured, false)
+                .is_none()
+        );
+        assert!(
+            open_accelerator_message(&o_key, o_pos, Modifiers::COMMAND, Status::Ignored, true)
+                .is_none()
+        );
     }
 
     /// Gated to the CI targets for the same reason as
