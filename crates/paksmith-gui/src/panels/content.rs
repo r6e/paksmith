@@ -61,8 +61,12 @@ pub fn view<'a>(
                     let meta = entries.get(tab.path.as_str());
                     match tab.view {
                         ViewMode::Info => info_view(tab.path.as_str(), bytes, parsed, meta),
-                        ViewMode::Properties => properties_view(parsed, &tab.expanded),
-                        ViewMode::Hex => hex_view::view(bytes, *truncated, &tab.hex, accent),
+                        ViewMode::Properties => {
+                            properties_view(parsed, &tab.expanded, viewer_scroll(tab))
+                        }
+                        ViewMode::Hex => {
+                            hex_view::view(bytes, *truncated, &tab.hex, accent, viewer_scroll(tab))
+                        }
                         ViewMode::Texture => texture_viewer::view(&tab.texture, accent),
                         ViewMode::Audio => {
                             audio_player::view(&tab.audio, accent, audio_device_available)
@@ -220,15 +224,29 @@ fn info_view(
         .into()
 }
 
+/// The scroll geometry the given view mode's surface windows with.
+///
+/// A seam, not a convenience: each surface stores its own offset, and
+/// handing the hex grid the inspector's (or vice versa) renders the wrong
+/// slice. The view fns are `#[mutants::skip]` and return opaque `Element`s,
+/// so that pairing is only observable here.
+fn viewer_scroll(tab: &crate::state::tabs::Tab) -> crate::state::row_window::ScrollPos {
+    match tab.view {
+        ViewMode::Hex => tab.hex_scroll,
+        _ => tab.props_scroll,
+    }
+}
+
 // ── Properties view ───────────────────────────────────────────────────────────
 
 #[mutants::skip]
 fn properties_view<'a>(
     parsed: &'a Result<std::sync::Arc<paksmith_core::asset::Package>, String>,
     expanded: &'a std::collections::HashSet<crate::state::property_view::NodeId>,
+    scroll: crate::state::row_window::ScrollPos,
 ) -> Element<'a, Message> {
     match parsed {
-        Ok(pkg) => property_tree::view(pkg.as_ref(), expanded),
+        Ok(pkg) => property_tree::view(pkg.as_ref(), expanded, scroll),
         Err(reason) => {
             let msg = format!("Not a parseable asset \u{2014} see Hex: {reason}");
             container(
@@ -278,4 +296,45 @@ fn muted_text(s: &'static str) -> Element<'static, Message> {
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::row_window::ScrollPos;
+    use crate::state::tabs::Tabs;
+
+    fn tab_with_offsets(hex: f32, props: f32) -> crate::state::tabs::Tab {
+        let mut tabs = Tabs::default();
+        let _ = tabs.open_or_activate("a.txt");
+        let t = tabs.active_tab_mut().expect("harness: a tab");
+        t.hex_scroll = ScrollPos {
+            y: hex,
+            viewport_h: 600.0,
+        };
+        t.props_scroll = ScrollPos {
+            y: props,
+            viewport_h: 600.0,
+        };
+        t.clone()
+    }
+
+    /// Each surface must window with ITS OWN stored offset. A review probe
+    /// swapped the two at the call sites and the whole suite stayed green,
+    /// because the views are mutants-skipped and return opaque `Element`s.
+    #[test]
+    fn each_view_mode_windows_with_its_own_stored_offset() {
+        let tab = tab_with_offsets(300.0, 900.0);
+        let mut hex_tab = tab.clone();
+        hex_tab.view = ViewMode::Hex;
+        let mut props_tab = tab.clone();
+        props_tab.view = ViewMode::Properties;
+        assert_eq!(viewer_scroll(&hex_tab), tab.hex_scroll);
+        assert_eq!(viewer_scroll(&props_tab), tab.props_scroll);
+        assert_ne!(
+            viewer_scroll(&hex_tab),
+            viewer_scroll(&props_tab),
+            "the two surfaces must not share one offset"
+        );
+    }
 }

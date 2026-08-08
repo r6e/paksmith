@@ -36,13 +36,22 @@ pub enum TabContent {
 
 #[derive(Debug, Clone)]
 pub struct Tab {
+    /// Stable identity for this tab, distinct from its INDEX — `close`
+    /// reuses indices, so index equality does not mean "the same tab"
+    /// (#660: the detail pane's shown-content discriminant keys on this).
+    pub id: u64,
     pub path: String,
     pub view: ViewMode,
     pub content: TabContent,
     pub hex: hex_view::HexState,
+    /// Last reported scroll geometry of the hex viewer's viewport (#660).
+    pub hex_scroll: crate::state::row_window::ScrollPos,
     pub texture: texture_view::TextureState,
     pub audio: audio_view::AudioState,
     pub expanded: HashSet<NodeId>,
+    /// Last reported scroll geometry of the property inspector's viewport
+    /// (#660).
+    pub props_scroll: crate::state::row_window::ScrollPos,
 }
 
 /// Returns `true` iff `tab` holds a decodable texture export.
@@ -83,6 +92,10 @@ pub fn audio_available(tab: &Tab) -> bool {
 pub struct Tabs {
     pub open: Vec<Tab>,
     pub active: Option<usize>,
+    /// The last [`Tab::id`] issued. Incremented before each use, so ids
+    /// start at 1 and are never reused, including across a close — which is
+    /// what makes them safe to key identity on where the index is not.
+    next_id: u64,
 }
 
 impl Tabs {
@@ -93,14 +106,18 @@ impl Tabs {
             self.active = Some(i);
             return i;
         }
+        self.next_id += 1;
         self.open.push(Tab {
+            id: self.next_id,
             path: path.to_string(),
             view: ViewMode::Properties,
             content: TabContent::Loading,
             hex: hex_view::HexState::default(),
+            hex_scroll: crate::state::row_window::ScrollPos::default(),
             texture: texture_view::TextureState::default(),
             audio: audio_view::AudioState::default(),
             expanded: HashSet::new(),
+            props_scroll: crate::state::row_window::ScrollPos::default(),
         });
         let i = self.open.len() - 1;
         self.active = Some(i);
@@ -454,6 +471,31 @@ mod tests {
     }
 
     // ── B5: close / activate boundary ────────────────────────────────────────
+
+    /// Ids must survive a close without being reused. Keying the shown-content
+    /// discriminant on the tab INDEX was the #660 defect this field exists to
+    /// fix; an id derived from a position (`open.len()`, say) reintroduces it
+    /// exactly — close the first of two tabs and the next opened tab collides
+    /// with the survivor, so switching between them reads as no change.
+    #[test]
+    fn ids_are_not_reused_after_a_close() {
+        let mut tabs = Tabs::default();
+        let _ = tabs.open_or_activate("A");
+        let _ = tabs.open_or_activate("B");
+        let b_id = tabs.open[1].id;
+        tabs.close(0);
+        let _ = tabs.open_or_activate("C");
+        assert_eq!(tabs.open.len(), 2, "harness: B survived and C opened");
+        assert_ne!(
+            tabs.open[0].id, tabs.open[1].id,
+            "a reopened slot must not collide with a surviving tab"
+        );
+        assert!(
+            tabs.open[1].id > b_id,
+            "ids must keep increasing across a close, got {} after {b_id}",
+            tabs.open[1].id
+        );
+    }
 
     #[test]
     fn close_active_middle_repicks_via_min_not_decrement() {

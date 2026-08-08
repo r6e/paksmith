@@ -142,6 +142,7 @@ fn build_loaded(path: PathBuf, resolved_key: Option<&AesKey>) -> Result<LoadedAr
         entry_count,
         decrypted: resolved_key.is_some(),
         tree,
+        tree_scroll: crate::state::row_window::ScrollPos::default(),
         entries,
         reader,
     })

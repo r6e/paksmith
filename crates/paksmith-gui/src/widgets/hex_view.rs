@@ -1,13 +1,19 @@
 //! Hex-dump widget: renders a byte slice as an interactive hex editor view
 //! with click-drag byte selection and copy-to-clipboard.
 //!
-//! # Byte-cap note
+//! # Virtualization and the byte cap
 //!
-//! The view renders the bytes it receives, which are already bounded to
-//! [`crate::task::asset::HEX_BYTES_CAP`] at read time. When the entry was
-//! larger than the cap, `truncated = true` is passed to [`view`] and a muted
-//! note is shown in the toolbar. True viewport virtualization (rendering only
-//! on-screen rows via a custom iced `Widget`) is a follow-up item.
+//! Only the grid rows the viewport can show are built
+//! ([`crate::state::row_window::visible_window`]); spacers stand in for the
+//! rest — see [`crate::state::row_window`] for what that does and does not
+//! promise about scrollbar geometry. Byte indices stay global, so selection
+//! and copy are unaffected by which slice is rendered.
+//!
+//! The bytes themselves are still bounded at read time by
+//! [`crate::task::asset::HEX_BYTES_CAP`] — now for retained memory rather
+//! than render cost (#660). When the entry was larger than the cap,
+//! `truncated = true` is passed to [`view`] and a muted note is shown in the
+//! toolbar.
 
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
 use iced::{Background, Element, Font, Length};
@@ -15,6 +21,11 @@ use iced::{Background, Element, Font, Length};
 use crate::app::Message;
 use crate::state::hex_view::{BYTES_PER_ROW, HexState, row_bytes, total_rows};
 use crate::theme::tokens;
+
+/// Stable [`iced::widget::Id`] for the hex grid's scrollable, so the update
+/// layer can push a tab's stored offset back after a tab or view switch —
+/// see `app::restore_scroll_positions` for why that is required.
+pub const HEX_SCROLL_ID: iced::widget::Id = iced::widget::Id::new("hex-grid-scroll");
 
 // ── pure helpers ──────────────────────────────────────────────────────────────
 
@@ -71,9 +82,10 @@ fn copy_toolbar_button(
 
 /// Render a hex dump of `bytes` as a scrollable, selectable grid.
 ///
-/// `bytes` is already bounded to [`crate::task::asset::HEX_BYTES_CAP`] at read
-/// time; all bytes are rendered without further slicing.  When `truncated` is
-/// `true` the toolbar shows a muted note that the entry is larger than the cap.
+/// `bytes` is bounded to [`crate::task::asset::HEX_BYTES_CAP`] at read time,
+/// and only the rows `scroll` puts in view are built — see the module docs.
+/// When `truncated` is `true` the toolbar shows a muted note that the entry
+/// is larger than the cap.
 ///
 /// Each row shows: an 8-digit offset gutter, 16 hex-cell columns, and 16
 /// ASCII-cell columns.  Byte cells in the current selection get an accent-tint
@@ -91,6 +103,7 @@ pub fn view<'a>(
     truncated: bool,
     hex: &'a HexState,
     accent: iced::Color,
+    scroll: crate::state::row_window::ScrollPos,
 ) -> Element<'a, Message> {
     // ── copy toolbar ─────────────────────────────────────────────────────────
     let has_sel = hex.selection.is_some();
@@ -103,8 +116,8 @@ pub fn view<'a>(
     if truncated {
         toolbar_items.push(
             text(format!(
-                "Showing the first {} KiB \u{2014} entry is larger; see Info for the full size or extract it",
-                crate::task::asset::HEX_BYTES_CAP / 1024,
+                "Showing the first {} \u{2014} entry is larger; see Info for the full size or extract it",
+                crate::state::hex_view::binary_size_label(crate::task::asset::HEX_BYTES_CAP),
             ))
             .size(f32::from(tokens::TEXT_SM))
             .style(|theme: &iced::Theme| iced::widget::text::Style {
@@ -119,10 +132,18 @@ pub fn view<'a>(
         .padding([tokens::SPACE_XS, tokens::SPACE_MD]);
 
     // ── hex grid ──────────────────────────────────────────────────────────────
+    //
+    // Windowed (#660): only the rows the viewport can show are built; the
+    // spacers below stand in for the rest so the scrollbar matches a full
+    // render. Byte indices stay GLOBAL, so selection and copy are unaffected.
     let n_rows = total_rows(bytes.len());
-    let mut grid_rows: Vec<Element<'_, Message>> = Vec::with_capacity(n_rows);
+    let win = crate::state::hex_view::window(n_rows, scroll);
+    // `+ 2`: the two spacers. `view` is `#[mutants::skip]`, so spelling out
+    // the capacity hint costs nothing — an off-by-one changes no behaviour.
+    let mut grid_rows: Vec<Element<'_, Message>> = Vec::with_capacity(win.range.len() + 2);
+    crate::widgets::push_spacer(&mut grid_rows, win.top_px);
 
-    for r in 0..n_rows {
+    for r in win.range.clone() {
         let row_slice = row_bytes(bytes, r);
         let row_start = r * BYTES_PER_ROW;
 
@@ -191,12 +212,19 @@ pub fn view<'a>(
         grid_rows.push(grid_row);
     }
 
+    crate::widgets::push_spacer(&mut grid_rows, win.bottom_px);
+
     let grid = scrollable(
         column(grid_rows)
             .spacing(0)
             .padding([tokens::SPACE_XS, tokens::SPACE_MD])
             .width(Length::Fill),
     )
+    .id(HEX_SCROLL_ID.clone())
+    .on_scroll(|v| Message::HexScrolled {
+        y: v.absolute_offset().y,
+        viewport_h: v.bounds().height,
+    })
     .width(Length::Fill)
     .height(Length::Fill);
 
