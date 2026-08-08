@@ -236,13 +236,6 @@ fn rows_px(rows: usize, row_height: f32) -> f32 {
 /// invariant is stated at a width that survives measurement.
 pub const MAX_SPACER_DEVIATION_ULPS: f32 = 4.0;
 
-/// The gap between `v` and the next representable `f32` above it.
-#[must_use]
-pub fn ulp(v: f32) -> f32 {
-    let next = f32::from_bits(v.abs().to_bits() + 1);
-    next - v.abs()
-}
-
 /// Convert a non-negative, finite pixel-derived float to a row count.
 ///
 /// Callers pass values already guarded to be finite and `>= 0`; Rust's
@@ -484,6 +477,15 @@ mod tests {
     /// not the representation, is wrong. The scroll POSITION matters as much
     /// as the count — a review probe found 32 px at a mid-list offset where
     /// the half-way samples showed 4 — so one off-centre case is included.
+    /// The gap between `v` and the next representable `f32` above it — the
+    /// measurement unit for the deviation bound below. Lives in the test
+    /// module because nothing in the render path reads it (same reason
+    /// [`MAX_SPACER_DEVIATION_ULPS`]'s doc gives for the constant itself).
+    fn ulp(v: f32) -> f32 {
+        let next = f32::from_bits(v.abs().to_bits() + 1);
+        next - v.abs()
+    }
+
     #[test]
     fn spacer_deviation_stays_bounded_at_tree_reachable_row_counts() {
         // (row count, row the viewport sits at, viewport height). The last
