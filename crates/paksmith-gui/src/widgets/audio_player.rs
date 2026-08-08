@@ -14,7 +14,7 @@ use crate::state::audio_view::{
     playback_availability,
 };
 use crate::theme::tokens::{
-    SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM,
+    SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_SM, muted_text_style,
 };
 
 // ── canvas height (pixels) ────────────────────────────────────────────────────
@@ -365,20 +365,6 @@ fn metadata_summary(
         "{codec_label} \u{b7} {channels} \u{b7} {}{rate_suffix}",
         format_time(duration_secs)
     )
-}
-
-/// Muted text style (foreground scaled by [`TEXT_MUTED_ALPHA`]). Shared by
-/// [`muted_line`] and [`centered_muted`] so the alpha lives in one place.
-///
-/// `#[mutants::skip]`: render glue (theme → `Style`), the same untested-by-design
-/// category as the `#[mutants::skip]` view functions it feeds; visual correctness
-/// is verified by manual smoke, and a `Default::default()` mutant only changes the
-/// muted colour, not behavior.
-#[mutants::skip]
-fn muted_text_style(theme: &iced::Theme) -> iced::widget::text::Style {
-    iced::widget::text::Style {
-        color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
-    }
 }
 
 /// A muted single-line text element (in-flight "Decoding…" and the non-playable

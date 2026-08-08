@@ -133,6 +133,10 @@ pub struct App {
     /// keeps application state on the main thread — see `audio_output`'s module
     /// docs for the placement rationale.
     pub audio: Option<AudioOutput>,
+    /// Last process-RSS reading for the status bar (#661), refreshed on the
+    /// [`crate::state::memory::MEMORY_TICK`] subscription. `None` when the
+    /// platform backend has no reading — the label hides rather than guessing.
+    pub memory_rss: Option<usize>,
 }
 
 impl Default for App {
@@ -175,6 +179,10 @@ impl Default for App {
             // unset so it stays free of any real audio-hardware side effect. The
             // live path opens the real output device eagerly in `boot_app`.
             audio: None,
+            // Seeded at construction (one cheap platform read) so the status
+            // bar shows a reading immediately instead of a blank first
+            // MEMORY_TICK interval.
+            memory_rss: crate::state::memory::read_rss(),
         }
     }
 }
@@ -406,6 +414,8 @@ pub enum Message {
     /// Periodic tick while the console is visible, so freshly captured records
     /// render without requiring other UI activity.
     ConsoleTick,
+    /// Coarse status-bar tick (#661): re-read the process RSS.
+    MemoryTick,
     /// The console scroll position changed; carries the relative vertical
     /// offset (0.0 = top, 1.0 = bottom) so the follow decision is testable
     /// without constructing a non-public `scrollable::Viewport`.
@@ -966,6 +976,10 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             } else {
                 Task::none()
             }
+        }
+        Message::MemoryTick => {
+            app.memory_rss = crate::state::memory::read_rss();
+            Task::none()
         }
         Message::ConsoleScrolled(relative_y) => {
             app.console_follow = crate::state::console::at_bottom(relative_y);
@@ -2167,6 +2181,14 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     let resize_sub =
         iced::event::listen_with(|event, _status, _window| window_resize_message(&event));
 
+    // Status-bar memory display (#661): re-read the process RSS on a coarse
+    // tick. Always on — the status bar renders in BOTH subscription branches
+    // below, so the tick must be in both batches or the label freezes at the
+    // construction-time seed until the first archive opens (an R1 panel
+    // catch). The read is one cheap platform call per MEMORY_TICK.
+    let memory_tick_sub =
+        iced::time::every(crate::state::memory::MEMORY_TICK).map(|_| Message::MemoryTick);
+
     if app.archive.is_none() {
         return Subscription::batch([
             menu_sub,
@@ -2174,6 +2196,7 @@ pub fn subscription(app: &App) -> Subscription<Message> {
             console_tick_sub,
             audio_tick_sub,
             resize_sub,
+            memory_tick_sub,
         ]);
     }
 
@@ -2207,6 +2230,7 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         tree_key_sub,
         hex_drag_sub,
         resize_sub,
+        memory_tick_sub,
     ])
 }
 
@@ -2333,7 +2357,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
             (a.entry_count, Some(a.path.as_path()), sel_name)
         }
     };
-    let status_view = status_bar::view(archive_path, entry_count, selected_name);
+    let status_view = status_bar::view(
+        archive_path,
+        entry_count,
+        selected_name,
+        crate::state::memory::memory_label(app.memory_rss),
+    );
 
     // ── main content area ─────────────────────────────────────────────────────
     let content_area: Element<'_, Message> = if app.keyflow.is_locked().is_some() {
@@ -3386,6 +3415,7 @@ mod tests {
             Message::RowSelected(0),
             Message::RowToggled(0),
             Message::ConsoleTick,
+            Message::MemoryTick,
             // About/Dismiss are teardown, not inheritance: they swap the
             // body, so `PaneLayout::about_visible` already fires and a
             // membership here could never change the outcome — the same
@@ -3401,6 +3431,21 @@ mod tests {
                  event would fight the user's own scrolling"
             );
         }
+    }
+
+    #[test]
+    fn app_starts_with_a_memory_reading_and_ticks_refresh_it() {
+        let mut app = App::default();
+        assert!(
+            app.memory_rss.is_some_and(|b| b > 0),
+            "seeded at construction so the label shows before the first tick"
+        );
+        app.memory_rss = None;
+        let _ = update(&mut app, Message::MemoryTick);
+        assert!(
+            app.memory_rss.is_some_and(|b| b > 0),
+            "a tick must store a fresh live RSS reading"
+        );
     }
 
     /// The TEARDOWN direction, which no message-variant set can express: a

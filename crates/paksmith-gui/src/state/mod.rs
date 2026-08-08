@@ -5,6 +5,7 @@ pub mod export;
 pub mod hex_view;
 pub mod keyflow;
 pub mod log_buffer;
+pub mod memory;
 pub mod profiles;
 pub mod property_view;
 pub mod row_window;

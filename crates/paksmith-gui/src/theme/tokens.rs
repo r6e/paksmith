@@ -30,3 +30,17 @@ pub const DIVIDER_GRAB_PX: f32 = 5.0;
 /// and secondary-body text.  Deliberately-faint non-text uses (selection
 /// highlight backgrounds, chip tints) may retain their own alpha values.
 pub const TEXT_MUTED_ALPHA: f32 = 0.68;
+
+/// The muted secondary-text style — [`TEXT_MUTED_ALPHA`] applied exactly as
+/// that constant's doc prescribes, as one shared fn (status bar, audio
+/// player) so retuning the muted look is a single edit, not named copies
+/// kept in sync by hand.
+// `#[mutants::skip]`: render glue (theme → `Style`), the same
+// untested-by-design category as the `#[mutants::skip]` view functions it
+// feeds; a mutant here only changes the muted colour, not behavior.
+#[mutants::skip]
+pub fn muted_text_style(theme: &iced::Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
+    }
+}
