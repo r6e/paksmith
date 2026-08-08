@@ -13,6 +13,18 @@ dark-light = "2.0.0"
 # registry fetch (inside the async `resolve_pak_key`) requires at runtime — the
 # default `thread-pool` executor would panic with no tokio reactor.
 iced = { version = "0.14", features = ["tokio", "image-without-codecs", "canvas"] }
+# #661: process-RSS reading for the status bar's memory display. MIT OR
+# Apache-2.0. The lightweight cross-platform reader the status-bar module doc
+# deferred on: one call per coarse tick, no polling machinery — unlike
+# `sysinfo`, which was rejected there as a heavyweight pull for one metric.
+# Platform backends: mach task_info (macOS), /proc/self/statm (Linux),
+# GetProcessMemoryInfo (Windows); unsupported platforms return None and the
+# label hides. `always_use_statm` is load-bearing: without it the crate
+# prefers reading and parsing ALL of /proc/self/smaps whenever it exists — a
+# kernel O(#mappings) walk the crate's own docs call expensive — which is the
+# wrong cost profile for a 2 s tick on the UI thread. statm is one small
+# procfs read (rss pages × page size).
+memory-stats = { version = "1.2", features = ["always_use_statm"] }
 # Phase 6 Task 11: native menu bar (File/View/Help) with ⌘/Ctrl-O accelerator.
 # Apache-2.0 OR MIT.  macOS: global app menu via init_for_nsapp().
 # Windows/Linux: menu built but not attached (no iced 0.14 window-handle API).
