@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use paksmith_core::container::ContainerReader;
+use paksmith_core::container::{ContainerReader, EntryIntegrity};
 
 use crate::state::tree::Tree;
 
@@ -24,6 +24,36 @@ pub struct EntryMeta {
     pub is_compressed: bool,
     /// True when the entry is AES-encrypted on disk.
     pub is_encrypted: bool,
+    /// File offset of the entry's on-disk RECORD, when recorded (#662).
+    /// For pak this is where the duplicated entry header starts — the
+    /// payload follows that header copy, so this is NOT the first payload
+    /// byte (mirrors `EntryMetadata::offset`'s contract).
+    pub offset: Option<u64>,
+    // RETENTION, deliberately asymmetric with the CLI (#662): these
+    // three detail fields roughly triple `EntryMeta` (24 -> 72 bytes) and
+    // are held for EVERY entry, though only the selected one is rendered.
+    // The CLI narrows its per-entry row for exactly that reason, but the
+    // CLI prints once and exits; GUI selection is random-access. The
+    // alternative is not archive I/O — core has already parsed the index
+    // into memory — but re-deriving through the type-erased
+    // `ContainerReader::entries` iterator, which is O(N) in entries and
+    // allocates a fresh path String per item, on every click. Keeping
+    // the map trades ~48 bytes per entry for O(1) selection.
+    /// Compression method display name (e.g. "Zlib"), when the entry is
+    /// compressed and the container recorded one (#662). Held as the
+    /// shared `Arc<str>` the capturing iteration interned, not a
+    /// `String`: an archive names few distinct methods, so retaining one
+    /// per entry bumps a refcount rather than copying bytes. Compare
+    /// these by VALUE — pointer identity only holds among entries from
+    /// the same `entries()` call, and pak leaves its `Unknown(id)`
+    /// rendering unshared by design.
+    pub compression_method: Option<Arc<str>>,
+    /// The entry's stored-SHA-1 claim (#662), classified once at capture
+    /// by core's [`paksmith_core::container::ContainerReader::entry_integrity`]
+    /// from the wire field plus the archive-level `claims_integrity`
+    /// bit. Carries the digest, not formatted hex — rendering formats on
+    /// demand, so this costs no heap per entry.
+    pub integrity: EntryIntegrity,
 }
 
 /// A successfully opened archive and its derived state.

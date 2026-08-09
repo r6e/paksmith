@@ -204,9 +204,13 @@ impl RegionDescriptor {
         self.size
     }
 
-    /// Stored SHA1 of the region bytes. `Sha1Digest::ZERO` is the
-    /// "no integrity claim recorded at write time" sentinel (same
-    /// convention as the main-index hash and per-entry hashes).
+    /// Stored SHA1 of the region bytes. A `Sha1Digest::ZERO` value is
+    /// context-dependent, like the per-entry hashes: "no claim
+    /// recorded" only when the footer's `index_hash` is also zero, and
+    /// the strip-shaped state when it is not — an observation about two
+    /// fields, not a finding of tampering. See
+    /// [`EntryIntegrity`](crate::container::EntryIntegrity), which
+    /// scopes what that state does and does not establish.
     pub fn hash(&self) -> crate::digest::Sha1Digest {
         self.hash
     }

@@ -171,12 +171,20 @@ pub(crate) fn collect_entry_groups(
     game: Option<&str>,
     detect: Option<&Path>,
     keep: impl Fn(&paksmith_core::container::EntryMetadata) -> bool,
-) -> paksmith_core::Result<Vec<(PathBuf, Vec<paksmith_core::container::EntryMetadata>)>> {
+) -> paksmith_core::Result<Vec<(PathBuf, Vec<crate::output::EntryRowData>)>> {
     let mut groups = Vec::with_capacity(sources.len());
     for pak in sources {
         let key = crate::commands::key_resolve::resolve_pak_key(&pak, aes_key, game, detect)?;
         let reader = paksmith_core::container::open(&pak, key.as_ref())?;
-        let entries: Vec<_> = reader.entries().filter(&keep).collect();
+        // Narrowed to the printed fields AS WE GO (#662): `keep`
+        // still sees the full core value, but only the five rendered
+        // fields are retained, so the entry's detail fields die with
+        // the iterator instead of being carried for the whole run.
+        let entries: Vec<_> = reader
+            .entries()
+            .filter(&keep)
+            .map(crate::output::EntryRowData::from_metadata)
+            .collect();
         groups.push((pak, entries));
     }
     Ok(groups)

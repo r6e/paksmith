@@ -228,7 +228,9 @@ fn open_and_collect(
         let entries: Vec<String> = reader
             .entries()
             .filter(|e| pattern.is_none_or(|pat| pat.matches(e.path())))
-            .map(|e| e.path().to_string())
+            // Keeps only the path and drops the rest, so MOVE the string
+            // the reader already allocated instead of copying it (#662).
+            .map(paksmith_core::container::EntryMetadata::into_path)
             .collect();
         readers.push(reader);
         entry_lists.push(entries);

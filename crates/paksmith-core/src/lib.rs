@@ -47,13 +47,20 @@ pub mod profile;
 mod seams;
 
 /// Test-utility surface shared between in-source tests and the
-/// integration suite under `tests/`. Gated behind the
-/// `__test_utils` feature so production builds never compile or
-/// expose it. Issue #68 promoted the v10+ fixture builder out of
+/// integration suite under `tests/`. Never compiled into a production
+/// build. Issue #68 promoted the v10+ fixture builder out of
 /// the in-source test module so the integration proptest doesn't
 /// need to duplicate ~30 lines of wire-format assembly.
+///
 #[cfg(feature = "__test_utils")]
 pub mod testing;
+
+/// Byte-patching helpers for this crate's own tamper-scenario tests
+/// (#662). Deliberately separate from [`testing`]: it has no downstream
+/// consumer, so `#[cfg(test)]` keeps it out of every published build
+/// and off the `__test_utils` surface.
+#[cfg(test)]
+mod test_patch;
 
 // `AesKey` is a cross-cutting credential type (used by `PakReader::open_with_key`
 // today; Phase 5 will extend it to IoStore). Promoted to the crate root so callers
@@ -171,7 +178,7 @@ mod send_sync_assertions {
     use crate::container::pak::index::{PakIndex, PakIndexEntry};
     use crate::container::pak::version::PakVersion;
     use crate::container::pak::{AesKey, PakReader, RegionVerifyState, VerifyOutcome, VerifyStats};
-    use crate::container::{ContainerFormat, EntryFlags, EntryMetadata};
+    use crate::container::{ContainerFormat, EntryFlags, EntryIntegrity, EntryMetadata};
     use crate::error::{
         AssetParseFault, CompanionFileKind, DecompressionFault, IndexParseFault,
         InvalidFooterFault, MappingsAllocationContext, MappingsParseFault, ProfileFault,
@@ -211,6 +218,9 @@ mod send_sync_assertions {
         assert_send_sync::<ContainerFormat>();
         assert_send_sync::<EntryMetadata>();
         assert_send_sync::<EntryFlags>();
+        // `EntryIntegrity` is returned by `ContainerReader::entry_integrity`
+        // (#662) and likewise not stored on anything already pinned.
+        assert_send_sync::<EntryIntegrity>();
         // `PakReader::verify_*` return types — also NOT stored on
         // `PakReader`. Lockpinned explicitly.
         assert_send_sync::<VerifyOutcome>();

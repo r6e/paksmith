@@ -2,11 +2,14 @@
 //! `tests/` and for in-source `#[cfg(test)] mod tests` blocks that
 //! want to avoid duplicating wire-format synthesis helpers.
 //!
-//! **Stability**: gated behind the `__test_utils` Cargo feature
-//! (note the leading `__` prefix — the convention signals "internal
-//! to paksmith's test infra; do not depend on this from downstream
-//! crates"). Anything `pub` here is a `cargo test`-only surface and
-//! may change in any release.
+//! **Stability**: gated behind the `__test_utils` Cargo feature (note
+//! the leading `__` prefix — the convention signals "internal to
+//! paksmith's test infra; do not depend on this from downstream
+//! crates"). An in-source test in THIS crate must enable the feature
+//! to reach it. A production build compiles none of it, and anything
+//! `pub` here is a `cargo test`-only surface that may change in any
+//! release.
+//!
 
 pub mod bench;
 pub mod bulk_data;

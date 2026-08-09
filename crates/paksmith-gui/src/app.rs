@@ -150,7 +150,7 @@ pub struct App {
     /// only by the RECOVERY regime of [`theme::poll_decision`] (watermark
     /// still `None`): an explicit flag rather than a mode comparison,
     /// because an even toggle count lands back on the default mode yet is
-    /// still a standing choice recovery must not revert (R5).
+    /// still a standing choice recovery must not revert.
     pub theme_user_chose: bool,
 }
 
@@ -3129,6 +3129,9 @@ mod tests {
                     compressed_size: 0,
                     is_compressed: false,
                     is_encrypted: false,
+                    offset: None,
+                    compression_method: None,
+                    integrity: paksmith_core::container::EntryIntegrity::NotInIndex,
                 },
             );
         }
@@ -3589,7 +3592,7 @@ mod tests {
             Some(OsReading::Light),
             "the watermark follows every successful reading"
         );
-        // The GNOME edge (#662 R1): PreferDark → NoPreference is a real
+        // The GNOME edge (#662): PreferDark → NoPreference is a real
         // transition and lands Light.
         app.last_os_reading = Some(OsReading::Dark);
         app.mode = Mode::Dark;
@@ -3609,7 +3612,7 @@ mod tests {
         use crate::theme::{Mode, OsReading};
         // A transient dark-light error (None payload) is NOT a reading: it
         // must touch neither the displayed mode nor the watermark — treating
-        // it as a value fabricated theme flips on loaded Linux systems (R1).
+        // it as a value fabricated theme flips on loaded Linux systems.
         let mut app = App {
             mode: Mode::Light,
             last_os_reading: Some(OsReading::Light),
@@ -3630,7 +3633,7 @@ mod tests {
         // Startup read failed (None watermark), the user overrode the dark
         // default via a real toggle, and the OS never changed: the first
         // SUCCESSFUL poll must not touch the mode — recovery is not an OS
-        // change (R2) — but must set the watermark so real later flips edge
+        // change — but must set the watermark so real later flips edge
         // normally.
         let mut app = App {
             mode: Mode::Dark,
@@ -3666,7 +3669,7 @@ mod tests {
         // Startup read failed and the user never toggled: recovery must
         // bring the app to what a successful startup read would have shown,
         // or a Light desktop whose startup read timed out once would stay
-        // Dark forever (R3).
+        // Dark forever.
         let mut app = App {
             mode: Mode::Dark,
             last_os_reading: None,
@@ -3755,7 +3758,7 @@ mod tests {
             open_accelerator_message(&o_key, o_pos, Modifiers::COMMAND, Status::Ignored, false),
             Some(Message::OpenRequested)
         ));
-        // Dvorak (R3): the layout's O sits at the physical QWERTY-S — the
+        // Dvorak: the layout's O sits at the physical QWERTY-S — the
         // LOGICAL half must fire, matching native accelerator behavior.
         assert!(matches!(
             open_accelerator_message(
@@ -3767,7 +3770,7 @@ mod tests {
             ),
             Some(Message::OpenRequested)
         ));
-        // Russian (R1): Ctrl+O delivers a non-Latin character — the
+        // Russian: Ctrl+O delivers a non-Latin character — the
         // PHYSICAL fallback must fire.
         let shcha = Key::Character("\u{0449}".into());
         assert!(matches!(

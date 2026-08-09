@@ -85,6 +85,61 @@ impl CompressionMethod {
             _ => Self::UnknownByName(name.to_owned()),
         }
     }
+
+    /// The display name as a [`Cow`](std::borrow::Cow), borrowing for the six known codecs
+    /// and allocating only for the two unknown variants whose payload
+    /// must be interpolated.
+    ///
+    /// The only PROSE rendering of this type — the one built for a
+    /// human reading a metadata row. (`DecompressionFault::
+    /// UnsupportedMethod` renders the same value a second way, with
+    /// `{self:?}`, for operator logs; the two are deliberately distinct,
+    /// see below.) `Display` is deliberately NOT implemented: `DecompressionFault::UnsupportedMethod` renders the
+    /// method with `{self:?}` in a wire-stable error string, and while a
+    /// `Display` existed a `{method:?}` -> `{method}` slip there would
+    /// have compiled and silently rewritten operator-visible text. With
+    /// no `Display`, that slip is a compile error.
+    ///
+    /// [`CompressionMethod::Unknown`]'s number is rendered "id/slot"
+    /// because the variant does not record which namespace it came from:
+    /// it is a raw method ID for v3-v7 archives and a 1-based index into
+    /// the footer's method table for v8+. Naming only one would be wrong
+    /// for every archive of the other vintage.
+    ///
+    /// Cost, per variant: the six
+    /// known codecs borrow and allocate nothing here, so a caller that
+    /// converts to `Arc<str>` (as `PakReader::entries` does) pays one
+    /// allocation instead of the two a `to_string()` would cost; the two
+    /// unknown variants allocate a `String` here regardless, so that
+    /// caller pays two either way. Neither figure is per-entry — the
+    /// reader interns, so it calls this once per DISTINCT method it can
+    /// bound, and `Unknown(_)` is the unbounded case it deliberately
+    /// cannot (see `PakReader::entries`).
+    ///
+    /// SECURITY CONTROL — the `{name:?}` in the
+    /// [`CompressionMethod::UnknownByName`] arm below is load-bearing,
+    /// not cosmetic quoting. That name is attacker-controlled text from
+    /// the archive's footer table, and this string is carried on
+    /// [`crate::container::EntryMetadata::compression_method_shared`]
+    /// into the GUI's Info pane today and into any future text sink (a
+    /// CLI column, a log field); `Debug`-formatting escapes ANSI control
+    /// bytes, bidi overrides, and newlines that would otherwise inject.
+    /// Do NOT "simplify" it to `\"{name}\"` — pinned by
+    /// `display_escapes_hostile_unknown_names`.
+    #[must_use]
+    pub fn display_name(&self) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow;
+        match self {
+            Self::None => Cow::Borrowed("none"),
+            Self::Zlib => Cow::Borrowed("Zlib"),
+            Self::Gzip => Cow::Borrowed("Gzip"),
+            Self::Oodle => Cow::Borrowed("Oodle"),
+            Self::Zstd => Cow::Borrowed("Zstd"),
+            Self::Lz4 => Cow::Borrowed("LZ4"),
+            Self::Unknown(n) => Cow::Owned(format!("unknown (id/slot {n})")),
+            Self::UnknownByName(name) => Cow::Owned(format!("unknown ({name:?})")),
+        }
+    }
 }
 
 /// Byte offset range of a single compression block within the entry payload.
@@ -123,5 +178,66 @@ impl CompressionBlock {
     /// Whether the block is empty.
     pub fn is_empty(&self) -> bool {
         self.start == self.end
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_names_every_method_for_the_metadata_surface() {
+        // Pins every rendering this method can produce. Note the `None`
+        // arm is NOT one the metadata surface can carry: `entries()`
+        // gates `with_compression_method` behind
+        // `*method != CompressionMethod::None`, so "none" is unreachable
+        // there and is pinned only as a total-function property. The
+        // rest are the strings `EntryMetadata::compression_method_shared`
+        // carries to the UIs (#662) — known codecs by canonical name,
+        // unknown variants with their diagnostic payload preserved.
+        assert_eq!(CompressionMethod::None.display_name(), "none");
+        assert_eq!(CompressionMethod::Zlib.display_name(), "Zlib");
+        assert_eq!(CompressionMethod::Gzip.display_name(), "Gzip");
+        assert_eq!(CompressionMethod::Oodle.display_name(), "Oodle");
+        assert_eq!(CompressionMethod::Zstd.display_name(), "Zstd");
+        assert_eq!(CompressionMethod::Lz4.display_name(), "LZ4");
+        // "id/slot", not "id": the variant carries a v3-v7 method ID or a
+        // v8+ table index and cannot tell which.
+        assert_eq!(
+            CompressionMethod::Unknown(NonZeroU32::new(7).unwrap()).display_name(),
+            "unknown (id/slot 7)"
+        );
+        assert_eq!(
+            CompressionMethod::UnknownByName("LZMA".to_string()).display_name(),
+            "unknown (\"LZMA\")"
+        );
+    }
+
+    #[test]
+    fn display_escapes_hostile_unknown_names() {
+        // The FName is attacker text from the footer table and this
+        // string reaches terminals and UI rows, so the Debug-escaping in
+        // the UnknownByName arm is a security control. "LZMA"
+        // cannot detect its removal — every character is inert — so
+        // exercise the classes that actually inject.
+        for (raw, needle) in [
+            ("\u{1b}[31mred", "\\u{1b}"),     // ANSI escape
+            ("a\nb", "\\n"),                  // newline / log forging
+            ("\u{202e}gnp.exe", "\\u{202e}"), // RTL override
+            ("a\rb", "\\r"),                  // carriage return
+        ] {
+            let rendered = CompressionMethod::UnknownByName(raw.to_string()).display_name();
+            assert!(
+                rendered.contains(needle),
+                "hostile name {raw:?} must render escaped as {needle}, got: {rendered}"
+            );
+            assert!(
+                !rendered.contains('\u{1b}')
+                    && !rendered.contains('\n')
+                    && !rendered.contains('\r')
+                    && !rendered.contains('\u{202e}'),
+                "no raw control/bidi byte may survive into the rendered string: {rendered}"
+            );
+        }
     }
 }

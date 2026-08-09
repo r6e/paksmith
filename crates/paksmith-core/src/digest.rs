@@ -2,9 +2,12 @@
 //!
 //! [`Sha1Digest`] wraps a raw `[u8; 20]` to:
 //!
-//! - Document the "all-zero sentinel = no integrity claim" semantic at
-//!   the type level (via [`Sha1Digest::is_zero`] and
-//!   [`Sha1Digest::ZERO`]).
+//! - Name the all-zero digest at the type level (via
+//!   [`Sha1Digest::is_zero`] and [`Sha1Digest::ZERO`]) so its
+//!   context-dependent meaning — no claim, or an integrity strip,
+//!   depending on the archive-level bit — is decided by one classifier
+//!   ([`crate::container::EntryIntegrity`]) rather than re-derived at
+//!   each call site.
 //! - Provide a canonical hex [`std::fmt::Display`] for operator-facing
 //!   logs, plus a [`Sha1Digest::short`] adapter for truncated displays
 //!   in error messages.
@@ -31,21 +34,32 @@ use std::fmt;
 
 /// SHA1 digest (20 bytes).
 ///
-/// UE writers leave per-entry and per-index SHA1 slots zero-filled when
-/// integrity hashing was not enabled at archive-creation time. This is
-/// the "no integrity claim was recorded" signal, distinct from "this
-/// is a real digest that happens to be all zeros" (which is
-/// cryptographically negligible — a uniformly random SHA1 collides
-/// with `[0; 20]` once per `2^160` digests). The
-/// [`PakReader::verify_index`](crate::container::pak::PakReader::verify_index)
-/// and
-/// [`PakReader::verify_entry`](crate::container::pak::PakReader::verify_entry)
-/// paths gate on [`Self::is_zero`] for that reason.
+/// Where a pak record HAS a SHA1 slot it is fixed-width, so a writer
+/// that recorded no digest still leaves twenty bytes behind (the v10+
+/// bit-packed index record has no slot at all — a different state, see
+/// [`EntryIntegrity::NotInIndex`](crate::container::EntryIntegrity)).
+/// For a slot that is present, zero is the
+/// value paksmith treats as "no digest recorded here", since a real
+/// digest of `[0; 20]` is cryptographically negligible (a uniformly
+/// random SHA1 collides with it once per `2^160`). That is an
+/// interpretation of an ambiguous slot, NOT an observed writer
+/// behaviour: no third-party fixture in `tests/fixtures/` carries a zero
+/// slot, and the format assigns the value no distinguished meaning.
+/// What a zero MEANS is context-dependent, not a flat sentinel: an
+/// absent claim when the archive's own index hash is likewise zero, and
+/// the strip-shaped state when it is not. Per-SLOT classification
+/// therefore goes through
+/// [`EntryIntegrity`](crate::container::EntryIntegrity)'s classifier,
+/// which compares against [`Self::ZERO`] — that is the form consumers
+/// should use. [`Self::is_zero`] remains the predicate for the
+/// ARCHIVE-level bit
+/// ([`PakReader::verify_index`](crate::container::pak::PakReader::verify_index)
+/// and `archive_claims_integrity`).
 ///
-/// `Default` is intentionally NOT derived: making "no integrity claim"
-/// the implicit default would silently re-introduce the bug class the
-/// newtype exists to prevent. Construct explicitly via
-/// `Sha1Digest::ZERO` (the named sentinel), `From<[u8; 20]>` (parsed
+/// `Default` is intentionally NOT derived: an implicit all-zero default
+/// would silently produce the very value whose meaning is ambiguous
+/// (see above), in code that never decided to. Construct explicitly via
+/// `Sha1Digest::ZERO` (the named constant), `From<[u8; 20]>` (parsed
 /// wire bytes or hasher output), or `Self::from`. Read the underlying
 /// bytes via [`Self::as_bytes`]. `Display` renders as lowercase 40-char
 /// hex.
@@ -58,13 +72,22 @@ use std::fmt;
 pub struct Sha1Digest([u8; 20]);
 
 impl Sha1Digest {
-    /// The all-zero digest sentinel ("no integrity claim recorded").
+    /// The all-zero digest. Whether a slot holding it means "no claim"
+    /// or "a claim was stripped" depends on the archive-level bit — and
+    /// the type doc above records that reading it as "no digest here"
+    /// is paksmith's interpretation of an ambiguous slot, not an
+    /// observed writer behaviour. A named VALUE, not a decided meaning;
+    /// see [`crate::container::EntryIntegrity`].
     pub const ZERO: Self = Self([0u8; 20]);
 
-    /// True iff this digest is the all-zero sentinel. Consumers MUST
-    /// gate on this rather than comparing against a hardcoded
-    /// `[0; 20]` — the comparison is what `verify_entry` / `verify_index`
-    /// use to distinguish "no integrity claim" from "tampered slot."
+    /// True iff this digest is all zeros. Consumers MUST gate on this
+    /// (or on [`Self::ZERO`]) rather than comparing against a hardcoded
+    /// `[0; 20]`. `verify_index` and `archive_claims_integrity` use this
+    /// predicate for the ARCHIVE-level bit; the per-slot "no claim"
+    /// versus "stripped" split lives in
+    /// [`EntryIntegrity`](crate::container::EntryIntegrity)'s
+    /// classifier, which compares against `ZERO` and resolves the split
+    /// with that bit rather than from either form alone.
     ///
     /// Takes `self` by value (the type is `Copy` and 20 bytes — passing
     /// by reference is wasted indirection).

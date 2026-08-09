@@ -175,20 +175,54 @@ struct EntryRow<'a> {
     source: Option<&'a str>,
 }
 
-impl<'a> EntryRow<'a> {
-    fn new(e: &'a EntryMetadata, source: Option<&'a str>) -> Self {
+/// The five fields the entry writers actually render, owned.
+///
+/// `list`/`search` retain one of these per entry for the whole run, so
+/// what the CLI carries is bounded by what it prints (#662).
+/// Retaining [`EntryMetadata`] instead would also carry the GUI-facing
+/// detail fields — offset, compression-method name, stored SHA-1 —
+/// which no CLI writer reads; on a multi-archive `list` that is tens of
+/// megabytes of never-read payload per million entries. Built during
+/// `collect_entry_groups`, so the core value is dropped as the iterator
+/// advances.
+#[derive(Debug, Clone)]
+pub(crate) struct EntryRowData {
+    pub(crate) path: String,
+    pub(crate) uncompressed_size: u64,
+    pub(crate) compressed_size: u64,
+    pub(crate) is_compressed: bool,
+    pub(crate) is_encrypted: bool,
+}
+
+impl EntryRowData {
+    /// Consumes the metadata so the path `entries()` already allocated
+    /// is MOVED, not copied — narrowing must not cost an allocation per
+    /// entry to save bytes per entry.
+    pub(crate) fn from_metadata(e: EntryMetadata) -> Self {
         Self {
-            path: e.path(),
-            size: e.uncompressed_size(),
+            uncompressed_size: e.uncompressed_size(),
             compressed_size: e.compressed_size(),
-            compressed: e.is_compressed(),
-            encrypted: e.is_encrypted(),
+            is_compressed: e.is_compressed(),
+            is_encrypted: e.is_encrypted(),
+            path: e.into_path(),
+        }
+    }
+}
+
+impl<'a> EntryRow<'a> {
+    fn new(e: &'a EntryRowData, source: Option<&'a str>) -> Self {
+        Self {
+            path: &e.path,
+            size: e.uncompressed_size,
+            compressed_size: e.compressed_size,
+            compressed: e.is_compressed,
+            encrypted: e.is_encrypted,
             source,
         }
     }
 }
 
-fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
+fn print_entries(entries: &[EntryRowData], format: ResolvedFormat) -> io::Result<()> {
     let stdout = io::stdout();
     let stdout_lock = stdout.lock();
     // Wrap stdout in a `BufWriter` so per-entry writes coalesce into
@@ -238,7 +272,7 @@ fn styling_enabled(no_color: Option<std::ffi::OsString>) -> bool {
 /// byte-identical output); anything else renders grouped. The slice
 /// pattern also removes the `groups[0]` index the commands carried.
 pub(crate) fn print_entry_groups(
-    groups: &[(std::path::PathBuf, Vec<EntryMetadata>)],
+    groups: &[(std::path::PathBuf, Vec<EntryRowData>)],
     explicit_path: bool,
     format: ResolvedFormat,
 ) -> io::Result<()> {
@@ -258,7 +292,7 @@ pub(crate) fn print_entry_groups(
 /// path invocations never route here, so their output is byte-identical
 /// to pre-#655.
 fn print_entries_grouped(
-    groups: &[(std::path::PathBuf, Vec<EntryMetadata>)],
+    groups: &[(std::path::PathBuf, Vec<EntryRowData>)],
     format: ResolvedFormat,
 ) -> io::Result<()> {
     let stdout = io::stdout();
@@ -302,7 +336,7 @@ fn print_entries_grouped(
 /// terminated), and a blank line between groups. Split from the writer
 /// so the frame is unit-pinned — a black-box test cannot see the
 /// styling decision, and the integration suites only exercise JSON.
-fn render_entry_groups(groups: &[(std::path::PathBuf, Vec<EntryMetadata>)], style: bool) -> String {
+fn render_entry_groups(groups: &[(std::path::PathBuf, Vec<EntryRowData>)], style: bool) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     for (i, (pak, entries)) in groups.iter().enumerate() {
@@ -333,7 +367,7 @@ fn render_entry_groups(groups: &[(std::path::PathBuf, Vec<EntryMetadata>)], styl
 // `unused_results` allow: comfy-table's builder returns `&mut Table`
 // for chaining; discarding is the documented call shape.
 #[allow(unused_results)]
-fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
+fn build_entries_table(entries: &[EntryRowData], style: bool) -> Table {
     let header = |text: &str| {
         if style {
             Cell::new(text)
@@ -364,10 +398,10 @@ fn build_entries_table(entries: &[EntryMetadata], style: bool) -> Table {
     ]);
     for entry in entries {
         table.add_row(vec![
-            Cell::new(sanitize_for_display(entry.path())),
-            Cell::new(format_size(entry.uncompressed_size())),
-            flag_cell(entry.is_compressed(), Color::Green),
-            flag_cell(entry.is_encrypted(), Color::Yellow),
+            Cell::new(sanitize_for_display(&entry.path)),
+            Cell::new(format_size(entry.uncompressed_size)),
+            flag_cell(entry.is_compressed, Color::Green),
+            flag_cell(entry.is_encrypted, Color::Yellow),
         ]);
     }
     table
@@ -460,8 +494,40 @@ mod grouped_render_tests {
 
     use super::*;
 
-    fn one_entry(path: &str) -> Vec<EntryMetadata> {
-        vec![EntryMetadata::new(path.into(), 10, 20, EntryFlags::NONE)]
+    fn one_entry(path: &str) -> Vec<EntryRowData> {
+        vec![EntryRowData::from_metadata(EntryMetadata::new(
+            path.into(),
+            10,
+            20,
+            EntryFlags::NONE,
+        ))]
+    }
+
+    /// The two-hop path from a core `EntryMetadata` to the JSON row
+    /// crosses two pairs of adjacent same-typed `u64` fields
+    /// (uncompressed/compressed size) — once in
+    /// `EntryRowData::from_metadata`, once in `EntryRow::new` — and
+    /// neither hop had any test asserting the VALUES, so a swap at
+    /// either would ship a JSON contract that reports each size as the
+    /// other. Distinct values make a swap fail here.
+    #[test]
+    fn entry_row_data_carries_each_size_to_its_own_json_field() {
+        let meta = EntryMetadata::new(
+            "Game/a.uasset".into(),
+            300,
+            1000,
+            EntryFlags::NONE.compressed(),
+        );
+        let row = EntryRowData::from_metadata(meta);
+        assert_eq!(row.uncompressed_size, 1000, "hop 1: uncompressed");
+        assert_eq!(row.compressed_size, 300, "hop 1: compressed");
+
+        let json = serde_json::to_value(EntryRow::new(&row, None)).unwrap();
+        assert_eq!(json["size"], 1000, "hop 2: `size` is the UNCOMPRESSED size");
+        assert_eq!(json["compressed_size"], 300, "hop 2: compressed");
+        assert_eq!(json["compressed"], true);
+        assert_eq!(json["encrypted"], false);
+        assert_eq!(json["path"], "Game/a.uasset");
     }
 
     /// The grouped frame: one `pak:` header per group, each table
@@ -517,8 +583,8 @@ mod table_style_tests {
 
     use super::*;
 
-    fn entries() -> Vec<EntryMetadata> {
-        vec![
+    fn entries() -> Vec<EntryRowData> {
+        [
             EntryMetadata::new(
                 "Game/enc.uasset".into(),
                 10,
@@ -533,6 +599,9 @@ mod table_style_tests {
             ),
             EntryMetadata::new("Game/plain.txt".into(), 10, 20, EntryFlags::NONE),
         ]
+        .into_iter()
+        .map(EntryRowData::from_metadata)
+        .collect()
     }
 
     /// `enforce_styling()` renders the attached styles even off-TTY, so
@@ -580,12 +649,12 @@ mod table_style_tests {
     /// before the cell is built — even under forced styling.
     #[test]
     fn hostile_path_control_chars_are_neutralized() {
-        let hostile = vec![EntryMetadata::new(
+        let hostile = vec![EntryRowData::from_metadata(EntryMetadata::new(
             "Game/\u{1b}]0;pwned\u{7}/\u{9b}2Jx.uasset".into(),
             10,
             20,
             EntryFlags::NONE,
-        )];
+        ))];
         // Unstyled: the ONLY possible ESC source would be the hostile
         // path, so the render must be entirely control-char-free.
         let plain = build_entries_table(&hostile, false).to_string();
