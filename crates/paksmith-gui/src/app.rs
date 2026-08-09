@@ -2348,7 +2348,8 @@ fn tree_key_for(key: iced::keyboard::Key, status: iced::event::Status) -> Option
 /// Match rules, each load-bearing (R1/R3/R4 catches):
 /// - The key the LAYOUT calls O (`Key::Character("o"/"O")`), with the
 ///   physical `KeyO` position as a fallback ONLY when the layout's key is
-///   not a Latin letter — the same conditional native accelerator tables
+///   not an ASCII letter (A–Z; see the predicate comment for why ASCII, not
+///   all Latin script) — the same conditional native accelerator tables
 ///   use. Each simpler rule failed a layout class: logical-only was dead on
 ///   non-Latin layouts (Russian Ctrl+O delivers `Key::Character("щ")`),
 ///   physical-only inverted Dvorak (its O sits at the QWERTY-S position),
@@ -2383,15 +2384,21 @@ fn open_accelerator_message(
         return None;
     }
     let layout_o = matches!(key, iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("o"));
-    // A layout key that IS a Latin letter (just not O) suppresses the
-    // physical fallback: the user pressed a different Latin shortcut.
-    let latin_layout_key = matches!(
+    // A layout key that IS an ASCII letter A–Z (just not O) suppresses the
+    // physical fallback: the user pressed a different letter's shortcut.
+    // Deliberately ASCII, not all Latin script: the remapped layouts the
+    // suppression exists for (Dvorak, Colemak) are pure ASCII, and a
+    // `char::is_alphabetic` widening would also match Cyrillic — breaking
+    // the exact non-Latin rescue the fallback provides. A rare layout with
+    // an ACCENTED Latin letter at the QWERTY-O position keeps the fallback,
+    // treated like the non-ASCII rescue case.
+    let ascii_letter_layout_key = matches!(
         key,
         iced::keyboard::Key::Character(c)
             if !c.is_empty() && c.chars().all(|ch| ch.is_ascii_alphabetic())
     );
     let physical_o = matches!(physical_key, Physical::Code(Code::KeyO));
-    (layout_o || (physical_o && !latin_layout_key)).then_some(Message::OpenRequested)
+    (layout_o || (physical_o && !ascii_letter_layout_key)).then_some(Message::OpenRequested)
 }
 
 /// Returns a button style closure that uses the system accent colour so that
