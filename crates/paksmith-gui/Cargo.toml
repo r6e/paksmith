@@ -27,7 +27,9 @@ iced = { version = "0.14", features = ["tokio", "image-without-codecs", "canvas"
 memory-stats = { version = "1.2", features = ["always_use_statm"] }
 # Phase 6 Task 11: native menu bar (File/View/Help) with ⌘/Ctrl-O accelerator.
 # Apache-2.0 OR MIT.  macOS: global app menu via init_for_nsapp().
-# Windows/Linux: menu built but not attached (no iced 0.14 window-handle API).
+# Windows/Linux: menu built but not attached — see crate::menu's module doc
+# for the per-platform attach story (Windows: implementable follow-up via the
+# iced 0.14 window handle; Linux: blocked by muda's GTK backend).
 muda = "0.19.3"
 # Phase 6: core library for container I/O and asset parsing.
 paksmith-core = { path = "../paksmith-core", version = "0.1" }

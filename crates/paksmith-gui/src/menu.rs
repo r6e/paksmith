@@ -6,12 +6,29 @@
 //!   iced event loop starts.  `muda` hooks into the NSApp directly — no window
 //!   handle needed.
 //!
-//! - **Windows / Linux**: attaching a `muda` menu requires a raw window handle
-//!   (HWND / GTK window) that iced 0.14 does not expose through its public API.
-//!   Toggle Theme and About are exposed via toolbar buttons (compiled in under
-//!   `#[cfg(not(target_os = "macos"))]` in `panels/toolbar.rs`).  Open is the
-//!   toolbar's primary CTA on all platforms.  Full native-menu support on
-//!   Windows/Linux is tracked as a follow-up.
+//! - **Windows / Linux**: the menu is built but never attached, so Toggle
+//!   Theme, the debug console, and About are exposed via toolbar buttons
+//!   (compiled in under `#[cfg(not(target_os = "macos"))]` in
+//!   `panels/toolbar.rs`), and Ctrl+O is supplied by an iced keyboard
+//!   listener (`app::open_accelerator_message`) since the menu's own
+//!   accelerator never registers unattached. Open is also the toolbar's
+//!   primary CTA on all platforms. The attach gap differs per platform —
+//!   #662 flagged it, and the audit BELOW (done for that issue's PR)
+//!   supersedes the issue body's premise that iced 0.14 exposes no window
+//!   handle: on **Windows** it does (`iced::window::run` hands out
+//!   `&dyn Window: HasWindowHandle`), so an HWND attach is implementable
+//!   follow-up work; on **Linux** muda's backend is GTK-based and an
+//!   iced/winit window is not a GTK window, so attach is blocked regardless
+//!   of handles.
+//!
+//! # Descoped: Tools menu
+//!
+//! SPEC.md's GUI layout sketch lists File/View/Tools/Help in its Menu Bar
+//! row; only three menus are built because nothing populates Tools yet —
+//! every current action already has a home (File/View/Help). Recorded as a
+//! deliberate descope per #662 rather than shipping an empty menu; add it
+//! when the first tool (e.g. batch export, key manager) exists to live
+//! there.
 //!
 //! # Event bridge
 //!
@@ -94,7 +111,7 @@ pub fn action_for_id(id: &muda::MenuId) -> Option<MenuAction> {
 /// File          View              Help
 /// ─────────     ───────────────   ──────
 /// Open…  ⌘O    Toggle Theme      About Paksmith
-/// ─────────
+/// ─────────     Debug Console
 /// Quit   ⌘Q   (system-predefined, OS handles Quit directly)
 /// ```
 ///
