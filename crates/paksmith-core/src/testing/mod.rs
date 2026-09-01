@@ -6,9 +6,16 @@
 //! the leading `__` prefix — the convention signals "internal to
 //! paksmith's test infra; do not depend on this from downstream
 //! crates"). An in-source test in THIS crate must enable the feature
-//! to reach it. A production build compiles none of it, and anything
+//! to reach it. An ordinary build compiles none of it, and anything
 //! `pub` here is a `cargo test`-only surface that may change in any
 //! release.
+//!
+//! That is the gate's INTENT, not a guarantee cargo enforces. Features
+//! resolve globally per package, so a non-dev dependency on
+//! `paksmith-core` from a workspace member, plus anything in the graph
+//! activating `__test_utils`, compiles this module into that member's
+//! release build. The crate's `Cargo.toml` records the same caveat and
+//! asks reviewers to check it when adding a consumer.
 //!
 
 pub mod bench;

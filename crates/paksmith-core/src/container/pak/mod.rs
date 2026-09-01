@@ -3362,19 +3362,34 @@ mod tests {
                     Some(_) => saw_inline_hash = true,
                     None => saw_absent_hash = true,
                 }
-                if m.is_compressed() {
-                    saw_compressed = true;
-                    assert_eq!(
-                        m.compression_method_shared().as_deref(),
-                        Some(e.header().compression_method().display_name().as_ref()),
-                        "{name}: compressed entries carry the method's display name"
-                    );
-                } else {
+                // Branch on the INDEX's own method, never on
+                // `m.is_compressed()`: that flag is the value under test,
+                // and a test that branches on it swaps BOTH arms together
+                // when the producing comparison flips, leaving every
+                // assertion satisfied and both `saw_*` guards set. That is
+                // not hypothetical — it let a `!=` -> `==` mutant survive
+                // the whole suite. `matches!` cannot co-move with that
+                // comparison, so the flag now has an independent oracle.
+                let uncompressed =
+                    matches!(e.header().compression_method(), CompressionMethod::None);
+                assert_eq!(
+                    m.is_compressed(),
+                    !uncompressed,
+                    "{name}: the compressed flag must follow the index's method"
+                );
+                if uncompressed {
                     saw_uncompressed = true;
                     assert_eq!(
                         m.compression_method_shared(),
                         None,
                         "{name}: uncompressed entries carry no method name"
+                    );
+                } else {
+                    saw_compressed = true;
+                    assert_eq!(
+                        m.compression_method_shared().as_deref(),
+                        Some(e.header().compression_method().display_name().as_ref()),
+                        "{name}: compressed entries carry the method's display name"
                     );
                 }
             }

@@ -69,9 +69,17 @@ table's slot count. See Variants → *V8A vs V8B*.
 
 ## Wire layout
 
-Every claim in this section's tables and prose is cross-validated against
-repak[^1] (paksmith's primary pak oracle) and CUE4Parse[^2] (secondary).
-See References for the pinned commits.
+Every WIRE claim in this section's tables and prose is cross-validated
+against repak[^1] (paksmith's primary pak oracle) and CUE4Parse[^2]
+(secondary). See References for the pinned commits.
+
+Three kinds of sentence here are NOT covered by that, and each says so
+where it appears: corpus OBSERVATIONS (true of every fixture on hand,
+but the oracle wrote those bytes rather than independently reading the
+field back), statements of paksmith's own READER POLICY, and explicit
+records of what the corpus and oracle could NOT settle. Read an
+unqualified sentence as oracle-corroborated and a qualified one as
+exactly what it says.
 
 ### Footer (tail-anchored)
 
@@ -125,7 +133,7 @@ sits the compression-method table[^1]:
 
 | offset | size | endian | name | type | semantics |
 |--------|------|--------|------|------|-----------|
-| 0 | `N × 32` | — | `compression_methods` | `FName[N]` | Fixed 32-byte slots; null- or whitespace-terminated UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11. |
+| 0 | `N × 32` | — | `compression_methods` | `FName[N]` | Fixed 32-byte slots; NUL-padded UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11. Paksmith additionally stops at a SPACE — its own rule, not the format's; see Known divergences. |
 
 The compression-method table is the per-archive registry of compression
 backend names. Per-entry compression bytes are 1-based indices into this
@@ -133,17 +141,37 @@ table: byte `0` means "no compression"; byte `N` selects slot `N - 1`.
 Byte `0` is the ONLY value meaning "no compression". Everything else
 resolves through the table: an unused slot is stored as an empty
 position, and a slot whose name paksmith does not recognize keeps that
-name. "Name" is the slot text up to its TERMINATOR, not its 32 bytes —
-parsing stops at the first NUL or space — so a slot reading
-`LZ4 turbo` yields the name `LZ4` and resolves to the LZ4 codec, and a
-slot whose first byte is a space reads as empty. None of the names
-paksmith matches contains a space, so the truncation changes the
-outcome only for a slot whose text does — and there a consumer
-displaying the method sees the RESOLVED name, not the slot's full
-text. An entry pointing at an empty slot, an out-of-range index,
-or an unrecognized name resolves to an *unknown method*, never to
+name.
+
+**The next two paragraphs are PAKSMITH READER POLICY, not corroborated
+wire fact — one of them is a known divergence from the oracle.**
+
+Paksmith takes the "name" as the slot text up to the first NUL **or
+space**, not its 32 bytes. The space stop is paksmith hardening (#132),
+and it is where paksmith and repak part company: repak strips only NUL
+bytes, so a slot reading `LZ4 turbo` keeps that whole string, fails
+`Compression::from_str`, and resolves to no method — repak then writes
+the entry's payload back RAW. Paksmith truncates to `LZ4`, resolves the
+LZ4 codec, and decompresses. Same bytes, different output. Paksmith
+also reads a slot whose FIRST byte is a space as empty. No name
+paksmith matches contains a space, so this separates only on a slot
+whose text does; there a consumer displaying the method sees the
+RESOLVED name, not the slot's full text. Tracked in #753.
+
+That rule is not total, and the remaining cases are fail-closed:
+a slot carrying NEITHER terminator in its 32 bytes, and a non-empty
+slot that is not valid UTF-8, both make paksmith reject the ARCHIVE
+with `InvalidFooter` rather than yield a name. repak takes neither
+exit — it strips NULs, decodes the rest byte-for-byte as Latin-1, and
+lets an unmatched name resolve to no method — so it opens files
+paksmith refuses. Both are in Known divergences.
+
+An entry pointing at an empty slot, an out-of-range index, or an
+unrecognized name resolves to an *unknown method*, never to
 "uncompressed", so a payload paksmith cannot decode surfaces as a typed
-error rather than being handed back as raw bytes.
+error rather than being handed back as raw bytes. That is also
+paksmith's choice, and the contrast above is exactly it: repak hands
+back the undecodable payload as raw bytes.
 
 #### V10+ footer
 
@@ -284,7 +312,7 @@ variant — see Verification → Known divergences.
 - **`version`**: `u32` LE; the wire field is unbounded by the format itself (any `u32` could appear on disk). Paksmith's acceptance range of `1–11` is a parser-policy decision — see §*Implementation hardening* below — not a wire-imposed limit.
 - **`index_offset` / `index_size`**: `u64` LE in the footer; range is the addressable file space (subject to `<= file_size` constraint enforced by the footer parser).
 - **`encrypted`**: `u8`; only `0` / `1` semantically valid (strict, the V7+ footer reader does not coerce).
-- **`compression_methods`** (V8+ table): `N × 32`-byte fixed slots, null- or whitespace-terminated UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11.
+- **`compression_methods`** (V8+ table): `N × 32`-byte fixed slots, NUL-padded UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11. Paksmith also treats a SPACE as a terminator, which the oracle does not — see Known divergences.
 - **`frozen_index`** (V9 only): `u8`; writer flag, read but not interpreted.
 - **`PakEntryHeader.compression`**: `u8` (V8A) or `u32` LE (V8B / V9+); 1-based index into the compression-method table (0 = `None`).
 - **`CompressionBlock`** (V3-V9 explicit form): 16 bytes (`u64 start + u64 end`).
@@ -393,6 +421,32 @@ policy.
     cooked archives use ASCII-only paths, so the practical impact is nil
     — but a non-ASCII fixture would fail to open. See
     `crates/paksmith-core/src/container/pak/index/mod.rs` `fn fnv64_path`.
+  - **Compression-slot SPACE terminator.** Paksmith ends a footer
+    compression-slot name at the first NUL **or** space
+    (`read_compression_method_table`, hardening from issue #132); repak
+    strips only NUL bytes (`repak/src/footer.rs`,
+    `(ch != 0).then_some(ch as char)` — its comment says "filter out
+    whitespace", but the code does not). For a slot whose text contains
+    a space the two disagree on the OUTCOME, not just the name: repak
+    fails `Compression::from_str`, resolves the slot to `None`, and
+    writes the payload raw, while paksmith resolves the truncated
+    prefix and may decompress it. No fixture exercises this — every
+    shipped fixture NUL-pads — and UE writes codec FNames that contain
+    no space, so cooked archives are unaffected. Tracked in #753.
+  - **Compression-slot rejection (no terminator / non-UTF-8).** Two
+    more exits from the same function, both fail-closed where repak is
+    total. A slot with no NUL and no space in its 32 bytes is
+    `InvalidFooter` ("compression slot N not nul/space-terminated
+    within 32 bytes", hardening from issue #132, which closed a hole
+    where such a slot resolved to a 32-character name); a non-empty
+    slot that is not valid UTF-8 is `InvalidFooter` too, deliberately,
+    since silently treating it as empty would serve an entry
+    referencing it as uncompressed. repak does neither: it decodes the
+    non-NUL bytes as Latin-1 (`ch as char`, which cannot fail) and an
+    unmatched name simply resolves to no method. So a pak with a
+    32-character codec FName, 0xFF padding, or a CP-1252 name opens in
+    repak and is REJECTED by paksmith — a whole-archive refusal, not a
+    per-entry difference.
   - **V8A default decoding.** `PakVersion::try_from(8)` returns `V8B`;
     callers bypassing the footer parser get the wrong variant. repak and
     CUE4Parse handle this similarly. Full disambiguation table in

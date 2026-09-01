@@ -39,6 +39,15 @@ pub struct EntryMeta {
     // `ContainerReader::entries` iterator, which is O(N) in entries and
     // allocates a fresh path String per item, on every click. Keeping
     // the map trades ~48 bytes per entry for O(1) selection.
+    //
+    // That trade is only forced because `ContainerReader` has no
+    // per-path metadata lookup — core HAS an O(1) one for pak
+    // (`PakIndex::by_path` behind `PakReader::index_entry`), but it is
+    // not on the type-erased trait this holds. Adding one lets the pane
+    // fetch on selection and these fields leave the map entirely;
+    // scoped in #754, where the design question is what the default
+    // body should be, since an O(N) default would silently hand a
+    // future container a full scan per click.
     /// Compression method display name (e.g. "Zlib"), when the entry is
     /// compressed and the container recorded one (#662). Held as the
     /// shared `Arc<str>` the capturing iteration interned, not a

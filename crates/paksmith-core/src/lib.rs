@@ -47,11 +47,17 @@ pub mod profile;
 mod seams;
 
 /// Test-utility surface shared between in-source tests and the
-/// integration suite under `tests/`. Never compiled into a production
-/// build. Issue #68 promoted the v10+ fixture builder out of
-/// the in-source test module so the integration proptest doesn't
+/// integration suite under `tests/`. Gated behind the `__test_utils`
+/// feature, so an ordinary build compiles none of it — but the gate is
+/// a FEATURE, not a `cfg(test)`, and cargo resolves features globally
+/// per package: a workspace member taking `paksmith-core` as a
+/// non-dev dependency while anything in the graph activates
+/// `__test_utils` gets these symbols in its release artifact. The
+/// leading `__` is convention; cargo does not enforce it. See the
+/// feature-unification caveat in this crate's `Cargo.toml` before
+/// adding a consumer. Issue #68 promoted the v10+ fixture builder out
+/// of the in-source test module so the integration proptest doesn't
 /// need to duplicate ~30 lines of wire-format assembly.
-///
 #[cfg(feature = "__test_utils")]
 pub mod testing;
 

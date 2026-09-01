@@ -100,10 +100,26 @@ impl EntryFlags {
 /// holding one of these per entry costs no heap.
 ///
 /// Deliberately NOT `#[non_exhaustive]`, unlike its module siblings: the
-/// four states enumerate what the wire can say (no field / zeroed /
-/// real) once the archive-level bit is applied — the bit only splits
-/// the zeroed case, since an absent field and a real digest mean the
-/// same thing either way. That is a closed set, not an open one. Exhaustive
+/// four states enumerate what the wire can say about ONE entry (no
+/// field / zeroed / real) once the archive-level bit is applied. The
+/// bit splits only the zeroed case — NOT because absence is harmless in
+/// a claiming archive, but because absence is not per-entry decidable:
+/// in a pak v10+ index the hash-less encoded record is the ORDINARY
+/// shape, so `claims_integrity() && sha1.is_none()` describes most
+/// normal v11 entries rather than a suspicious few. That is a closed
+/// set, not an open one.
+///
+/// LIMITS — this classifies one entry, so it cannot see a cross-entry
+/// anomaly. In a v10+ index the shape is chosen per record (the sign of
+/// an FDI record's `encoded_offset` selects a hash-less encoded header
+/// or an Inline one carrying a digest), so an archive may MIX both, and
+/// re-encoding a hash-carrying record into the hash-less form turns
+/// what would have been a `HashMismatch` into `NotInIndex` here and
+/// `SkippedNoHash` in `verify_entry`. The archive-level signal
+/// survives — `verify()` counts every such entry in
+/// `VerifyStats::entries_skipped_no_hash` and warns that some bytes
+/// went unhashed — but no per-entry state can say "this entry's
+/// siblings carry hashes and it does not". Surveying that is #755. Exhaustive
 /// matching is the safety property — a fifth state must break every
 /// consumer at compile time rather than fall into a catch-all that
 /// shows the wrong prose about an integrity claim. Consumers MAY fold
@@ -346,6 +362,22 @@ impl EntryMetadata {
     /// its `Unknown(id)` rendering, whose number comes from each
     /// entry's own field — interning an unbounded namespace would grow
     /// a pool with the archive rather than shrink it.
+    ///
+    /// SCOPE: this records ONE method for the whole entry, which is
+    /// pak's granularity — a pak entry names a single method and every
+    /// block uses it. A format that selects the method BELOW entry
+    /// granularity does not fit: per
+    /// `docs/formats/container/iostore-utoc.md`, IoStore carries a
+    /// `CompressionMethodIndex` on each `FIoStoreTocCompressedBlockEntry`,
+    /// so one chunk's blocks may mix methods (and index `0` means a
+    /// block is stored raw). Such a reader must LEAVE THIS UNSET rather
+    /// than pick a representative block's method: an unset field costs
+    /// a display surface some information, while a representative one
+    /// makes the Info pane state "Yes (Oodle, …)" about a chunk that is
+    /// partly uncompressed, and nothing in this type lets a consumer
+    /// detect the flattening. Widening it to a per-block form is a
+    /// breaking change deliberately deferred until a reader needs it,
+    /// on the same reasoning as [`EntryIntegrity`]'s digest-width note.
     #[must_use]
     pub fn with_compression_method(mut self, method: impl Into<std::sync::Arc<str>>) -> Self {
         self.compression_method = Some(method.into());
@@ -420,8 +452,15 @@ impl EntryMetadata {
     /// The `_shared` suffix names what the caller gets: a handle to the
     /// bytes the reader already holds, not a copy. Retaining one per
     /// entry (the GUI's entry map) costs a refcount bump where
-    /// `map(String::from)` would copy; reading one in passing is
-    /// `.as_deref()`.
+    /// `map(String::from)` would copy.
+    ///
+    /// To READ the name, `.as_deref()` gives an `Option<&str>` borrowed
+    /// from the returned `Arc` — which is a temporary, so it lives to
+    /// the end of the enclosing statement and no further. That covers
+    /// expression position (`assert_eq!`, a `match` scrutinee, an
+    /// argument); to hold the `&str` across statements, bind the `Arc`
+    /// first (`let m = meta.compression_method_shared();` then
+    /// `m.as_deref()`). Binding the `&str` directly is E0716.
     ///
     /// Sharing is NOT guaranteed: it is exactly as good as the
     /// implementor's interning, and pak deliberately excludes its
@@ -608,7 +647,25 @@ pub trait ContainerReader: Send + Sync {
     ///
     /// `meta` must come from this reader's own [`Self::entries`];
     /// classifying another archive's metadata against this archive's bit
-    /// is a caller error the type system cannot catch.
+    /// is a caller error the type system cannot catch. A caller holding
+    /// two open archives and crossing them gets a WRONG answer, not an
+    /// error — and the crossing that hides a strip (a zeroed hash from a
+    /// claiming archive read against a non-claiming one) yields the
+    /// benign [`EntryIntegrity::NoClaim`].
+    ///
+    /// The obvious alternative is to classify once in [`Self::entries`]
+    /// and store the result on [`EntryMetadata`], making it
+    /// self-describing and the crossing impossible. That is NOT
+    /// strictly better: it moves the hazard from the caller to the
+    /// IMPLEMENTOR, who must then remember both to classify and to
+    /// supply the bit, where forgetting yields
+    /// [`EntryIntegrity::NotInIndex`] for every entry — silently, since
+    /// an unset field is indistinguishable from a hash-less encoding
+    /// (see that variant's docs). The current split keeps the
+    /// implementor's obligation to one overridden bool and puts the
+    /// residual risk on a caller who has two readers in hand, which is
+    /// the rarer and more visible mistake. Revisit if a consumer
+    /// genuinely holds several archives at once.
     fn entry_integrity(&self, meta: &EntryMetadata) -> EntryIntegrity {
         classify_sha1_claim(meta.sha1(), self.claims_integrity())
     }
