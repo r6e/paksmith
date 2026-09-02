@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "GUI for exploring and extracting Unreal Engine game assets"
 
 [dependencies]
-dark-light = "2.0.0"
+dark-light = "3.0.0"
 # Phase 6: Iced GUI framework. MIT/Apache-2.0. The `tokio` feature makes Iced's
 # `Task::perform` executor tokio-backed, which `paksmith-core`'s reqwest-based
 # registry fetch (inside the async `resolve_pak_key`) requires at runtime — the
