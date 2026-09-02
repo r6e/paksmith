@@ -233,8 +233,10 @@ mod tests {
         let channels = u16::from_le_bytes([wav[22], wav[23]]);
         let rate = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]);
         let samples = wav[44..]
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b))
             .collect();
         (channels, rate, samples)
     }

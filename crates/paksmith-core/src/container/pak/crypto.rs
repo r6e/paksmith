@@ -108,9 +108,8 @@ pub(crate) fn aes256_ecb_decrypt(key: &AesKey, data: &mut [u8]) -> crate::Result
     // feature), as is the `AesKey` field on `PakReader`. For paksmith's
     // local-extractor threat model, this is an accepted trade-off.
     let cipher = Aes256::new(&key.0.into());
-    for block in data.chunks_exact_mut(16) {
-        let block_arr = <&mut aes::Block>::try_from(block)
-            .expect("chunks_exact_mut(16) guarantees 16-byte slices");
+    for block in data.as_chunks_mut::<16>().0 {
+        let block_arr: &mut aes::Block = block.into();
         cipher.decrypt_block(block_arr);
     }
     Ok(())
@@ -132,9 +131,8 @@ pub(crate) fn aes256_ecb_encrypt(key: &AesKey, data: &mut [u8]) -> crate::Result
         return Err(crate::PaksmithError::Decryption { path: None });
     }
     let cipher = Aes256::new(&key.0.into());
-    for block in data.chunks_exact_mut(16) {
-        let block_arr = <&mut aes::Block>::try_from(block)
-            .expect("chunks_exact_mut(16) guarantees 16-byte slices");
+    for block in data.as_chunks_mut::<16>().0 {
+        let block_arr: &mut aes::Block = block.into();
         cipher.encrypt_block(block_arr);
     }
     Ok(())

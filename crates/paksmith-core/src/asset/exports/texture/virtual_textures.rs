@@ -1391,6 +1391,8 @@ pub(crate) mod test_fixtures {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asset::exports::texture::test_support::every_px;
+
     use crate::asset::property::test_utils::{make_ctx_with_version, write_fstring};
 
     /// Append a counted `u32[]` (`i32` count prefix + elements).
@@ -2703,9 +2705,7 @@ mod tests {
         let out = flatten_virtual_texture(&vt, &[], false).expect("flatten");
         assert_eq!((out.width, out.height), (2, 2));
         assert!(
-            out.rgba
-                .chunks_exact(4)
-                .all(|px| px == [255, 255, 255, 255]),
+            every_px(&out.rgba, [255, 255, 255, 255]),
             "every pixel is opaque white"
         );
     }
@@ -3104,7 +3104,7 @@ mod tests {
             let out = flatten_virtual_texture(&special_fill_vt(codec), &[], false)
                 .unwrap_or_else(|e| panic!("codec {codec} flatten: {e:?}"));
             assert!(
-                out.rgba.chunks_exact(4).all(|px| px == color),
+                every_px(&out.rgba, color),
                 "codec {codec} should fill {color:?}",
             );
         }
@@ -3132,9 +3132,7 @@ mod tests {
         let out = flatten_virtual_texture(&vt, &[], false).expect("flatten");
         assert_eq!((out.width, out.height), (4, 2)); // 2 tiles × tile_size 2
         assert!(
-            out.rgba
-                .chunks_exact(4)
-                .all(|px| px == [255, 255, 255, 255]),
+            every_px(&out.rgba, [255, 255, 255, 255]),
             "both tiles white — the second at column 2 (tile_x = 2)",
         );
     }

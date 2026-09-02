@@ -112,8 +112,8 @@ pub(crate) fn parse_pcm_wav(wav: &[u8]) -> crate::Result<(u16, u32, Vec<i16>)> {
     pcm_data_within_cap(data.len())?;
     // A 16-bit PCM `data` chunk must be a whole number of interleaved frames
     // (`channels * 2` bytes each); a misaligned length is a malformed container —
-    // `chunks_exact(2)` would silently drop a partial trailing frame, skewing the
-    // channels. `channels >= 1` here, so `frame_bytes >= 2` (no divide-by-zero).
+    // `as_chunks::<2>()` would silently drop a partial trailing frame, skewing
+    // the channels. `channels >= 1` here, so `frame_bytes >= 2` (no divide-by-zero).
     let frame_bytes = usize::from(fmt.channels) * 2;
     if data.len() % frame_bytes != 0 {
         return Err(crate::PaksmithError::Internal {
@@ -125,8 +125,10 @@ pub(crate) fn parse_pcm_wav(wav: &[u8]) -> crate::Result<(u16, u32, Vec<i16>)> {
         });
     }
     let samples = data
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| i16::from_le_bytes(*b))
         .collect();
     Ok((fmt.channels, fmt.sample_rate, samples))
 }
@@ -273,7 +275,7 @@ mod tests {
     #[test]
     fn parse_pcm_wav_rejects_odd_data_length() {
         // A mono 16-bit PCM data chunk with an odd byte count is malformed: without
-        // the frame-alignment guard, `chunks_exact(2)` would silently drop the
+        // the frame-alignment guard, `as_chunks::<2>()` would silently drop the
         // trailing byte and return Ok. Three data bytes → 1.5 mono frames.
         let wav = make_wav(1, 1, 22050, 16, &[1, 0, 2]);
         let err = parse_pcm_wav(&wav).unwrap_err();

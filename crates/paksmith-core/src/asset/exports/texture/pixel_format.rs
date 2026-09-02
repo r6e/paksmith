@@ -87,6 +87,8 @@
     reason = "3e-4…3e-7 ship the decode layer; 3e-8's PngHandler is the first production consumer"
 )]
 
+use std::iter::zip;
+
 use crate::PaksmithError;
 use crate::error::AssetParseFault;
 
@@ -664,7 +666,7 @@ pub(crate) fn encoded_len(format: &PixelFormat, width: u32, height: u32) -> Opti
 
 /// `PF_B8G8R8A8` (B,G,R,A wire order) → RGBA8: swizzle the B and R channels.
 fn decode_b8g8r8a8(encoded: &[u8], rgba: &mut [u8]) {
-    for (src, dst) in encoded.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+    for (src, dst) in zip(encoded.as_chunks::<4>().0, rgba.as_chunks_mut::<4>().0) {
         dst[0] = src[2]; // dst R ← src[2] (the R byte in B,G,R,A)
         dst[1] = src[1]; // dst G ← src[1] (unchanged)
         dst[2] = src[0]; // dst B ← src[0] (the B byte in B,G,R,A)
@@ -674,7 +676,7 @@ fn decode_b8g8r8a8(encoded: &[u8], rgba: &mut [u8]) {
 
 /// `PF_G8` (8-bit grayscale) → RGBA8: replicate to R=G=B, opaque alpha.
 fn decode_g8(encoded: &[u8], rgba: &mut [u8]) {
-    for (g, dst) in encoded.iter().zip(rgba.chunks_exact_mut(4)) {
+    for (g, dst) in encoded.iter().zip(rgba.as_chunks_mut::<4>().0) {
         write_gray(dst, *g);
     }
 }
@@ -682,22 +684,23 @@ fn decode_g8(encoded: &[u8], rgba: &mut [u8]) {
 /// `PF_G16` (16-bit LE grayscale) → RGBA8: take the high byte as the 8-bit
 /// gray value (truncation), replicate to R=G=B, opaque alpha.
 fn decode_g16(encoded: &[u8], rgba: &mut [u8]) {
-    for (px, dst) in encoded.chunks_exact(2).zip(rgba.chunks_exact_mut(4)) {
+    for (px, dst) in zip(encoded.as_chunks::<2>().0, rgba.as_chunks_mut::<4>().0) {
         write_gray(dst, px[1]); // px[1] = high byte of the little-endian u16
     }
 }
 
 /// Write one opaque RGBA8 pixel replicating `gray` to R=G=B (alpha `0xFF`).
-/// `dst` is one `chunks_exact_mut(4)` slice, so the four indices never panic.
-fn write_gray(dst: &mut [u8], gray: u8) {
+/// Takes the chunk by type, so the four writes need no bounds check.
+fn write_gray(dst: &mut [u8; 4], gray: u8) {
     dst[0] = gray;
     dst[1] = gray;
     dst[2] = gray;
     dst[3] = 0xFF;
 }
 
-/// Write one opaque RGBA8 pixel `[r, g, b, 0xFF]`. `dst` is a length-≥4 slice.
-fn write_opaque(dst: &mut [u8], rgb: [u8; 3]) {
+/// Write one opaque RGBA8 pixel `[r, g, b, 0xFF]`. Takes the chunk by type,
+/// so the four writes need no bounds check.
+fn write_opaque(dst: &mut [u8; 4], rgb: [u8; 3]) {
     dst[0] = rgb[0];
     dst[1] = rgb[1];
     dst[2] = rgb[2];
@@ -871,8 +874,8 @@ fn decode_bc4(
             // UNORM (UE's `PF_BC4` is unsigned; the SNORM variant isn't a UE format).
             let mut r = [0u8; BC_BLOCK_DIM * BC_BLOCK_DIM];
             bcdec_rs::bc4(block, &mut r, BC_BLOCK_DIM, false);
-            for (px, &gray) in r.iter().enumerate() {
-                write_gray(&mut tile[px * 4..px * 4 + 4], gray);
+            for (&gray, dst) in r.iter().zip(tile.as_chunks_mut::<4>().0) {
+                write_gray(dst, gray);
             }
         },
     )
@@ -902,13 +905,8 @@ fn decode_bc5(
             // first sub-block, G from the second. `false` = UNORM (UE's `PF_BC5`).
             let mut rg = [0u8; BC_BLOCK_DIM * BC_BLOCK_DIM * 2];
             bcdec_rs::bc5(block, &mut rg, BC_BLOCK_DIM * 2, false);
-            for (px, rg_px) in rg.chunks_exact(2).enumerate() {
-                let (r, g) = (rg_px[0], rg_px[1]);
-                let dst = &mut tile[px * 4..px * 4 + 4];
-                dst[0] = r;
-                dst[1] = g;
-                dst[2] = reconstruct_z_normal(r, g);
-                dst[3] = 0xFF;
+            for (&[r, g], dst) in zip(rg.as_chunks::<2>().0, tile.as_chunks_mut::<4>().0) {
+                *dst = [r, g, reconstruct_z_normal(r, g), 0xFF];
             }
         },
     )
@@ -955,9 +953,8 @@ fn decode_bc6h(
             // bcdec_rs writes a 4×4 RGB f32 block (3 floats/px, pitch = 4×3).
             let mut rgb = [0f32; BC_BLOCK_DIM * BC_BLOCK_DIM * 3];
             bcdec_rs::bc6h_float(block, &mut rgb, BC_BLOCK_DIM * 3, false);
-            for (px, rgb_px) in rgb.chunks_exact(3).enumerate() {
-                let tile_px = &mut tile[px * 4..px * 4 + 4];
-                write_opaque(tile_px, tonemap_pixel([rgb_px[0], rgb_px[1], rgb_px[2]]));
+            for (rgb_px, dst) in zip(rgb.as_chunks::<3>().0, tile.as_chunks_mut::<4>().0) {
+                write_opaque(dst, tonemap_pixel(*rgb_px));
             }
         },
     )
@@ -1028,7 +1025,7 @@ fn decode_t2d(
         Ok(Err(reason)) => return Err(reason),
         Err(_) => return Err("texture2ddecoder panicked on malformed block data"),
     }
-    for (px, dst) in bgra.iter().zip(rgba.chunks_exact_mut(4)) {
+    for (px, dst) in bgra.iter().zip(rgba.as_chunks_mut::<4>().0) {
         // `color()` packed [b, g, r, a] as the u32's little-endian bytes;
         // re-order to RGBA8.
         let bgra_bytes = px.to_le_bytes();
@@ -1045,7 +1042,7 @@ fn decode_t2d(
 /// ASTC, so it's restored from R/G the same way BC5 always is. Matches
 /// CUE4Parse's `TextureDecoder` ASTC path (applied only when `isNormalMap`).
 fn restore_normal_z(rgba: &mut [u8]) {
-    for dst in rgba.chunks_exact_mut(4) {
+    for dst in rgba.as_chunks_mut::<4>().0 {
         dst[2] = reconstruct_z_normal(dst[0], dst[1]);
     }
 }
@@ -1306,8 +1303,8 @@ fn unpack_r11g11b10f(packed: u32) -> [f32; 3] {
 
 /// `PF_FloatRGB` (`R11G11B10F`, 4 B/px) → tone-mapped RGBA8 (opaque alpha).
 fn decode_float_rgb(encoded: &[u8], rgba: &mut [u8]) {
-    for (src, dst) in encoded.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
-        let packed = u32::from_le_bytes([src[0], src[1], src[2], src[3]]);
+    for (src, dst) in zip(encoded.as_chunks::<4>().0, rgba.as_chunks_mut::<4>().0) {
+        let packed = u32::from_le_bytes(*src);
         write_opaque(dst, tonemap_pixel(unpack_r11g11b10f(packed)));
     }
 }
@@ -1316,7 +1313,7 @@ fn decode_float_rgb(encoded: &[u8], rgba: &mut [u8]) {
 /// tone-mapped (ACES → sRGB); alpha linear coverage (clamp `[0,1]`, no
 /// ACES/sRGB).
 fn decode_float_rgba(encoded: &[u8], rgba: &mut [u8]) {
-    for (src, dst) in encoded.chunks_exact(8).zip(rgba.chunks_exact_mut(4)) {
+    for (src, dst) in zip(encoded.as_chunks::<8>().0, rgba.as_chunks_mut::<4>().0) {
         let r = f16_to_f32(u16::from_le_bytes([src[0], src[1]]));
         let g = f16_to_f32(u16::from_le_bytes([src[2], src[3]]));
         let b = f16_to_f32(u16::from_le_bytes([src[4], src[5]]));
@@ -1368,6 +1365,8 @@ fn fault(asset_path: &str, fault: AssetParseFault) -> PaksmithError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asset::exports::texture::test_support::every_px;
+
     use proptest::prelude::*;
 
     // --- #648: multi-slice slab composition ---
@@ -1718,12 +1717,7 @@ mod tests {
         let red = bc1_solid_block([0x00, 0xF8]);
         let decoded = decode_mip(&PixelFormat::Bc1, &red, 4, 4, false, "t").expect("decode");
         assert_eq!(&decoded.rgba[0..4], &[255, 0, 0, 255]);
-        assert!(
-            decoded
-                .rgba
-                .chunks_exact(4)
-                .all(|px| px == [255, 0, 0, 255])
-        );
+        assert!(every_px(&decoded.rgba, [255, 0, 0, 255]));
 
         let blue = bc1_solid_block([0x1F, 0x00]);
         let decoded = decode_mip(&PixelFormat::Bc1, &blue, 4, 4, false, "t").expect("decode");
@@ -1743,11 +1737,11 @@ mod tests {
         let decoded = decode_mip(&PixelFormat::Bc1, &block, 4, 4, false, "t").expect("decode");
         let red = [255, 0, 0, 255];
         let blue = [0, 0, 255, 255];
-        // 4-wide image → each `chunks_exact(16)` is one pixel row of 4 RGBA px.
-        for (y, row) in decoded.rgba.chunks_exact(4 * 4).enumerate() {
+        // 4-wide image → each `as_chunks::<16>()` chunk is one pixel row of 4 RGBA px.
+        for (y, row) in decoded.rgba.as_chunks::<16>().0.iter().enumerate() {
             let expected = if y % 2 == 0 { red } else { blue };
             assert!(
-                row.chunks_exact(4).all(|px| px == expected),
+                every_px(row, expected),
                 "row {y} should be {expected:?}, got {row:?}"
             );
         }
@@ -1762,12 +1756,7 @@ mod tests {
         let encoded: Vec<u8> = red.iter().copied().cycle().take(4 * 8).collect();
         let decoded = decode_mip(&PixelFormat::Bc1, &encoded, 5, 5, false, "t").expect("decode");
         assert_eq!(decoded.rgba.len(), 5 * 5 * 4);
-        assert!(
-            decoded
-                .rgba
-                .chunks_exact(4)
-                .all(|px| px == [255, 0, 0, 255])
-        );
+        assert!(every_px(&decoded.rgba, [255, 0, 0, 255]));
     }
 
     #[test]
@@ -1776,12 +1765,7 @@ mod tests {
         // expanded to grayscale (200,200,200,255), matching CUE4Parse's BC4.
         let block = [200, 200, 0, 0, 0, 0, 0, 0];
         let decoded = decode_mip(&PixelFormat::Bc4, &block, 4, 4, false, "t").expect("decode");
-        assert!(
-            decoded
-                .rgba
-                .chunks_exact(4)
-                .all(|px| px == [200, 200, 200, 255])
-        );
+        assert!(every_px(&decoded.rgba, [200, 200, 200, 255]));
     }
 
     #[test]
@@ -1793,12 +1777,7 @@ mod tests {
         let decoded = decode_mip(&PixelFormat::Bc5, &block, 4, 4, false, "t").expect("decode");
         let z = reconstruct_z_normal(100, 200);
         assert_eq!(z, 228);
-        assert!(
-            decoded
-                .rgba
-                .chunks_exact(4)
-                .all(|px| px == [100, 200, z, 255])
-        );
+        assert!(every_px(&decoded.rgba, [100, 200, z, 255]));
     }
 
     #[test]
@@ -1809,12 +1788,7 @@ mod tests {
         let mut block = [0xFFu8; 16];
         block[8..].copy_from_slice(&bc1_solid_block([0x00, 0xF8]));
         let decoded = decode_mip(&PixelFormat::Bc2, &block, 4, 4, false, "t").expect("decode");
-        assert!(
-            decoded
-                .rgba
-                .chunks_exact(4)
-                .all(|px| px == [255, 0, 0, 255])
-        );
+        assert!(every_px(&decoded.rgba, [255, 0, 0, 255]));
     }
 
     #[test]
@@ -1826,12 +1800,7 @@ mod tests {
         block[1] = 255; // alpha1
         block[8..].copy_from_slice(&bc1_solid_block([0x00, 0xF8]));
         let decoded = decode_mip(&PixelFormat::Bc3, &block, 4, 4, false, "t").expect("decode");
-        assert!(
-            decoded
-                .rgba
-                .chunks_exact(4)
-                .all(|px| px == [255, 0, 0, 255])
-        );
+        assert!(every_px(&decoded.rgba, [255, 0, 0, 255]));
     }
 
     #[test]
@@ -1913,21 +1882,11 @@ mod tests {
         // blue → (0,0,255,255). Red in byte 0 + blue in byte 2 proves RGBA.
         let red = astc_void_extent_block(255, 0, 0, 255);
         let decoded = decode_mip(&PixelFormat::Astc4x4, &red, 4, 4, false, "t").expect("decode");
-        assert!(
-            decoded
-                .rgba
-                .chunks_exact(4)
-                .all(|px| px == [255, 0, 0, 255])
-        );
+        assert!(every_px(&decoded.rgba, [255, 0, 0, 255]));
 
         let blue = astc_void_extent_block(0, 0, 255, 255);
         let decoded = decode_mip(&PixelFormat::Astc4x4, &blue, 4, 4, false, "t").expect("decode");
-        assert!(
-            decoded
-                .rgba
-                .chunks_exact(4)
-                .all(|px| px == [0, 0, 255, 255])
-        );
+        assert!(every_px(&decoded.rgba, [0, 0, 255, 255]));
     }
 
     #[test]
@@ -1937,16 +1896,11 @@ mod tests {
         // x=1 boundary). Distinct, so the conditional restore is pinned.
         let red = astc_void_extent_block(255, 0, 0, 255);
         let plain = decode_mip(&PixelFormat::Astc4x4, &red, 4, 4, false, "t").expect("decode");
-        assert!(plain.rgba.chunks_exact(4).all(|px| px == [255, 0, 0, 255]));
+        assert!(every_px(&plain.rgba, [255, 0, 0, 255]));
 
         assert_eq!(reconstruct_z_normal(255, 0), 128);
         let normal = decode_mip(&PixelFormat::Astc4x4, &red, 4, 4, true, "t").expect("decode");
-        assert!(
-            normal
-                .rgba
-                .chunks_exact(4)
-                .all(|px| px == [255, 0, 128, 255])
-        );
+        assert!(every_px(&normal.rgba, [255, 0, 128, 255]));
     }
 
     #[test]
@@ -1970,13 +1924,7 @@ mod tests {
         ] {
             let decoded = decode_mip(&fmt, &red, dim, dim, false, "t").expect("decode");
             assert_eq!(decoded.rgba.len(), (dim as usize) * (dim as usize) * 4);
-            assert!(
-                decoded
-                    .rgba
-                    .chunks_exact(4)
-                    .all(|px| px == [255, 0, 0, 255]),
-                "{fmt:?}"
-            );
+            assert!(every_px(&decoded.rgba, [255, 0, 0, 255]), "{fmt:?}");
         }
     }
 
@@ -2169,11 +2117,13 @@ mod tests {
         // The latter pins the `bcdec_rs::bc6h_float` destination pitch (4 px ×
         // 3 floats): a wrong pitch leaves the tail of the f32 buffer unwritten,
         // so the last pixels would decode to black (0,0,0).
-        assert!(decoded.rgba.chunks_exact(4).all(|px| px[3] == 0xFF));
+        // Bound once: `every_px` does not fit here, since neither predicate is
+        // an equality against a fixed colour.
+        let pixels = decoded.rgba.as_chunks::<4>().0;
+        assert!(pixels.iter().all(|px| px[3] == 0xFF));
         assert!(
-            decoded
-                .rgba
-                .chunks_exact(4)
+            pixels
+                .iter()
                 .all(|px| px[0] != 0 || px[1] != 0 || px[2] != 0),
             "a pixel decoded to black — likely a wrong BC6H decode pitch"
         );
