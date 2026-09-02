@@ -67,10 +67,19 @@ jobs:
           #   successor is skrifa). deny.toml already tolerates it under
           #   `unmaintained = workspace`:
           #     2026-0192
+          #   lru < 0.18.2 (unsound: `LruCache::pop()` leaves dangling pointers if a
+          #   stored KEY's `Drop` panics) via paksmith-gui → iced 0.14 → iced_wgpu →
+          #   cryoglyph. Unreachable by construction, not merely unlikely: the tree's
+          #   only LruCache is cryoglyph's glyph cache, keyed by cosmic_text::CacheKey,
+          #   which derives `Copy` — and Rust forbids `Drop` on a `Copy` type, so the
+          #   advisory's precondition cannot be satisfied. cryoglyph pins lru ^0.16, so
+          #   the 0.18.2 fix is unreachable until iced bumps it:
+          #     2026-0253
           #
           # Removal condition: when muda moves its Linux backend to gtk4, dark-light
           # drops async-std, texture2ddecoder drops paste, wayland-scanner ships a
-          # release on quick-xml 0.41+, and no crate in the tree pulls ttf-parser
+          # release on quick-xml 0.41+, an iced release ships a cryoglyph allowing
+          # lru >= 0.18.2, and no crate in the tree pulls ttf-parser
           # (both iced's cosmic-text/fontdb path and winit's ab_glyph/owned_ttf_parser
           # path must be gone — `cargo tree -i ttf-parser` empty).
-          ignore: RUSTSEC-2024-0370,RUSTSEC-2024-0412,RUSTSEC-2024-0413,RUSTSEC-2024-0415,RUSTSEC-2024-0416,RUSTSEC-2024-0418,RUSTSEC-2024-0419,RUSTSEC-2024-0420,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2025-0052,RUSTSEC-2026-0192,RUSTSEC-2026-0194,RUSTSEC-2026-0195
+          ignore: RUSTSEC-2024-0370,RUSTSEC-2024-0412,RUSTSEC-2024-0413,RUSTSEC-2024-0415,RUSTSEC-2024-0416,RUSTSEC-2024-0418,RUSTSEC-2024-0419,RUSTSEC-2024-0420,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2025-0052,RUSTSEC-2026-0192,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0253
