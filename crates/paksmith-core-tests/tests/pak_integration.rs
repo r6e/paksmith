@@ -961,11 +961,11 @@ fn verify_entry_integrity_strip_check_applies_to_encrypted_entries() {
     }
 }
 
-/// Entries whose stored SHA1 is the all-zero sentinel return
-/// `Ok(SkippedNoHash)` rather than failing — UE writers leave this slot
-/// zero-filled when integrity hashing is not enabled at write time. Only
-/// applies when the index hash is ALSO zero (whole-archive policy); the
-/// mixed case is tested separately above.
+/// Entries whose stored SHA1 is all zeros return `Ok(SkippedNoHash)`
+/// rather than failing: with nothing recorded to check against, there is
+/// no verification to perform. Only applies when the index hash is ALSO
+/// zero (whole-archive policy); the mixed case is tested separately
+/// above.
 #[test]
 fn verify_entry_returns_skipped_for_zero_hash() {
     let payload = b"unhashed";
@@ -3329,7 +3329,10 @@ fn find_v10_plus_phi_tamper_anchors(file_bytes: &[u8]) -> (usize, u64, u64, usiz
             .try_into()
             .unwrap(),
     );
-    let index_hash_slot = magic_pos + 24;
+    // Same footer-start anchoring the other three patch sites in this
+    // file use (#662) — `INDEX_HASH_OFFSET_IN_FOOTER` is 17 + 24,
+    // i.e. the magic offset plus the hash's offset from it.
+    let index_hash_slot = footer_start + INDEX_HASH_OFFSET_IN_FOOTER;
 
     let mut off = usize::try_from(index_offset).unwrap();
     let mount_len = i32::from_le_bytes(file_bytes[off..off + 4].try_into().unwrap());

@@ -117,25 +117,50 @@ fn build_loaded(path: PathBuf, resolved_key: Option<&AesKey>) -> Result<LoadedAr
         Err(e) => return Err(e.into()),
     };
 
-    let raw_entries: Vec<_> = reader.entries().collect();
-    let entry_count = raw_entries.len();
-    // Allocate each path string once and reuse it for both the BTreeMap key and
-    // the paths Vec — avoids a second `to_string()` per entry.
+    // Streamed, not collected: each `EntryMetadata` (with its owned path
+    // string) is consumed and dropped before the next is built, so peak
+    // memory is the retained `EntryMeta` map rather than that map PLUS a
+    // full parallel Vec of core values (#662).
+    let raw_entries = reader.entries();
+    // A pre-allocation HINT, not a guarantee: the reader is
+    // type-erased here and `ContainerReader::entries` promises nothing
+    // about `size_hint`, so a future container may report 0 and cost
+    // this Vec its reallocations — never correctness.
+    let size_hint = raw_entries.size_hint().0;
+    // Two owned copies of each path are needed — the BTreeMap key and the
+    // tree's Vec — and core already allocated one, so MOVE it out with
+    // `into_path` rather than copying twice. The metadata is read
+    // first because that move consumes `e`.
     let mut entries = std::collections::BTreeMap::new();
-    let mut paths: Vec<String> = Vec::with_capacity(entry_count);
+    let mut paths: Vec<String> = Vec::with_capacity(size_hint);
     for e in raw_entries {
-        let path_str = e.path().to_string();
-        let _ = entries.insert(
-            path_str.clone(),
-            EntryMeta {
-                uncompressed_size: e.uncompressed_size(),
-                compressed_size: e.compressed_size(),
-                is_compressed: e.is_compressed(),
-                is_encrypted: e.is_encrypted(),
-            },
-        );
+        let meta = EntryMeta {
+            uncompressed_size: e.uncompressed_size(),
+            compressed_size: e.compressed_size(),
+            is_compressed: e.is_compressed(),
+            is_encrypted: e.is_encrypted(),
+            offset: e.offset(),
+            // The shared form: this iteration interned it, so
+            // retaining one per entry bumps a refcount rather than
+            // copying bytes (a GUI-side pool was the wrong
+            // home; core knows which names it can bound).
+            compression_method: e.compression_method_shared(),
+            // Via the reader that produced `e`, so the entry meets
+            // its OWN archive's bit. The trait cannot enforce that
+            // pairing (see `entry_integrity`'s docstring) — what it
+            // removes is the bool a call site could get wrong, whose
+            // easy wrong answer, false, is the one that hides a
+            // strip. Pairing the right reader stays the caller's job,
+            // and it matters once two archives are open at once.
+            integrity: reader.entry_integrity(&e),
+        };
+        let path_str = e.into_path();
+        let _ = entries.insert(path_str.clone(), meta);
         paths.push(path_str);
     }
+    // One push per entry, so this IS the entry count — no separate
+    // counter to drift from the loop.
+    let entry_count = paths.len();
     let tree = Tree::from_paths(paths);
     Ok(LoadedArchive {
         path,
@@ -179,6 +204,117 @@ mod tests {
             "decrypted flag should be true after key-unlock"
         );
         assert!(!loaded.tree.is_empty(), "tree should be populated");
+    }
+
+    #[tokio::test]
+    async fn run_captures_entry_details_for_the_info_pane() {
+        // #662: the open task must carry offset / method / SHA-1 status
+        // from the container surface into EntryMeta. THREE fixtures so
+        // every assertion is UNCONDITIONAL (a v11-only version would
+        // make the SHA-1 block dead code — v11 encoded
+        // records carry no hash field at all): v9_compressed supplies the
+        // compressed arm, v9_multi (all-uncompressed) the uncompressed
+        // arm with real hex claims, and v11 the NotInIndex arm.
+        use paksmith_core::container::EntryIntegrity;
+
+        // Every captured field is compared against the reader's OWN
+        // metadata for the same entry, not merely `is_some()`: the
+        // fixture's single entry sits at record offset 0, so an
+        // `is_some()` assertion was satisfied just as well by a constant
+        // `Some(0)`, and nothing pinned that the method name
+        // belongs to THIS entry.
+        // One binding for the v9 corpus — the value assertions below
+        // reuse these names rather than re-spelling them.
+        const V9_COMPRESSED: &str = "real_v9_compressed.pak";
+        const V9_MULTI: &str = "real_v9_multi.pak";
+
+        // Each fixture is opened ONCE: `run` retains the reader it used
+        // (LoadedArchive::reader), so the oracle below is that same
+        // reader re-queried, not a second parse of the same bytes.
+        // Re-querying still discriminates — it compares what
+        // the capture STORED against what the container surface says
+        // now, which is the wiring this test names.
+        let v9c = run(fixture_path(V9_COMPRESSED), None).await.unwrap();
+        let v9m = run(fixture_path(V9_MULTI), None).await.unwrap();
+
+        for (name, loaded) in [(V9_COMPRESSED, &v9c), (V9_MULTI, &v9m)] {
+            let reader = &loaded.reader;
+            let mut seen = 0usize;
+            for e in reader.entries() {
+                let m = loaded
+                    .entries
+                    .get(e.path())
+                    .unwrap_or_else(|| panic!("{name}: {} missing from the map", e.path()));
+                assert_eq!(
+                    m.offset,
+                    e.offset(),
+                    "{name}: offset must be the entry's own"
+                );
+                assert_eq!(
+                    m.compression_method.as_deref(),
+                    e.compression_method_shared().as_deref(),
+                    "{name}: method name must be the entry's own"
+                );
+                assert_eq!(
+                    m.integrity,
+                    reader.entry_integrity(&e),
+                    "{name}: integrity must be the entry's own"
+                );
+                seen += 1;
+            }
+            assert!(seen > 0, "{name}: fixture must yield entries");
+        }
+
+        let compressed = v9c
+            .entries
+            .values()
+            .find(|m| m.is_compressed)
+            .expect("v9_compressed must contain a compressed entry");
+        assert!(compressed.offset.is_some(), "offset must be captured");
+        assert!(
+            compressed.compression_method.is_some(),
+            "compressed entries must carry the method name"
+        );
+
+        let uncompressed = v9m
+            .entries
+            .values()
+            .find(|m| !m.is_compressed)
+            .expect("v9_multi must contain an uncompressed entry");
+        assert_eq!(
+            uncompressed.compression_method, None,
+            "uncompressed entries carry no method name"
+        );
+        for m in v9m.entries.values() {
+            match &m.integrity {
+                EntryIntegrity::Claim(digest) => {
+                    assert!(
+                        !digest.is_zero(),
+                        "a real claim must not be the zero sentinel"
+                    );
+                }
+                other => panic!("v9 inline records must yield Claim, got {other:?}"),
+            }
+        }
+
+        // The v9 loops above compare each captured value against
+        // `reader.entry_integrity(&e)` — the same call that produced it —
+        // so they pin the per-entry PAIRING but are self-referential about
+        // the value itself. This block is the one integrity assertion here
+        // made against a literal, so it still fails if `entry_integrity`
+        // starts answering differently. v11 also carries the only
+        // hash-less records in this test's corpus.
+        let v11 = run(fixture_path("real_v11_compressed.pak"), None)
+            .await
+            .unwrap();
+        for m in v11.entries.values() {
+            assert_eq!(
+                m.integrity,
+                EntryIntegrity::NotInIndex,
+                "v11 BIT-PACKED index records carry no hash field (v10+ \
+                 non-encoded entries are full Inline records that do)"
+            );
+        }
     }
 
     #[tokio::test]

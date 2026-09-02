@@ -12,7 +12,7 @@ use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length};
 
 use crate::app::{Message, accent_button};
-use crate::panels::detail::{compression_ratio, human_size, kv_row};
+use crate::panels::detail::kv_row;
 use crate::state::archive::EntryMeta;
 use crate::state::tabs::{TabContent, Tabs, ViewMode, audio_available, texture_available};
 use crate::theme::tokens::{
@@ -163,29 +163,20 @@ fn info_view(
     let mut entry_rows: Vec<Element<'static, Message>> = Vec::new();
 
     // ── entry-level rows (from EntryMeta) ────────────────────────────────────
-    if let Some(m) = meta {
-        let ucmp = human_size(m.uncompressed_size);
-        let cmp = human_size(m.compressed_size);
-        let ratio_str = compression_ratio(m.uncompressed_size, m.compressed_size)
-            .unwrap_or_else(|| "\u{2014}".to_string());
-
-        let compressed_label: String = if m.is_compressed {
-            format!("Yes ({cmp}, {ratio_str})")
-        } else {
-            "No".to_string()
-        };
-        let encrypted_label: &str = if m.is_encrypted { "Yes" } else { "No" };
-
-        entry_rows.push(kv_row("Path", path.to_owned()));
-        entry_rows.push(kv_row("Size", ucmp));
-        entry_rows.push(kv_row("Compressed", compressed_label));
-        entry_rows.push(kv_row("Encrypted", encrypted_label.to_owned()));
-    } else {
-        // No EntryMeta — still show path.
-        entry_rows.push(kv_row("Path", path.to_owned()));
+    // Which rows, in which order, with which label on which value is
+    // decided by the tested `detail::entry_rows` seam (#662) —
+    // this view is `#[mutants::skip]` and returns an opaque `Element`,
+    // so a swap made HERE would be invisible to the suite.
+    for (label, value) in crate::panels::detail::entry_rows(path, meta) {
+        entry_rows.push(kv_row(label, value));
     }
 
     // ── package-level rows ────────────────────────────────────────────────────
+    // NOT routed through `detail::entry_rows` — that seam exists because
+    // #662 made the ENTRY rows' label-to-value pairing load-bearing and
+    // this view cannot be tested. These three are pre-existing, take no
+    // metadata this PR touches, and moving them would widen the change
+    // into pane code it does not otherwise modify. Worth doing; not here.
     let mut pkg_rows: Vec<Element<'static, Message>> = Vec::new();
     match parsed {
         Ok(pkg) => {

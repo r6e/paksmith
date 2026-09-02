@@ -246,16 +246,20 @@ pub enum PaksmithError {
     },
 
     /// An entry's stored SHA1 slot is zeroed but the archive's index hash
-    /// is non-zero — i.e., the writer recorded integrity for the archive
-    /// as a whole but this one entry's hash slot is empty. UE writers
-    /// produce all-or-nothing hashing, so a mixed state is the signature
-    /// of an attacker stripping the integrity tag for a single entry to
-    /// bypass per-entry verification.
+    /// is non-zero — i.e., the archive records an integrity claim of its
+    /// own while this one entry's hash slot is empty. That mixed state is
+    /// the shape an attacker stripping a single entry's integrity tag
+    /// would leave, and it is why this is an error rather than a skip;
+    /// but it is an observation about two fields, not a finding of
+    /// tampering (see
+    /// [`EntryIntegrity::Stripped`](crate::container::EntryIntegrity),
+    /// which scopes what the state does and does not establish).
     ///
     /// Distinct from [`Self::HashMismatch`] because there is nothing to
-    /// compare digests against — the tag was removed, not changed.
-    /// Monitoring rules can alert on this variant separately, since
-    /// random corruption almost never zeroes 20 contiguous bytes.
+    /// compare digests against — no digest was recorded, rather than a
+    /// recorded one disagreeing. Monitoring rules can alert on this
+    /// variant separately, since random corruption almost never zeroes
+    /// 20 contiguous bytes.
     #[error(
         "integrity tag stripped for {target}: archive index is hashed but \
          this slot was zeroed (possible tampering)"
@@ -5629,6 +5633,31 @@ mod tests {
             method: CompressionMethod::Oodle,
         };
         assert_eq!(fault.to_string(), "unsupported compression method Oodle");
+    }
+
+    /// The wire-stable arm renders the method with `{method:?}`, whose
+    /// output differs from the operator-facing prose
+    /// `CompressionMethod::display_name` produces — most visibly for
+    /// the unknown variants (`UnknownByName("LZMA")` vs
+    /// `unknown ("LZMA")`), but also for two known codecs (`Lz4` vs
+    /// `LZ4`, `None` vs `none`).
+    ///
+    /// The primary guard against swapping them is that
+    /// `CompressionMethod` has NO `Display` impl, so `{method}` here is
+    /// a compile error (see `display_name`'s doc for why that absence
+    /// is deliberate). This test is the belt to that braces: it pins
+    /// the exact operator-visible string, so any future rewrite of the
+    /// rendering — including one that re-adds `Display` first — fails
+    /// here rather than silently changing text that log greps key on.
+    #[test]
+    fn decompression_fault_display_keeps_debug_rendering_of_the_method() {
+        let fault = DecompressionFault::UnsupportedMethod {
+            method: CompressionMethod::UnknownByName("LZMA".to_string()),
+        };
+        assert_eq!(
+            fault.to_string(),
+            "unsupported compression method UnknownByName(\"LZMA\")"
+        );
     }
 
     #[test]

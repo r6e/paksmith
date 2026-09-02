@@ -167,9 +167,15 @@ pub enum PakEntryHeader {
         /// Fields shared with [`PakEntryHeader::Encoded`].
         common: EntryCommon,
         /// SHA1 digest of the entry's stored bytes, as recorded on the
-        /// wire. May be [`Sha1Digest::ZERO`] for v3-v9 archives that
-        /// did not opt into per-entry integrity hashing — that case
-        /// is a legitimate tampering signal, not a placeholder.
+        /// wire. May be [`Sha1Digest::ZERO`], whose meaning is
+        /// context-dependent: the ordinary "no claim recorded" case when
+        /// the footer's `index_hash` is also zero, and the strip-shaped
+        /// state when it is not (the verify path's `SkippedNoHash` vs
+        /// `IntegrityStripped` split). Which of those a consumer should
+        /// SAY is scoped by
+        /// [`EntryIntegrity`](crate::container::EntryIntegrity) — the
+        /// shape is an observation about two fields, not a finding of
+        /// tampering.
         sha1: Sha1Digest,
         /// On-wire width of the compression-method field in this
         /// entry's in-data FPakEntry record. The only consumer is
@@ -756,9 +762,11 @@ impl PakEntryHeader {
         //
         // The variant (Inline vs Encoded) carries this information at the
         // type level: if `self.sha1()` returns `Some`, this is an inline
-        // header and the digest is genuine — including the all-zeros case,
-        // which is a real tampering signal we want to preserve for v3-v9
-        // archives. The bug from issue #28 (`is_zero_sha1(sha1)` instead
+        // header and the field is genuine — including the all-zeros case,
+        // which is preserved rather than filtered. What a zero MEANS is
+        // not decided here: it depends on the archive-level bit, and
+        // `container::classify_sha1_claim` is what resolves it (#662).
+        // This comparison only cares that the two copies AGREE. The bug from issue #28 (`is_zero_sha1(sha1)` instead
         // of consulting an `omits_sha1` flag) is structurally impossible
         // here: there's no zero-filled placeholder for an Encoded entry
         // to be confused with a real digest.
@@ -896,15 +904,20 @@ impl PakEntryHeader {
     ///
     /// Returns `Some` for inline FPakEntry records (v3-v9 index headers
     /// and every in-data record) — including the all-zeros case, which
-    /// is a legitimate tampering signal for v3-v9 archives that opted
-    /// into integrity hashing.
+    /// is passed through rather than filtered: under an archive that
+    /// opted into integrity hashing it is the strip-shaped state, and
+    /// [`EntryIntegrity`](crate::container::EntryIntegrity) scopes what
+    /// that does and does not establish.
     ///
     /// Returns `None` for v10+ encoded entries: their bit-packed wire
-    /// format omits the SHA1 field entirely. Callers deciding between
-    /// "no integrity claim was made" and "an integrity claim was zeroed"
-    /// pattern-match on this `Option` directly — there is no way to
-    /// confuse a placeholder zero digest with a real one because the
-    /// Encoded variant has no `sha1` field to read.
+    /// format omits the SHA1 field entirely, so an absent field can
+    /// never be confused with a present zero one.
+    ///
+    /// The `Option` alone does NOT separate "no claim" from "a claim was
+    /// zeroed", though — a present zero means either, depending on the
+    /// archive's own index hash. Callers classifying a stored claim
+    /// should use [`crate::container::ContainerReader::entry_integrity`]
+    /// rather than matching this `Option` themselves.
     pub fn sha1(&self) -> Option<Sha1Digest> {
         match self {
             Self::Inline { sha1, .. } => Some(*sha1),

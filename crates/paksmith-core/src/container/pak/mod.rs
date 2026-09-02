@@ -574,8 +574,14 @@ impl PakReader {
     }
 
     /// Look up the parsed index entry for `path`, exposing the wire-level
-    /// fields (entry offset, on-disk sizes, compression blocks, stored
-    /// SHA1) that the lighter [`EntryMetadata`] hides.
+    /// fields the lighter [`EntryMetadata`] still hides — compression
+    /// block layout, block size, the raw header for derived-offset
+    /// arithmetic. (Since #662 `EntryMetadata` carries the entry offset
+    /// and method name itself, and offers the stored SHA-1 as a
+    /// CLASSIFICATION via `ContainerReader::entry_integrity`. This
+    /// function still hands out the raw `PakEntryHeader`, stored SHA-1
+    /// included — prefer the classified form unless you specifically
+    /// need the wire field.)
     ///
     /// Use this when a caller needs to compute a derived offset (e.g., to
     /// poke at a specific payload byte for a corruption test) and would
@@ -587,10 +593,14 @@ impl PakReader {
     }
 
     /// Whether the archive's index hash slot is non-zero — i.e., the
-    /// writer recorded an integrity claim. When `true`, any zero entry
-    /// hash slot is treated as a tampering signal (an attacker stripping
-    /// the integrity tag) rather than "no claim recorded." See
-    /// [`PakReader::verify_entry`] for the details.
+    /// writer recorded an integrity claim. When `true`, a zero entry
+    /// hash slot classifies as
+    /// [`EntryIntegrity::Stripped`](crate::container::EntryIntegrity)
+    /// rather than "no claim recorded". That is the shape a stripped
+    /// integrity tag would leave, but the state is an observation about
+    /// two fields, not a finding of tampering — see the variant's own
+    /// doc, and [`PakReader::verify_entry`] for how the verify path acts
+    /// on it.
     fn archive_claims_integrity(&self) -> bool {
         !self.footer.index_hash().is_zero()
     }
@@ -618,10 +628,13 @@ impl PakReader {
     /// Returns:
     /// - `Ok(VerifyOutcome::Verified)` when the stored hash matches.
     /// - `Ok(VerifyOutcome::SkippedNoHash)` when the footer's stored hash
-    ///   is all zeros — UE writers leave the field zero-filled when
-    ///   integrity hashing was not enabled at archive-creation time, so a
-    ///   zeroed slot means "no integrity claim to verify against," not
-    ///   "tampered."
+    ///   is all zeros. paksmith reads that as "no integrity claim to
+    ///   verify against," not "tampered" — an interpretation of an
+    ///   ambiguous slot (the format assigns the value no distinguished
+    ///   meaning), and the same reading that defines
+    ///   `archive_claims_integrity`. `Stripped` is unreachable for THIS
+    ///   slot by construction: it is the bit the classification is
+    ///   derived from.
     /// - `Err(HashMismatch { target: Index, .. })` when a non-zero stored
     ///   hash disagrees with the recomputed digest — the only signal of
     ///   actual tampering or transit corruption.
@@ -745,8 +758,10 @@ impl PakReader {
 
     /// Hash and verify the v10+ full-directory-index region.
     /// `Ok(None)` for pre-v10 (flat) archives where no FDI exists.
-    /// `Ok(Some(SkippedNoHash))` when the FDI hash slot is zero
-    /// ("no integrity claim recorded at write time").
+    /// `Ok(Some(SkippedNoHash))` when the FDI hash slot is zero AND the
+    /// archive records no integrity claim of its own; a zeroed slot
+    /// under a claiming archive is `Err(IntegrityStripped)` instead.
+    /// See [`Self::verify_region`], which applies the shared policy.
     fn verify_fdi_region(&self) -> crate::Result<Option<VerifyOutcome>> {
         let Some(regions) = self.index.encoded_regions() else {
             return Ok(None);
@@ -775,8 +790,10 @@ impl PakReader {
     /// pointing into the parent file.
     ///
     /// When the stored hash slot is zero, applies the same
-    /// strip-detection policy as `verify_entry`: if the archive
-    /// claims integrity (footer index_hash non-zero), surface as
+    /// strip-detection policy as `verify_entry` — literally the same
+    /// code, `container::classify_sha1_claim`, so the two paths cannot
+    /// drift: if the archive claims integrity (footer index_hash
+    /// non-zero), surface as
     /// [`PaksmithError::IntegrityStripped`] — an attacker who can
     /// recompute the footer hash can zero a region hash slot to
     /// downgrade the region to `SkippedNoHash`, evading callers that
@@ -803,8 +820,18 @@ impl PakReader {
         // PHI at open. Shared comparator via `check_region_bounds`.
         check_region_bounds(region_kind, region.offset(), region.size(), self.file_size)
             .map_err(|fault| PaksmithError::InvalidIndex { fault })?;
-        if region.hash().is_zero() {
-            if self.archive_claims_integrity() {
+        // Same shared classifier `verify_entry` uses (#662), so a region
+        // slot and an entry slot in the same archive can never be judged
+        // by two different rules. The slot is always PRESENT on the wire
+        // here — the `(offset, size, SHA1)` triple is fixed-width, so
+        // there is no v10+-style omission — hence `Some`; `NotInIndex` is
+        // unreachable and folds into the same skip as `NoClaim` rather
+        // than inventing a fourth region outcome.
+        let expected_hash = match crate::container::classify_sha1_claim(
+            Some(region.hash()),
+            self.archive_claims_integrity(),
+        ) {
+            crate::container::EntryIntegrity::Stripped => {
                 error!(
                     region = %target,
                     expected = "non-zero (archive-wide integrity claimed)",
@@ -814,12 +841,16 @@ impl PakReader {
                 );
                 return Err(PaksmithError::IntegrityStripped { target });
             }
-            debug!(
-                region = %target,
-                "region has no recorded SHA1; skipping verification"
-            );
-            return Ok(VerifyOutcome::SkippedNoHash);
-        }
+            crate::container::EntryIntegrity::NoClaim
+            | crate::container::EntryIntegrity::NotInIndex => {
+                debug!(
+                    region = %target,
+                    "region has no recorded SHA1; skipping verification"
+                );
+                return Ok(VerifyOutcome::SkippedNoHash);
+            }
+            crate::container::EntryIntegrity::Claim(d) => d,
+        };
         // Encrypted v10+ indexes (#635): each region (FDI/PHI) is
         // AES-encrypted in place, and UE records the SHA-1 over the
         // PLAINTEXT — so decrypt before hashing, exactly as
@@ -841,8 +872,8 @@ impl PakReader {
             let mut buf = [0u8; HASH_BUFFER_BYTES];
             sha1_of_reader(&mut file, region.size(), &mut buf)?
         };
-        if actual != region.hash() {
-            let expected = region.hash().to_string();
+        if actual != expected_hash {
+            let expected = expected_hash.to_string();
             let actual_hex = actual.to_string();
             error!(
                 region = %target,
@@ -988,8 +1019,11 @@ impl PakReader {
     /// Returns:
     /// - `Ok(VerifyOutcome::Verified)` on a hash match.
     /// - `Ok(VerifyOutcome::SkippedNoHash)` when the entry's stored SHA1
-    ///   is all zeros (no integrity claim recorded at write time), or the
-    ///   entry is a v10+ encoded record (which omits SHA1 from the wire).
+    ///   is all zeros AND the archive itself records no integrity claim
+    ///   (zero footer `index_hash`), or the entry is a v10+ encoded
+    ///   record (which omits SHA1 from the wire). A zeroed slot in an
+    ///   archive that DOES claim integrity is `Err(IntegrityStripped)`,
+    ///   not this — see the archive-wide integrity policy above.
     /// - `Err(EntryNotFound)` for unknown paths.
     /// - `Err(Decompression)` for a PLAINTEXT entry in an unsupported
     ///   compression method (Gzip, Oodle, Zstd, UnknownByName, Unknown).
@@ -1022,27 +1056,29 @@ impl PakReader {
         // hash arms as plaintext entries: the bytes on disk are exactly
         // what the hash covers. No `is_encrypted` branch is needed here.
 
-        // V10+ encoded entries have NO sha1 field on the wire (the
-        // bit-packed `FPakEntry::EncodeTo` format omits it; only the
-        // in-data record carries one). The Encoded variant returns
-        // `None` from `sha1()`, which is the unambiguous "no integrity
-        // claim was made" signal — distinct from a real-but-zero digest
-        // on an Inline entry, which is the v3-v9 tampering signal we
-        // want to surface.
-        let Some(expected_sha1) = entry.header().sha1() else {
-            debug!(
-                path,
-                "entry has no recorded SHA1 (encoded entry); skipping verification"
-            );
-            return Ok(VerifyOutcome::SkippedNoHash);
-        };
-
-        if expected_sha1.is_zero() {
-            // Inline entry with an all-zero SHA1. If the archive opts
-            // into integrity (non-zero index_hash), this is a tampering
-            // signal we want to surface; otherwise it's a legitimate
-            // "no integrity recorded" case.
-            if self.archive_claims_integrity() {
+        // Which of the three no-hash-to-check states (if any) this entry
+        // is in comes from the SHARED classifier (#662), so the Info
+        // pane's label and this verdict can never disagree. Note an
+        // absent field means the INDEX record omits it (v10+ bit-packed);
+        // the entry's in-data record still stores a hash, but
+        // verification reads the index header.
+        let expected_sha1 = match crate::container::classify_sha1_claim(
+            entry.header().sha1(),
+            self.archive_claims_integrity(),
+        ) {
+            crate::container::EntryIntegrity::NotInIndex => {
+                debug!(
+                    path,
+                    "entry has no recorded SHA1 in the index (encoded entry); \
+                     skipping verification"
+                );
+                return Ok(VerifyOutcome::SkippedNoHash);
+            }
+            crate::container::EntryIntegrity::NoClaim => {
+                debug!(path, "entry has no recorded SHA1; skipping verification");
+                return Ok(VerifyOutcome::SkippedNoHash);
+            }
+            crate::container::EntryIntegrity::Stripped => {
                 error!(
                     path,
                     expected = "non-zero (archive-wide integrity claimed)",
@@ -1056,9 +1092,8 @@ impl PakReader {
                     },
                 });
             }
-            debug!(path, "entry has no recorded SHA1; skipping verification");
-            return Ok(VerifyOutcome::SkippedNoHash);
-        }
+            crate::container::EntryIntegrity::Claim(d) => d,
+        };
 
         let mut guard = self.locked();
         let mut file = BufReader::new(&mut *guard);
@@ -1189,9 +1224,10 @@ impl PakReader {
     /// counts of what was actually checked vs skipped. Stops on the first
     /// `HashMismatch` and returns the error.
     ///
-    /// **Skips are reported, not silenced.** Entries that have no recorded
-    /// hash (UE didn't enable integrity at write time, or a v10+ encoded
-    /// record with no SHA1 on the wire) are counted in the returned
+    /// **Skips are reported, not silenced.** Entries with no claim to
+    /// check (a zeroed slot in an archive that records no claim of its
+    /// own, or a v10+ encoded record with no SHA1 on the wire) are
+    /// counted in the returned
     /// [`VerifyStats`]. (Encrypted entries are NOT skipped as of #634 —
     /// they verify keylessly against the on-disk ciphertext hash.) Callers
     /// can inspect the report to decide whether `Ok` means "all bytes
@@ -1485,6 +1521,90 @@ impl PakReader {
     }
 }
 
+/// Whether `entries()` may intern this method's display name (#662).
+///
+/// The pool is only safe for methods drawn from a BOUNDED namespace,
+/// because it grows one slot per distinct method it sees. Every variant
+/// except [`CompressionMethod::Unknown`] qualifies: the known codecs are
+/// a fixed set, and `UnknownByName` can only originate from the footer's
+/// compression-method table, which holds at most five 31-byte slots.
+/// `Unknown(n)` carries the ENTRY's own wire field, so a crafted pak can
+/// mint a distinct one per entry — pooling those would grow the pool
+/// without bound AND make its linear scan quadratic. They render per
+/// entry instead, which costs exactly what no pool at all would.
+///
+/// A pure seam so both directions are testable: widening this to
+/// exclude `UnknownByName` would silently un-bound the ~200-byte
+/// rendering of a hostile FName across every entry (the memory control
+/// this exists for), and narrowing it to intern everything would
+/// re-open the unbounded-pool path. Neither edit is visible in any
+/// fixture-driven test, since no shipped pak carries either variant.
+///
+/// The bypass is keyed on the VARIANT, so it also declines to pool the
+/// benign sub-case — every entry naming the SAME out-of-range slot,
+/// where one pool row would serve them all. A length-capped pool would
+/// capture that and still bound the hostile case; it is not done here
+/// because the cap would be a tuning constant with no wire meaning, and
+/// the cost it avoids (one `Arc` per entry for an archive whose method
+/// paksmith cannot decompress anyway) is one paksmith already pays for
+/// the path string. Revisit if such archives turn out to be common.
+fn method_name_is_poolable(method: &CompressionMethod) -> bool {
+    // Exhaustive on purpose, and no wildcard: `#[non_exhaustive]` binds
+    // only outside the defining crate, so in here a new variant makes
+    // this a compile error. That is the point — a negative `matches!`
+    // would silently default a new variant into the POOLABLE direction,
+    // which is the unbounded one. Its namespace must be classified
+    // deliberately rather than by omission.
+    match method {
+        CompressionMethod::None
+        | CompressionMethod::Zlib
+        | CompressionMethod::Gzip
+        | CompressionMethod::Oodle
+        | CompressionMethod::Zstd
+        | CompressionMethod::Lz4
+        | CompressionMethod::UnknownByName(_) => true,
+        CompressionMethod::Unknown(_) => false,
+    }
+}
+
+/// The display name for `method`, shared with earlier entries that used
+/// the same method where [`method_name_is_poolable`] allows it (#662).
+///
+/// WHICH methods may be pooled, and why, is stated once on
+/// [`method_name_is_poolable`]; this function does not restate the
+/// bound. Sites outside this module describe the policy in their own
+/// terms because they cannot link a private item — they are written to
+/// name no slot count. They DO name the current variant split, so a
+/// change to the predicate has to visit them — `grep -r "Unknown(id)"`
+/// reaches all of them (`container/mod.rs` twice, and the GUI's
+/// `state/archive.rs`).
+///
+/// What it buys: a pak can point ten million entries at ONE 31-byte
+/// unrecognized FName whose escaped rendering is ~200 bytes. Sharing
+/// makes that one allocation instead of ~2 GB. Matching on the METHOD
+/// rather than the rendered string also means a hit never runs the
+/// `format!` inside `display_name`.
+///
+/// SCOPE — the pool's lifetime is the CALLER's: `entries()` creates one
+/// per call and drops it with the iterator, so two iterations of the
+/// same reader mint separate allocations for the same method. Callers
+/// may compare these by value; `Arc::ptr_eq` identity holds only within
+/// one iteration.
+fn interned_method_name(
+    pool: &mut Vec<(CompressionMethod, std::sync::Arc<str>)>,
+    method: &CompressionMethod,
+) -> std::sync::Arc<str> {
+    if !method_name_is_poolable(method) {
+        return std::sync::Arc::from(&*method.display_name());
+    }
+    if let Some((_, shared)) = pool.iter().find(|(m, _)| m == method) {
+        return std::sync::Arc::clone(shared);
+    }
+    let shared: std::sync::Arc<str> = std::sync::Arc::from(&*method.display_name());
+    pool.push((method.clone(), std::sync::Arc::clone(&shared)));
+    shared
+}
+
 /// Route a `Zlib | Lz4` entry to its per-block streamer over `reader`.
 ///
 /// `reader` is either the pak file (plaintext entries) or a
@@ -1675,16 +1795,35 @@ impl Seek for RebasedReader<'_> {
 
 impl ContainerReader for PakReader {
     fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + Send + '_> {
-        Box::new(self.index.entries().iter().map(|e| {
-            EntryMetadata::new(
+        // One intern pool per iteration; see `interned_method_name` for
+        // the policy and its bound (#662).
+        let mut method_pool: Vec<(CompressionMethod, std::sync::Arc<str>)> = Vec::new();
+        Box::new(self.index.entries().iter().map(move |e| {
+            let method = e.header().compression_method();
+            let compressed = *method != CompressionMethod::None;
+            let mut meta = EntryMetadata::new(
                 e.filename().to_owned(),
                 e.header().compressed_size(),
                 e.header().uncompressed_size(),
                 EntryFlags {
-                    compressed: *e.header().compression_method() != CompressionMethod::None,
+                    compressed,
                     encrypted: e.header().is_encrypted(),
                 },
             )
+            .with_offset(e.header().offset());
+            if compressed {
+                meta = meta.with_compression_method(interned_method_name(&mut method_pool, method));
+            }
+            // Propagate the stored field VERBATIM — including an all-zero
+            // digest, whose meaning depends on the archive-level
+            // `claims_integrity` bit (strip-shaped vs ordinary
+            // no-claim; see `verify_entry`), so it is NOT ours to strip.
+            // Absent (the v10+ bit-packed INDEX record has no SHA1 field;
+            // the in-data record still stores one) stays absent.
+            if let Some(sha1) = e.header().sha1() {
+                meta = meta.with_sha1(sha1);
+            }
+            meta
         }))
     }
 
@@ -1696,6 +1835,10 @@ impl ContainerReader for PakReader {
                 path: path.to_string(),
             })?;
         self.stream_entry_to(entry, writer)
+    }
+
+    fn claims_integrity(&self) -> bool {
+        self.archive_claims_integrity()
     }
 
     /// Implements the trait's required `read_entry` (no default — see
@@ -2855,8 +2998,13 @@ const HASH_BUFFER_BYTES: usize = 8 * 1024;
 pub enum VerifyOutcome {
     /// Hash was computed and matched the stored value.
     Verified,
-    /// The stored hash slot is all zeros — UE's "no integrity claim
-    /// recorded" sentinel. Nothing was hashed.
+    /// Nothing was hashed because the INDEX offered no claim to check:
+    /// its record carries no hash field (v10+ bit-packed entries — the
+    /// in-data record still stores one, but verification reads the index
+    /// header), or the field is all zeros in an archive whose own index
+    /// hash is likewise zero. (A zeroed field in an archive that DOES
+    /// claim integrity is not this outcome — it raises
+    /// [`PaksmithError::IntegrityStripped`].)
     SkippedNoHash,
     /// RETIRED (#634): has NO producer as of encrypted-entry keyless
     /// verification — the stored SHA1 covers the on-disk ciphertext, so
@@ -2885,9 +3033,11 @@ pub enum RegionVerifyState {
     /// [`PakReader::verify`] populates per-region state.
     #[default]
     NotPresent,
-    /// Region's hash slot is the all-zero sentinel ("no integrity
-    /// claim was recorded at write time"). Region bytes were not
-    /// hashed. Counts against [`VerifyStats::is_fully_verified`].
+    /// Region's hash slot is all zeros in an archive whose own index
+    /// hash is likewise zero — no claim to check, so the region bytes
+    /// were not hashed. (A zeroed slot under a non-zero index hash
+    /// raises [`PaksmithError::IntegrityStripped`] instead.) Counts
+    /// against [`VerifyStats::is_fully_verified`].
     SkippedNoHash,
     /// Region bytes were hashed and matched the stored SHA1.
     Verified,
@@ -2956,9 +3106,12 @@ impl VerifyStats {
         self.entries_verified
     }
 
-    /// Number of entries skipped because the stored SHA1 was the all-zero
-    /// sentinel (no integrity claim recorded at write time) or the entry
-    /// was a v10+ encoded record (which omits SHA1 from the wire format).
+    /// Number of entries skipped because there was no claim to check:
+    /// the stored SHA1 was all zeros AND the archive records no
+    /// integrity claim either, or the entry was a v10+ encoded record
+    /// (which omits SHA1 from the wire format). A zeroed hash alone is
+    /// NOT sufficient — under a claiming archive it is
+    /// [`PaksmithError::IntegrityStripped`], not a skip.
     pub fn entries_skipped_no_hash(&self) -> usize {
         self.entries_skipped_no_hash
     }
@@ -2983,9 +3136,9 @@ impl VerifyStats {
     /// True iff every byte the verifier could see was hashed and matched.
     /// Use this in security-sensitive contexts where any `SkippedNoHash`
     /// outcome should be treated as a potential downgrade attack on the
-    /// stored hash slot — UE's writer either records integrity for the
-    /// whole archive or for none of it, so a partial-skip in a context
-    /// you control end-to-end is a tampering signal.
+    /// stored hash slot: for an archive you control end-to-end, you know
+    /// whether integrity was recorded, so a skip you did not expect is
+    /// worth investigating.
     ///
     /// Since #634, per-entry-encrypted entries verify keylessly (they no
     /// longer count as skips), so a fully-encrypted archive whose stored
@@ -3150,6 +3303,336 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    /// The container-generic `entries()` surface must carry the per-entry
+    /// details #662 added — record offset, compression-method name, and
+    /// the stored SHA-1 field VERBATIM — faithfully from the parsed index.
+    ///
+    /// Three fixtures, each carrying an arm no other supplies:
+    /// `real_v11_compressed` (encoded records, so NO sha1 field — the
+    /// absent-hash arm — and Zlib), `real_v9_multi` (inline records with
+    /// real hashes, all three uncompressed — the hash and uncompressed
+    /// arms), and `real_v11_lz4` (a SECOND compression method, so the
+    /// method assertion cannot be satisfied by a constant ACROSS
+    /// archives). `real_v8b_lz4` would serve for the last equally.
+    ///
+    /// It says nothing about a mis-lookup WITHIN one archive's pool —
+    /// each fixture holds a single compressed entry and the pool is
+    /// per-call — which is pinned separately by
+    /// `intern_pool_returns_each_methods_own_name_not_the_first`. The
+    /// `saw_*` guards make each arm's coverage an assertion, not an
+    /// accident of the corpus.
+    #[test]
+    fn entries_expose_offset_method_and_sha1_from_the_index() {
+        // real_v11_lz4.pak is load-bearing, not padding: the others are
+        // Zlib-or-uncompressed, so without a SECOND method among the
+        // fixtures THIS TEST iterates, the per-entry method assertion
+        // cannot tell "this entry's own method" from any fixed one —
+        // handing every entry a hardcoded Zlib kept the whole workspace
+        // green.
+        let fixtures = [
+            "real_v11_compressed.pak",
+            "real_v9_multi.pak",
+            "real_v11_lz4.pak",
+        ];
+        let mut saw_compressed = false;
+        let mut saw_uncompressed = false;
+        let mut saw_inline_hash = false;
+        let mut saw_absent_hash = false;
+        for name in fixtures {
+            let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures")
+                .join(name);
+            let reader = PakReader::open(&fixture).unwrap();
+            let metas: Vec<_> = reader.entries().collect();
+            let idx: Vec<_> = reader.index.entries().iter().collect();
+            assert_eq!(metas.len(), idx.len(), "{name}");
+            for (m, e) in metas.iter().zip(idx.iter()) {
+                assert_eq!(
+                    m.offset(),
+                    Some(e.header().offset()),
+                    "{name}: offset must come from the index entry"
+                );
+                assert_eq!(
+                    m.sha1(),
+                    e.header().sha1(),
+                    "{name}: the stored SHA-1 field must propagate verbatim"
+                );
+                match e.header().sha1() {
+                    Some(_) => saw_inline_hash = true,
+                    None => saw_absent_hash = true,
+                }
+                // Branch on the INDEX's own method, never on
+                // `m.is_compressed()`: that flag is the value under test,
+                // and a test that branches on it swaps BOTH arms together
+                // when the producing comparison flips, leaving every
+                // assertion satisfied and both `saw_*` guards set. That is
+                // not hypothetical — it let a `!=` -> `==` mutant survive
+                // the whole suite. `matches!` cannot co-move with that
+                // comparison, so the flag now has an independent oracle.
+                let uncompressed =
+                    matches!(e.header().compression_method(), CompressionMethod::None);
+                assert_eq!(
+                    m.is_compressed(),
+                    !uncompressed,
+                    "{name}: the compressed flag must follow the index's method"
+                );
+                if uncompressed {
+                    saw_uncompressed = true;
+                    assert_eq!(
+                        m.compression_method_shared(),
+                        None,
+                        "{name}: uncompressed entries carry no method name"
+                    );
+                } else {
+                    saw_compressed = true;
+                    assert_eq!(
+                        m.compression_method_shared().as_deref(),
+                        Some(e.header().compression_method().display_name().as_ref()),
+                        "{name}: compressed entries carry the method's display name"
+                    );
+                }
+            }
+        }
+        assert!(saw_compressed, "corpus must exercise the compressed arm");
+        assert!(
+            saw_uncompressed,
+            "corpus must exercise the uncompressed arm"
+        );
+        assert!(
+            saw_inline_hash,
+            "corpus must exercise inline (hash-carrying) records"
+        );
+        assert!(
+            saw_absent_hash,
+            "corpus must exercise encoded (hash-less) records"
+        );
+    }
+
+    /// Entries sharing a compression method must share ONE interned
+    /// name allocation (#662), not own a copy each. Pointer
+    /// equality is the only observable that distinguishes interning
+    /// from per-entry `Arc::from`.
+    ///
+    /// Scope: this fixture's entries are `Zlib`, so what it pins
+    /// is that the pool WORKS for a poolable method. Which methods are
+    /// poolable — the memory control that keeps a hostile 31-byte FName
+    /// from being rendered per entry — is pinned separately by
+    /// [`method_name_is_poolable`]'s own tests, because no shipped
+    /// fixture carries an unknown method at all.
+    #[test]
+    fn same_compression_method_shares_one_interned_name() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/minimal_v6.pak");
+        let reader = PakReader::open(&fixture).unwrap();
+        let names: Vec<_> = reader
+            .entries()
+            .filter_map(|e| e.compression_method_shared())
+            .collect();
+        assert!(
+            names.len() >= 2,
+            "fixture must have >= 2 compressed entries or this is vacuous"
+        );
+        let first = &names[0];
+        for other in &names[1..] {
+            assert_eq!(&**first, &**other, "fixture entries share one method");
+            assert!(
+                std::sync::Arc::ptr_eq(first, other),
+                "equal method names must be ONE shared allocation, not copies"
+            );
+        }
+    }
+
+    /// The Stripped/NoClaim context end-to-end (#662): a zeroed
+    /// per-entry hash means tampering ONLY under a nonzero footer
+    /// `index_hash`. No shipped fixture carries a zeroed entry hash, so
+    /// this byte-patches copies of `real_v9_minimal.pak` — search-based
+    /// (the stored hash's 20 bytes are the needle), not offset-based, so
+    /// the patch survives fixture regeneration.
+    ///
+    /// Kills two mutants no fixture can reach: a zero-filter regression
+    /// in `entries()` (copy (a) must yield `Some(ZERO)` verbatim), and
+    /// the `claims_integrity` override falling back to the trait's
+    /// `false` default (the unpatched fixture must report `true`; the
+    /// zeroed-`index_hash` twin must report `false`).
+    ///
+    /// It also drives `ContainerReader::entry_integrity` itself over the
+    /// two states that differ ONLY in the archive bit: the same
+    /// zeroed entry bytes must classify `Stripped` under a claiming
+    /// archive and `NoClaim` under a non-claiming one, so a default body
+    /// that hardcoded either bit would fail one of them. Without both,
+    /// a hardcoded `true` would render every entry of a legitimately
+    /// hash-less archive as a tampering accusation and no test would
+    /// notice.
+    ///
+    /// Deliberately NOT `__test_utils`-gated. Its only helper,
+    /// `crate::test_patch::zero_needle`, is a `#[cfg(test)]` module of
+    /// this crate rather than part of the feature-gated
+    /// `crate::testing` surface, so nothing here needs the feature —
+    /// and gating it would drop the only end-to-end Stripped/NoClaim
+    /// coverage from the package-scoped `cargo test -p paksmith-core`
+    /// run.
+    #[test]
+    fn zeroed_entry_hash_and_archive_bit_classify_end_to_end() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v9_minimal.pak");
+        let original = PakReader::open(&fixture).unwrap();
+        assert!(
+            original.claims_integrity(),
+            "v9 fixture carries a nonzero index_hash — pins the trait \
+             override against the trait's false default"
+        );
+        let needle = original
+            .entries()
+            .next()
+            .expect("fixture has an entry")
+            .sha1()
+            .expect("v9 inline records carry a hash");
+        assert!(!needle.is_zero(), "fixture hash must be real");
+
+        // (a) Zero every copy of the stored hash (index + in-data record).
+        // Byte variants go through `from_bytes` rather than a tempfile
+        // roundtrip — nothing here exercises filesystem behaviour, and
+        // `open` would add a TMPDIR dependency this test does not need.
+        let mut zeroed_entry = std::fs::read(&fixture).unwrap();
+        let hits = crate::test_patch::zero_needle(&mut zeroed_entry, needle.as_bytes());
+        assert!(hits >= 1, "the stored hash must occur in the file");
+
+        let stripped_ctx = PakReader::from_bytes(zeroed_entry.clone())
+            .expect("open must succeed — only hash slots are patched");
+        let stripped_meta = stripped_ctx.entries().next().unwrap();
+        assert_eq!(
+            stripped_meta.sha1(),
+            Some(crate::digest::Sha1Digest::ZERO),
+            "a zeroed stored hash must surface VERBATIM, never filtered"
+        );
+        assert!(
+            stripped_ctx.claims_integrity(),
+            "index_hash untouched: the archive still claims integrity — \
+             the Stripped classification context"
+        );
+        assert_eq!(
+            stripped_ctx.entry_integrity(&stripped_meta),
+            crate::container::EntryIntegrity::Stripped,
+            "the trait form must supply THIS archive's bit and reach \
+             Stripped"
+        );
+
+        // (b) Twin: additionally zero the footer index_hash — no
+        // archive-level claim, the NoClaim context. The two
+        // `entry_integrity` assertions are what make the archive bit
+        // load-bearing: identical entry bytes, opposite verdicts, so a
+        // hardcoded bit in the trait default cannot satisfy both.
+        let mut no_claim = zeroed_entry;
+        let hash_range = crate::test_patch::footer_index_hash_range(&no_claim);
+        no_claim[hash_range].fill(0);
+        let no_claim_ctx = PakReader::from_bytes(no_claim).unwrap();
+        assert!(
+            !no_claim_ctx.claims_integrity(),
+            "zeroed index_hash: no archive-level integrity claim"
+        );
+        let no_claim_meta = no_claim_ctx.entries().next().unwrap();
+        assert_eq!(
+            no_claim_meta.sha1(),
+            Some(crate::digest::Sha1Digest::ZERO),
+            "the zeroed entry hash still surfaces verbatim"
+        );
+        assert_eq!(
+            no_claim_ctx.entry_integrity(&no_claim_meta),
+            crate::container::EntryIntegrity::NoClaim,
+            "same entry bytes, non-claiming archive: NoClaim, not a \
+             tampering accusation"
+        );
+    }
+
+    /// The pool LOOKUP, with more than one row in it (#662).
+    ///
+    /// No fixture has two distinct compression methods and the pool is
+    /// per-`entries()`-call, so nothing fixture-driven ever puts a
+    /// second row in a pool — `pool.first()` in place of the `find`
+    /// kept the entire workspace green, which would hand every Oodle
+    /// entry the name "Zlib" in the Info pane. `entries_expose_...`'s
+    /// LZ4 fixture only rules out a CROSS-ARCHIVE constant, so this is
+    /// the pin.
+    #[test]
+    fn intern_pool_returns_each_methods_own_name_not_the_first() {
+        let mut pool: Vec<(CompressionMethod, std::sync::Arc<str>)> = Vec::new();
+        let zlib = interned_method_name(&mut pool, &CompressionMethod::Zlib);
+        let oodle = interned_method_name(&mut pool, &CompressionMethod::Oodle);
+        assert_eq!(&*zlib, "Zlib");
+        assert_eq!(
+            &*oodle, "Oodle",
+            "a second method must not get the first's name"
+        );
+        assert_eq!(pool.len(), 2, "both methods must occupy their own row");
+
+        // Re-asking for the FIRST method after a second row exists must
+        // still find it — a lookup that only ever checks the newest row
+        // would pass the assertions above.
+        let zlib_again = interned_method_name(&mut pool, &CompressionMethod::Zlib);
+        assert_eq!(&*zlib_again, "Zlib");
+        assert!(
+            std::sync::Arc::ptr_eq(&zlib, &zlib_again),
+            "a repeat lookup must share the existing allocation, not add a row"
+        );
+        assert_eq!(pool.len(), 2, "a hit must not grow the pool");
+
+        // The bypassed variant never enters the pool, however often it
+        // is asked for, and each call gets its own allocation.
+        let a = interned_method_name(
+            &mut pool,
+            &CompressionMethod::Unknown(std::num::NonZeroU32::new(7).unwrap()),
+        );
+        let b = interned_method_name(
+            &mut pool,
+            &CompressionMethod::Unknown(std::num::NonZeroU32::new(7).unwrap()),
+        );
+        assert_eq!(&*a, "unknown (id/slot 7)");
+        assert_eq!(pool.len(), 2, "the bypassed variant must not be pooled");
+        assert!(
+            !std::sync::Arc::ptr_eq(&a, &b),
+            "bypass means a fresh allocation per call, by design"
+        );
+    }
+
+    /// Both directions of the intern/bypass split (#662). No
+    /// fixture carries an unknown method, so the split is decided by
+    /// unit tests alone; this is the only place the `UnknownByName`
+    /// half is pinned (the sibling
+    /// `intern_pool_returns_each_methods_own_name_not_the_first` also
+    /// covers the `Unknown(n)` bypass, from the pool's side):
+    ///
+    /// - `UnknownByName` MUST pool (see the predicate's doc for the
+    ///   bound). It is the variant whose ~200-byte escaped rendering a
+    ///   crafted pak would otherwise duplicate across ten million
+    ///   entries. Excluding it (the plausible tidy — both variants read
+    ///   as "unknown") is what this arm forbids.
+    /// - `Unknown(n)` MUST NOT pool. `n` is the entry's own wire field,
+    ///   so pooling grows a `Vec` per distinct id and scans it linearly
+    ///   per entry.
+    #[test]
+    fn only_entry_supplied_unknown_ids_bypass_the_intern_pool() {
+        for m in [
+            CompressionMethod::None,
+            CompressionMethod::Zlib,
+            CompressionMethod::Gzip,
+            CompressionMethod::Oodle,
+            CompressionMethod::Zstd,
+            CompressionMethod::Lz4,
+            CompressionMethod::UnknownByName("Brotli".to_string()),
+        ] {
+            assert!(
+                method_name_is_poolable(&m),
+                "{m:?} comes from a bounded namespace and must pool"
+            );
+        }
+        assert!(
+            !method_name_is_poolable(&CompressionMethod::Unknown(
+                std::num::NonZeroU32::new(7).unwrap()
+            )),
+            "an entry-supplied id is unbounded and must bypass the pool"
+        );
+    }
 
     /// A well-formed LZ4 block: a 64 KiB output derived from ~300
     /// compressed bytes. `compressed_len × 255` (76_500) exceeds the
@@ -3987,20 +4470,6 @@ mod tests {
             .join("../../tests/fixtures/real_v8b_encrypted_index.pak")
     }
 
-    /// Absolute offset of the footer's 4-byte magic within `bytes` — the
-    /// anchor for magic-relative footer field offsets (version at `+4`,
-    /// index_offset at `+8`, index_size at `+16`, index_hash at `+24`).
-    /// Sourced from [`version::PAK_MAGIC`] rather than a hand-typed literal,
-    /// and shared by the tests that patch/inspect the footer. The footer
-    /// sits at the physical tail, so the LAST magic occurrence is its.
-    fn footer_magic_pos(bytes: &[u8]) -> usize {
-        let magic = crate::container::pak::version::PAK_MAGIC.to_le_bytes();
-        bytes
-            .windows(4)
-            .rposition(|w| w == magic.as_slice())
-            .expect("footer magic must be present in fixture")
-    }
-
     /// Happy path: with the correct key, the encrypted index decrypts and
     /// parses, exposing the four known plaintext entries. This is the
     /// oracle for the index-decrypt being byte-correct — a wrong decrypt
@@ -4056,7 +4525,7 @@ mod tests {
     #[test]
     fn flat_encrypted_index_aligned_overshoot_is_offset_past_file_size() {
         let mut bytes = std::fs::read(encrypted_index_fixture()).expect("read fixture bytes");
-        let footer_start = footer_magic_pos(&bytes);
+        let footer_start = crate::test_patch::footer_magic_pos(&bytes);
         let idx_off_pos = footer_start + 8;
         let idx_size_pos = footer_start + 16;
         let index_offset =
@@ -4164,17 +4633,9 @@ mod tests {
     #[test]
     fn verify_index_on_tampered_encrypted_pak_returns_hash_mismatch() {
         // Byte-patch the stored `index_hash` in a copy of the fixture.
-        // V8B+ footer layout: magic(4) + version(4) + index_offset(8) +
-        // index_size(8) + index_hash(20) = field starts at footer_start + 24.
         let fixture_bytes =
             std::fs::read(encrypted_index_fixture()).expect("read encrypted fixture");
-        let footer_start = footer_magic_pos(&fixture_bytes);
-        let hash_start = footer_start + 24;
-        let hash_end = hash_start + 20;
-        assert!(
-            hash_end <= fixture_bytes.len(),
-            "index_hash field must fit within fixture"
-        );
+        let hash_start = crate::test_patch::footer_index_hash_range(&fixture_bytes).start;
         let mut tampered = fixture_bytes;
         tampered[hash_start] ^= 0xFF; // flip the first hash byte
 
@@ -4289,7 +4750,7 @@ mod tests {
         // module do) rather than hardcoding the footer size; the version u32
         // sits immediately after the 4-byte magic. The "reads 11" sanity
         // assert below still guards the offset math either way.
-        let ver_off = footer_magic_pos(&bytes) + 4;
+        let ver_off = crate::test_patch::footer_magic_pos(&bytes) + 4;
         assert_eq!(
             u32::from_le_bytes(bytes[ver_off..ver_off + 4].try_into().unwrap()),
             11,
@@ -4350,7 +4811,7 @@ mod tests {
     /// The v11 fixture's primary-index absolute offset, parsed from the
     /// footer (`…magic(4) + version(4) + index_offset(8)…`).
     fn v11_primary_index_offset(bytes: &[u8]) -> u64 {
-        let magic_pos = footer_magic_pos(bytes);
+        let magic_pos = crate::test_patch::footer_magic_pos(bytes);
         u64::from_le_bytes(bytes[magic_pos + 8..magic_pos + 16].try_into().unwrap())
     }
 

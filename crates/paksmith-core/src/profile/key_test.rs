@@ -94,12 +94,6 @@ mod tests {
         );
     }
 
-    /// Zeroing the footer `index_hash` field (without touching ciphertext) causes
-    /// `verify_index` to see a zero hash and return `SkippedNoHash`, which
-    /// `test_key` maps to `Decrypted` (not `Verified` — integrity cannot be confirmed).
-    ///
-    /// V8B+ footer layout: magic(4) + version(4) + index_offset(8) +
-    /// index_size(8) + index_hash(20) → hash field starts at footer_start + 24.
     #[test]
     fn read_footer_guid_returns_none_for_pre_v7() {
         // The encryption-key GUID field was added in pak v7. A v3 footer has
@@ -110,24 +104,21 @@ mod tests {
         assert_eq!(guid, None, "pre-v7 paks have no encryption-key GUID field");
     }
 
+    /// Zeroing the footer `index_hash` field (without touching ciphertext) causes
+    /// `verify_index` to see a zero hash and return `SkippedNoHash`, which
+    /// `test_key` maps to `Decrypted` (not `Verified` — integrity cannot be confirmed).
+    ///
+    /// The field's byte range comes from `test_patch::footer_index_hash_range`,
+    /// which documents the anchor; deriving it a second time here is how this
+    /// test and that helper would drift apart.
     #[test]
     fn test_key_zeroed_index_hash_returns_decrypted() {
         let fixture_bytes =
             std::fs::read(fixture("real_v8b_encrypted_index.pak")).expect("read encrypted fixture");
-        let magic = b"\xe1\x12\x6f\x5a";
-        let footer_start = fixture_bytes
-            .windows(4)
-            .rposition(|w| w == magic)
-            .expect("footer magic must be present in fixture");
-        let hash_start = footer_start + 24;
-        let hash_end = hash_start + 20;
-        assert!(
-            hash_end <= fixture_bytes.len(),
-            "index_hash field must fit within fixture"
-        );
+        let hash_range = crate::test_patch::footer_index_hash_range(&fixture_bytes);
 
         let mut patched = fixture_bytes;
-        patched[hash_start..hash_end].fill(0x00);
+        patched[hash_range].fill(0x00);
 
         let tmp = tempfile::NamedTempFile::new().expect("create temp file");
         std::fs::write(tmp.path(), &patched).expect("write patched fixture");

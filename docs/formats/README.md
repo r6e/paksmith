@@ -42,7 +42,7 @@ section "Format inventory" for column semantics.
 
 | Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
 |-----|------------|---------------|----------------|-------------------|---------------|
-| `container/pak.md` | complete | complete | `container/pak/` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `8f56038` |
+| `container/pak.md` | complete | complete | `container/pak/` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `ce66557` |
 | `container/iostore-utoc.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `container/iostore-ucas.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `container/iostore-uptnl.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
@@ -102,4 +102,15 @@ Status enums (the `paksmith-doc-lint status-enum` check enforces these):
   activity, not commit-touch. Because PRs squash-merge, these SHAs
   reference pre-squash branch commits and may not resolve on `main`;
   they date/order the verification event rather than serve as a
-  browsable ref.
+  browsable ref. Prefer a SHA that is REACHABLE at the time you write
+  it — the branch point is a good choice. Two traps: a commit cannot
+  contain its own SHA, so the value can never name the commit that
+  writes it; and on a branch whose commit is amended before push, any
+  earlier in-branch SHA is orphaned and never reaches the remote at
+  all. (A SHA that does not resolve is expected here, not evidence of
+  a bad value, and fetching does not recover one: this remote's
+  refspec is `+refs/heads/*:refs/remotes/origin/*`, and a squashed
+  branch commit survives upstream only under `refs/pull/<n>/head`,
+  which that refspec does not cover — as of this writing `8f56038`
+  is such a value, an ancestor of PR #468's head and on no branch.
+  A commit amended away before push is reachable from nothing.)

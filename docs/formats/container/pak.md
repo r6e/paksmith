@@ -69,9 +69,17 @@ table's slot count. See Variants → *V8A vs V8B*.
 
 ## Wire layout
 
-Every claim in this section's tables and prose is cross-validated against
-repak[^1] (paksmith's primary pak oracle) and CUE4Parse[^2] (secondary).
-See References for the pinned commits.
+Every WIRE claim in this section's tables and prose is cross-validated
+against repak[^1] (paksmith's primary pak oracle) and CUE4Parse[^2]
+(secondary). See References for the pinned commits.
+
+Three kinds of sentence here are NOT covered by that, and each says so
+where it appears: corpus OBSERVATIONS (true of every fixture on hand,
+but the oracle wrote those bytes rather than independently reading the
+field back), statements of paksmith's own READER POLICY, and explicit
+records of what the corpus and oracle could NOT settle. Read an
+unqualified sentence as oracle-corroborated and a qualified one as
+exactly what it says.
 
 ### Footer (tail-anchored)
 
@@ -95,7 +103,7 @@ candidate offset, falling through size candidates until one matches.
 | 4 | 4 | LE | `version` | `u32` | Wire version (1–6). |
 | 8 | 8 | LE | `index_offset` | `u64` | Byte offset where index begins. |
 | 16 | 8 | LE | `index_size` | `u64` | Byte length of the index region. |
-| 24 | 20 | — | `index_hash` | `Sha1Digest` | SHA1 of the index bytes (zero-filled = no integrity claim). |
+| 24 | 20 | — | `index_hash` | `Sha1Digest` | SHA1 of the index bytes. Fixed-width and always present; the format assigns no distinguished meaning to an all-zero value. What paksmith reads INTO a zero here is policy, not format — see [Paksmith implementation](#paksmith-implementation). |
 
 #### V7+ footer (61 bytes, wire version 7)
 
@@ -107,7 +115,7 @@ candidate offset, falling through size candidates until one matches.
 | 21 | 4 | LE | `version` | `u32` | Wire version (7). |
 | 25 | 8 | LE | `index_offset` | `u64` | Byte offset where index begins. |
 | 33 | 8 | LE | `index_size` | `u64` | Byte length of the index region. |
-| 41 | 20 | — | `index_hash` | `Sha1Digest` | SHA1 of the (possibly-encrypted) index bytes. |
+| 41 | 20 | — | `index_hash` | `Sha1Digest` | SHA1 of the index bytes. For an encrypted index this covers the PLAINTEXT — UE hashes before encrypting, so a verifier must decrypt first (see Overview step 2 and `verify_main_index_region`); hashing the on-disk ciphertext false-mismatches a pristine archive. Fixed-width and always present; the format assigns no distinguished meaning to an all-zero value. What paksmith reads INTO a zero here is policy, not format — see [Paksmith implementation](#paksmith-implementation). |
 
 #### V9 footer addition (between hash and compression-method table)
 
@@ -125,13 +133,45 @@ sits the compression-method table[^1]:
 
 | offset | size | endian | name | type | semantics |
 |--------|------|--------|------|------|-----------|
-| 0 | `N × 32` | — | `compression_methods` | `FName[N]` | Fixed 32-byte slots; null- or whitespace-terminated UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11. |
+| 0 | `N × 32` | — | `compression_methods` | `FName[N]` | Fixed 32-byte slots; NUL-padded UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11. Paksmith additionally stops at a SPACE — its own rule, not the format's; see Known divergences. |
 
 The compression-method table is the per-archive registry of compression
 backend names. Per-entry compression bytes are 1-based indices into this
 table: byte `0` means "no compression"; byte `N` selects slot `N - 1`.
-Unrecognized slot strings decode to `None` (the entry is still readable if
-it has no compression byte set).
+Byte `0` is the ONLY value meaning "no compression". Everything else
+resolves through the table: an unused slot is stored as an empty
+position, and a slot whose name paksmith does not recognize keeps that
+name.
+
+**The next two paragraphs are PAKSMITH READER POLICY, not corroborated
+wire fact — one of them is a known divergence from the oracle.**
+
+Paksmith takes the "name" as the slot text up to the first NUL **or
+space**, not its 32 bytes. The space stop is paksmith hardening (#132),
+and it is where paksmith and repak part company: repak strips only NUL
+bytes, so a slot reading `LZ4 turbo` keeps that whole string, fails
+`Compression::from_str`, and resolves to no method — repak then writes
+the entry's payload back RAW. Paksmith truncates to `LZ4`, resolves the
+LZ4 codec, and decompresses. Same bytes, different output. Paksmith
+also reads a slot whose FIRST byte is a space as empty. No name
+paksmith matches contains a space, so this separates only on a slot
+whose text does; there a consumer displaying the method sees the
+RESOLVED name, not the slot's full text. Tracked in #753.
+
+That rule is not total, and the remaining cases are fail-closed:
+a slot carrying NEITHER terminator in its 32 bytes, and a non-empty
+slot that is not valid UTF-8, both make paksmith reject the ARCHIVE
+with `InvalidFooter` rather than yield a name. repak takes neither
+exit — it strips NULs, decodes the rest byte-for-byte as Latin-1, and
+lets an unmatched name resolve to no method — so it opens files
+paksmith refuses. Both are in Known divergences.
+
+An entry pointing at an empty slot, an out-of-range index, or an
+unrecognized name resolves to an *unknown method*, never to
+"uncompressed", so a payload paksmith cannot decode surfaces as a typed
+error rather than being handed back as raw bytes. That is also
+paksmith's choice, and the contrast above is exactly it: repak hands
+back the undecodable payload as raw bytes.
 
 #### V10+ footer
 
@@ -170,13 +210,13 @@ invariant.
 
 | offset | size | endian | name | type | semantics |
 |--------|------|--------|------|------|-----------|
-| 0 | 8 | LE | `offset` | `u64` | Byte offset of the entry payload in the file. |
+| 0 | 8 | LE | `offset` | `u64` | Byte offset of the entry's on-disk record — NOT the first payload byte. For an entry with a payload, a second copy of this entry header sits immediately before that payload in the data area, and this offset points at the copy. (What a v6+ delete record looks like here is NOT established — see issue #742, which records that neither its offset nor whether an in-data copy exists at all could be determined from the corpus or the vendored oracle. paksmith does not model such records.) paksmith's read path derives the payload start as `offset + wire_size` and cross-validates the copy (`open_entry_into`/`matches_payload`). Observed in every third-party-written fixture: the in-data copy stores its own `offset` field as `0` (see Verification → Fixtures for which fixtures count as third-party evidence and why `minimal_v6.pak` does not). |
 | 8 | 8 | LE | `size` | `u64` | Compressed size of the payload. |
 | 16 | 8 | LE | `uncompressed_size` | `u64` | Decompressed size of the payload. |
 | 24 | 4 or 1 | LE | `compression` | `u32` (V8B+: u32; V8A: u8) | Compression-method index (0 = no compression, 1+ = slot in footer's compression-method table). For v3–v7 archives that predate the FName table, this is a fixed enum identifier. |
-| 28 (V8B+) / 25 (V8A) | 20 | — | `sha1` | `Sha1Digest` | Payload SHA1 (zero = no integrity claim). |
+| 28 (V8B+) / 25 (V8A) | 20 | — | `sha1` | `Sha1Digest` | Payload SHA1. The field is fixed-width and always present; the format assigns no distinguished meaning to an all-zero value. Paksmith's interpretation of a zero here — "no claim" when the footer's `index_hash` is also zero, otherwise a strip signal — is paksmith policy, not a format rule; see [Paksmith implementation](#paksmith-implementation). |
 | `+ 20` | variable | — | `compression_blocks` | `CompressionBlock[]` | Present iff `compression != 0`. See below. |
-| `+ blocks` | 1 | — | `encrypted` | `u8` | Per-entry AES encryption flag. |
+| `+ blocks` | 1 | — | `flags` | `u8` | Bitfield: bit 0 = AES-encrypted, bit 1 = delete record. Paksmith currently reads the whole byte as a bool, so any value with bit 0 clear and another bit set is misreported as encrypted — see issue #742. |
 | `+ 1` | 4 | LE | `compression_block_size` | `u32` | Block size (often `64 KiB`). |
 
 Per-block `CompressionBlock` (when present): two `u64` offsets `(start, end)`.
@@ -217,12 +257,14 @@ compactly without per-entry length prefixes.
 V10+ encoded entries **omit the per-entry SHA1**. Paksmith's
 `PakReader::verify_entry` returns `Ok(VerifyOutcome::SkippedNoHash)` for
 v10+ encoded entries — the `Encoded` variant returns `None` from
-`sha1()`, which is the unambiguous "no integrity claim" signal (distinct
-from a real-but-zero digest on an `Inline` entry, which is the v3-v9
-tampering signal). `PaksmithError::IntegrityStripped` fires only for
-`Inline` entries with an all-zero SHA1 when the archive's index hash is
-non-zero, or for FDI/PHI region-hash verification via `verify_region` —
-see `Paksmith implementation` → Error variants for the full target list.
+`sha1()`, an absent field, distinct from a present-but-zero digest on an
+`Inline` entry. A zero digest is itself ambiguous and paksmith resolves
+it by the archive-level bit: `PaksmithError::IntegrityStripped` fires
+only for `Inline` entries with an all-zero SHA1 **when the archive's
+index hash is non-zero** (a zero index hash makes the same entry
+`SkippedNoHash`), or for FDI/PHI region-hash verification via
+`verify_region` — see `Paksmith implementation` → Error variants for the
+full target list.
 
 ### Worked example: v11 footer
 
@@ -270,7 +312,7 @@ variant — see Verification → Known divergences.
 - **`version`**: `u32` LE; the wire field is unbounded by the format itself (any `u32` could appear on disk). Paksmith's acceptance range of `1–11` is a parser-policy decision — see §*Implementation hardening* below — not a wire-imposed limit.
 - **`index_offset` / `index_size`**: `u64` LE in the footer; range is the addressable file space (subject to `<= file_size` constraint enforced by the footer parser).
 - **`encrypted`**: `u8`; only `0` / `1` semantically valid (strict, the V7+ footer reader does not coerce).
-- **`compression_methods`** (V8+ table): `N × 32`-byte fixed slots, null- or whitespace-terminated UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11.
+- **`compression_methods`** (V8+ table): `N × 32`-byte fixed slots, NUL-padded UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11. Paksmith also treats a SPACE as a terminator, which the oracle does not — see Known divergences.
 - **`frozen_index`** (V9 only): `u8`; writer flag, read but not interpreted.
 - **`PakEntryHeader.compression`**: `u8` (V8A) or `u32` LE (V8B / V9+); 1-based index into the compression-method table (0 = `None`).
 - **`CompressionBlock`** (V3-V9 explicit form): 16 bytes (`u64 start + u64 end`).
@@ -303,26 +345,70 @@ the literal.
 - **`ENTRY_MIN_RECORD_BYTES = 58`**
   (`crates/paksmith-core/src/container/pak/index/mod.rs`).
   Used to bound `entry_count` against `index_size`. Computed as
-  `5 (min FString) + 8 (offset) + 8 (compressed_size) + 8 (uncompressed_size) + 4 (compr method) + 20 (sha1) + 1 (encrypted flag) + 4 (compression_block_size, present unconditionally for v3+)`.
+  `5 (min FString) + 8 (offset) + 8 (compressed_size) + 8 (uncompressed_size) + 4 (compr method) + 20 (sha1) + 1 (flags) + 4 (compression_block_size, present unconditionally for v3+)`.
+  Note the `4` is the v3–v7/V8B+ width: **V8A's compression field is 1
+  byte**, so a V8A entry's true floor is 55, not 58. The constant does
+  not distinguish, which makes the derived per-archive ceiling
+  (`index_size / 58`) TIGHTER than V8A's wire minimum rather than
+  looser — see issue #751.
 
 See `docs/security/allocation-caps.md` for the broader allocation-cap
 policy.
 
 ## Verification
 
-- **Fixtures.** `tests/fixtures/real_v3_*.pak`, `real_v6_*.pak`, `real_v7_*.pak`,
-  `real_v8a_*.pak`, `real_v8b_*.pak`, `real_v10_*.pak`, `real_v11_*.pak` —
-  all generated by `paksmith-fixture-gen` and cross-validated against
-  `trumank/repak`. The `minimal_*` variants exercise the smallest valid
-  pak; `mixed_paths_*` exercises FDI-path-shape edge cases; `multi_*`
-  exercises multi-entry indices; `compressed_*` exercises the
-  compression-block framing.
+- **Fixtures**, by writer — the distinction matters wherever a claim
+  cites the corpus as evidence, since only the first two groups are
+  independent of paksmith:
+  - `tests/fixtures/real_*.pak` EXCEPT the encrypted ones below —
+    generated by `paksmith-fixture-gen`, which drives `trumank/repak`'s
+    writer. repak WROTE all of them; how much repak has READ them back
+    varies, and that is what decides how far one can be cited:
+    - Most are re-read by repak in
+      `crates/paksmith-fixture-gen/tests/cross_validation.rs`. For v3–v9
+      that suite ALSO runs a hand-rolled wire oracle (`read_with_oracle`)
+      which parses the inline index independently of both readers — the
+      strongest corroboration in the corpus. For v10+ that oracle
+      returns `None` (the encoded bit-packed format is deferred rather
+      than mirrored, which would risk copying paksmith's own bugs), so
+      the `real_v10_*` / `real_v11_*` fixtures there are corroborated by
+      repak's read-back only, with no independent parse of their index
+      metadata.
+    - The uasset family (`real_v8b_{uasset,split,ubulk,uptnl,unversioned}.pak`)
+      is absent from that file but IS re-opened by repak at generation
+      time in `crates/paksmith-fixture-gen/src/uasset.rs`, checking
+      entry count and paths (the bulk-companion writer also round-trips
+      contents). Weaker than cross-validation, but not self-attestation.
+    - `real_v8b_lz4.pak` and `real_v11_lz4.pak` get NO repak read-back
+      anywhere — `write_fixture` writes and renames without re-opening.
+      paksmith is the only implementation that has parsed those bytes,
+      so cite them for what repak's WRITER emitted, never as
+      independent read-back corroboration.
+  - `real_v8b_encrypted_*.pak` and `real_v11_encrypted_*.pak` (six
+    files) — UnrealPak-produced binaries vendored from repak's test
+    suite; repak's writer at the rev this workspace locks
+    (`e215472c51db69328b1ce77be2db24d24c1d646b`, per `Cargo.lock`, which
+    is where this was verified — [^1] cites a different SHA) does not
+    support writing
+    encrypted paks (`Pak::write` hardcodes `encrypted: false`), which is
+    why these are vendored rather than generated. See
+    `tests/fixtures/PROVENANCE-encrypted.md`.
+  - `minimal_v6.pak` — hand-rolled by paksmith's own
+    `tests/fixtures/generate.rs`. NOT evidence for any wire claim: it
+    only attests that paksmith agrees with itself.
+
+  Within the generated set, the `minimal_*` variants exercise the
+  smallest valid pak; `mixed_paths_*` exercises FDI-path-shape edge
+  cases; `multi_*` exercises multi-entry indices; `compressed_*`
+  exercises the compression-block framing.
 - **Hex anchor commands.** See *Worked example: v11 footer* under Wire
   layout — `xxd -s -221 -l 32 tests/fixtures/real_v11_minimal.pak`
   reproduces the embedded expected output byte-for-byte. Per-version
   anchors for the v8a/v8b/v10/legacy footer shapes belong in a follow-up.
-- **Cross-validation oracle.** Every fixture round-trips through repak[^1]
-  at fixture-gen time. CUE4Parse[^2] is the secondary oracle for the wire
+- **Cross-validation oracle.** repak[^1] is the primary oracle, but how far
+  each fixture is corroborated by it varies — see the Fixtures bullet
+  above for the three tiers, and do not treat the corpus as uniformly
+  round-tripped. CUE4Parse[^2] is the secondary oracle for the wire
   shape of FDI records and compression-block tables. The PHI/FDI
   consistency check itself is paksmith-specific hardening (issue #131) —
   CUE4Parse does not enforce that invariant.
@@ -335,6 +421,32 @@ policy.
     cooked archives use ASCII-only paths, so the practical impact is nil
     — but a non-ASCII fixture would fail to open. See
     `crates/paksmith-core/src/container/pak/index/mod.rs` `fn fnv64_path`.
+  - **Compression-slot SPACE terminator.** Paksmith ends a footer
+    compression-slot name at the first NUL **or** space
+    (`read_compression_method_table`, hardening from issue #132); repak
+    strips only NUL bytes (`repak/src/footer.rs`,
+    `(ch != 0).then_some(ch as char)` — its comment says "filter out
+    whitespace", but the code does not). For a slot whose text contains
+    a space the two disagree on the OUTCOME, not just the name: repak
+    fails `Compression::from_str`, resolves the slot to `None`, and
+    writes the payload raw, while paksmith resolves the truncated
+    prefix and may decompress it. No fixture exercises this — every
+    shipped fixture NUL-pads — and UE writes codec FNames that contain
+    no space, so cooked archives are unaffected. Tracked in #753.
+  - **Compression-slot rejection (no terminator / non-UTF-8).** Two
+    more exits from the same function, both fail-closed where repak is
+    total. A slot with no NUL and no space in its 32 bytes is
+    `InvalidFooter` ("compression slot N not nul/space-terminated
+    within 32 bytes", hardening from issue #132, which closed a hole
+    where such a slot resolved to a 32-character name); a non-empty
+    slot that is not valid UTF-8 is `InvalidFooter` too, deliberately,
+    since silently treating it as empty would serve an entry
+    referencing it as uncompressed. repak does neither: it decodes the
+    non-NUL bytes as Latin-1 (`ch as char`, which cannot fail) and an
+    unmatched name simply resolves to no method. So a pak with a
+    32-character codec FName, 0xFF padding, or a CP-1252 name opens in
+    repak and is REJECTED by paksmith — a whole-archive refusal, not a
+    per-entry difference.
   - **V8A default decoding.** `PakVersion::try_from(8)` returns `V8B`;
     callers bypassing the footer parser get the wrong variant. repak and
     CUE4Parse handle this similarly. Full disambiguation table in
@@ -365,7 +477,12 @@ policy.
 **Public surface:**
 - `pub struct PakReader` — `open()`, `entries()`, `read_entry(path)`,
   `read_entry_to(path, writer)`, `verify_index()`, `verify_entry(path)`,
-  `verify()`, `archive_claims_integrity()`.
+  `verify()`. The archive-level integrity bit is reachable through the
+  `ContainerReader::claims_integrity()` trait method (the inherent
+  `archive_claims_integrity()` is private), and
+  `ContainerReader::entry_integrity(&meta)` classifies one entry's
+  stored claim against it, yielding
+  `EntryIntegrity::{NotInIndex, NoClaim, Stripped, Claim}`.
 - `pub struct PakFooter` — `version()`, `index_offset()`, `index_size()`,
   `index_hash()`, `is_encrypted()`, `encryption_key_guid()`, `frozen_index()`.
 - `pub enum PakVersion` — `Initial`, `NoTimestamps`, …, `Fnv64BugFix`
@@ -410,9 +527,11 @@ fixtures generated by `paksmith-fixture-gen` and cross-validated against
 ## References
 
 [^1]: `trumank/repak/repak/src/pak.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` — paksmith's primary pak
-    oracle. Used by `paksmith-fixture-gen` for round-trip validation on every
-    generated `.pak` fixture; the wire-version decisions in this doc reflect
-    repak's tested coverage.
+    oracle for wire-format decisions; the wire-version decisions in this doc
+    reflect repak's tested coverage. repak is ALSO a `paksmith-fixture-gen`
+    dependency (at a different rev — see `Cargo.lock`), but how far each
+    fixture is corroborated by it varies: see Verification → Fixtures, and do
+    not read this footnote as a uniform round-trip claim.
 [^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/PakFileReader.cs@ecc4878950336126f125af0747190edf474b2a21` —
     secondary oracle; cited for the FDI record-shape and compression-block
     table layout. CUE4Parse silently skips PHI cross-validation at this
