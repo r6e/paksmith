@@ -394,7 +394,7 @@ pub(crate) fn convert_tangent(v: &FVector4) -> [f32; 4] {
 /// Reverse triangle winding (`[a,b,c]` → `[a,c,b]`) to restore CCW front faces
 /// after the handedness-flipping basis change. Callers floor the span to a
 /// multiple of 3 before this, so `indices.len()` is always a whole number of
-/// triangles; the trailing `remainder()` copy is defensive-only (a partial tail
+/// triangles; the trailing remainder copy is defensive-only (a partial tail
 /// would be copied verbatim rather than dropped).
 ///
 /// DELIBERATE DIVERGENCE FROM CUE4Parse. CUE4Parse's `Gltf.cs` does NOT reverse
@@ -407,11 +407,11 @@ pub(crate) fn convert_tangent(v: &FVector4) -> [f32; 4] {
 /// confirmation.
 pub(crate) fn reverse_winding(indices: &[u32]) -> Vec<u32> {
     let mut out = Vec::with_capacity(indices.len());
-    let mut tri = indices.chunks_exact(3);
-    for c in &mut tri {
+    let (tris, remainder) = indices.as_chunks::<3>();
+    for c in tris {
         out.extend_from_slice(&[c[0], c[2], c[1]]);
     }
-    out.extend_from_slice(tri.remainder());
+    out.extend_from_slice(remainder);
     out
 }
 
@@ -964,9 +964,9 @@ mod tests {
     /// `reverse_winding` and assert the two triangles are reversed and the
     /// trailing index is copied verbatim.
     ///
-    /// Exercises the `chunks_exact(3).remainder()` path; a mutant that drops
-    /// `out.extend_from_slice(tri.remainder())` would produce a 6-element
-    /// result missing the trailing `9`.
+    /// Exercises the `as_chunks::<3>()` remainder path; a mutant that drops
+    /// `out.extend_from_slice(remainder)` would produce a 6-element result
+    /// missing the trailing `9`.
     #[test]
     fn reverse_winding_copies_trailing_partial_triangle() {
         let src = [0u32, 1, 2, 3, 4, 5, 9];

@@ -424,7 +424,13 @@ impl Cursor<'_> {
                 .checked_mul(2)
                 .ok_or_else(|| string_fault(LocresStringFault::LengthExceedsFile))?;
             let raw = self.take(byte_len, field)?;
-            let units: Vec<u16> = raw.chunks_exact(2).map(LittleEndian::read_u16).collect();
+            let units: Vec<u16> = raw
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .copied()
+                .map(u16::from_le_bytes)
+                .collect();
             if units.last() != Some(&0) {
                 return Err(string_fault(LocresStringFault::MissingNullTerminator));
             }

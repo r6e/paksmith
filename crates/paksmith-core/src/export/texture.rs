@@ -603,11 +603,8 @@ mod tests {
         let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
         let frame = reader.next_frame(&mut buf).expect("decode frame");
         // The whole 4×4 is opaque red.
-        assert!(
-            buf[..frame.buffer_size()]
-                .chunks_exact(4)
-                .all(|px| px == [255, 0, 0, 255])
-        );
+        let pixels = buf[..frame.buffer_size()].as_chunks::<4>().0;
+        assert!(pixels.iter().all(|px| *px == [255, 0, 0, 255]));
     }
 
     #[test]

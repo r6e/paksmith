@@ -1768,7 +1768,8 @@ pub(crate) fn decompress_zlib(
     pos += table_bytes;
     let mut sum_comp: i64 = 0;
     let mut sum_unc: i64 = 0;
-    for entry in table_region.chunks_exact(CHUNK_INFO_WIRE_SIZE) {
+    let (table_entries, _) = table_region.as_chunks::<CHUNK_INFO_WIRE_SIZE>();
+    for entry in table_entries {
         let mut entry_pos = 0usize;
         let (chunk_comp, chunk_unc) = read_chunk_info(entry, &mut entry_pos)
             .ok_or_else(|| fail("truncated chunk table entry".to_string()))?;
@@ -1825,7 +1826,7 @@ pub(crate) fn decompress_zlib(
     // decompression bomb at one byte past the table's claim, and the
     // table sums were pinned to `expected` above.
     let mut out: Vec<u8> = Vec::with_capacity(compressed.len());
-    for (index, entry) in table_region.chunks_exact(CHUNK_INFO_WIRE_SIZE).enumerate() {
+    for (index, entry) in table_entries.iter().enumerate() {
         let mut entry_pos = 0usize;
         let (chunk_comp, chunk_unc) = read_chunk_info(entry, &mut entry_pos)
             .ok_or_else(|| fail("truncated chunk table entry".to_string()))?;
