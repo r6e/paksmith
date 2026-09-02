@@ -123,14 +123,36 @@ pub enum OpenError {
         path: PathBuf,
     },
     /// Any other core error (I/O, index corruption, decryption failure, …).
-    /// Stringified at the message boundary so `Message: Clone` is satisfied.
-    #[error("{0}")]
-    Core(String),
+    ///
+    /// Carries the attempted path for the same reason [`OpenError::Locked`]
+    /// does: the GUI's archive-open failure card is scoped to a file, so it can
+    /// name the file it reports on and be superseded by a later completed
+    /// attempt on THAT path rather than on any path (#663). Core's own
+    /// `Display` carries a path for some faults and not others, so the string
+    /// cannot stand in for it.
+    ///
+    /// `message` is stringified at the boundary so `Message: Clone` is
+    /// satisfied.
+    #[error("{message}")]
+    Core {
+        /// Path the open was attempted on.
+        path: PathBuf,
+        /// Core's rendered error.
+        message: String,
+    },
 }
 
-impl From<paksmith_core::PaksmithError> for OpenError {
-    fn from(e: paksmith_core::PaksmithError) -> Self {
-        Self::Core(e.to_string())
+impl OpenError {
+    /// Build a [`OpenError::Core`] from a core error raised while opening
+    /// `path`.
+    ///
+    /// Replaces a `From<PaksmithError>` impl: `From` cannot see the path, and a
+    /// blanket `?` conversion is exactly how the path got dropped before.
+    pub fn core(path: impl Into<PathBuf>, e: &paksmith_core::PaksmithError) -> Self {
+        Self::Core {
+            path: path.into(),
+            message: e.to_string(),
+        }
     }
 }
 
