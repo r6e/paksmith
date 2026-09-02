@@ -170,8 +170,8 @@ pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::with_capacity(s.len() / 2);
-    for pair in s.as_bytes().chunks_exact(2) {
-        // `chunks_exact` makes `pair[1]` structurally safe instead of safe only
+    for pair in s.as_bytes().as_chunks::<2>().0 {
+        // `as_chunks` makes `pair[1]` structurally safe instead of safe only
         // by way of the parity guard above. Two nibbles are at most 0xFF, so
         // this cannot overflow and needs no fallible conversion.
         out.push(nibble(pair[0])? * 16 + nibble(pair[1])?);

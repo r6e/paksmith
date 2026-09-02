@@ -44,6 +44,24 @@ ignore = [
     # ignores once wayland-scanner ships a release on quick-xml 0.41+.
     { id = "RUSTSEC-2026-0194", reason = "quick-xml is a Linux-only build-time dep (only wayland-scanner uses it) parsing bundled trusted wayland protocol XML; no attacker input reaches it and it is not in the runtime binary; fix (0.41+) blocked — no wayland-scanner release uses quick-xml 0.41 and rfd 0.17.2 pins the ^0.31 wayland stack" },
     { id = "RUSTSEC-2026-0195", reason = "quick-xml is a Linux-only build-time dep (only wayland-scanner uses it) parsing bundled trusted wayland protocol XML; no attacker input reaches it and it is not in the runtime binary; fix (0.41+) blocked — no wayland-scanner release uses quick-xml 0.41 and rfd 0.17.2 pins the ^0.31 wayland stack" },
+    # RUSTSEC-2026-0253: unsoundness in `lru` < 0.18.2 — `LruCache::pop()` skips
+    # `detach()` when a stored KEY's `Drop` panics, leaving dangling pointers a
+    # later eviction can dereference. Triggering it needs BOTH a key type whose
+    # `Drop` can panic AND `catch_unwind` around the cache operation.
+    # Provable non-applicability: (1) `lru` has exactly one path into the tree —
+    # paksmith-gui → iced 0.14 → iced_renderer → iced_wgpu → cryoglyph — and
+    # cryoglyph's only use is `glyph_cache: LruCache<CacheKey, GlyphDetails,
+    # Hasher>` (text_atlas.rs), evicting via `pop_lru()`. (2) That key type is
+    # `cosmic_text::CacheKey`, declared `#[derive(Clone, Copy, ...)]`. Rust
+    # FORBIDS `Drop` on a `Copy` type, so the key's drop glue is trivial by
+    # construction — the advisory's precondition is not merely unlikely here, it
+    # is unsatisfiable. (3) paksmith wraps no cache operation in `catch_unwind`.
+    # Fix is upstream-BLOCKED: cryoglyph requires `lru = "^0.16"`, so
+    # `cargo update -p lru --precise 0.18.2` fails outright ("candidate versions
+    # found which didn't match"). Remove this ignore when an iced release ships a
+    # cryoglyph allowing lru >= 0.18.2 — and re-check if cryoglyph ever adds a
+    # second LruCache with a non-`Copy` key.
+    { id = "RUSTSEC-2026-0253", reason = "lru reaches the tree only via cryoglyph's glyph cache, whose key type cosmic_text::CacheKey is `Copy` — Rust forbids Drop on a Copy type, so the advisory's panicking-key-Drop precondition is unsatisfiable, which alone is dispositive; paksmith itself wraps no cache operation in catch_unwind (winit's event loops do use it, so that half is NOT a standing guarantee); fix blocked because cryoglyph pins lru ^0.16" },
 ]
 
 [licenses]

@@ -44,6 +44,24 @@
 //!   `FVirtualTextureBuiltData` blob (header, dispatch tables, layer formats)
 //!   when `bIsVirtual == true`, stopping before the chunk payloads (3e-VT-b2).
 
+/// Assertion helpers shared by the decoder test modules in this directory.
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// True iff `rgba` is a non-empty whole number of RGBA8 pixels and every
+    /// one equals `expected`.
+    ///
+    /// The length guard is load-bearing: `all()` over an empty or sub-pixel
+    /// buffer is vacuously true, so without it a decoder that emitted nothing
+    /// would satisfy every caller. It also keeps the buffer and its expected
+    /// colour on one line — spelled inline, the `as_chunks::<4>().0.iter()
+    /// .all(..)` chain rustfmt produces buries the expected value five lines
+    /// below the buffer, which is where a copy-pasted wrong colour hides.
+    pub(crate) fn every_px(rgba: &[u8], expected: [u8; 4]) -> bool {
+        let (pixels, rest) = rgba.as_chunks::<4>();
+        !pixels.is_empty() && rest.is_empty() && pixels.iter().all(|px| *px == expected)
+    }
+}
+
 pub(crate) mod pixel_format;
 pub(crate) mod texture2d;
 pub(crate) mod virtual_textures;
