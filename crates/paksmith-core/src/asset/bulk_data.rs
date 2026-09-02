@@ -3893,13 +3893,22 @@ mod tests {
         // `< 0` → `<= 0` mutants on the entry check.
         //
         // (a) A (0, 10) entry passes the check and fails only later,
-        // in the decode loop (its empty stream inflates to 0 bytes,
-        // not 10) — the mutant would misreport it as "negative".
+        // in the DECODE LOOP — the mutant would misreport it as
+        // "negative" from the entry check instead.
+        //
+        // The needle is `chunk 0` because that is what distinguishes
+        // the two, and it does so whichever decode-loop arm fires:
+        // both `chunk {i}: {inflate error}` and `chunk {i} decompressed
+        // to ...` carry it, while the entry check reads "negative chunk
+        // table entry (compressed 0, uncompressed 10)" — no `chunk 0`.
+        // Pinning one arm's text would re-break on a decompressor
+        // bump, which is exactly what happened: a zero-length slice is
+        // not a zlib stream at all, and miniz_oxide moved it from
+        // "inflates to 0 bytes" to an "incomplete deflate stream"
+        // error, flipping which arm reports it without changing the
+        // typed fault or the fail-closed outcome.
         let zero_comp = assemble_framing((TEST_V1_TAG, 4096), None, (0, 10), &[(0, 10)], &[]);
-        expect_decode_failed(
-            decompress_zlib(&zero_comp, 10, "test.uasset"),
-            "decompressed to 0 bytes",
-        );
+        expect_decode_failed(decompress_zlib(&zero_comp, 10, "test.uasset"), "chunk 0");
         // (b) A (len, 0) entry alongside a real chunk is ACCEPTED:
         // its stream inflates to exactly the claimed 0 bytes and the
         // remaining chunk carries the payload. chunk size 8 over a
