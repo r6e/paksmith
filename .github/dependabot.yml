@@ -28,3 +28,23 @@ updates:
     labels:
       - dependencies
       - ci
+    groups:
+      # `init` and `analyze` share a config file and REFUSE to run at
+      # different versions ("Loaded a configuration file for version X,
+      # but running version Y"), so a PR bumping one alone cannot merge
+      # without breaking CodeQL. Dependabot tracks each path as its own
+      # dependency, so without this group it opens exactly that PR.
+      #
+      # BOTH update types need a group: `applies-to` takes one value and
+      # defaults to `version-updates`, so a version-only group would let
+      # security updates through per-sub-path — and this repo has
+      # Dependabot security updates enabled against an ecosystem that
+      # does carry codeql-action advisories (GHSA-vqf5-2xx6-9wfm, high).
+      codeql-action:
+        applies-to: version-updates
+        patterns:
+          - "github/codeql-action*"
+      codeql-action-security:
+        applies-to: security-updates
+        patterns:
+          - "github/codeql-action*"
