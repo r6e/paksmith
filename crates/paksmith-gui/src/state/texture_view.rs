@@ -104,8 +104,14 @@ pub fn composite_over_checkerboard(buf: &mut [u8], width: u32) {
             CHECKER_DARK
         });
         for ch in &mut p[..3] {
-            *ch =
-                u8::try_from((u32::from(*ch) * a + checker * (255 - a) + 127) / 255).unwrap_or(255);
+            let blended = (u32::from(*ch) * a + checker * (255 - a) + 127) / 255;
+            // Bounded by construction: `a` and `checker` are both <= 255, so
+            // the numerator peaks at 65152 and `blended` at 255. The assert
+            // keeps a future formula edit loud under the suite (which runs
+            // debug); release saturates to white rather than aborting a
+            // render over one bad pixel.
+            debug_assert!(blended <= 255, "checker blend exceeded a byte: {blended}");
+            *ch = u8::try_from(blended).unwrap_or(255);
         }
         p[3] = 255;
     }
