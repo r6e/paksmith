@@ -46,6 +46,12 @@ impl FormatHandler for DataTableJsonHandler {
         matches!(asset, Asset::DataTable(_))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "export",
+        skip_all,
+        fields(handler = "datatable_json")
+    )]
     fn export(&self, asset: &Asset, _bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         // The dispatch table must only route an `Asset::DataTable`
         // here; any other variant is an internal routing bug, not user
@@ -86,6 +92,12 @@ impl FormatHandler for DataTableCsvHandler {
         matches!(asset, Asset::DataTable(_))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "export",
+        skip_all,
+        fields(handler = "datatable_csv")
+    )]
     fn export(&self, asset: &Asset, _bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         let Asset::DataTable(data) = asset else {
             return Err(crate::PaksmithError::Internal {

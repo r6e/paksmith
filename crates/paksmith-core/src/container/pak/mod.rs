@@ -271,6 +271,12 @@ impl PakReader {
     /// the `File::open`, and the `Decryption { path: None }` →
     /// `Some(path)` diagnostic upgrade. The only difference between the
     /// two public callers is whether a key is threaded through.
+    #[tracing::instrument(
+        level = "debug",
+        name = "pak_open",
+        skip_all,
+        fields(path = %path.display(), keyed = key.is_some())
+    )]
     fn open_inner(path: &Path, key: Option<AesKey>) -> crate::Result<Self> {
         // F4 (security hardening, defense-in-depth): warn when the path
         // resolves through a symbolic link. The current threat model is
@@ -322,8 +328,10 @@ impl PakReader {
     }
 
     /// Parse a `.pak` archive from any `Read + Seek + Send + 'static`
-    /// source. The most general entry point; [`Self::open`] and
-    /// [`Self::from_bytes`] both delegate to it.
+    /// source. [`Self::from_bytes`] delegates to it; [`Self::open`] routes
+    /// through the same shared parse body (`from_reader_inner`) without
+    /// passing through here — which is what keeps every open door emitting
+    /// exactly one `pak_open` span (#665).
     ///
     /// Use this directly when the byte source is neither a filesystem
     /// path nor an in-memory `Vec<u8>` — e.g. `memmap2::Mmap`, a
@@ -335,20 +343,34 @@ impl PakReader {
     /// `'static` lets the box live as long as `PakReader` does, which
     /// matches how every plausible reader source works (owned `File`,
     /// owned `Cursor<Vec<u8>>`, owned `Mmap`).
+    #[tracing::instrument(
+        level = "debug",
+        name = "pak_open",
+        skip_all,
+        fields(path = "<reader>", keyed = false)
+    )]
     pub fn from_reader<R: PakReadSeek + 'static>(reader: R) -> crate::Result<Self> {
         Self::from_reader_inner(reader, None)
     }
 
     /// Parse a `.pak` archive from any `Read + Seek + Send + 'static`
     /// source, supplying an AES-256 decryption `key`. The key-aware
-    /// counterpart to [`Self::from_reader`]; [`Self::open_with_key`]
-    /// delegates to it.
+    /// counterpart to [`Self::from_reader`]. [`Self::open_with_key`] does
+    /// NOT pass through here — it routes through the same shared parse body
+    /// (`from_reader_inner`) via `open_inner`, which is what keeps every
+    /// keyed open emitting exactly one `pak_open` span (#665).
     ///
     /// Use this for an encrypted-index archive whose byte source is
     /// neither a filesystem path nor an in-memory `Vec<u8>`. For an
     /// archive with an AES-encrypted index, the index region is
     /// decrypted and parsed at open time; a wrong key surfaces as
     /// [`PaksmithError::Decryption`].
+    #[tracing::instrument(
+        level = "debug",
+        name = "pak_open",
+        skip_all,
+        fields(path = "<reader>", keyed = true)
+    )]
     pub fn from_reader_with_key<R: PakReadSeek + 'static>(
         reader: R,
         key: AesKey,
@@ -1827,6 +1849,7 @@ impl ContainerReader for PakReader {
         }))
     }
 
+    #[tracing::instrument(level = "debug", name = "entry_read", skip_all, fields(path = path))]
     fn read_entry_to(&self, path: &str, writer: &mut dyn Write) -> crate::Result<u64> {
         let entry = self
             .index
@@ -1845,6 +1868,7 @@ impl ContainerReader for PakReader {
     /// the trait docstring for why). Reserves the full uncompressed
     /// size via `Vec::try_reserve_exact` upfront, surfacing OOM as a
     /// typed `InvalidIndex` before any I/O begins.
+    #[tracing::instrument(level = "debug", name = "entry_read", skip_all, fields(path = path))]
     fn read_entry(&self, path: &str) -> crate::Result<Vec<u8>> {
         let entry = self
             .index
@@ -4111,6 +4135,170 @@ mod tests {
     /// Content equality against this constant makes the round-trip
     /// byte-exact against the repak oracle, not just size-exact.
     const LZ4_FIXTURE_PAYLOAD_LEN: usize = 256;
+
+    #[test]
+    fn open_and_entry_read_emit_operation_spans() {
+        // #665: the SPEC-named operation boundaries emit tracing spans. The
+        // recorder is thread-local, so nothing leaks into parallel tests.
+        let rec = crate::test_spans::SpanRecorder::capture_until(
+            || {
+                let reader =
+                    PakReader::open(lz4_fixture("real_v8b_lz4.pak")).expect("open fixture");
+                let mut buf: Vec<u8> = Vec::new();
+                let _ = reader
+                    .read_entry_to("Content/Compressed.uasset", &mut buf)
+                    .expect("read_entry_to");
+                let _ = reader
+                    .read_entry("Content/Compressed.uasset")
+                    .expect("read_entry");
+            },
+            |r| r.count("pak_open") == 1 && r.count("entry_read") == 2,
+        );
+        assert!(
+            rec.names().contains(&"pak_open"),
+            "opening a pak must emit the pak_open span; got {:?}",
+            rec.names()
+        );
+        assert!(
+            rec.field("pak_open", "path")
+                .is_some_and(|p| p.contains("real_v8b_lz4.pak")),
+            "pak_open carries the archive path"
+        );
+        assert_eq!(rec.count("pak_open"), 1, "exactly one span per open");
+        assert_eq!(
+            rec.field("pak_open", "keyed").as_deref(),
+            Some("false"),
+            "pak_open records whether a key was supplied — key PRESENCE, not \
+             whether the archive is actually encrypted (a supported flow opens \
+             an unencrypted pak with a key)"
+        );
+        assert_eq!(
+            rec.count("entry_read"),
+            2,
+            "both entry-read trait methods emit the entry_read span"
+        );
+        assert!(
+            rec.field("entry_read", "path")
+                .is_some_and(|p| p.contains("Compressed.uasset")),
+            "entry_read carries the entry path"
+        );
+    }
+
+    #[test]
+    fn reader_based_package_parse_emits_package_read() {
+        // #665: the span sits on `read_from_inner`, the one body EVERY parse
+        // entry point reaches — an earlier revision put it on `read_from_with`
+        // and no production path (CLI inspect/extract, GUI, all of which use
+        // the reader forms) ever emitted it. The fixture's entry is not a
+        // parseable package; that is fine — the span is entered before the
+        // parse can fail, so the Err path pins placement just as well. The
+        // entry_read spans asserted below are PRECEDING SIBLINGS of
+        // package_read (the reader form does its container reads before
+        // calling the inner); the recorder records creation order only and
+        // cannot observe nesting.
+        let rec = crate::test_spans::SpanRecorder::capture_until(
+            || {
+                let reader: std::sync::Arc<dyn crate::container::ContainerReader> =
+                    crate::container::open(&lz4_fixture("real_v8b_lz4.pak"), None).expect("open");
+                let _ = crate::asset::Package::read_from_reader(
+                    &reader,
+                    "Content/Compressed.uasset",
+                    None,
+                );
+            },
+            |r| r.count("package_read") == 1 && r.count("entry_read") >= 2,
+        );
+        assert_eq!(
+            rec.count("package_read"),
+            1,
+            "the reader-based parse path must emit exactly one package_read; got {:?}",
+            rec.names()
+        );
+        assert_eq!(
+            rec.field("package_read", "asset_path").as_deref(),
+            Some("Content/Compressed.uasset")
+        );
+        assert!(
+            rec.count("entry_read") >= 2,
+            "the uasset read and the uexp companion probe each emit entry_read \
+             (as siblings preceding package_read)"
+        );
+    }
+
+    #[test]
+    fn keyed_file_open_emits_one_pak_open_with_the_real_path() {
+        // #665: the fourth open door. `open_with_key` routes through
+        // `open_inner`, NOT `from_reader_with_key`, so its span carries the
+        // filesystem path — and exactly one span, like every other door.
+        let rec = crate::test_spans::SpanRecorder::capture_until(
+            || {
+                let _ = PakReader::open_with_key(
+                    encrypted_entries_fixture(),
+                    AesKey::new(FIXTURE_AES_KEY),
+                )
+                .expect("open_with_key");
+            },
+            |r| r.count("pak_open") == 1,
+        );
+        assert_eq!(rec.count("pak_open"), 1, "exactly one span per open");
+        assert!(
+            rec.field("pak_open", "path")
+                .is_some_and(|p| p.contains(".pak")),
+            "the keyed file door carries the real path, not <reader>"
+        );
+        assert_eq!(rec.field("pak_open", "keyed").as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn keyed_byte_source_open_emits_pak_open_keyed() {
+        // #665: `from_reader_with_key` is the keyed byte-source door — keyed
+        // as in "a key was supplied", not "the archive is encrypted"; the
+        // fixture here happens to be encrypted, but the field records key
+        // PRESENCE. One of only two sites asserting `keyed = true`; without
+        // this test, stripping the attribute (or flipping the hardcoded
+        // field) leaves the byte-source door unpinned.
+        let rec = crate::test_spans::SpanRecorder::capture_until(
+            || {
+                let bytes = std::fs::read(encrypted_entries_fixture()).expect("read fixture");
+                let _ = PakReader::from_reader_with_key(
+                    std::io::Cursor::new(bytes),
+                    AesKey::new(FIXTURE_AES_KEY),
+                )
+                .expect("from_reader_with_key");
+            },
+            |r| r.count("pak_open") == 1,
+        );
+        assert!(
+            rec.names().contains(&"pak_open"),
+            "a keyed byte-source open must emit pak_open; got {:?}",
+            rec.names()
+        );
+        assert_eq!(rec.count("pak_open"), 1, "exactly one span per open");
+        assert_eq!(rec.field("pak_open", "path").as_deref(), Some("<reader>"));
+        assert_eq!(rec.field("pak_open", "keyed").as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn byte_source_open_emits_pak_open() {
+        // #665: `from_bytes`/`from_reader` are the documented public entry
+        // points for mmap/network byte sources; they must not be invisible to
+        // span-based profiling just because no path exists.
+        let rec = crate::test_spans::SpanRecorder::capture_until(
+            || {
+                let bytes = std::fs::read(lz4_fixture("real_v8b_lz4.pak")).expect("read fixture");
+                let _ = PakReader::from_bytes(bytes).expect("from_bytes");
+            },
+            |r| r.count("pak_open") == 1,
+        );
+        assert!(
+            rec.names().contains(&"pak_open"),
+            "a byte-source open must emit pak_open; got {:?}",
+            rec.names()
+        );
+        assert_eq!(rec.count("pak_open"), 1, "exactly one span per open");
+        assert_eq!(rec.field("pak_open", "path").as_deref(), Some("<reader>"));
+        assert_eq!(rec.field("pak_open", "keyed").as_deref(), Some("false"));
+    }
 
     fn lz4_fixture(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

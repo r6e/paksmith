@@ -1220,6 +1220,7 @@ impl BulkDataResolver {
         clippy::too_many_lines,
         reason = "sequential dispatch + cap chain + side-effect-free budget reservation; splitting hurts the line-by-line auditability of the cap chain that the security panel reviewed"
     )]
+    #[tracing::instrument(level = "debug", name = "bulk_resolve", skip_all, fields(asset_path = asset_path))]
     pub fn resolve(&self, record: &FByteBulkData, asset_path: &str) -> crate::Result<BulkData> {
         // 1. Unsupported compression rejection (fail-closed, #559).
         // LZO is a real LZO1X codec, but only UE3-era content emits it
@@ -2963,6 +2964,32 @@ mod tests {
         bytes.extend_from_slice(&offset_in_file.to_le_bytes());
         let mut cur = std::io::Cursor::new(bytes);
         FByteBulkData::read_from(&mut cur, "test.uasset").expect("record parses")
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn resolve_emits_a_bulk_resolve_span() {
+        // #665: bulk-data resolution is an operation boundary.
+        let mut uasset = vec![0xAA; 100];
+        uasset.extend_from_slice(&[0xBB; 200]);
+        let record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 16, 32);
+        let resolver = BulkDataResolver::new_for_test(uasset, 100, 0);
+        let rec = crate::test_spans::SpanRecorder::capture_until(
+            || {
+                let _ = resolver.resolve(&record, "test.uasset").expect("resolve");
+            },
+            |r| r.count("bulk_resolve") == 1,
+        );
+        assert_eq!(
+            rec.count("bulk_resolve"),
+            1,
+            "resolving bulk data must emit exactly one bulk_resolve span; got {:?}",
+            rec.names()
+        );
+        assert_eq!(
+            rec.field("bulk_resolve", "asset_path").as_deref(),
+            Some("test.uasset")
+        );
     }
 
     #[cfg(feature = "__test_utils")]

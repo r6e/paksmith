@@ -647,6 +647,12 @@ impl FormatHandler for GltfSkeletalMeshHandler {
         matches!(asset, Asset::SkeletalMesh(d) if d.lods.iter().any(|l| !l.positions.is_empty()))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "export",
+        skip_all,
+        fields(handler = "gltf_skeletal")
+    )]
     fn export(&self, asset: &Asset, _bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         let Asset::SkeletalMesh(data) = asset else {
             return Err(crate::PaksmithError::Internal {

@@ -448,6 +448,84 @@ mod facade_tests {
     }
 
     #[test]
+    fn export_payload_emits_the_handlers_export_span() {
+        // #665: the span lives on each `FormatHandler::export` impl, NOT on
+        // this dispatch wrapper — the CLI extract pipeline calls
+        // `handler.export` directly and never routes through
+        // `export_payload`, so a dispatch-level span would miss the heaviest
+        // production export workload. Dispatching here must therefore emit
+        // the HANDLER's span.
+        let pkg = generic_pkg();
+        let reg = HandlerRegistry::all_default_handlers();
+        let rec = crate::test_spans::SpanRecorder::capture_until(
+            || {
+                let _ = export_payload(&pkg, 0, "json", &reg).expect("export");
+            },
+            |r| r.count("export") == 1,
+        );
+        assert_eq!(
+            rec.count("export"),
+            1,
+            "dispatch must reach exactly one instrumented handler; got {:?}",
+            rec.names()
+        );
+        assert_eq!(
+            rec.field("export", "handler").as_deref(),
+            Some("generic_json")
+        );
+    }
+
+    #[test]
+    fn every_format_handler_export_emits_its_labelled_span() {
+        // #665, "Each FormatHandler::export". `#[instrument]` enters the span
+        // before the body runs, so a handler fed an asset it rejects still
+        // emits its span — which lets ONE trivial fixture drive all ten
+        // production impls and pin every attribute: stripping any one drops
+        // its label from the set.
+        let asset = crate::asset::Asset::Generic(crate::asset::PropertyBag::opaque(Vec::new()));
+        let rec = crate::test_spans::SpanRecorder::capture_until(
+            || {
+                let _ = GenericHandler.export(&asset, &[]);
+                let _ = PngHandler::default().export(&asset, &[]);
+                let _ = GltfStaticMeshHandler.export(&asset, &[]);
+                let _ = GltfSkeletalMeshHandler.export(&asset, &[]);
+                let _ = DataTableJsonHandler.export(&asset, &[]);
+                let _ = DataTableCsvHandler.export(&asset, &[]);
+                let _ = OggHandler.export(&asset, &[]);
+                let _ = VorbisHandler.export(&asset, &[]);
+                let _ = WavHandler.export(&asset, &[]);
+                let _ = RawSoundHandler::new(&["OPUS"], "opus").export(&asset, &[]);
+            },
+            |r| r.count("export") == 10,
+        );
+
+        let mut labels: Vec<String> = rec
+            .spans()
+            .into_iter()
+            .filter(|s| s.name == "export")
+            .filter_map(|s| s.fields.into_iter().find(|(k, _)| k == "handler"))
+            .map(|(_, v)| v)
+            .collect();
+        labels.sort();
+        assert_eq!(
+            labels,
+            [
+                "datatable_csv",
+                "datatable_json",
+                "generic_json",
+                "gltf_skeletal",
+                "gltf_static",
+                "ogg",
+                "png",
+                "raw_sound",
+                "vorbis",
+                "wav",
+            ],
+            "every production FormatHandler impl carries its labelled span"
+        );
+    }
+
+    #[test]
     fn export_payload_generic_to_json_ok() {
         let pkg = generic_pkg();
         let reg = HandlerRegistry::all_default_handlers();

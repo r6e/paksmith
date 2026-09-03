@@ -214,6 +214,7 @@ impl RegistryClient {
     }
 
     /// Common fetch-verify-parse path (scheme-agnostic; callers enforce scheme).
+    #[tracing::instrument(level = "debug", name = "registry_fetch", skip_all, fields(url = url))]
     async fn fetch_inner(&self, url: &str, pubkey_hex: &str) -> Result<RegistryDoc, PaksmithError> {
         let sig_url = format!("{url}.sig");
         let payload = self.get_capped(url).await?;
@@ -289,6 +290,51 @@ mod fetch_tests {
         (sk, pk)
     }
     const BODY: &str = r#"[{"id":"g","name":"G","keys":{}}]"#;
+
+    #[tokio::test]
+    async fn fetch_emits_a_registry_fetch_span() {
+        // #665: the network fetch is an operation boundary. Instrumented on
+        // `fetch_inner` so the span covers the public `fetch` AND this test
+        // path. Like the other green-path tests here it calls `fetch_inner`
+        // directly rather than `fetch` (`http_url_is_rejected` is the one
+        // that goes through the public gate, to test the gate): the wiremock
+        // server serves http, and setting PAKSMITH_ALLOW_HTTP in-process
+        // would race that test — see `fetch_verifies_and_parses` for the
+        // full rationale.
+        let (sk, pk) = keypair();
+        let sig = sk.sign(BODY.as_bytes()).to_bytes().to_vec();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/r.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY.as_bytes()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/r.json.sig"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(sig))
+            .mount(&server)
+            .await;
+        let client = RegistryClient::new().unwrap();
+        let url = format!("{}/r.json", server.uri());
+        let rec = crate::test_spans::SpanRecorder::capture_until_async(
+            || async {
+                let _ = client.fetch_inner(&url, &pk).await.expect("fetch");
+            },
+            |r| r.count("registry_fetch") == 1,
+        )
+        .await;
+        assert_eq!(
+            rec.count("registry_fetch"),
+            1,
+            "a registry fetch must emit exactly one registry_fetch span; got {:?}",
+            rec.names()
+        );
+        assert!(
+            rec.field("registry_fetch", "url")
+                .is_some_and(|u| u.contains("/r.json")),
+            "registry_fetch carries the url"
+        );
+    }
 
     #[tokio::test]
     async fn fetch_verifies_and_parses() {
