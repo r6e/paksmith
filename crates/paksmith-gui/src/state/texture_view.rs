@@ -65,6 +65,69 @@ pub const ZOOM_STEPS: &[f32] = &[
     0.0625, 0.125, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0,
 ];
 
+/// Checkerboard cell edge, in TEXTURE pixels (#664).
+///
+/// Texture space, not screen space, deliberately: the composite runs once per
+/// state change inside the cached render handle (see [`TextureState::render`]),
+/// so the cells scale with zoom instead of being regenerated per zoom tick —
+/// regenerating would invalidate iced's raster cache on the hottest interaction
+/// the viewer has. At high zoom the scaled cells also read as a measuring aid.
+pub const CHECKER_CELL_PX: u32 = 8;
+/// The lighter of the two checker grays. Mid-tones rather than white/light
+/// gray so the pattern reads on both light and dark themes without being
+/// mistaken for texture content.
+pub const CHECKER_LIGHT: u8 = 0x99;
+/// The darker checker gray. See [`CHECKER_LIGHT`].
+pub const CHECKER_DARK: u8 = 0x66;
+
+/// Blend straight-alpha RGBA pixels over an alpha checkerboard, in place.
+///
+/// Standard transparency inspection (#664): where the image is transparent the
+/// checker shows through, where it is opaque the bytes are EXACTLY unchanged —
+/// the integer blend `(src*a + checker*(255-a) + 127) / 255` is an identity at
+/// `a == 255` and yields the pure cell color at `a == 0`, so channel-isolation
+/// views (whose mask forces `A = 255`) render byte-identically with or without
+/// this pass. Output alpha is always 255. A trailing partial pixel is left
+/// unchanged, matching [`mask_rgba`]'s contract.
+pub fn composite_over_checkerboard(buf: &mut [u8], width: u32) {
+    let w = width.max(1) as usize;
+    let cell = CHECKER_CELL_PX as usize;
+    for (i, p) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let a = u32::from(p[3]);
+        if a == 255 {
+            continue;
+        }
+        let (x, y) = (i % w, i / w);
+        let checker = u32::from(if (x / cell + y / cell).is_multiple_of(2) {
+            CHECKER_LIGHT
+        } else {
+            CHECKER_DARK
+        });
+        for ch in &mut p[..3] {
+            let blended = (u32::from(*ch) * a + checker * (255 - a) + 127) / 255;
+            // Bounded by construction: `a` and `checker` are both <= 255, so
+            // the numerator peaks at 65152 and `blended` at 255. The assert
+            // keeps a future formula edit loud under the suite (which runs
+            // debug); release saturates to white rather than aborting a
+            // render over one bad pixel.
+            debug_assert!(blended <= 255, "checker blend exceeded a byte: {blended}");
+            *ch = u8::try_from(blended).unwrap_or(255);
+        }
+        p[3] = 255;
+    }
+}
+
+/// The full display pipeline for a decoded mip: channel mask, then the alpha
+/// checkerboard. The single producer of the bytes behind the render handle —
+/// shared with the widget's cache-miss fallback via [`render_handle`], so the
+/// two builds can never drift.
+#[must_use]
+pub fn display_rgba(src: &[u8], channels: ChannelSet, width: u32) -> Vec<u8> {
+    let mut buf = mask_rgba(src, channels);
+    composite_over_checkerboard(&mut buf, width);
+    buf
+}
+
 /// Apply channel masking to raw RGBA bytes.
 ///
 /// # Semantics
@@ -246,14 +309,16 @@ impl Default for TextureState {
 }
 
 /// Build the iced render handle for a decoded mip under a channel set:
-/// [`mask_rgba`] produces the display buffer, which is then moved into an RGBA
-/// image handle. Shared by [`TextureState::recompute_render`] (the cached path)
-/// and the widget's cache-miss fallback so the two builds can never drift.
+/// [`display_rgba`] (channel mask + alpha checkerboard, #664) produces the
+/// display buffer, which is then moved into an RGBA image handle. Shared by
+/// [`TextureState::recompute_render`] (the cached path) and the widget's
+/// cache-miss fallback so the two builds can never drift.
 ///
 /// # Memory
-/// [`mask_rgba`] always returns a fresh buffer the same length as its input
-/// (even the all-channels-on identity branch copies), and that buffer is
-/// *moved* — not copied — into the handle. It coexists with the source pixels
+/// [`display_rgba`] always returns a fresh buffer the same length as its input
+/// (even the all-channels-on identity branch copies; the checkerboard
+/// composite is in place on that buffer and allocates nothing), and that
+/// buffer is *moved* — not copied — into the handle. It coexists with the source pixels
 /// still held in [`TextureState::decoded`], so at rest one open texture tab
 /// holds ≈ 2× a single decoded mip (retained source + masked handle). During a
 /// rebuild ([`TextureState::recompute_render`] or a landing decode) the peak is
@@ -274,7 +339,11 @@ impl Default for TextureState {
 /// constraint rules out. The behavioural alternatives — re-decoding per toggle
 /// or a GPU shader mask — are the slower / explicitly-rejected `wgpu` paths.
 pub(crate) fn render_handle(d: &DecodedMip, channels: ChannelSet) -> iced::widget::image::Handle {
-    iced::widget::image::Handle::from_rgba(d.width, d.height, mask_rgba(&d.rgba, channels))
+    iced::widget::image::Handle::from_rgba(
+        d.width,
+        d.height,
+        display_rgba(&d.rgba, channels, d.width),
+    )
 }
 
 impl TextureState {
@@ -315,6 +384,104 @@ impl TextureState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── checkerboard composite (#664) ─────────────────────────────────────────
+
+    /// One RGBA pixel as a Vec, for building small fixtures.
+    fn px(r: u8, g: u8, b: u8, a: u8) -> Vec<u8> {
+        vec![r, g, b, a]
+    }
+
+    #[test]
+    fn transparent_pixel_becomes_the_checker_color_exactly() {
+        // a == 0: the source contributes nothing, so the output IS the cell
+        // color — exact, not approximate, because the blend's rounding term
+        // (+127) floors away below one whole step. Pixel (0,0) sits in the
+        // first cell, whose color is CHECKER_LIGHT by convention.
+        let mut buf = px(255, 0, 255, 0);
+        composite_over_checkerboard(&mut buf, 1);
+        assert_eq!(
+            buf,
+            px(CHECKER_LIGHT, CHECKER_LIGHT, CHECKER_LIGHT, 255),
+            "fully transparent shows pure checker, opaque out"
+        );
+    }
+
+    #[test]
+    fn opaque_pixel_is_byte_identical_after_composite() {
+        // a == 255: the checker contributes nothing and the integer blend is
+        // exact, so channel-isolation views (which force A=255) and opaque
+        // textures render byte-identically with or without the composite.
+        let mut buf = px(10, 200, 77, 255);
+        composite_over_checkerboard(&mut buf, 1);
+        assert_eq!(buf, px(10, 200, 77, 255), "opaque pixels pass through");
+    }
+
+    #[test]
+    fn half_alpha_blends_toward_the_cell_color() {
+        // Divergent fixture: src=200 over CHECKER_LIGHT at a=128. The exact
+        // value pins the blend formula (swap the weights, drop the rounding
+        // term, or flip src/checker and this changes).
+        let mut buf = px(200, 200, 200, 128);
+        composite_over_checkerboard(&mut buf, 1);
+        let expected =
+            u8::try_from((200u32 * 128 + u32::from(CHECKER_LIGHT) * 127 + 127) / 255).unwrap();
+        assert_eq!(buf, px(expected, expected, expected, 255));
+        assert_ne!(expected, 200, "fixture must diverge from the source");
+        assert_ne!(expected, CHECKER_LIGHT, "and from the checker");
+    }
+
+    #[test]
+    fn cells_alternate_on_both_axes_with_the_documented_period() {
+        // A 2x2-cell grid of transparent pixels, sampling the first pixel of
+        // each cell plus two interior points. (0,0) and (CELL,CELL) share a
+        // color; (CELL,0) and (0,CELL) share the other.
+        assert_eq!(CHECKER_CELL_PX, 8, "the documented period");
+        let cell = CHECKER_CELL_PX as usize;
+        let w = 2 * cell;
+        let mut buf = vec![0u8; w * 2 * cell * 4];
+        composite_over_checkerboard(&mut buf, u32::try_from(w).unwrap());
+        let at = |x: usize, y: usize| buf[(y * w + x) * 4];
+        assert_eq!(at(0, 0), CHECKER_LIGHT, "origin cell is light");
+        assert_eq!(at(cell, 0), CHECKER_DARK, "next column flips");
+        assert_eq!(at(0, cell), CHECKER_DARK, "next row flips");
+        assert_eq!(at(cell, cell), CHECKER_LIGHT, "diagonal restores");
+        assert_eq!(at(cell - 1, 0), CHECKER_LIGHT, "last pixel of a cell holds");
+        assert_eq!(at(cell - 1, cell - 1), CHECKER_LIGHT, "cell interior holds");
+    }
+
+    #[test]
+    fn trailing_partial_pixel_is_left_unchanged() {
+        // Same contract as mask_rgba: a byte-slice not divisible by 4 leaves
+        // the remainder untouched rather than panicking or half-blending.
+        let mut buf = vec![7, 8, 9];
+        composite_over_checkerboard(&mut buf, 1);
+        assert_eq!(buf, vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn display_rgba_is_mask_then_checker() {
+        // The composed pipeline the render handle is built from. All-channels
+        // identity mask + a transparent pixel: display shows pure checker.
+        let src = px(50, 60, 70, 0);
+        let out = display_rgba(&src, ChannelSet::default(), 1);
+        assert_eq!(out, px(CHECKER_LIGHT, CHECKER_LIGHT, CHECKER_LIGHT, 255));
+
+        // Alpha-isolation forces A=255 in the mask, so the checker must NOT
+        // appear — the grayscale alpha readout passes through untouched.
+        let only_a = ChannelSet {
+            r: false,
+            g: false,
+            b: false,
+            a: true,
+        };
+        let out = display_rgba(&src, only_a, 1);
+        assert_eq!(
+            out,
+            px(0, 0, 0, 255),
+            "alpha isolation renders alpha as grayscale with no checker"
+        );
+    }
 
     // ── mask_rgba ──────────────────────────────────────────────────────────────
 
@@ -642,8 +809,10 @@ mod tests {
         assert_eq!((w, h), (1, 1), "handle must carry the decoded mip's dims");
         assert_eq!(
             pixels,
-            mask_rgba(&[10, 20, 30, 40], st.channels).as_slice(),
-            "handle pixels must equal mask_rgba(decoded.rgba, channels)"
+            display_rgba(&[10, 20, 30, 40], st.channels, 1).as_slice(),
+            "handle pixels must equal the display pipeline's output \
+             (mask, then checker — an identity here, since g-isolation \
+             forces A = 255)"
         );
         assert_ne!(
             pixels,
