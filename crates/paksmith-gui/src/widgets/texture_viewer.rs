@@ -291,10 +291,18 @@ pub fn view<'a>(state: &TextureState, accent: iced::Color) -> Element<'a, Messag
 
         // F2: the framed image box uses `background.strong` to distinguish it
         // visually from the controls bar (`background.weak`); a 1px
-        // `text.scale_alpha(0.15)` border marks the image boundary so alpha edges
-        // read clearly.  (The `canvas` feature is NOT enabled, so a true per-pixel
-        // checkerboard is unavailable this pass; the distinct background + boundary
-        // border is the approved fallback.)
+        // `text.scale_alpha(0.15)` border marks the image boundary. Transparency
+        // itself reads via the alpha checkerboard composited INTO the render
+        // handle (`state::texture_view::composite_over_checkerboard`, #664) —
+        // baked CPU-side rather than drawn as a layer underneath, which keeps
+        // the cached-handle design untouched. (A drawn layer WOULD be buildable:
+        // the `canvas` feature is enabled for the audio waveform — the
+        // predecessor comment's claim that it wasn't had been stale since #633.
+        // Baking wins on cost, not availability: a canvas underlay pays
+        // per-zoom-tick geometry re-tessellation, a second draw every frame,
+        // and position tracking through the fit/fixed sizing below, all for a
+        // pattern that never changes. Within baking, texture-space cells beat
+        // screen-space ones on iced's raster cache — see `CHECKER_CELL_PX`.)
         //
         // F3: `iced::widget::Responsive` measures the available space at layout time
         // and passes it into the closure.  When `fit_to_window` is true the closure

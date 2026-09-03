@@ -6261,7 +6261,7 @@ mod tests {
 
     #[test]
     fn texture_decoded_rebuilds_render_cache() {
-        use crate::state::texture_view::{DecodedMip, mask_rgba};
+        use crate::state::texture_view::{DecodedMip, display_rgba};
         let mut app = app_with_open_texture_tab();
         app.archive_generation = 5;
         let mip = DecodedMip {
@@ -6281,7 +6281,7 @@ mod tests {
         let tex = &app.tabs.active_tab().unwrap().texture;
         assert_eq!(
             render_pixels(tex).as_deref(),
-            Some(mask_rgba(&mip.rgba, tex.channels).as_slice()),
+            Some(display_rgba(&mip.rgba, tex.channels, mip.width).as_slice()),
             "a current-generation decode must rebuild the render cache"
         );
     }
@@ -6325,7 +6325,7 @@ mod tests {
         // selecting a mip leaves `decoded` (and thus `render`) on the old mip
         // until the new mip's decode arrives, at which point `render` must flip
         // to the NEW bytes — never serve the stale old-mip cache for the new mip.
-        use crate::state::texture_view::{DecodedMip, mask_rgba};
+        use crate::state::texture_view::{DecodedMip, display_rgba};
         let mut app = app_with_open_texture_tab();
         app.archive_generation = 7;
         if let Some(tab) = app.tabs.active_tab_mut() {
@@ -6366,7 +6366,7 @@ mod tests {
         let tex = &app.tabs.active_tab().unwrap().texture;
         assert_eq!(
             render_pixels(tex).as_deref(),
-            Some(mask_rgba(&mip1.rgba, tex.channels).as_slice()),
+            Some(display_rgba(&mip1.rgba, tex.channels, mip1.width).as_slice()),
             "once mip 1 decodes, render must reflect mip 1, not the stale mip-0 cache"
         );
         assert_ne!(
