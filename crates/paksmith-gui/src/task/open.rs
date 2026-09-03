@@ -55,7 +55,8 @@ pub async fn run_with_detect(
     // not forwarded (detect resolution wins in `resolve_pak_key` priority order).
     let resolved_key =
         paksmith_core::profile::resolve::resolve_pak_key(&path, None, None, Some(&detect_dir))
-            .await?;
+            .await
+            .map_err(|e| OpenError::core(&path, &e))?;
 
     build_loaded(path, resolved_key.as_ref())
 }
@@ -87,7 +88,8 @@ async fn run_inner(
         game.as_deref(),
         None,
     )
-    .await?;
+    .await
+    .map_err(|e| OpenError::core(&path, &e))?;
 
     build_loaded(path, resolved_key.as_ref())
 }
@@ -114,7 +116,7 @@ fn build_loaded(path: PathBuf, resolved_key: Option<&AesKey>) -> Result<LoadedAr
             // Encrypted archive, no key available → prompt the user.
             return Err(OpenError::Locked { path });
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(OpenError::core(&path, &e)),
     };
 
     // Streamed, not collected: each `EntryMetadata` (with its owned path
@@ -345,7 +347,7 @@ mod tests {
             "wrong key must not produce Locked — got {err:?}"
         );
         assert!(
-            matches!(err, OpenError::Core(..)),
+            matches!(err, OpenError::Core { .. }),
             "wrong key must produce Core decryption error — got {err:?}"
         );
     }

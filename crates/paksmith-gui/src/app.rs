@@ -102,8 +102,10 @@ pub struct App {
     /// generation no longer matches the current archive is ignored — prevents a
     /// stale load from the previous archive populating a new archive's tab.
     pub archive_generation: u64,
-    /// Live transient notifications (errors + action feedback), rendered as a
-    /// non-blocking overlay. See [`crate::state::toast`].
+    /// Live notifications (errors + action feedback), rendered as a
+    /// non-blocking overlay. Most auto-expire, but an archive-open failure
+    /// stays until dismissed (#663) — do NOT add a cap or a blanket clear
+    /// without reading [`crate::state::toast::Toasts::dismiss_persistent`].
     pub toasts: crate::state::toast::Toasts,
     /// Visible-row index whose inline context-menu strip (Open / Copy Path /
     /// Export As…) is currently shown, or `None`. A *visible-row* index like
@@ -549,10 +551,11 @@ fn restores_scroll(message: &Message) -> bool {
 /// a change to any of these tears the panes down and rebuilds them at zero
 /// — including ones no message variant can express, because they turn on a
 /// state transition rather than a message class. A toast appearing is the
-/// sharpest example: the root becomes `stack([column, overlay])`, the panes
+/// sharpest example: the body becomes `stack([body, overlay])`, the panes
 /// move to a different child, and their state is discarded. That happens on
 /// a copy-path confirmation, an export result, an audio warning, and again
-/// when the last toast expires.
+/// when the last toast goes — by expiry for a transient one, or by dismissal
+/// for the persistent open-failure card, which has no expiry (#663).
 ///
 /// Compared before and after each update rather than enumerated, which is
 /// what makes the teardown coverage complete rather than a list to keep
@@ -640,7 +643,15 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             refresh_profiles(app);
             match *boxed {
                 Ok(loaded) => {
+                    // Housekeeping, not user-visible policy: once an archive
+                    // has loaded, `app.archive` never returns to `None`, so the
+                    // `app.error` banner can never render again.
                     app.error = None;
+                    // This attempt on THIS file completed, so a card
+                    // reporting a failed open of the same file is superseded
+                    // (#663). Why the retirement is path-scoped rather than
+                    // clear-on-any-success: see `Toasts::dismiss_persistent_for`.
+                    app.toasts.dismiss_persistent_for(&loaded.path);
                     app.keyflow.unlock();
                     app.hex_input.clear();
                     // Reset stale per-archive UI state so a new archive doesn't
@@ -655,6 +666,10 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     Task::none()
                 }
                 Err(OpenError::Locked { path }) => {
+                    // A completed attempt on this file too — it resolved to
+                    // "needs a key", which supersedes an earlier failure card
+                    // about the same file. Before `lock` takes the path.
+                    app.toasts.dismiss_persistent_for(&path);
                     // Enter the key-entry flow: show the inline key-prompt panel.
                     app.keyflow.lock(path);
                     app.hex_input.clear();
@@ -666,12 +681,28 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     app.archive_generation = app.archive_generation.wrapping_add(1);
                     Task::none()
                 }
-                Err(OpenError::Core(msg)) => {
-                    if app.keyflow.is_locked().is_some() {
-                        // We're mid-key-flow (e.g. wrong manual key) — show the error
-                        // inside the panel, not as the global banner.
-                        app.keyflow.set_error(msg);
+                Err(OpenError::Core { path, message }) => {
+                    // The key prompt owns only ITS OWN file's failures. Path-
+                    // gated like every other decision in this arm: two opens
+                    // can be in flight, and a slow failure for X landing while
+                    // Y's prompt is up would otherwise render inside Y's
+                    // prompt as if Y's key were wrong — erased by the first
+                    // keystroke (`KeyInputChanged` clears it), i.e. exactly
+                    // the swallowed archive-level failure #663 removes.
+                    let prompt_owns = app.keyflow.is_locked().is_some_and(|locked| locked == path);
+                    if prompt_owns {
+                        // Mid key-entry (wrong manual key, failed detect) —
+                        // show the error inside the panel, not as the global
+                        // banner.
+                        app.keyflow.set_error(message);
                         Task::none()
+                    } else if app.keyflow.is_locked().is_some() {
+                        // A failure for a DIFFERENT file behind the prompt:
+                        // give it the persistent card, which stacks over the
+                        // body (the prompt IS the body here, so it is visible
+                        // immediately), and leave the prompt's state alone —
+                        // no unlock, no reset, no error text.
+                        push_open_failure_card(app, path, &message)
                     } else if app.archive.is_some() {
                         // An archive is already open, so the full-area error banner in
                         // `view` would never render (the `Some(archive)` branch wins).
@@ -684,19 +715,28 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                         // loaded-archive invariant (`Unlocked`, the state the `Ok` arm
                         // sets) rather than `Idle`, which would imply no archive.
                         app.keyflow.unlock();
-                        push_toast(
-                            app,
-                            crate::state::toast::Severity::Error,
-                            format!("Couldn't open file: {msg}"),
-                        )
+                        // Persistent, not transient (issue #663): SPEC assigns
+                        // non-blocking toasts to *recoverable* errors, and an
+                        // archive-level open failure is not one — an 8-second
+                        // card is fire-and-forget for it. A modal, which SPEC
+                        // sketches for this case, would be worse here: it would
+                        // block a successfully-loaded archive to announce that a
+                        // DIFFERENT file failed to open.
+                        push_open_failure_card(app, path, &message)
                     } else {
                         // No archive: the empty-state banner (with retry CTA) is the
                         // right home. The open began with `keyflow.begin()` (→
                         // `Resolving`); reset to `Idle` so `view` falls through to the
                         // banner instead of showing the "Opening…" spinner forever
                         // (the `Resolving` branch precedes the `app.error` branch).
+                        //
+                        // A completed attempt like every other arm: the banner now
+                        // reports this file's newest failure, so an older card
+                        // about the SAME file is superseded. A card about a
+                        // different file stays — one notice per failed file.
+                        app.toasts.dismiss_persistent_for(&path);
                         app.keyflow.reset();
-                        app.error = Some(msg);
+                        app.error = Some(message);
                         Task::none()
                     }
                 }
@@ -789,6 +829,21 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::TreeKey(ref key) => {
+            // A SPARE Escape retires the persistent open-failure card (#663).
+            // Decided here, before `handle_tree_key` clears the menus that make
+            // an Escape non-spare, and OUTSIDE that function because it returns
+            // early when the tree has no visible rows — a filter matching
+            // nothing, or a zero-entry archive, would otherwise strand the card
+            // with no keyboard exit for the rest of the session.
+            //
+            // Routed through this message rather than its own listener: the
+            // tree-key listener is live whenever a persistent card exists
+            // (`tree_key_listener_active` covers the no-archive card), so a
+            // second listener would fire on the same press and an Escape
+            // closing a menu would silently destroy the archive-level notice.
+            if matches!(key, iced::keyboard::Key::Named(Named::Escape)) && is_spare_escape(app) {
+                app.toasts.dismiss_persistent();
+            }
             let scroll_task = handle_tree_key(app, key);
             scroll_task.unwrap_or_else(Task::none)
         }
@@ -1612,16 +1667,136 @@ fn push_toast(
     severity: crate::state::toast::Severity,
     message: String,
 ) -> Task<Message> {
-    let id = app.toasts.push(severity, message);
-    let ttl = severity.ttl();
+    push_toast_with(
+        app,
+        severity,
+        message,
+        crate::state::toast::Lifetime::Transient,
+    )
+}
+
+/// Push a toast that stays until dismissed, replacing any previous one.
+///
+/// `subject` is the file the open was attempted on. It is what the card names
+/// and what scopes its retirement — see [`crate::state::toast::Lifetime`].
+///
+/// Three routes retire it: the dismiss button ([`Message::ToastDismissed`]
+/// removes by id regardless of lifetime), a SPARE Escape (see
+/// [`is_spare_escape`], handled in the [`Message::TreeKey`] arm of [`update`]),
+/// and a later COMPLETED open attempt on the same `subject`, which supersedes
+/// the report.
+fn push_persistent_toast(
+    app: &mut App,
+    severity: crate::state::toast::Severity,
+    subject: PathBuf,
+    message: String,
+) -> Task<Message> {
+    push_toast_with(
+        app,
+        severity,
+        message,
+        crate::state::toast::Lifetime::UntilDismissed { subject },
+    )
+}
+
+/// Push the archive-open failure card for a completed failed attempt on
+/// `path` (#663): subject-scoped, named by [`archive_label`], persistent.
+///
+/// The one producer of the card, shared by the archive-loaded and
+/// behind-the-prompt branches, so the message shape cannot drift between
+/// them.
+fn push_open_failure_card(app: &mut App, path: PathBuf, message: &str) -> Task<Message> {
+    let label = archive_label(&path);
+    push_persistent_toast(
+        app,
+        crate::state::toast::Severity::Error,
+        path,
+        format!("Couldn't open {label}: {message}"),
+    )
+}
+
+/// The name to show for `path` in an archive-level message.
+///
+/// The file name, not the full path: the card sits in a corner overlay whose
+/// width is its content, and a deep install path would run it across the
+/// window. Falls back to the full path when there is no final component.
+/// Two files can share a name — the status bar labels the loaded archive the
+/// same way, and same-name paks are the norm in UE installs — so the label
+/// identifies the card's subject, it does not distinguish it from every other
+/// pak on disk. The full path stays on the card's `Lifetime` subject and is
+/// deliberately NOT rendered (no second line, no tooltip): a second line
+/// carrying the path re-creates the window-wide permanent card this helper
+/// exists to prevent, and the card's only interactive element is deliberately
+/// its `x`.
+fn archive_label(path: &std::path::Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into(),
+    )
+}
+
+/// Push a toast and schedule its expiry, if it has one.
+///
+/// ONE `lifetime` binding drives both halves: it is stored on the toast and it
+/// decides the expiry via [`crate::state::toast::Lifetime::expiry`] (pinned by
+/// `expiry_is_none_only_for_until_dismissed`); two independent statements of
+/// the same fact could silently disagree.
+///
+/// Both halves are observable, so both are pinned. The label is asserted off
+/// `Toasts::items`; the schedule is asserted off THIS function's return value
+/// via [`iced::Task::units`] — 0 for `Task::none()`, 1 for a `Task::perform` —
+/// in `persistent_push_schedules_no_expiry_task`. Without that second pin,
+/// replacing the `expiry` call below with an unconditional `severity.ttl()`
+/// restores the 8-second card with the whole suite green.
+fn push_toast_with(
+    app: &mut App,
+    severity: crate::state::toast::Severity,
+    message: String,
+    lifetime: crate::state::toast::Lifetime,
+) -> Task<Message> {
+    // Read the expiry BEFORE the push moves `lifetime` in. Still one binding
+    // driving both halves — the read is `&self` — just ordered, now that
+    // `Lifetime` owns a path and is no longer `Copy`.
+    let expiry = lifetime.expiry(severity);
+    let id = app.toasts.push_with(severity, message, lifetime);
+    let Some(ttl) = expiry else {
+        return Task::none();
+    };
     // The `async move {}` wrapper is load-bearing: it defers the
     // `tokio::time::sleep(ttl)` call until the future is polled by the iced
     // runtime. Calling `sleep` eagerly here would panic ("no reactor running")
-    // whenever `push_toast` runs outside a tokio runtime — e.g. in the unit
-    // tests that drive `update` directly.
+    // whenever this runs outside a tokio runtime — e.g. in the unit tests that
+    // drive `update` directly.
     Task::perform(async move { tokio::time::sleep(ttl).await }, move |()| {
         Message::ToastDismissed(id)
     })
+}
+
+/// Whether an Escape press is unclaimed by the four surfaces `App` can see.
+///
+/// The row menus are dismissed by any named key in [`handle_tree_key`]; the
+/// About panel and the key prompt have no Escape handler at all, but an Escape
+/// pressed while either is up still reads as aimed at them. Treating those as
+/// claimed keeps a stray Escape from retiring the persistent card behind a
+/// surface the user is looking at. The About panel is closed by its dismiss
+/// button; the key prompt has NO close gesture and exits only through a
+/// completed open (unlock, or opening a different file) — while it is up, the
+/// card's `x` is the card's only exit, which is the cost of not letting a
+/// prompt-aimed Escape destroy it.
+///
+/// The enumeration is exactly those four and cannot be completed: iced keeps a
+/// `pick_list` dropdown's open/closed state in the widget tree, not in `App`,
+/// and 0.14's `pick_list` does not handle `Escape` either — so an Escape aimed
+/// at an open dropdown reads as spare here and retires the card. Documented
+/// rather than fixed because `App` has no way to observe it; the cost is one
+/// re-open, since the card names the failure and the open is one click away.
+///
+/// The opposite direction exists too and is benign: a focused `text_input`
+/// captures Escape to unfocus itself, so that press never reaches this
+/// predicate and the card stays — the SECOND press, with the input blurred,
+/// retires it. One dead keypress, no loss.
+fn is_spare_escape(app: &App) -> bool {
+    !row_menus_open(app) && !app.about_visible && app.keyflow.is_locked().is_none()
 }
 
 /// Move the keyboard cursor and mutate the tree based on a key press.
@@ -1889,7 +2064,7 @@ fn scroll_restore_targets(app: &App, reset_texture: bool) -> Vec<(iced::widget::
 /// retained one drift apart in BOTH directions. A surface that keeps its
 /// position and tag inherits whatever offset was there before; one whose tag
 /// changes, or that is displaced within its parent (the About panel and key
-/// prompt replace the body; a toast wraps the root in a stack — see
+/// prompt replace the body; a toast wraps the body in a stack — see
 /// [`PaneLayout`] for the tracked set), has
 /// its offset dropped and rebuilt at zero while the app keeps a non-zero
 /// one. The two directions fail differently: an INHERITED offset is
@@ -2014,6 +2189,19 @@ fn toggle_context_row(current: Option<usize>, clicked: usize) -> Option<usize> {
 fn dismiss_row_menus(app: &mut App) {
     app.context_row = None;
     app.export_menu = None;
+}
+
+/// Whether either inline row menu is open.
+///
+/// The read half of the row-menu set. TWO writers clear it —
+/// [`dismiss_row_menus`], and [`handle_tree_key`]'s inline pair, which cannot
+/// call the helper under its live `archive` borrow — and [`is_spare_escape`]
+/// must claim an Escape for every menu that clear closes. A third row surface
+/// must be added to all three, or closing it will also retire the persistent
+/// card; `row_menus_open_covers_every_menu_dismiss_row_menus_clears` pins the
+/// two that exist.
+fn row_menus_open(app: &App) -> bool {
+    app.context_row.is_some() || app.export_menu.is_some()
 }
 
 /// The asset path to open for visible tree row `i`, if it is a file row with a
@@ -2263,22 +2451,32 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     #[cfg(target_os = "macos")]
     let open_accel_sub = Subscription::none();
 
-    if app.archive.is_none() {
-        return Subscription::batch([
-            menu_sub,
-            console_toggle_sub,
-            console_tick_sub,
-            audio_tick_sub,
-            resize_sub,
-            memory_tick_sub,
-            theme_follow_sub,
-            open_accel_sub,
-        ]);
+    // Subscriptions that must run in BOTH states. Building the list once and
+    // consuming it in both paths is deliberate: "always on" used to be a
+    // convention maintained by hand in two separate literals, and omitting the
+    // second copy is a mistake this crate has made twice — #661's memory tick
+    // and #662's theme follow. A new always-on listener now cannot be added to
+    // only one branch.
+    let always_on = [
+        menu_sub,
+        console_toggle_sub,
+        console_tick_sub,
+        audio_tick_sub,
+        resize_sub,
+        memory_tick_sub,
+        theme_follow_sub,
+        open_accel_sub,
+    ];
+
+    if !tree_key_listener_active(app) {
+        return Subscription::batch(always_on);
     }
 
-    // Tree navigation keys. The decision (F12 exclusion + only-act-on-unconsumed
-    // keys) lives in the tested `tree_key_for`; this closure just destructures
-    // the event and forwards the key + capture status.
+    // Tree navigation keys — and the persistent card's Escape exit, which is
+    // why the gate is `tree_key_listener_active`, not `archive.is_some()`.
+    // The decision (F12 exclusion + only-act-on-unconsumed keys) lives in the
+    // tested `tree_key_for`; this closure just destructures the event and
+    // forwards the key + capture status.
     let tree_key_sub = iced::event::listen_with(|event, status, _window| match event {
         Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) => tree_key_for(key, status),
         _ => None,
@@ -2298,18 +2496,23 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         Subscription::none()
     };
 
-    Subscription::batch([
-        menu_sub,
-        console_toggle_sub,
-        console_tick_sub,
-        audio_tick_sub,
-        tree_key_sub,
-        hex_drag_sub,
-        resize_sub,
-        memory_tick_sub,
-        theme_follow_sub,
-        open_accel_sub,
-    ])
+    // Archive-only listeners on top of the shared set.
+    Subscription::batch(always_on.into_iter().chain([tree_key_sub, hex_drag_sub]))
+}
+
+/// Whether the tree-key listener runs.
+///
+/// Two disjoint reasons, one listener: an archive is loaded (tree
+/// navigation), or a persistent card is up with NO archive — the
+/// mismatched-failure branch can raise one in that state, and without this
+/// half the card's spare-Escape exit would not exist there, leaving it
+/// mouse-only for exactly the keyboard-only user the exit serves. One
+/// listener for both keeps delivery single: a key can never fan out to a
+/// second subscription, which is the double-fire the `Message::TreeKey` arm's
+/// routing argument rules out. With no archive, every non-Escape key no-ops
+/// in `handle_tree_key`'s `archive.as_mut()?` guard.
+fn tree_key_listener_active(app: &App) -> bool {
+    app.archive.is_some() || app.toasts.has_persistent()
 }
 
 /// Decide whether a key press should drive tree navigation.
@@ -2682,28 +2885,36 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     // ── compose ───────────────────────────────────────────────────────────────
+    // Layer the non-blocking toast overlay over the BODY, not the whole window.
+    // The overlay insets SPACE_MD (12) from its bottom edge while the status bar
+    // is at least 2 * SPACE_SM (16) tall from padding alone, so an overlay
+    // stacked over the root always intrudes into the status bar's right end —
+    // over `selection_label` and the memory readout. That was survivable while
+    // every card expired in <= 8s; a card that stays until dismissed (#663)
+    // would hide them for the rest of the session. Scoping the stack to the body
+    // keeps the chrome permanently visible, for transient cards too.
+    //
+    // The overlay container is click-through except over each card's dismiss
+    // button, so the body stays interactive while toasts are showing.
+    let body: iced::Element<'_, Message> = if app.toasts.is_empty() {
+        body
+    } else {
+        iced::widget::stack([body, crate::widgets::toast::overlay(&app.toasts)])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    };
+
     // The menu placeholder strip is removed: on macOS the native menu bar is
     // global (above the window); on other platforms the actions are toolbar-only.
     let mut root = column![toolbar_view, body];
     if app.console_visible {
         root = root.push(crate::panels::console::view(app));
     }
-    let root = root
-        .push(status_view)
+    root.push(status_view)
         .width(Length::Fill)
-        .height(Length::Fill);
-
-    // Layer the non-blocking toast overlay on top when there are toasts. The
-    // overlay container is click-through except over each card's dismiss button,
-    // so the rest of the UI stays interactive while toasts are showing.
-    if app.toasts.is_empty() {
-        root.into()
-    } else {
-        iced::widget::stack([root.into(), crate::widgets::toast::overlay(&app.toasts)])
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
-    }
+        .height(Length::Fill)
+        .into()
 }
 
 #[cfg(test)]
@@ -2766,22 +2977,39 @@ mod tests {
     use crate::state::toast::Severity;
 
     #[test]
-    fn open_error_while_archive_loaded_pushes_error_toast_not_banner() {
+    fn open_error_while_archive_loaded_pushes_persistent_toast_not_banner() {
         // An archive is already open and an open of another file is in flight
         // (keyflow.begin() → Resolving). The failed open would set `app.error`,
         // but `view` shows the archive (the Some(archive) branch wins), so the
         // banner never renders — the error is swallowed. It must become a toast.
+        //
+        // The toast is UntilDismissed: an archive-level failure outranks the
+        // "recoverable errors" SPEC assigns to non-blocking toasts, and an
+        // 8-second card is fire-and-forget for it (issue #663). This asserts the
+        // stored LABEL; `persistent_push_schedules_no_expiry_task` asserts the
+        // other half, that no expiry was actually scheduled. Neither implies the
+        // other — see that test.
         let mut app = app_with_paths(&["Game/A.uasset"]);
         app.keyflow.begin();
         let _ = update(
             &mut app,
-            Message::ArchiveOpened(Box::new(Err(OpenError::Core("boom".to_string())))),
+            Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "boom")))),
         );
         assert_eq!(app.toasts.items().len(), 1, "one error toast pushed");
         assert_eq!(app.toasts.items()[0].severity, Severity::Error);
-        assert!(
-            app.toasts.items()[0].message.contains("boom"),
-            "toast carries the core error message"
+        assert_eq!(
+            app.toasts.items()[0].lifetime,
+            crate::state::toast::Lifetime::UntilDismissed {
+                subject: PathBuf::from(FAILED_PATH)
+            },
+            "an archive-level failure persists until dismissed, not 8 seconds, \
+             and is scoped to the file it reports on"
+        );
+        assert_eq!(
+            app.toasts.items()[0].message,
+            "Couldn't open broken.pak: boom",
+            "the card names the FILE, not the full path — a deep install path \
+             would run a content-sized corner card across the window"
         );
         assert!(
             app.error.is_none(),
@@ -2796,6 +3024,322 @@ mod tests {
         );
     }
 
+    /// Put an archive up with a persistent open-failure card showing.
+    fn app_with_persistent_failure() -> App {
+        let mut app = app_with_paths(&["Game/A.uasset"]);
+        app.keyflow.begin();
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "boom")))),
+        );
+        assert_eq!(app.toasts.items().len(), 1, "failure card is up");
+        app
+    }
+
+    #[test]
+    fn persistent_push_schedules_no_expiry_task() {
+        // The OTHER half of persistence, and the one with no state to inspect:
+        // storing `UntilDismissed` decides what the card is LABELLED, while the
+        // returned `Task` decides whether a `ToastDismissed` is already in
+        // flight against it. Replacing `push_toast_with`'s
+        // `lifetime.expiry(severity)` guard with an unconditional
+        // `severity.ttl()` keeps every label assertion in this module green and
+        // silently restores the 8-second card that #663 exists to remove.
+        //
+        // `iced::Task::units()` is the discriminator: 0 for `Task::none()`, 1
+        // for a `Task::perform`. Asserted off the pusher directly — `update`'s
+        // return cannot discriminate, because `restores_scroll` matches every
+        // `ArchiveOpened` and batches `restore_scroll_positions`, whose own
+        // effects contribute units.
+        let mut app = app_with_paths(&["Game/A.uasset"]);
+        let persistent = push_persistent_toast(
+            &mut app,
+            Severity::Error,
+            PathBuf::from(FAILED_PATH),
+            "archive-level failure".to_string(),
+        );
+        assert_eq!(
+            persistent.units(),
+            0,
+            "a persistent card must schedule NO auto-dismiss task"
+        );
+
+        // Control: the same pusher on the transient path DOES schedule one, so
+        // the assertion above discriminates rather than passing on a `Task` that
+        // is empty for some unrelated reason.
+        let transient = push_toast(&mut app, Severity::Error, "recoverable".to_string());
+        assert_eq!(
+            transient.units(),
+            1,
+            "a transient toast still schedules its expiry"
+        );
+    }
+
+    #[test]
+    fn a_completed_open_of_the_same_file_supersedes_the_card() {
+        // The card is scoped to the file it reports on. Re-opening THAT file —
+        // after finishing the copy that truncated it, or fixing the profile
+        // whose key was wrong — supersedes the report on every completed
+        // outcome.
+        // Ok:
+        let mut app = app_with_persistent_failure();
+        app.keyflow.begin();
+        let mut loaded = app_with_paths(&["Game/B.uasset"])
+            .archive
+            .expect("the helper builds a loaded archive");
+        loaded.path = PathBuf::from(FAILED_PATH);
+        let _ = update(&mut app, Message::ArchiveOpened(Box::new(Ok(loaded))));
+        assert!(
+            app.toasts.is_empty(),
+            "a successful open of the reported file retires the card"
+        );
+
+        // Locked is a completed attempt too — it resolved to "needs a key".
+        let mut app = app_with_persistent_failure();
+        app.keyflow.begin();
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
+                path: PathBuf::from(FAILED_PATH),
+            }))),
+        );
+        assert!(
+            app.toasts.is_empty(),
+            "reaching the key prompt for the reported file retires the card"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_open_leaves_the_card_standing() {
+        // Why retirement is path-scoped: see `Toasts::dismiss_persistent_for`.
+        // This drives exactly the race that scoping exists for — two opens in
+        // flight, the failure lands (card up), then the older open's Ok.
+        let mut app = app_with_persistent_failure();
+        app.keyflow.begin();
+        let loaded = app_with_paths(&["Game/B.uasset"])
+            .archive
+            .expect("the helper builds a loaded archive");
+        assert_ne!(
+            loaded.path,
+            PathBuf::from(FAILED_PATH),
+            "precondition: the success is about a different file"
+        );
+        let _ = update(&mut app, Message::ArchiveOpened(Box::new(Ok(loaded))));
+        assert_eq!(
+            app.toasts.items().len(),
+            1,
+            "an unrelated success must not destroy the failure card"
+        );
+
+        // Same for an unrelated Locked outcome.
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
+                path: PathBuf::from("other-locked.pak"),
+            }))),
+        );
+        assert_eq!(
+            app.toasts.items().len(),
+            1,
+            "an unrelated key prompt must not destroy the failure card"
+        );
+    }
+
+    #[test]
+    fn archive_label_is_the_file_name_with_a_display_fallback() {
+        // Divergent fixture: the deep path renders differently under the two
+        // arms, so collapsing either into the other fails here.
+        assert_eq!(
+            archive_label(std::path::Path::new("/deep/install/dir/pakchunk0.pak")),
+            "pakchunk0.pak"
+        );
+        // No final component: fall back to the whole path rather than "".
+        assert_eq!(archive_label(std::path::Path::new("/")), "/");
+    }
+
+    #[test]
+    fn a_failed_reopen_of_the_loaded_archive_keeps_its_card() {
+        // The card's subject CAN be the archive on screen, deliberately: the
+        // loaded tree is served by the reader's retained file handle, so when
+        // the file is replaced on disk (a game update) and the re-open fails,
+        // the display is a working STALE SNAPSHOT and the card is the only
+        // notice that the reload failed. Retiring it because its subject
+        // matches the display would hide exactly that.
+        let mut app = app_with_paths(&["Game/A.uasset"]);
+        let loaded_path = app
+            .archive
+            .as_ref()
+            .expect("helper loads an archive")
+            .path
+            .clone();
+        app.keyflow.begin();
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(core_err(
+                loaded_path.to_str().expect("utf-8 test path"),
+                "unsupported pak version 42",
+            )))),
+        );
+        assert_eq!(app.toasts.items().len(), 1, "the failed reload is reported");
+        assert_eq!(
+            app.toasts.items()[0].lifetime.subject(),
+            Some(loaded_path.as_path()),
+            "and its subject is the archive still on screen"
+        );
+    }
+
+    #[test]
+    fn row_menus_open_covers_every_menu_dismiss_row_menus_clears() {
+        // `is_spare_escape` must claim an Escape for every menu a named key
+        // closes, so the reader has to span the whole set the writer clears —
+        // a third row surface taught to `dismiss_row_menus` alone would make
+        // closing it also retire the persistent card.
+        //
+        // Asserted per-field rather than through an Escape sequence: no
+        // reachable state sets `export_menu` without `context_row` (the picker
+        // opens from the action strip), so a UI-level test could not tell a
+        // reader that checks only `context_row` from one that checks both.
+        let mut app = app_with_paths(&["Game/A.uasset"]);
+        assert!(!row_menus_open(&app), "a clean app has neither menu open");
+
+        app.context_row = Some(0);
+        assert!(row_menus_open(&app), "the action strip counts");
+        dismiss_row_menus(&mut app);
+        assert!(!row_menus_open(&app), "and the writer clears it");
+
+        app.export_menu = Some(crate::state::export::ExportMenu {
+            path: "Game/A.uasset".into(),
+            choices: vec![crate::state::export::ExportChoice::Raw],
+        });
+        assert!(row_menus_open(&app), "the export picker counts too");
+        dismiss_row_menus(&mut app);
+        assert!(!row_menus_open(&app), "and the writer clears both");
+    }
+
+    #[test]
+    fn escape_closing_a_menu_does_not_also_retire_the_persistent_toast() {
+        // The precedence that matters: an Escape aimed at an open context menu
+        // must not silently destroy the archive-level notice. An earlier
+        // revision routed Escape through a SECOND listener, live in exactly the
+        // states the tree-key one is, so one press did both.
+        let mut app = app_with_persistent_failure();
+        app.context_row = Some(0);
+        let _ = update(&mut app, Message::TreeKey(named_key(Named::Escape)));
+        assert_eq!(app.context_row, None, "the menu closes");
+        assert_eq!(
+            app.toasts.items().len(),
+            1,
+            "the card survives an Escape that was spent on the menu"
+        );
+    }
+
+    #[test]
+    fn spare_escape_retires_the_persistent_toast() {
+        // With no menu open, Escape is the keyboard route out of a card whose
+        // only other exit is a mouse click on its `x`.
+        let mut app = app_with_persistent_failure();
+        assert_eq!(app.context_row, None, "no menu open");
+        let _ = update(&mut app, Message::TreeKey(named_key(Named::Escape)));
+        assert!(app.toasts.is_empty(), "the card is retired");
+    }
+
+    #[test]
+    fn spare_escape_retires_the_card_even_with_no_visible_rows() {
+        // The keyboard exit must not depend on the tree having rows. An earlier
+        // revision put this inside `handle_tree_key`, after its `row_count == 0`
+        // early return, so a filter matching nothing — or a zero-entry archive —
+        // left the card dismissable only by mouse for the rest of the session.
+        let mut app = app_with_persistent_failure();
+        if let Some(archive) = app.archive.as_mut() {
+            archive.tree.set_filter("zzz-matches-nothing");
+        }
+        assert_eq!(
+            app.archive
+                .as_ref()
+                .map(|a| a.tree.visible_rows().len())
+                .unwrap_or_default(),
+            0,
+            "precondition: the filter hides every row"
+        );
+        let _ = update(&mut app, Message::TreeKey(named_key(Named::Escape)));
+        assert!(app.toasts.is_empty(), "the card is still retired");
+    }
+
+    #[test]
+    fn escape_behind_the_about_panel_or_key_prompt_is_not_spare() {
+        // Neither surface has an Escape handler, but an Escape pressed while one
+        // is up reads as aimed at it — retiring the card behind it would be a
+        // silent loss.
+        let mut app = app_with_persistent_failure();
+        app.about_visible = true;
+        let _ = update(&mut app, Message::TreeKey(named_key(Named::Escape)));
+        assert_eq!(app.toasts.items().len(), 1, "About panel claims the Escape");
+
+        let mut app = app_with_persistent_failure();
+        app.keyflow
+            .lock(std::path::PathBuf::from("/tmp/locked.pak"));
+        let _ = update(&mut app, Message::TreeKey(named_key(Named::Escape)));
+        assert_eq!(app.toasts.items().len(), 1, "key prompt claims the Escape");
+    }
+
+    #[test]
+    fn only_escape_retires_the_card_not_other_spare_keys() {
+        // The other half of the guard in the `Message::TreeKey` arm: the
+        // `is_spare_escape` conjunct is pinned by the menu/About/prompt tests,
+        // but nothing else distinguishes Escape from ArrowDown — and ArrowDown
+        // is the most common keystroke in the app. Without this, widening the
+        // guard to "any spare named key" ships silently and browsing the tree
+        // destroys the notice on the first arrow press.
+        let mut app = app_with_persistent_failure();
+        for key in [Named::ArrowDown, Named::ArrowUp, Named::Enter] {
+            let _ = update(&mut app, Message::TreeKey(named_key(key)));
+        }
+        assert_eq!(
+            app.toasts.items().len(),
+            1,
+            "spare non-Escape keys navigate; they do not dismiss"
+        );
+        let _ = update(&mut app, Message::TreeKey(named_key(Named::Escape)));
+        assert!(app.toasts.is_empty(), "Escape itself still works");
+    }
+
+    #[test]
+    fn spare_escape_spares_transient_toasts() {
+        let mut app = app_with_persistent_failure();
+        let archive_gen = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::ExportCompleted {
+                outcome: ExportOutcome::Written("/tmp/T_Rock.png".into()),
+                generation: archive_gen,
+            },
+        );
+        assert_eq!(app.toasts.items().len(), 2, "one persistent, one transient");
+        let _ = update(&mut app, Message::TreeKey(named_key(Named::Escape)));
+        assert_eq!(app.toasts.items().len(), 1, "only the persistent one goes");
+        assert_eq!(app.toasts.items()[0].severity, Severity::Success);
+    }
+
+    #[test]
+    fn repeated_open_failures_replace_rather_than_stack() {
+        // The single-slot bound, driven through the real failure arm. Why the
+        // bound exists: see `Toasts::push_with`.
+        // Via the helper, whose `len == 1` precondition is what makes the
+        // assertion below evidence of REPLACEMENT rather than of a first push
+        // that silently never happened.
+        let mut app = app_with_persistent_failure();
+        app.keyflow.begin();
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "second")))),
+        );
+        assert_eq!(app.toasts.items().len(), 1, "the second failure replaces");
+        assert!(
+            app.toasts.items()[0].message.contains("second"),
+            "the newest failure is the one shown"
+        );
+    }
+
     #[test]
     fn open_error_with_no_archive_uses_banner_not_toast() {
         // Empty state: the full-area banner (with the retry CTA) is the right
@@ -2803,7 +3347,7 @@ mod tests {
         let mut app = App::default();
         let _ = update(
             &mut app,
-            Message::ArchiveOpened(Box::new(Err(OpenError::Core("nope".to_string())))),
+            Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "nope")))),
         );
         assert!(app.toasts.is_empty(), "no toast in the empty state");
         assert_eq!(app.error.as_deref(), Some("nope"), "banner error is set");
@@ -2823,7 +3367,7 @@ mod tests {
         ));
         let _ = update(
             &mut app,
-            Message::ArchiveOpened(Box::new(Err(OpenError::Core("boom".to_string())))),
+            Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "boom")))),
         );
         assert!(
             matches!(app.keyflow, crate::state::keyflow::KeyFlow::Idle),
@@ -2836,21 +3380,154 @@ mod tests {
 
     #[test]
     fn open_error_mid_keyflow_sets_keyflow_error_no_toast() {
-        // Mid key-entry (wrong manual key): the error belongs inside the key panel.
+        // Mid key-entry (wrong manual key): the error belongs inside the key
+        // panel — but only for the PROMPT'S OWN file. `run_with_key` and
+        // `run_with_detect` always report the locked path, so the legit
+        // wrong-key flow always matches this gate.
         let mut app = App::default();
         app.keyflow.lock(PathBuf::from("locked.pak"));
         let _ = update(
             &mut app,
-            Message::ArchiveOpened(Box::new(Err(OpenError::Core("bad key".to_string())))),
+            Message::ArchiveOpened(Box::new(Err(core_err("locked.pak", "bad key")))),
         );
         assert!(app.toasts.is_empty(), "no toast during the key flow");
         assert!(app.error.is_none(), "no banner during the key flow");
+        assert_eq!(
+            app.keyflow.error(),
+            Some("bad key"),
+            "the prompt shows its own file's failure"
+        );
+    }
+
+    #[test]
+    fn tree_key_listener_is_active_exactly_when_it_has_work() {
+        // The gate's second half is what keeps the no-archive card's Escape
+        // exit alive; narrowing it back to `archive.is_some()` strands that
+        // card mouse-only. The Escape tests inject `Message::TreeKey`
+        // directly, so THIS is the only pin on delivery existing at all.
+        assert!(
+            !tree_key_listener_active(&App::default()),
+            "nothing to do: no archive, no card"
+        );
+        assert!(
+            tree_key_listener_active(&app_with_paths(&["Game/A.uasset"])),
+            "archive loaded: tree navigation"
+        );
+
+        let mut app = App::default();
+        let _ = push_open_failure_card(&mut app, PathBuf::from(FAILED_PATH), "boom");
+        assert!(
+            tree_key_listener_active(&app),
+            "no archive but a persistent card: its Escape exit needs delivery"
+        );
+
+        let mut app = App::default();
+        let _ = push_toast(&mut app, Severity::Success, "copied".to_string());
+        assert!(
+            !tree_key_listener_active(&app),
+            "a transient toast alone does not warrant a key listener"
+        );
+    }
+
+    #[test]
+    fn spare_escape_retires_a_no_archive_card() {
+        // The R8 scenario end-to-end: the mismatched-failure branch raises a
+        // card with NO archive loaded, the prompt is later torn down by a
+        // third open whose failure lands in the banner arm, and the card must
+        // still have its keyboard exit.
+        let mut app = App::default();
+        app.keyflow.lock(PathBuf::from("locked.pak"));
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "version 42")))),
+        );
+        assert_eq!(app.toasts.items().len(), 1, "card up, archive still None");
+
+        // A third open tears the prompt down and fails into the banner arm.
+        app.keyflow.begin();
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(core_err("third.pak", "nope")))),
+        );
+        assert_eq!(
+            app.toasts.items().len(),
+            1,
+            "the banner reports third.pak; the card about another file stays"
+        );
+        assert!(app.error.is_some(), "banner is up");
+
+        let _ = update(&mut app, Message::TreeKey(named_key(Named::Escape)));
+        assert!(
+            app.toasts.is_empty(),
+            "the spare Escape retires the card with no archive loaded"
+        );
+    }
+
+    #[test]
+    fn the_banner_arm_supersedes_its_own_files_card() {
+        // The banner is a completed attempt like every other arm: an older
+        // card about the SAME file is superseded by the newer report.
+        let mut app = App::default();
+        app.keyflow.lock(PathBuf::from("locked.pak"));
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "old message")))),
+        );
+        assert_eq!(app.toasts.items().len(), 1, "card up for the file");
+
+        app.keyflow.begin();
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "newer message")))),
+        );
+        assert!(
+            app.toasts.is_empty(),
+            "the banner now reports this file; the stale card is superseded"
+        );
+        assert_eq!(app.error.as_deref(), Some("newer message"));
+    }
+
+    #[test]
+    fn a_mismatched_failure_behind_the_key_prompt_gets_its_card() {
+        // Two opens in flight: Y resolves Locked first (prompt up for Y), then
+        // slow X lands Core. X's failure is not about Y's key — routing it
+        // into the prompt would misattribute it AND erase it on the first
+        // keystroke (`KeyInputChanged` clears the prompt error). It gets the
+        // persistent card instead, and the prompt survives untouched.
+        let mut app = App::default();
+        app.keyflow.lock(PathBuf::from("locked.pak"));
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "version 42")))),
+        );
+        assert_eq!(app.toasts.items().len(), 1, "the failure gets its card");
+        assert_eq!(
+            app.toasts.items()[0].lifetime.subject(),
+            Some(std::path::Path::new(FAILED_PATH)),
+            "scoped to the file that failed"
+        );
+        assert_eq!(
+            app.toasts.items()[0].message,
+            "Couldn't open broken.pak: version 42",
+            "same producer, same shape as the archive-loaded card"
+        );
+        assert_eq!(
+            app.keyflow.is_locked(),
+            Some(std::path::Path::new("locked.pak")),
+            "the prompt is still up for its own file"
+        );
+        assert_eq!(app.keyflow.error(), None, "and shows no borrowed error");
+        assert!(app.error.is_none(), "no banner either");
     }
 
     #[test]
     fn toast_dismissed_removes_the_targeted_toast() {
         let mut app = App::default();
-        let id = app.toasts.push(Severity::Error, "x".to_string());
+        let id = app.toasts.push_with(
+            Severity::Error,
+            "x".to_string(),
+            crate::state::toast::Lifetime::Transient,
+        );
         let _ = update(&mut app, Message::ToastDismissed(id));
         assert!(app.toasts.is_empty(), "dismiss removes the toast");
     }
@@ -2958,7 +3635,7 @@ mod tests {
         type MkMessage = fn() -> Message;
         let outcomes: [(&str, MkMessage); 3] = [
             ("Core error", || {
-                Message::ArchiveOpened(Box::new(Err(OpenError::Core("nope".into()))))
+                Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "nope"))))
             }),
             ("Locked", || {
                 Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
@@ -3154,6 +3831,21 @@ mod tests {
 
     fn named_key(n: Named) -> Key {
         Key::Named(n)
+    }
+
+    /// The path the failing opens in this module were attempted on. Distinct
+    /// from `app_with_paths`'s loaded `test.pak`, so a test that retires the
+    /// card by opening a DIFFERENT file cannot pass by accident. Carries a
+    /// directory component so `file_name()` and `display()` DIVERGE — a bare
+    /// name would let `archive_label` regress to the full path with every
+    /// assertion on it still green.
+    const FAILED_PATH: &str = "/tmp/fixtures/broken.pak";
+
+    fn core_err(path: &str, message: &str) -> OpenError {
+        OpenError::Core {
+            path: PathBuf::from(path),
+            message: message.to_string(),
+        }
     }
 
     // ── hex / properties viewport windowing (#660) ────────────────────────────
@@ -3527,9 +4219,7 @@ mod tests {
             // load-bearing one (a new archive under a sidebar iced never
             // tore down), and the error arms are inert. Only an error is
             // constructible here — `LoadedArchive` needs a real reader.
-            Message::ArchiveOpened(Box::new(Err(crate::state::archive::OpenError::Core(
-                "probe".to_string(),
-            )))),
+            Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "probe")))),
         ];
         for m in restores {
             assert!(
@@ -6057,6 +6747,14 @@ mod tests {
         assert_eq!(app.toasts.items().len(), 1);
         assert_eq!(app.toasts.items()[0].severity, Severity::Error);
         assert!(app.toasts.items()[0].message.contains("disk full"));
+        // Control for issue #663: had persistence been derived from severity
+        // rather than set per toast, THIS toast would have become permanent and
+        // the assertions above would not have noticed.
+        assert_eq!(
+            app.toasts.items()[0].lifetime,
+            crate::state::toast::Lifetime::Transient,
+            "an export failure is recoverable and still auto-expires"
+        );
     }
 
     #[test]
@@ -6940,7 +7638,7 @@ mod tests {
 
         let _ = update(
             &mut app,
-            Message::ArchiveOpened(Box::new(Err(OpenError::Core("boom".to_string())))),
+            Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "boom")))),
         );
 
         assert_eq!(
