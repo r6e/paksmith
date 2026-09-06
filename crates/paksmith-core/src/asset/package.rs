@@ -594,6 +594,12 @@ impl Package {
         clippy::too_many_lines,
         reason = "Phase 2e stitching + 4-state companion detection + the existing summary/name/import/export/payload pipeline naturally cross the 100-line cap; splitting would obscure the linear top-to-bottom byte-stream flow that's the function's whole point"
     )]
+    #[tracing::instrument(
+        level = "debug",
+        name = "package_read",
+        skip_all,
+        fields(asset_path = asset_path, has_uexp = uexp.is_some())
+    )]
     fn read_from_inner<U, T>(
         uasset: &[u8],
         uexp: Option<&[u8]>,
@@ -1837,6 +1843,55 @@ mod tests {
         // contract is "append" because no `.uasset` suffix is present
         // at the byte level.
         assert_eq!(result, "ab😀abcd.uexp");
+    }
+
+    #[test]
+    fn read_from_emits_a_package_read_span() {
+        // #665: the parse boundary emits one span, from `read_from_inner` —
+        // the shared body every entry point reaches — so the raw-bytes and
+        // reader forms are covered alike.
+        let pkg = build_minimal_ue4_27();
+        let rec = crate::test_spans::SpanRecorder::capture_until(
+            || {
+                let _ = Package::read_from(&pkg.bytes, None, None, "spans.uasset").expect("parse");
+            },
+            |r| r.count("package_read") == 1,
+        );
+        assert_eq!(
+            rec.count("package_read"),
+            1,
+            "parsing a package must emit exactly one package_read span; got {:?}",
+            rec.names()
+        );
+        assert_eq!(
+            rec.field("package_read", "asset_path").as_deref(),
+            Some("spans.uasset")
+        );
+        assert_eq!(
+            rec.field("package_read", "has_uexp").as_deref(),
+            Some("false"),
+            "a monolithic parse reports no companion"
+        );
+
+        // The OTHER direction, on a real split fixture: without it, hardcoding
+        // `has_uexp = false` survives the whole suite and every split-asset
+        // parse would silently report no companion stitching — the exact
+        // profiling signal #665 exists to provide. Pinned in both directions
+        // like `keyed`.
+        let (uasset, uexp) = build_minimal_ue4_27_split();
+        let rec = crate::test_spans::SpanRecorder::capture_until(
+            || {
+                let _ = Package::read_from(&uasset, Some(&uexp), None, "split.uasset")
+                    .expect("split parse");
+            },
+            |r| r.count("package_read") == 1,
+        );
+        assert_eq!(
+            rec.field("package_read", "has_uexp").as_deref(),
+            Some("true"),
+            "a split parse reports its companion — this is what makes the \
+             field a stitching signal rather than a constant"
+        );
     }
 
     #[test]

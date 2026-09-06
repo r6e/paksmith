@@ -68,6 +68,12 @@ pub mod testing;
 #[cfg(test)]
 mod test_patch;
 
+/// Test-only span capture for the #665 operation-boundary spans. Same
+/// `#[cfg(test)]`-not-`__test_utils` reasoning as [`test_patch`]: no
+/// downstream consumer, so it stays out of every published build.
+#[cfg(test)]
+pub(crate) mod test_spans;
+
 // `AesKey` is a cross-cutting credential type (used by `PakReader::open_with_key`
 // today; Phase 5 will extend it to IoStore). Promoted to the crate root so callers
 // write `paksmith_core::AesKey`. `PakReader` is intentionally NOT promoted — it is a

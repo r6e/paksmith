@@ -76,6 +76,7 @@ impl FormatHandler for OggHandler {
         supports_codec(asset, OGG_CODECS)
     }
 
+    #[tracing::instrument(level = "debug", name = "export", skip_all, fields(handler = "ogg"))]
     fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         passthrough_export(asset, bulk)
     }
@@ -98,6 +99,7 @@ impl FormatHandler for VorbisHandler {
         supports_codec(asset, OGG_CODECS)
     }
 
+    #[tracing::instrument(level = "debug", name = "export", skip_all, fields(handler = "vorbis"))]
     fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         let ogg = passthrough_export(asset, bulk)?;
         // Unlike `WavHandler` (whose output is always a WAV, so a decode failure
@@ -128,6 +130,7 @@ impl FormatHandler for WavHandler {
         supports_codec(asset, WAV_CODECS)
     }
 
+    #[tracing::instrument(level = "debug", name = "export", skip_all, fields(handler = "wav"))]
     fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         let wav = passthrough_export(asset, bulk)?;
         // The cooked `"PCM"`/`"ADPCM"` buffer (non-streaming) or the reassembled
@@ -192,6 +195,12 @@ impl FormatHandler for RawSoundHandler {
         supports_codec(asset, self.codecs)
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "export",
+        skip_all,
+        fields(handler = "raw_sound")
+    )]
     fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         let raw = passthrough_export(asset, bulk)?;
         if let Asset::SoundWave(data) = asset {

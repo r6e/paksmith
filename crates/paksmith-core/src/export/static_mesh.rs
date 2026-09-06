@@ -68,6 +68,12 @@ impl FormatHandler for GltfStaticMeshHandler {
         matches!(asset, Asset::StaticMesh(d) if d.render_data.is_some())
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "export",
+        skip_all,
+        fields(handler = "gltf_static")
+    )]
     fn export(&self, asset: &Asset, _bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         let Asset::StaticMesh(data) = asset else {
             return Err(crate::PaksmithError::Internal {

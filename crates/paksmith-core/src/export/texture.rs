@@ -90,6 +90,7 @@ impl FormatHandler for PngHandler {
         matches!(asset, Asset::Texture2D(_))
     }
 
+    #[tracing::instrument(level = "debug", name = "export", skip_all, fields(handler = "png"))]
     fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         let Asset::Texture2D(data) = asset else {
             return Err(PaksmithError::Internal {

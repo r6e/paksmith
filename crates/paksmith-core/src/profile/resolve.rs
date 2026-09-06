@@ -180,6 +180,12 @@ pub async fn resolve_pak_key(
 /// This fn is `async` so the GUI can `.await` it inside `iced::Task::perform`
 /// (Iced runs on tokio — a `block_on` there would panic). The CLI wraps it in
 /// its existing synchronous `block_on`.
+#[tracing::instrument(
+    level = "debug",
+    name = "profile_resolve",
+    skip_all,
+    fields(path = %path.display())
+)]
 pub async fn resolve_pak_context(
     path: &Path,
     aes_key: Option<&AesKey>,
@@ -1596,6 +1602,33 @@ mod tests {
             .unwrap();
         // AesKey doesn't implement PartialEq (security); compare via to_hex().
         assert_eq!(got.unwrap().to_hex(), hex);
+    }
+
+    #[tokio::test]
+    async fn resolve_emits_a_profile_resolve_span() {
+        // #665: key resolution is an operation boundary (it can do store I/O
+        // and a registry fetch). This drives the zero-I/O early return, which
+        // still enters the instrumented function — no config-dir exposure.
+        let rec = crate::test_spans::SpanRecorder::capture_until_async(
+            || async {
+                let _ = resolve_pak_key(Path::new("/nonexistent/x.pak"), None, None, None)
+                    .await
+                    .expect("no-flags resolution");
+            },
+            |r| r.count("profile_resolve") == 1,
+        )
+        .await;
+        assert_eq!(
+            rec.count("profile_resolve"),
+            1,
+            "key resolution must emit exactly one profile_resolve span; got {:?}",
+            rec.names()
+        );
+        assert!(
+            rec.field("profile_resolve", "path")
+                .is_some_and(|p| p.contains("x.pak")),
+            "profile_resolve carries the pak path"
+        );
     }
 
     #[tokio::test]

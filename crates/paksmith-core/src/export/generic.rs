@@ -34,6 +34,12 @@ impl FormatHandler for GenericHandler {
         true
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "export",
+        skip_all,
+        fields(handler = "generic_json")
+    )]
     fn export(&self, asset: &Asset, _bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         // `let Asset::Generic(bag) = asset else` is irrefutable
         // today (Asset is single-variant in Phase 2 closure +
