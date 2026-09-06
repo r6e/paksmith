@@ -110,7 +110,12 @@ cargo run -p paksmith-cli -- --game hero list
 `paksmith list` auto-detects whether stdout is a terminal — emits a human-readable
 table (with color; set `NO_COLOR` to disable) interactively, JSON when piped or
 redirected. Override with `--format table` or `--format json`. `--quiet` silences
-advisory notes and drops logging to error-level (errors still print). The JSON shape is
+advisory notes and drops logging to error-level (errors still print). `--log-json` switches stderr
+diagnostics to line-delimited JSON records and suppresses the advisory notes.
+Execution failures (exit 2) still end with the plain `paksmith: error:` line
+(argument errors print clap's usage text instead); exit-1 completions keep stderr
+pure JSON, with failure detail in the stdout summary. Independent of `--format`,
+which governs the stdout payload. The JSON shape is
 a versioned envelope shared with `search`:
 
 ```json
@@ -138,7 +143,7 @@ collapse is silent), and so does the GUI selector's loader, independent of
 `fetch.profile_count` comparison described below. (The selector globals
 `--game`/`--detect`/`--aes-key` are not used by `profile` subcommands,
 though `--aes-key` is still validated before dispatch; `--format`,
-`--verbose` and `--quiet` apply there as everywhere.)
+`--verbose`, `--quiet` and `--log-json` apply there as everywhere.)
 
 Each read surface carries its own `schema_version` — no two return the same
 document — and the four mutations share one, because they share one shape:

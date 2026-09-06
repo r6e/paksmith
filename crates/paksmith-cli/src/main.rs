@@ -61,6 +61,15 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    /// Emit log records as line-delimited JSON on stderr instead of the
+    /// human-readable format, and suppress advisory `note:` lines (which
+    /// would corrupt the JSON stream). Orthogonal to `--format`, which
+    /// governs the command's stdout payload; this governs diagnostics.
+    // #666; clap renders the doc comment above into --help, so the issue
+    // ref lives here (the #712 convention: no maintainer refs in help text).
+    #[arg(long, global = true)]
+    log_json: bool,
+
     /// Quiet mode: error-level logging only, and no advisory notes
     /// (e.g. the piped-auto "emitting JSON" note). Errors still print.
     /// If `RUST_LOG` is set, it takes precedence (same contract as
@@ -110,13 +119,17 @@ fn main() -> ExitCode {
         })
     });
 
-    // `try_init` instead of `init` so a host that has already wired up a
-    // global subscriber (e.g. a future embed-paksmith-as-a-library scenario)
-    // doesn't panic during CLI startup.
-    let _ = tracing_subscriber::fmt()
+    // `try_init`, not `init`: a host that already installed a global
+    // subscriber must not panic CLI startup.
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
+        .with_writer(std::io::stderr);
+    if cli.log_json {
+        let _ = builder.json().try_init();
+    } else {
+        let _ = builder.try_init();
+    }
+    output::set_log_json(cli.log_json);
 
     let result = cli
         .aes_key
