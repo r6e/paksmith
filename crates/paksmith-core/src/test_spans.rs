@@ -178,8 +178,13 @@ impl Visit for FieldCollector {
 }
 
 impl tracing::Subscriber for SpanRecorder {
-    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
-        true
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        // Spans only: saying yes to everything would have the operation's
+        // `warn!`/`debug!` events construct their fields just to reach the
+        // no-op `event()` below. Interest-cache safety is unaffected — a
+        // combined `never`(events, here) + `always`(elsewhere) computes to
+        // `sometimes`, which re-checks per thread against its own default.
+        metadata.is_span()
     }
 
     fn new_span(&self, attrs: &Attributes<'_>) -> Id {
