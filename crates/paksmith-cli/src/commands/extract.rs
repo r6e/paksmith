@@ -114,7 +114,11 @@ pub(crate) fn run(
     // output) so non-interactive callers get clean stderr without ANSI
     // escape sequences. --quiet hides it even on a TTY: the bar is
     // advisory chatter (#652). One bar spans every archive.
-    let target = if show_progress(std::io::stderr().is_terminal(), quiet) {
+    let target = if show_progress(
+        std::io::stderr().is_terminal(),
+        quiet,
+        crate::output::log_json(),
+    ) {
         indicatif::ProgressDrawTarget::stderr()
     } else {
         indicatif::ProgressDrawTarget::hidden()
@@ -270,12 +274,12 @@ fn winning_entries(entry_lists: &[Vec<String>]) -> Vec<Vec<String>> {
 }
 
 /// Whether the extract progress bar draws: stderr must be a real TTY
-/// (piped/CI stderr stays clean) AND `--quiet` must be off (the bar is
-/// advisory chatter). Pure, like `styling_enabled`/`resolve_with_tty`
-/// and for the same reason: a black-box test's captured stderr is never
-/// a TTY, so the `quiet` leg of this decision is observable only here.
-fn show_progress(stderr_is_tty: bool, quiet: bool) -> bool {
-    stderr_is_tty && !quiet
+/// (piped/CI stderr stays clean), `--quiet` must be off (advisory
+/// chatter), and `--log-json` must be off (bar redraws would interleave
+/// with the JSON records on a pty). Pure because a black-box test's
+/// captured stderr is never a TTY; the truth table lives below.
+fn show_progress(stderr_is_tty: bool, quiet: bool, log_json: bool) -> bool {
+    stderr_is_tty && !quiet && !log_json
 }
 
 #[cfg(test)]
@@ -314,14 +318,23 @@ mod winner_tests {
 mod progress_tests {
     use super::show_progress;
 
-    /// All four quadrants — the `quiet` leg cannot be seen by any
-    /// integration test (captured stderr is never a TTY), so the full
-    /// truth table lives here.
+    /// No integration test can see these legs (captured stderr is never
+    /// a TTY), so the full truth table lives here.
     #[test]
     fn show_progress_truth_table() {
-        assert!(show_progress(true, false), "TTY, loud → bar");
-        assert!(!show_progress(true, true), "TTY, quiet → hidden");
-        assert!(!show_progress(false, false), "piped, loud → hidden");
-        assert!(!show_progress(false, true), "piped, quiet → hidden");
+        assert!(show_progress(true, false, false), "TTY, loud → bar");
+        assert!(!show_progress(true, true, false), "TTY, quiet → hidden");
+        assert!(
+            !show_progress(true, false, true),
+            "TTY, --log-json → hidden (redraws would corrupt the records)"
+        );
+        assert!(!show_progress(false, false, false), "piped, loud → hidden");
+        assert!(!show_progress(false, true, false), "piped, quiet → hidden");
+        assert!(
+            !show_progress(false, false, true),
+            "piped, --log-json → hidden"
+        );
+        assert!(!show_progress(false, true, true), "piped, both → hidden");
+        assert!(!show_progress(true, true, true), "TTY, both → hidden");
     }
 }

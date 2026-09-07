@@ -43,15 +43,25 @@ pub(crate) enum ResolvedFormat {
     Table,
 }
 
-/// Emit an advisory `note:` line to stderr unless `--quiet`.
-///
-/// The single guarded site for the flag's "no advisory notes" half — every
-/// advisory note must route through here, or the contract depends on
-/// remembering an `if !quiet` at each new call site.
+/// Emit an advisory `note:` line to stderr unless `--quiet` or `--log-json`
+/// (a bare line would corrupt the JSON stream). Every advisory note must
+/// route through this single guarded site.
 pub(crate) fn note(quiet: bool, msg: &str) {
-    if !quiet {
+    if !quiet && !log_json() {
         eprintln!("note: {msg}");
     }
+}
+
+static LOG_JSON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record `--log-json` for [`note`]'s suppression. Set once in `main`.
+pub(crate) fn set_log_json(active: bool) {
+    LOG_JSON.store(active, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether `--log-json` is active.
+pub(crate) fn log_json() -> bool {
+    LOG_JSON.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Emit a one-line stderr note when `--format auto` silently resolved to JSON
