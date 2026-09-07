@@ -6337,4 +6337,111 @@ mod tests {
             "verify() must report the main index as verified (non-default stats)"
         );
     }
+
+    /// SPEC.md round-trip properties: compress→decompress and
+    /// encrypt→decrypt against arbitrary payloads, driven through the
+    /// production read path (`from_reader_with_key`/`from_bytes` →
+    /// `read_entry_to`). Test-side encryption uses the in-source
+    /// `aes256_ecb_encrypt` helper, so these stay IN-SOURCE like
+    /// `reads_encrypted_lz4_entry_round_trips`.
+    #[cfg(feature = "__test_utils")]
+    mod codec_round_trip_props {
+        use std::io::Write as _;
+
+        use proptest::prelude::*;
+
+        use super::*;
+        use crate::testing::wire::{LZ4_SYNTH_PATH, build_v8b_lz4_pak, pak_entry_wire_size};
+
+        fn zlib_compress(data: &[u8]) -> Vec<u8> {
+            let mut enc =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(data).expect("in-memory zlib write");
+            enc.finish().expect("in-memory zlib finish")
+        }
+
+        /// Encrypt `compressed` (zero-padded to the AES footprint), wrap it
+        /// in a single-block v8b entry, and read it back through the full
+        /// decrypt-then-decompress path.
+        fn encrypted_single_block_read_back(
+            method: &str,
+            compressed: &[u8],
+            uncompressed_size: u64,
+            block_size: u32,
+        ) -> Vec<u8> {
+            let mut payload = compressed.to_vec();
+            payload.resize(payload.len().next_multiple_of(16), 0);
+            let key = AesKey::new(FIXTURE_AES_KEY);
+            crypto::aes256_ecb_encrypt(&key, &mut payload).expect("encrypt aligned payload");
+
+            let payload_start = pak_entry_wire_size(1);
+            let blocks = [(payload_start, payload_start + compressed.len() as u64)];
+            let pak = super::build_v8b_encrypted_single_entry(
+                1,
+                method,
+                &payload,
+                payload.len() as u64,
+                uncompressed_size,
+                &blocks,
+                block_size,
+            );
+            let reader = PakReader::from_reader_with_key(std::io::Cursor::new(pak), key)
+                .expect("open synthetic encrypted v8b pak");
+            let mut out = Vec::new();
+            let written = reader
+                .read_entry_to("Content/x.uasset", &mut out)
+                .expect("encrypted entry must decrypt-then-decompress");
+            assert_eq!(written, uncompressed_size);
+            out
+        }
+
+        proptest! {
+            #[test]
+            fn encrypted_zlib_entry_round_trips(
+                plaintext in prop::collection::vec(any::<u8>(), 1..2048),
+            ) {
+                let compressed = zlib_compress(&plaintext);
+                let out = encrypted_single_block_read_back(
+                    "Zlib",
+                    &compressed,
+                    plaintext.len() as u64,
+                    plaintext.len() as u32,
+                );
+                prop_assert_eq!(out, plaintext);
+            }
+
+            #[test]
+            fn encrypted_lz4_entry_round_trips(
+                plaintext in prop::collection::vec(any::<u8>(), 1..2048),
+            ) {
+                let compressed = lz4_flex::block::compress(&plaintext);
+                let out = encrypted_single_block_read_back(
+                    "LZ4",
+                    &compressed,
+                    plaintext.len() as u64,
+                    plaintext.len() as u32,
+                );
+                prop_assert_eq!(out, plaintext);
+            }
+
+            #[test]
+            fn lz4_multi_block_round_trips(
+                plaintext in prop::collection::vec(any::<u8>(), 1..4096),
+                block_size in 32u32..512,
+            ) {
+                let streams: Vec<Vec<u8>> = plaintext
+                    .chunks(block_size as usize)
+                    .map(lz4_flex::block::compress)
+                    .collect();
+                let pak = build_v8b_lz4_pak(&streams, plaintext.len() as u64, block_size);
+                let reader = PakReader::from_bytes(pak).expect("synthetic multi-block v8b pak parses");
+                let mut out = Vec::new();
+                let written = reader
+                    .read_entry_to(LZ4_SYNTH_PATH, &mut out)
+                    .expect("multi-block lz4 round-trip must succeed");
+                prop_assert_eq!(written, plaintext.len() as u64);
+                prop_assert_eq!(out, plaintext);
+            }
+        }
+    }
 }

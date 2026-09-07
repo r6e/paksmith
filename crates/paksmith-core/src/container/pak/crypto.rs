@@ -267,4 +267,33 @@ mod tests {
             "message names the expected length: {e}"
         );
     }
+
+    #[cfg(feature = "__test_utils")]
+    mod round_trip_props {
+        use proptest::prelude::*;
+
+        use super::super::{AesKey, aes256_ecb_decrypt, aes256_ecb_encrypt};
+
+        proptest! {
+            /// `decrypt(encrypt(x)) == x` for arbitrary keys and any
+            /// 16-aligned length, and encryption is never the identity
+            /// on non-empty input (kills a symmetric no-op pair the
+            /// round-trip equality alone would accept).
+            #[test]
+            fn encrypt_then_decrypt_round_trips(
+                key in any::<[u8; 32]>(),
+                blocks in prop::collection::vec(any::<[u8; 16]>(), 0..8),
+            ) {
+                let key = AesKey::new(key);
+                let plain: Vec<u8> = blocks.concat();
+                let mut data = plain.clone();
+                aes256_ecb_encrypt(&key, &mut data).unwrap();
+                if !plain.is_empty() {
+                    prop_assert_ne!(&data, &plain, "encrypt must not be the identity");
+                }
+                aes256_ecb_decrypt(&key, &mut data).unwrap();
+                prop_assert_eq!(data, plain);
+            }
+        }
+    }
 }
