@@ -5563,50 +5563,59 @@ mod tests {
         );
     }
 
-    /// #634 (R7 architect finding 2): a single-block encrypted + LZ4 entry
-    /// round-trips through the full decrypt-then-decompress read path. This is
-    /// the only end-to-end coverage of encrypted+LZ4 (every vendored fixture is
-    /// zlib), and LZ4 is in the #634 acceptance criteria. IN-SOURCE because
-    /// `paksmith-core-tests` has no `aes` dev-dep to synthesize the ciphertext.
-    /// No multi-block / #688 wire-convention dependency: a single block's
-    /// `(start, end)` are read verbatim off the wire.
+    /// Encrypt `compressed` (zero-padded to the AES footprint), wrap it in
+    /// a single-block v8b entry, and read it back through the full
+    /// decrypt-then-decompress path, asserting the written size. For an
+    /// encrypted entry `compressed_size` is the 16-aligned footprint while
+    /// the block spans the UNALIGNED compressed bytes (repak/CUE4Parse:
+    /// block end = start + unaligned length; the cursor advances by the
+    /// aligned length). No multi-block / #688 wire-convention dependency: a
+    /// single block's `(start, end)` are read verbatim off the wire.
     #[cfg(feature = "__test_utils")]
-    #[test]
-    fn reads_encrypted_lz4_entry_round_trips() {
-        let plaintext: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
-        let lz4 = lz4_flex::block::compress(&plaintext);
-        let lz4_len = lz4.len() as u64;
-
-        // On-disk payload = AES-encrypt(lz4 bytes, zero-padded to 16). For an
-        // encrypted entry `compressed_size` is the 16-aligned footprint, while
-        // the block spans the UNALIGNED lz4 bytes (repak/CUE4Parse: block end =
-        // start + unaligned length; the cursor advances by the aligned length).
-        let mut payload = lz4.clone();
-        payload.resize(lz4.len().next_multiple_of(16), 0);
+    fn encrypted_single_block_read_back(
+        method: &str,
+        compressed: &[u8],
+        plaintext_len: usize,
+    ) -> Vec<u8> {
+        let uncompressed_size = plaintext_len as u64;
+        let block_size = u32::try_from(plaintext_len).expect("plaintext len fits u32");
+        let mut payload = compressed.to_vec();
+        payload.resize(payload.len().next_multiple_of(16), 0);
         let key = AesKey::new(FIXTURE_AES_KEY);
-        crypto::aes256_ecb_encrypt(&key, &mut payload).expect("encrypt 16-aligned payload");
+        crypto::aes256_ecb_encrypt(&key, &mut payload).expect("encrypt aligned payload");
 
         let payload_start = crate::testing::wire::pak_entry_wire_size(1);
-        let blocks = [(payload_start, payload_start + lz4_len)];
-        let uncompressed_size = plaintext.len() as u64;
-        let block_size = u32::try_from(plaintext.len()).expect("300 fits u32");
+        let blocks = [(payload_start, payload_start + compressed.len() as u64)];
         let pak = build_v8b_encrypted_single_entry(
             1,
-            "LZ4",
+            method,
             &payload,
             payload.len() as u64,
             uncompressed_size,
             &blocks,
             block_size,
         );
-
         let reader = PakReader::from_reader_with_key(std::io::Cursor::new(pak), key)
-            .expect("open v8b (plaintext index) with key");
+            .expect("open synthetic encrypted v8b pak");
         let mut out = Vec::new();
         let written = reader
             .read_entry_to("Content/x.uasset", &mut out)
-            .expect("encrypted+LZ4 entry must decrypt-then-decompress");
-        assert_eq!(written, plaintext.len() as u64);
+            .expect("encrypted entry must decrypt-then-decompress");
+        assert_eq!(written, uncompressed_size);
+        out
+    }
+
+    /// #634 (R7 architect finding 2): deterministic single-block
+    /// encrypted+LZ4 anchor (every vendored fixture is zlib; the
+    /// `codec_round_trip_props` property generalizes it over arbitrary
+    /// payloads). IN-SOURCE because `paksmith-core-tests` has no `aes`
+    /// dev-dep to synthesize the ciphertext.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn reads_encrypted_lz4_entry_round_trips() {
+        let plaintext: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+        let lz4 = lz4_flex::block::compress(&plaintext);
+        let out = encrypted_single_block_read_back("LZ4", &lz4, plaintext.len());
         assert_eq!(out, plaintext, "encrypted+LZ4 decode must be byte-exact");
     }
 
@@ -6349,49 +6358,13 @@ mod tests {
         use proptest::prelude::*;
 
         use super::*;
-        use crate::testing::wire::{LZ4_SYNTH_PATH, build_v8b_lz4_pak, pak_entry_wire_size};
+        use crate::testing::wire::{LZ4_SYNTH_PATH, build_v8b_lz4_pak};
 
         fn zlib_compress(data: &[u8]) -> Vec<u8> {
             let mut enc =
                 flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
             enc.write_all(data).expect("in-memory zlib write");
             enc.finish().expect("in-memory zlib finish")
-        }
-
-        /// Encrypt `compressed` (zero-padded to the AES footprint), wrap it
-        /// in a single-block v8b entry, and read it back through the full
-        /// decrypt-then-decompress path.
-        fn encrypted_single_block_read_back(
-            method: &str,
-            compressed: &[u8],
-            plaintext_len: usize,
-        ) -> Vec<u8> {
-            let uncompressed_size = plaintext_len as u64;
-            let block_size = u32::try_from(plaintext_len).expect("payload len < 2048");
-            let mut payload = compressed.to_vec();
-            payload.resize(payload.len().next_multiple_of(16), 0);
-            let key = AesKey::new(FIXTURE_AES_KEY);
-            crypto::aes256_ecb_encrypt(&key, &mut payload).expect("encrypt aligned payload");
-
-            let payload_start = pak_entry_wire_size(1);
-            let blocks = [(payload_start, payload_start + compressed.len() as u64)];
-            let pak = super::build_v8b_encrypted_single_entry(
-                1,
-                method,
-                &payload,
-                payload.len() as u64,
-                uncompressed_size,
-                &blocks,
-                block_size,
-            );
-            let reader = PakReader::from_reader_with_key(std::io::Cursor::new(pak), key)
-                .expect("open synthetic encrypted v8b pak");
-            let mut out = Vec::new();
-            let written = reader
-                .read_entry_to("Content/x.uasset", &mut out)
-                .expect("encrypted entry must decrypt-then-decompress");
-            assert_eq!(written, uncompressed_size);
-            out
         }
 
         proptest! {
