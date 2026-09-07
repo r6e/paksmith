@@ -336,14 +336,14 @@ jobs:
       # never silently join the core number. The measured figure
       # includes in-source #[cfg(test)] lines (llvm-cov cannot exclude
       # them, and they are covered by construction — ~53% of core src),
-      # so the floor is set in measured space: 90 corresponds to
-      # roughly 79% production-line coverage. Measured 96.30% when
-      # added.
+      # so the floor is set in measured space: 91 = ceil(0.53 + 0.47 *
+      # 0.80), the SPEC target re-derived through that padding. Measured
+      # 96.30% when added.
       - name: Enforce core coverage floor (lines)
         shell: bash
         run: |
           ignore="crates/($(ls crates | grep -vx paksmith-core | paste -sd'|' -))/"
-          cargo llvm-cov report --fail-under-lines 90 --ignore-filename-regex "$ignore"
+          cargo llvm-cov report --fail-under-lines 91 --ignore-filename-regex "$ignore"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-report
