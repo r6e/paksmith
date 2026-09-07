@@ -4449,6 +4449,26 @@ mod tests {
     // includes the bare default-members `cargo test`. CI's guard is
     // therefore `-p paksmith-core`-scoped (#636 R8/R9).
 
+    /// Chunk `plaintext` into `block_size` blocks, LZ4-compress each,
+    /// and read the assembled entry back through the production path,
+    /// asserting the written size.
+    #[cfg(feature = "__test_utils")]
+    fn multi_block_lz4_read_back(plaintext: &[u8], block_size: u32) -> Vec<u8> {
+        let streams: Vec<Vec<u8>> = plaintext
+            .chunks(block_size as usize)
+            .map(lz4_flex::block::compress)
+            .collect();
+        let pak =
+            crate::testing::wire::build_v8b_lz4_pak(&streams, plaintext.len() as u64, block_size);
+        let reader = PakReader::from_bytes(pak).expect("synthetic multi-block v8b pak parses");
+        let mut out = Vec::new();
+        let written = reader
+            .read_entry_to(crate::testing::wire::LZ4_SYNTH_PATH, &mut out)
+            .expect("multi-block lz4 round-trip must succeed");
+        assert_eq!(written, plaintext.len() as u64);
+        out
+    }
+
     /// A valid multi-block LZ4 entry (two full non-final blocks that
     /// each inflate to EXACTLY `compression_block_size`, plus a short
     /// final block) must round-trip byte-exact. Pins the non-final
@@ -4460,19 +4480,12 @@ mod tests {
     fn read_lz4_entry_multi_block_round_trips() {
         let block_size = 128u32;
         let payload: Vec<u8> = (0..296u32).map(|i| (i % 251) as u8).collect();
-        let streams: Vec<Vec<u8>> = payload
-            .chunks(block_size as usize)
-            .map(lz4_flex::block::compress)
-            .collect();
-        assert_eq!(streams.len(), 3, "fixture invariant: 2 full + 1 remainder");
-        let pak =
-            crate::testing::wire::build_v8b_lz4_pak(&streams, payload.len() as u64, block_size);
-        let reader = PakReader::from_bytes(pak).expect("synthetic multi-block v8b pak parses");
-        let mut out = Vec::new();
-        let written = reader
-            .read_entry_to(crate::testing::wire::LZ4_SYNTH_PATH, &mut out)
-            .expect("multi-block lz4 round-trip must succeed");
-        assert_eq!(written, payload.len() as u64);
+        assert_eq!(
+            payload.chunks(block_size as usize).count(),
+            3,
+            "fixture invariant: 2 full + 1 remainder"
+        );
+        let out = multi_block_lz4_read_back(&payload, block_size);
         assert_eq!(out, payload, "multi-block decode must be byte-exact");
     }
 
@@ -6350,15 +6363,15 @@ mod tests {
     /// SPEC.md round-trip properties: compress→decompress and
     /// encrypt→decrypt against arbitrary payloads, driven through the
     /// production read path (`from_reader_with_key`/`from_bytes` →
-    /// `read_entry_to`). Test-side encryption uses the in-source
-    /// `aes256_ecb_encrypt` helper, so these stay IN-SOURCE like
-    /// `reads_encrypted_lz4_entry_round_trips`.
+    /// `read_entry_to`). IN-SOURCE so they share the assembly drivers
+    /// with their deterministic anchors; the encrypted pair could not
+    /// live elsewhere regardless, since `aes256_ecb_encrypt` is
+    /// `pub(crate)` under `cfg(test)`.
     #[cfg(feature = "__test_utils")]
     mod codec_round_trip_props {
         use proptest::prelude::*;
 
         use super::*;
-        use crate::testing::wire::{LZ4_SYNTH_PATH, build_v8b_lz4_pak};
 
         fn zlib_compress(data: &[u8]) -> Vec<u8> {
             let mut enc =
@@ -6376,23 +6389,6 @@ mod tests {
                 prop::collection::vec(any::<u8>(), 1..max),
                 prop::collection::vec(0u8..4, 1..max),
             ]
-        }
-
-        /// Chunk `plaintext` into `block_size` blocks, LZ4-compress each,
-        /// and read the assembled entry back through the production path.
-        fn multi_block_lz4_read_back(plaintext: &[u8], block_size: u32) -> Vec<u8> {
-            let streams: Vec<Vec<u8>> = plaintext
-                .chunks(block_size as usize)
-                .map(lz4_flex::block::compress)
-                .collect();
-            let pak = build_v8b_lz4_pak(&streams, plaintext.len() as u64, block_size);
-            let reader = PakReader::from_bytes(pak).expect("synthetic multi-block v8b pak parses");
-            let mut out = Vec::new();
-            let written = reader
-                .read_entry_to(LZ4_SYNTH_PATH, &mut out)
-                .expect("multi-block lz4 round-trip must succeed");
-            assert_eq!(written, plaintext.len() as u64);
-            out
         }
 
         proptest! {
