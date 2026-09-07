@@ -213,6 +213,10 @@ fn read_entries(
     version: u32,
 ) {
     let entry_size = entry_wire_size(version);
+    debug_assert!(
+        count.saturating_mul(entry_size) <= bytes.len().saturating_sub(entries_start),
+        "read_entries called outside its in-bounds contract"
+    );
     let mut pos = entries_start;
     #[expect(
         clippy::expect_used,
