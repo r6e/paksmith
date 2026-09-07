@@ -88,10 +88,6 @@ impl KeyGuid {
     /// Does not panic in practice. The two `.expect()` calls inside are
     /// unreachable: `from_utf8` is called on a 2-byte slice already validated
     /// as ASCII hex digits, and `from_str_radix` is called on that same pair.
-    #[expect(
-        clippy::expect_used,
-        reason = "pairs validated as ASCII hex before parsing"
-    )]
     pub fn from_hex(s: &str) -> Result<Self, KeyGuidHexError> {
         let s = s
             .strip_prefix("0x")
@@ -105,11 +101,16 @@ impl KeyGuid {
             if !chunk[0].is_ascii_hexdigit() || !chunk[1].is_ascii_hexdigit() {
                 return Err(KeyGuidHexError::NonHex);
             }
-            bytes[i] = u8::from_str_radix(
+            #[expect(
+                clippy::expect_used,
+                reason = "pair validated as ASCII hex immediately above"
+            )]
+            let byte = u8::from_str_radix(
                 std::str::from_utf8(chunk).expect("ascii-validated above"),
                 16,
             )
             .expect("ascii-hex pair always parses");
+            bytes[i] = byte;
         }
         Ok(Self(bytes))
     }
