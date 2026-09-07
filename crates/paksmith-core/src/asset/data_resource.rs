@@ -215,19 +215,21 @@ fn read_entries(
     mut entries: Vec<FObjectDataResource>,
     version: u32,
 ) -> Vec<FObjectDataResource> {
-    #[expect(
-        clippy::expect_used,
-        reason = "fixed-width subslice of a chunk sized to entry_wire_size"
-    )]
     let word_at = |e: &[u8], p: usize| -> u32 {
-        u32::from_le_bytes(e[p..p + 4].try_into().expect("in-bounds"))
+        #[expect(
+            clippy::expect_used,
+            reason = "fixed-width subslice of a chunk sized to entry_wire_size"
+        )]
+        let raw: [u8; 4] = e[p..p + 4].try_into().expect("in-bounds");
+        u32::from_le_bytes(raw)
     };
-    #[expect(
-        clippy::expect_used,
-        reason = "fixed-width subslice of a chunk sized to entry_wire_size"
-    )]
     let quad_at = |e: &[u8], p: usize| -> i64 {
-        i64::from_le_bytes(e[p..p + 8].try_into().expect("in-bounds"))
+        #[expect(
+            clippy::expect_used,
+            reason = "fixed-width subslice of a chunk sized to entry_wire_size"
+        )]
+        let raw: [u8; 8] = e[p..p + 8].try_into().expect("in-bounds");
+        i64::from_le_bytes(raw)
     };
     for entry in table.chunks_exact(entry_wire_size(version)) {
         let flags = word_at(entry, 0);
