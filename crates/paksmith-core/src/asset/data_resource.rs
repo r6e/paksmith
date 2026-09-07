@@ -197,29 +197,22 @@ pub(crate) fn parse_data_resource_table(
         asset_path,
         crate::seams::AssetSeam::DataResourceTable,
     )?;
-    read_entries(
-        bytes,
-        &mut entries,
-        entries_start,
-        count,
-        entry_size,
-        version,
-    );
+    read_entries(bytes, &mut entries, entries_start, count, version);
     Ok(entries)
 }
 
-/// Decode `count` entries of `entry_size` bytes starting at
-/// `entries_start`, pushing into the pre-reserved `entries`. In-bounds
-/// contract: the caller has verified `count * entry_size <= bytes.len()
-/// - entries_start`.
+/// Decode `count` entries starting at `entries_start`, pushing into
+/// the pre-reserved `entries`. In-bounds contract: the caller has
+/// verified `count * entry_wire_size(version) <= bytes.len() -
+/// entries_start`.
 fn read_entries(
     bytes: &[u8],
     entries: &mut Vec<FObjectDataResource>,
     entries_start: usize,
     count: usize,
-    entry_size: usize,
     version: u32,
 ) {
+    let entry_size = entry_wire_size(version);
     let mut pos = entries_start;
     #[expect(
         clippy::expect_used,
@@ -234,8 +227,8 @@ fn read_entries(
     let quad_at =
         |p: usize| -> i64 { i64::from_le_bytes(bytes[p..p + 8].try_into().expect("in-bounds")) };
     for _ in 0..count {
-        // In-bounds: `needed <= remaining` was checked above, and `pos`
-        // advances by exactly `entry_size` per iteration.
+        // In-bounds per the fn contract; `pos` advances by exactly
+        // `entry_size` per iteration.
         let flags = word_at(pos);
         let mut p = pos + 4;
         let cooked_index = if version >= 2 {
@@ -251,7 +244,7 @@ fn read_entries(
         let raw_size = quad_at(p + 24);
         #[expect(
             clippy::expect_used,
-            reason = "fixed-width subslice; `needed <= remaining` checked above"
+            reason = "fixed-width subslice; callers stay inside the checked entry span"
         )]
         let outer_index = i32::from_le_bytes(bytes[p + 32..p + 36].try_into().expect("in-bounds"));
         let legacy_bulk_data_flags = word_at(p + 36);
