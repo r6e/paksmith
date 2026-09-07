@@ -6367,20 +6367,44 @@ mod tests {
             enc.finish().expect("in-memory zlib finish")
         }
 
+        /// Payloads spanning both compressibility regimes. Uniform bytes
+        /// alone never compress — every codec call would emit a stream at
+        /// least as large as its input, leaving match emission and the
+        /// expansion-ratio cap unexercised.
+        fn payload(max: usize) -> impl Strategy<Value = Vec<u8>> {
+            prop_oneof![
+                prop::collection::vec(any::<u8>(), 1..max),
+                prop::collection::vec(0u8..4, 1..max),
+            ]
+        }
+
+        /// Chunk `plaintext` into `block_size` blocks, LZ4-compress each,
+        /// and read the assembled entry back through the production path.
+        fn multi_block_lz4_read_back(plaintext: &[u8], block_size: u32) -> Vec<u8> {
+            let streams: Vec<Vec<u8>> = plaintext
+                .chunks(block_size as usize)
+                .map(lz4_flex::block::compress)
+                .collect();
+            let pak = build_v8b_lz4_pak(&streams, plaintext.len() as u64, block_size);
+            let reader = PakReader::from_bytes(pak).expect("synthetic multi-block v8b pak parses");
+            let mut out = Vec::new();
+            let written = reader
+                .read_entry_to(LZ4_SYNTH_PATH, &mut out)
+                .expect("multi-block lz4 round-trip must succeed");
+            assert_eq!(written, plaintext.len() as u64);
+            out
+        }
+
         proptest! {
             #[test]
-            fn encrypted_zlib_entry_round_trips(
-                plaintext in prop::collection::vec(any::<u8>(), 1..2048),
-            ) {
+            fn encrypted_zlib_entry_round_trips(plaintext in payload(2048)) {
                 let compressed = zlib_compress(&plaintext);
                 let out = encrypted_single_block_read_back("Zlib", &compressed, plaintext.len());
                 prop_assert_eq!(out, plaintext);
             }
 
             #[test]
-            fn encrypted_lz4_entry_round_trips(
-                plaintext in prop::collection::vec(any::<u8>(), 1..2048),
-            ) {
+            fn encrypted_lz4_entry_round_trips(plaintext in payload(2048)) {
                 let compressed = lz4_flex::block::compress(&plaintext);
                 let out = encrypted_single_block_read_back("LZ4", &compressed, plaintext.len());
                 prop_assert_eq!(out, plaintext);
@@ -6388,20 +6412,10 @@ mod tests {
 
             #[test]
             fn lz4_multi_block_round_trips(
-                plaintext in prop::collection::vec(any::<u8>(), 1..4096),
+                plaintext in payload(4096),
                 block_size in 32u32..512,
             ) {
-                let streams: Vec<Vec<u8>> = plaintext
-                    .chunks(block_size as usize)
-                    .map(lz4_flex::block::compress)
-                    .collect();
-                let pak = build_v8b_lz4_pak(&streams, plaintext.len() as u64, block_size);
-                let reader = PakReader::from_bytes(pak).expect("synthetic multi-block v8b pak parses");
-                let mut out = Vec::new();
-                let written = reader
-                    .read_entry_to(LZ4_SYNTH_PATH, &mut out)
-                    .expect("multi-block lz4 round-trip must succeed");
-                prop_assert_eq!(written, plaintext.len() as u64);
+                let out = multi_block_lz4_read_back(&plaintext, block_size);
                 prop_assert_eq!(out, plaintext);
             }
         }
