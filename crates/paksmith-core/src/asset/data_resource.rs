@@ -197,61 +197,58 @@ pub(crate) fn parse_data_resource_table(
         asset_path,
         crate::seams::AssetSeam::DataResourceTable,
     )?;
-    read_entries(bytes, &mut entries, entries_start, count, version);
-    Ok(entries)
+    // Hand the decoder exactly the bytes the bounds check above proved
+    // present, so it cannot read outside them.
+    let span = usize::try_from(needed).map_err(|_| eof())?;
+    let table = bytes
+        .get(entries_start..entries_start.checked_add(span).ok_or_else(eof)?)
+        .ok_or_else(eof)?;
+    Ok(read_entries(table, entries, version))
 }
 
-/// Decode `count` entries starting at `entries_start`, pushing into
-/// the pre-reserved `entries`. In-bounds contract: the caller has
-/// verified `count * entry_wire_size(version) <= bytes.len() -
-/// entries_start`.
+/// Decode the records packed in `table`, appending to the pre-reserved
+/// `entries`. Every read is bounded by a chunk sized to
+/// `entry_wire_size(version)`, so the record count and the in-bounds
+/// property both follow from the slice the caller passes.
 fn read_entries(
-    bytes: &[u8],
-    entries: &mut Vec<FObjectDataResource>,
-    entries_start: usize,
-    count: usize,
+    table: &[u8],
+    mut entries: Vec<FObjectDataResource>,
     version: u32,
-) {
-    let entry_size = entry_wire_size(version);
-    debug_assert!(
-        count.saturating_mul(entry_size) <= bytes.len().saturating_sub(entries_start),
-        "read_entries called outside its in-bounds contract"
-    );
-    let mut pos = entries_start;
+) -> Vec<FObjectDataResource> {
     #[expect(
         clippy::expect_used,
-        reason = "fixed-width subslice; callers stay inside the checked entry span"
+        reason = "fixed-width subslice of a chunk sized to entry_wire_size"
     )]
-    let word_at =
-        |p: usize| -> u32 { u32::from_le_bytes(bytes[p..p + 4].try_into().expect("in-bounds")) };
+    let word_at = |e: &[u8], p: usize| -> u32 {
+        u32::from_le_bytes(e[p..p + 4].try_into().expect("in-bounds"))
+    };
     #[expect(
         clippy::expect_used,
-        reason = "fixed-width subslice; callers stay inside the checked entry span"
+        reason = "fixed-width subslice of a chunk sized to entry_wire_size"
     )]
-    let quad_at =
-        |p: usize| -> i64 { i64::from_le_bytes(bytes[p..p + 8].try_into().expect("in-bounds")) };
-    for _ in 0..count {
-        // In-bounds per the fn contract; `pos` advances by exactly
-        // `entry_size` per iteration.
-        let flags = word_at(pos);
-        let mut p = pos + 4;
+    let quad_at = |e: &[u8], p: usize| -> i64 {
+        i64::from_le_bytes(e[p..p + 8].try_into().expect("in-bounds"))
+    };
+    for entry in table.chunks_exact(entry_wire_size(version)) {
+        let flags = word_at(entry, 0);
+        let mut p = 4;
         let cooked_index = if version >= 2 {
-            let b = bytes[p];
+            let b = entry[p];
             p += 1;
             b
         } else {
             0
         };
-        let serial_offset = quad_at(p);
-        let duplicate_serial_offset = quad_at(p + 8);
-        let serial_size = quad_at(p + 16);
-        let raw_size = quad_at(p + 24);
+        let serial_offset = quad_at(entry, p);
+        let duplicate_serial_offset = quad_at(entry, p + 8);
+        let serial_size = quad_at(entry, p + 16);
+        let raw_size = quad_at(entry, p + 24);
         #[expect(
             clippy::expect_used,
-            reason = "fixed-width subslice; callers stay inside the checked entry span"
+            reason = "fixed-width subslice of a chunk sized to entry_wire_size"
         )]
-        let outer_index = i32::from_le_bytes(bytes[p + 32..p + 36].try_into().expect("in-bounds"));
-        let legacy_bulk_data_flags = word_at(p + 36);
+        let outer_index = i32::from_le_bytes(entry[p + 32..p + 36].try_into().expect("in-bounds"));
+        let legacy_bulk_data_flags = word_at(entry, p + 36);
         entries.push(FObjectDataResource {
             flags,
             cooked_index,
@@ -262,8 +259,8 @@ fn read_entries(
             outer_index,
             legacy_bulk_data_flags,
         });
-        pos += entry_size;
     }
+    entries
 }
 
 #[cfg(test)]
