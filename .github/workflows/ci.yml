@@ -330,6 +330,13 @@ jobs:
       # wave of new tests raises the measured number cleanly.
       - name: Enforce coverage floor (lines)
         run: cargo llvm-cov report --fail-under-lines 85
+      # SPEC.md targets 80%+ on paksmith-core specifically; the
+      # workspace floor can mask a core regression padded by the
+      # frontends. Measured 96.30% core-scoped when added.
+      - name: Enforce core coverage floor (lines)
+        run: >-
+          cargo llvm-cov report --fail-under-lines 80
+          --ignore-filename-regex 'crates/(paksmith-cli|paksmith-gui|paksmith-fixture-gen|paksmith-core-tests|paksmith-bench|paksmith-doc-lint)/'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-report
