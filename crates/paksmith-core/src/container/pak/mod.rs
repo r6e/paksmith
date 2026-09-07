@@ -6364,9 +6364,10 @@ mod tests {
         fn encrypted_single_block_read_back(
             method: &str,
             compressed: &[u8],
-            uncompressed_size: u64,
-            block_size: u32,
+            plaintext_len: usize,
         ) -> Vec<u8> {
+            let uncompressed_size = plaintext_len as u64;
+            let block_size = u32::try_from(plaintext_len).expect("payload len < 2048");
             let mut payload = compressed.to_vec();
             payload.resize(payload.len().next_multiple_of(16), 0);
             let key = AesKey::new(FIXTURE_AES_KEY);
@@ -6399,12 +6400,7 @@ mod tests {
                 plaintext in prop::collection::vec(any::<u8>(), 1..2048),
             ) {
                 let compressed = zlib_compress(&plaintext);
-                let out = encrypted_single_block_read_back(
-                    "Zlib",
-                    &compressed,
-                    plaintext.len() as u64,
-                    u32::try_from(plaintext.len()).expect("payload len < 2048"),
-                );
+                let out = encrypted_single_block_read_back("Zlib", &compressed, plaintext.len());
                 prop_assert_eq!(out, plaintext);
             }
 
@@ -6413,12 +6409,7 @@ mod tests {
                 plaintext in prop::collection::vec(any::<u8>(), 1..2048),
             ) {
                 let compressed = lz4_flex::block::compress(&plaintext);
-                let out = encrypted_single_block_read_back(
-                    "LZ4",
-                    &compressed,
-                    plaintext.len() as u64,
-                    u32::try_from(plaintext.len()).expect("payload len < 2048"),
-                );
+                let out = encrypted_single_block_read_back("LZ4", &compressed, plaintext.len());
                 prop_assert_eq!(out, plaintext);
             }
 
