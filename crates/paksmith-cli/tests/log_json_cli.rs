@@ -45,11 +45,14 @@ fn log_json_emits_line_delimited_json_records() {
         "record carries a target for module filtering"
     );
 
-    // Every brace line is one complete JSON document; the `paksmith: error:`
-    // line is the non-tracing reporting path, exempt by contract.
-    for line in stderr.lines().filter(|l| l.starts_with('{')) {
+    // Every non-empty line is one complete JSON document, except the
+    // `paksmith: error:` line — the exit-2 reporting path, exempt by contract.
+    for line in stderr.lines().filter(|l| !l.trim().is_empty()) {
+        if line.starts_with("paksmith: error:") {
+            continue;
+        }
         let _: serde_json::Value = serde_json::from_str(line)
-            .unwrap_or_else(|e| panic!("non-JSON brace line under --log-json: {e}; line={line}"));
+            .unwrap_or_else(|e| panic!("non-JSON stderr line under --log-json: {e}; line={line}"));
     }
     assert!(
         stderr.lines().any(|l| l.starts_with('{')),
