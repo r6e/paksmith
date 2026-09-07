@@ -422,6 +422,10 @@ impl ObjectExport {
     /// populates these under the gate, so a `None` at gate-fire is a
     /// hand-built-struct programmer error.
     #[cfg(any(test, feature = "__test_utils"))]
+    #[expect(
+        clippy::expect_used,
+        reason = "test-only writer; gate-mismatch panic is the documented contract"
+    )]
     pub fn write_to<W: Write>(
         &self,
         writer: &mut W,

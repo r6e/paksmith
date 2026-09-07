@@ -18,6 +18,11 @@
 //! asks reviewers to check it when adding a consumer.
 //!
 
+// Test infrastructure with bounded, self-authored inputs — the crate's
+// no-panic guarantee covers production parsing paths, not fixture
+// builders that panic on their own construction bugs.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 pub mod bench;
 pub mod bulk_data;
 pub mod gltf_fixtures;

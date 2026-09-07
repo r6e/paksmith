@@ -36,6 +36,11 @@
 //! profile management remains planned (Phase 5) per
 //! `docs/plans/ROADMAP.md`.
 
+// No-panic guarantee (see CLAUDE.md): mechanical, not review-only.
+// Test code is exempt via `not(test)`; `testing/` carries a
+// module-level allow for the same reason.
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod asset;
 pub mod container;
 pub mod digest;

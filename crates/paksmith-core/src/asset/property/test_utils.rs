@@ -13,6 +13,10 @@
 //! the rest of `paksmith-core::testing` — the helpers are never
 //! reachable from release builds.
 
+// Test scaffolding with self-authored inputs; the no-panic guarantee
+// covers production parsing paths (see lib.rs).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 
 use crate::asset::{

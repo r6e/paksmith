@@ -312,6 +312,10 @@ pub(crate) fn read_static_mesh_vertex_buffer<R: Read>(
                 let uv = read_uv(reader, asset_path, full_precision_uvs)?;
                 // Store only the real vertices; the padding row is consumed but dropped.
                 if vertex < num {
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "channels below num_tex_coords are initialized above"
+                    )]
                     channel
                         .as_mut()
                         .expect("channel initialized above")

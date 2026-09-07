@@ -6346,8 +6346,6 @@ mod tests {
     /// `reads_encrypted_lz4_entry_round_trips`.
     #[cfg(feature = "__test_utils")]
     mod codec_round_trip_props {
-        use std::io::Write as _;
-
         use proptest::prelude::*;
 
         use super::*;
@@ -6405,7 +6403,7 @@ mod tests {
                     "Zlib",
                     &compressed,
                     plaintext.len() as u64,
-                    plaintext.len() as u32,
+                    u32::try_from(plaintext.len()).expect("payload len < 2048"),
                 );
                 prop_assert_eq!(out, plaintext);
             }
@@ -6419,7 +6417,7 @@ mod tests {
                     "LZ4",
                     &compressed,
                     plaintext.len() as u64,
-                    plaintext.len() as u32,
+                    u32::try_from(plaintext.len()).expect("payload len < 2048"),
                 );
                 prop_assert_eq!(out, plaintext);
             }

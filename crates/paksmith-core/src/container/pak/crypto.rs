@@ -53,6 +53,10 @@ impl AesKey {
     /// unreachable: `from_utf8` is called on a 2-byte slice that has already
     /// been validated to be ASCII hex digits, and `from_str_radix` is called
     /// on that same ASCII-validated hex pair.
+    #[expect(
+        clippy::expect_used,
+        reason = "pairs validated as ASCII hex before parsing"
+    )]
     pub fn from_hex(s: &str) -> Result<Self, AesKeyHexError> {
         let hex = s
             .strip_prefix("0x")
@@ -82,6 +86,7 @@ impl AesKey {
         use std::fmt::Write as _;
         let mut s = String::with_capacity(64);
         for b in self.0 {
+            #[expect(clippy::expect_used, reason = "fmt::Write to String is infallible")]
             write!(s, "{b:02x}").expect("write to String is infallible");
         }
         s

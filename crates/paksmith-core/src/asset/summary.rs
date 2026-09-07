@@ -729,6 +729,10 @@ impl PackageSummary {
     /// Mirrors the analogous `ObjectExport::write_to` precedent for
     /// `script_serialization_{start,end}_offset` at UE5 ≥ 1010.
     #[cfg(any(test, feature = "__test_utils"))]
+    #[expect(
+        clippy::expect_used,
+        reason = "test-only writer; gate-mismatch panic is the documented contract"
+    )]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_u32::<LittleEndian>(PACKAGE_FILE_TAG)?;
         writer.write_i32::<LittleEndian>(self.version.legacy_file_version)?;

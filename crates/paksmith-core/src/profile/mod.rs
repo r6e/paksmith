@@ -74,6 +74,7 @@ impl KeyGuid {
         use std::fmt::Write as _;
         let mut s = String::with_capacity(32);
         for b in self.0 {
+            #[expect(clippy::expect_used, reason = "fmt::Write to String is infallible")]
             write!(s, "{b:02x}").expect("write to String is infallible");
         }
         s
@@ -87,6 +88,10 @@ impl KeyGuid {
     /// Does not panic in practice. The two `.expect()` calls inside are
     /// unreachable: `from_utf8` is called on a 2-byte slice already validated
     /// as ASCII hex digits, and `from_str_radix` is called on that same pair.
+    #[expect(
+        clippy::expect_used,
+        reason = "pairs validated as ASCII hex before parsing"
+    )]
     pub fn from_hex(s: &str) -> Result<Self, KeyGuidHexError> {
         let s = s
             .strip_prefix("0x")

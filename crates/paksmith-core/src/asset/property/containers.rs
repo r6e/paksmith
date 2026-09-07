@@ -305,6 +305,10 @@ fn read_array_value<R: Read + Seek>(
     )?;
 
     for _ in 0..count_usize {
+        #[expect(
+            clippy::expect_used,
+            reason = "inner_type validated by is_handled_element_type before the loop"
+        )]
         let elem = read_element_value(
             &tag.inner_type,
             AssetWireField::ArrayElementBody,
@@ -620,6 +624,10 @@ fn read_struct_value<R: Read + Seek>(
               flag + EOF-diagnostic field + reader/ctx + recursion bounds \
               (depth, expected_end) + asset_path; grouping into a struct \
               would add ceremony without clarifying the call sites"
+)]
+#[expect(
+    clippy::expect_used,
+    reason = "primitive slots are pre-validated by is_handled_element_type"
 )]
 fn read_map_set_slot<R: Read + Seek>(
     type_name: &str,
