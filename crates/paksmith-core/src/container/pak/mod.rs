@@ -5605,7 +5605,7 @@ mod tests {
         out
     }
 
-    /// #634 (R7 architect finding 2): deterministic single-block
+    /// #634: deterministic single-block
     /// encrypted+LZ4 anchor (every vendored fixture is zlib; the
     /// `codec_round_trip_props` property generalizes it over arbitrary
     /// payloads). IN-SOURCE because `paksmith-core-tests` has no `aes`
