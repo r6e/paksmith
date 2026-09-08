@@ -6382,8 +6382,8 @@ mod tests {
 
         /// Payloads spanning both compressibility regimes. Uniform bytes
         /// alone never compress — every codec call would emit a stream at
-        /// least as large as its input, leaving match emission and the
-        /// expansion-ratio cap unexercised.
+        /// least as large as its input, leaving match emission
+        /// unexercised.
         fn payload(max: usize) -> impl Strategy<Value = Vec<u8>> {
             prop_oneof![
                 prop::collection::vec(any::<u8>(), 1..max),
