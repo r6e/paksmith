@@ -598,8 +598,7 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
 
 /// Consume a capped `i32`-prefixed array of `elem_bytes`-sized elements,
 /// skipping the body. The `i32` count is capped at `cap` (negative → `NegativeValue`,
-/// over-cap → `BoundsExceeded { field }`) before any skip, so `count × elem_bytes`
-/// cannot overflow `u64` (`count` is the capped `u32`, `elem_bytes` a small constant).
+/// over-cap → `BoundsExceeded { field }`) before any skip.
 ///
 /// Used for both the inner cloth-mapping array (`cap = MAX_CLOTH_VERTS_PER_LOD_U32`,
 /// `elem_bytes = MESH_TO_MESH_VERT_DATA_BYTES`) and the dup-vert arrays
@@ -982,7 +981,7 @@ fn skip_cloth_buffer<R: Read>(
         .is_some_and(|v| v >= COMPACT_CLOTH_VERTEX_BUFFER)
     {
         // ClothIndexMapping = TArray<uint64>: a plain `i32` count + N × u64 (NOT
-        // a bulk array — no elementSize header). Capped before the `× 8` span.
+        // a bulk array — no elementSize header).
         let count = read::read_capped_count(
             r,
             asset_path,
