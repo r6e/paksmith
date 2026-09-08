@@ -336,6 +336,20 @@ mod tests {
         assert_eq!(parsed, entries);
     }
 
+    /// Production always hands the parser the whole stitched asset, so a
+    /// populated table is followed by unrelated bytes. Only the table's
+    /// own extent may be decoded — the record count comes from the
+    /// sliced span, and without its end bound the trailing bytes would
+    /// decode as extra records.
+    #[test]
+    fn trailing_bytes_after_the_table_are_not_decoded() {
+        let entries = vec![sample_entry(), sample_entry()];
+        let mut bytes = table_bytes(2, &entries);
+        bytes.extend_from_slice(&[0xAA; 128]);
+        let parsed = parse_data_resource_table(&bytes, 4, "t").unwrap();
+        assert_eq!(parsed, entries);
+    }
+
     /// `outer_index` is an `FPackageIndex`, so INDEX_NONE (-1) and other
     /// negative values are ordinary wire content and must survive the
     /// unsigned read the decoder shares with the other 4-byte fields.
