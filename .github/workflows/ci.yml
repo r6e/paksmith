@@ -331,9 +331,9 @@ jobs:
       - name: Enforce coverage floor (lines)
         run: cargo llvm-cov report --fail-under-lines 85
       # SPEC.md targets 80%+ on paksmith-core specifically, while the
-      # workspace floor blends core with the lower-covered frontends
-      # (87.50% workspace against core's 96.10%) and so tracks core only
-      # indirectly. Sibling crates are excluded by a derived alternation
+      # workspace floor blends core with the lower-covered frontends and
+      # so tracks core only indirectly. Sibling crates are excluded by a
+      # derived alternation
       # so a future crate cannot silently join the core number; core's
       # own whole-file test modules are excluded by name and a new one
       # belongs in that list. What remains is production code plus the
