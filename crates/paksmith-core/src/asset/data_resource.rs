@@ -245,11 +245,7 @@ fn read_entries(
         let duplicate_serial_offset = quad_at(entry, p + 8);
         let serial_size = quad_at(entry, p + 16);
         let raw_size = quad_at(entry, p + 24);
-        #[expect(
-            clippy::expect_used,
-            reason = "fixed-width subslice of a chunk sized to entry_wire_size"
-        )]
-        let outer_index = i32::from_le_bytes(entry[p + 32..p + 36].try_into().expect("in-bounds"));
+        let outer_index = word_at(entry, p + 32).cast_signed();
         let legacy_bulk_data_flags = word_at(entry, p + 36);
         entries.push(FObjectDataResource {
             flags,
@@ -335,6 +331,23 @@ mod tests {
             e2.legacy_bulk_data_flags = 0x0001;
             e2
         }];
+        let bytes = table_bytes(2, &entries);
+        let parsed = parse_data_resource_table(&bytes, 4, "t").unwrap();
+        assert_eq!(parsed, entries);
+    }
+
+    /// `outer_index` is an `FPackageIndex`, so INDEX_NONE (-1) and other
+    /// negative values are ordinary wire content and must survive the
+    /// unsigned read the decoder shares with the other 4-byte fields.
+    #[test]
+    fn parses_negative_outer_index() {
+        let entries: Vec<FObjectDataResource> = [-1i32, i32::MIN, -12345]
+            .into_iter()
+            .map(|outer_index| FObjectDataResource {
+                outer_index,
+                ..sample_entry()
+            })
+            .collect();
         let bytes = table_bytes(2, &entries);
         let parsed = parse_data_resource_table(&bytes, 4, "t").unwrap();
         assert_eq!(parsed, entries);
