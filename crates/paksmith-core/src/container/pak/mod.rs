@@ -4451,13 +4451,16 @@ mod tests {
 
     /// Chunk `plaintext` into `block_size` blocks, LZ4-compress each,
     /// and read the assembled entry back through the production path,
-    /// asserting the written size.
+    /// asserting the written size. Returns the decoded bytes alongside
+    /// the number of blocks actually assembled, so callers can pin the
+    /// shape of the entry they built rather than recomputing it.
     #[cfg(feature = "__test_utils")]
-    fn multi_block_lz4_read_back(plaintext: &[u8], block_size: u32) -> Vec<u8> {
+    fn multi_block_lz4_read_back(plaintext: &[u8], block_size: u32) -> (Vec<u8>, usize) {
         let streams: Vec<Vec<u8>> = plaintext
             .chunks(block_size as usize)
             .map(lz4_flex::block::compress)
             .collect();
+        let block_count = streams.len();
         let pak =
             crate::testing::wire::build_v8b_lz4_pak(&streams, plaintext.len() as u64, block_size);
         let reader = PakReader::from_bytes(pak).expect("synthetic multi-block v8b pak parses");
@@ -4466,7 +4469,7 @@ mod tests {
             .read_entry_to(crate::testing::wire::LZ4_SYNTH_PATH, &mut out)
             .expect("multi-block lz4 round-trip must succeed");
         assert_eq!(written, plaintext.len() as u64);
-        out
+        (out, block_count)
     }
 
     /// A valid multi-block LZ4 entry (two full non-final blocks that
@@ -4480,12 +4483,8 @@ mod tests {
     fn read_lz4_entry_multi_block_round_trips() {
         let block_size = 128u32;
         let payload: Vec<u8> = (0..296u32).map(|i| (i % 251) as u8).collect();
-        assert_eq!(
-            payload.chunks(block_size as usize).count(),
-            3,
-            "fixture invariant: 2 full + 1 remainder"
-        );
-        let out = multi_block_lz4_read_back(&payload, block_size);
+        let (out, block_count) = multi_block_lz4_read_back(&payload, block_size);
+        assert_eq!(block_count, 3, "fixture invariant: 2 full + 1 remainder");
         assert_eq!(out, payload, "multi-block decode must be byte-exact");
     }
 
@@ -6411,7 +6410,7 @@ mod tests {
                 plaintext in payload(4096),
                 block_size in 32u32..512,
             ) {
-                let out = multi_block_lz4_read_back(&plaintext, block_size);
+                let (out, _) = multi_block_lz4_read_back(&plaintext, block_size);
                 prop_assert_eq!(out, plaintext);
             }
         }
