@@ -13,10 +13,6 @@
 //! the rest of `paksmith-core::testing` — the helpers are never
 //! reachable from release builds.
 
-// Test scaffolding with self-authored inputs; the no-panic guarantee
-// covers production parsing paths (see lib.rs).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use std::sync::Arc;
 
 use crate::asset::{
@@ -149,6 +145,10 @@ pub fn write_int_property(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, value
 /// If `s.len() + 1` exceeds `i32::MAX` (never for a realistic test
 /// string).
 pub fn write_fstring(buf: &mut Vec<u8>, s: &str) {
+    #[expect(
+        clippy::expect_used,
+        reason = "caller-authored test string, far under i32::MAX"
+    )]
     let len = i32::try_from(s.len() + 1).expect("test FString fits in i32");
     buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(s.as_bytes());
