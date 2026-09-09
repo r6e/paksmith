@@ -346,10 +346,15 @@ jobs:
         run: |
           meta=$(cargo metadata --no-deps --format-version 1)
           root=$(jq -r '.workspace_root' <<<"$meta")
-          siblings=$(jq -r --arg r "$root/" \
+          members=$(jq -r --arg r "$root/" \
             '.packages[] | select(.name != "paksmith-core")
-             | (.manifest_path | ltrimstr($r) | rtrimstr("/Cargo.toml"))' <<<"$meta" \
-            | paste -sd'|' -)
+             | (.manifest_path | ltrimstr($r) | rtrimstr("/Cargo.toml"))' <<<"$meta")
+          if grep -qE '^(/|Cargo\.toml$)' <<<"$members"; then
+            echo "::error::a workspace member sits at the workspace root or outside it;" \
+                 "the core-coverage exclusion cannot express it and would count it as core" >&2
+            exit 1
+          fi
+          siblings=$(paste -sd'|' - <<<"$members")
           infra='crates/paksmith-core/src/(testing/|asset/property/test_utils\.rs|test_patch\.rs|test_spans\.rs)'
           cargo llvm-cov report --fail-under-lines 93 --ignore-filename-regex "(($siblings)/|$infra)"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
