@@ -7,12 +7,19 @@ rust-version.workspace = true
 description = "GUI for exploring and extracting Unreal Engine game assets"
 
 [dependencies]
-dark-light = "2.0.0"
 # Phase 6: Iced GUI framework. MIT/Apache-2.0. The `tokio` feature makes Iced's
 # `Task::perform` executor tokio-backed, which `paksmith-core`'s reqwest-based
 # registry fetch (inside the async `resolve_pak_key`) requires at runtime — the
 # default `thread-pool` executor would panic with no tokio reactor.
 iced = { version = "0.14", features = ["tokio", "image-without-codecs", "canvas"] }
+# The OS appearance. Apache-2.0. Direct rather than reached through iced —
+# see `theme::appearance_stream` for why iced's reading cannot serve, and
+# #789 for what its own detection still costs us.
+# `default-features = false` because the crate
+# defaults to every preference it knows and `color-scheme` is the only one
+# read; `async-io` re-enables the zbus backend that default would have given
+# us, rather than switching to mundy's `tokio` one.
+mundy = { version = "0.2.3", default-features = false, features = ["color-scheme", "async-io"] }
 # #661: process-RSS reading for the status bar's memory display. MIT OR
 # Apache-2.0. The lightweight cross-platform reader the status-bar module doc
 # deferred on: one call per coarse tick, no polling machinery — unlike
@@ -50,8 +57,8 @@ tracing-subscriber.workspace = true
 
 # Phase 6 Task 11: async sleep in the menu subscription bridge (tokio runtime
 # is already present via iced's tokio feature; `time` declared here because
-# menu.rs calls tokio::time::sleep — the feature must be direct, not just
-# a transitive unification via iced).
+# menu.rs and theme/mod.rs call tokio::time::sleep — the feature must be
+# direct, not just a transitive unification via iced).
 tokio = { workspace = true, features = ["time"] }
 mutants = "0.0.4"
 # Phase 6 final-panel: zeroize the hex-key buffer so AES key material is
@@ -60,7 +67,11 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 # Phase 6 Task 7: async runtime for the open-fixture integration test.
-tokio = { workspace = true }
+# `test-util` lets the startup-retry, rebuild and composition tests advance
+# the paused clock instead of waiting it out — on every target, including the
+# `cfg(not(linux))` composition test, the only such test macOS and Windows
+# compile.
+tokio = { workspace = true, features = ["test-util"] }
 # Phase 7b Task 3: enable __test_utils so tests can build synthetic texture
 # Packages via paksmith_core::testing::uasset. Normal `cargo build` is
 # unaffected; this feature is only active during test compilation.

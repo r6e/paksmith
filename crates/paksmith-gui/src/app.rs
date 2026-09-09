@@ -51,7 +51,7 @@ const WAVEFORM_COLUMNS: usize = 512;
 pub struct App {
     /// Active appearance mode: seeded from the OS at startup
     /// ([`theme::startup_mode`]), following live OS changes via the
-    /// edge-triggered theme poll (#662), and manually toggleable — an
+    /// edge-triggered appearance stream (#662), and manually toggleable — an
     /// override stands until the OS reading next changes.
     pub mode: theme::Mode,
     /// The currently-open archive, if any.
@@ -65,7 +65,8 @@ pub struct App {
     /// Wrapped in [`Zeroizing`] so the AES key material is cleared on drop
     /// (e.g. when the archive is swapped or the app exits).
     pub hex_input: Zeroizing<String>,
-    /// System accent color (read once at startup from the OS).
+    /// System accent color: read once at startup on macOS, the built-in
+    /// default elsewhere (see [`theme::accent`]).
     pub accent: iced::Color,
     /// Keyboard cursor within the visible-row list.
     ///
@@ -142,17 +143,23 @@ pub struct App {
     /// [`crate::state::memory::MEMORY_TICK`] subscription. `None` when the
     /// platform backend has no reading — the label hides rather than guessing.
     pub memory_rss: Option<usize>,
-    /// The OS appearance as of the last SUCCESSFUL theme-follow poll (#662)
-    /// — the edge-trigger watermark [`theme::poll_decision`] compares
-    /// against, NOT the app's displayed mode: after a manual Toggle Theme the
-    /// two deliberately diverge until the OS reading itself next changes.
-    /// `None` until a read succeeds; failed polls leave it untouched.
+    /// The last OS appearance reading (#662) — the edge-trigger watermark
+    /// [`theme::appearance_decision`] compares against, NOT the app's
+    /// displayed mode: after a manual Toggle Theme the two deliberately
+    /// diverge until the OS reading itself next changes. Seeded at boot from
+    /// the startup read, then updated by the appearance stream; `None` only
+    /// when that read found nothing and no stream item has arrived.
     pub last_os_reading: Option<theme::OsReading>,
-    /// Whether the user manually toggled the theme this session. Consulted
-    /// only by the RECOVERY regime of [`theme::poll_decision`] (watermark
-    /// still `None`): an explicit flag rather than a mode comparison,
-    /// because an even toggle count lands back on the default mode yet is
-    /// still a standing choice recovery must not revert.
+    /// Whether a manual theme choice is standing. Set by any Toggle Theme,
+    /// consulted by [`theme::appearance_decision`] on the re-read arm that
+    /// carries no definite edge, and cleared whenever a reading is adopted,
+    /// however it was observed — the choice was made against a reading the
+    /// OS has since moved off. An explicit flag rather than a mode
+    /// comparison, because an even toggle count lands back on the default
+    /// mode yet is still a choice. What it blocks is every re-read with no
+    /// definite edge to adopt: no watermark at all (the failed-boot-read
+    /// recovery it was introduced for), an indefinite value on either side,
+    /// or one that merely restates the watermark.
     pub theme_user_chose: bool,
 }
 
@@ -167,14 +174,12 @@ impl Default for App {
             a: Box::new(pane_grid::Configuration::Pane(PaneKind::Sidebar)),
             b: Box::new(pane_grid::Configuration::Pane(PaneKind::Detail)),
         });
-        // One read serves both fields: the displayed mode starts from the
-        // reading (via the startup contract), and the follow watermark starts
-        // EQUAL to that reading, so the first poll is a quiet tick rather
-        // than a spurious "transition".
-        let os_reading = theme::read_os();
-        let os_mode = theme::startup_mode(os_reading);
+        // Unknown by default: mundy's macOS backend asserts the main thread
+        // and would panic under `App::default`, which tests construct off it.
+        // The live path seeds it through `boot_app`. The accent read below
+        // carries the same contract but does not assert it (#793).
         Self {
-            mode: os_mode,
+            mode: theme::startup_mode(None),
             archive: None,
             error: None,
             keyflow: KeyFlow::Idle,
@@ -206,7 +211,7 @@ impl Default for App {
             // bar shows a reading immediately instead of a blank first
             // MEMORY_TICK interval.
             memory_rss: crate::state::memory::read_rss(),
-            last_os_reading: os_reading,
+            last_os_reading: None,
             theme_user_chose: false,
         }
     }
@@ -225,11 +230,15 @@ impl Default for App {
 /// environment-gated — `AudioOutput::new()` returns `None` in a headless
 /// (CI/test) environment, so a mutant deleting the `audio` field init is
 /// indistinguishable from the real path there and would survive. The
-/// device-free, load-bearing part (log-buffer sharing) is extracted to
-/// [`base_app`] so it stays mutation-tested.
+/// device-free, load-bearing parts — the log-buffer sharing and the
+/// appearance seed — are extracted to [`base_app`] so they stay
+/// mutation-tested.
 #[mutants::skip]
-pub fn boot_app(log_buffer: crate::state::log_buffer::LogBuffer) -> App {
-    let mut app = base_app(log_buffer);
+pub fn boot_app(
+    log_buffer: crate::state::log_buffer::LogBuffer,
+    os_reading: Option<theme::OsReading>,
+) -> App {
+    let mut app = base_app(log_buffer, os_reading);
     // Open the real output device here (not in `App::default`/`base_app`):
     // `default()` is used throughout the tests and must stay free of any
     // audio-hardware side effect, so device acquisition lives on the live boot
@@ -240,13 +249,19 @@ pub fn boot_app(log_buffer: crate::state::log_buffer::LogBuffer) -> App {
 }
 
 /// The device-free core of [`boot_app`]: wire the caller's shared `LogBuffer`
-/// into a fresh `App`. Extracted (not `#[mutants::skip]`) so the load-bearing
-/// buffer sharing — drop it and the console is permanently empty — stays
-/// mutation-tested via `boot_app_shares_the_injected_log_buffer`, even though
-/// `boot_app` itself is device glue.
-fn base_app(log_buffer: crate::state::log_buffer::LogBuffer) -> App {
+/// into a fresh `App` and seed the appearance. Extracted (not
+/// `#[mutants::skip]`) so both load-bearing parts stay mutation-tested even
+/// though `boot_app` itself is device glue — drop the buffer sharing and the
+/// console is permanently empty; drop the seed and the first frame is painted
+/// in the wrong theme, before the window exists to correct.
+fn base_app(
+    log_buffer: crate::state::log_buffer::LogBuffer,
+    os_reading: Option<theme::OsReading>,
+) -> App {
     App {
         log_buffer,
+        mode: theme::startup_mode(os_reading),
+        last_os_reading: os_reading,
         ..App::default()
     }
 }
@@ -441,11 +456,10 @@ pub enum Message {
     ConsoleTick,
     /// Coarse status-bar tick (#661): re-read the process RSS.
     MemoryTick,
-    /// The theme-follow poll read the OS appearance (#662). Carries the raw
-    /// tri-state reading (`None` = the read failed) so the update arm is
-    /// pure and fully testable — the `dark-light` read happens in the
-    /// subscription's map closure.
-    OsAppearancePolled(Option<theme::OsReading>),
+    /// An appearance item arrived from the stream (#662). Carries the raw
+    /// tri-state reading plus whether it is a re-read or a signalled
+    /// change, so the update arm stays pure and fully testable.
+    OsAppearance(theme::Appearance),
     /// The console scroll position changed; carries the relative vertical
     /// offset (0.0 = top, 1.0 = bottom) so the follow decision is testable
     /// without constructing a non-public `scrollable::Viewport`.
@@ -898,7 +912,8 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 theme::Mode::Dark => theme::Mode::Light,
             };
             // Any manual toggle is a standing choice, even one toggled
-            // back — blocks the recovery regime, see `theme_user_chose`.
+            // back — blocks a re-read from re-syncing, see
+            // `theme_user_chose`.
             app.theme_user_chose = true;
             Task::none()
         }
@@ -1067,20 +1082,25 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             app.memory_rss = crate::state::memory::read_rss();
             Task::none()
         }
-        Message::OsAppearancePolled(reading) => {
-            // Live theme follow (#662). The three-regime decision (real OS
-            // edge / quiet tick / recovery-from-failed-reads) lives in
-            // `theme::poll_decision`; a failed read (None) is NOT a reading
-            // and is skipped entirely — treating it as a value fabricated
-            // theme flips (R1; the Linux backend times out at 25 ms).
-            if let Some(now) = reading {
-                if let Some(new_mode) =
-                    theme::poll_decision(app.last_os_reading, now, app.theme_user_chose)
-                {
-                    app.mode = new_mode;
+        Message::OsAppearance(appearance) => {
+            // Live theme follow (#662). The regimes live in
+            // `theme::appearance_decision`; an adopted OS change also
+            // discharges any standing manual choice, since the user
+            // overrode the reading the OS has now moved off. The watermark
+            // follows every item, including one that changes nothing:
+            // leaving it stale would make the NEXT signalled change edge
+            // against a reading the OS has already moved past.
+            match theme::appearance_decision(app.last_os_reading, appearance, app.theme_user_chose)
+            {
+                // One arm: `Resync` is only returned when no choice stands,
+                // so clearing the flag there is already a no-op.
+                theme::Decision::Adopt(mode) | theme::Decision::Resync(mode) => {
+                    app.mode = mode;
+                    app.theme_user_chose = false;
                 }
-                app.last_os_reading = Some(now);
+                theme::Decision::Hold => {}
             }
+            app.last_os_reading = Some(appearance.reading());
             Task::none()
         }
         Message::ConsoleScrolled(relative_y) => {
@@ -2424,12 +2444,12 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     let memory_tick_sub =
         iced::time::every(crate::state::memory::MEMORY_TICK).map(|_| Message::MemoryTick);
 
-    // Live OS theme follow (#662): poll the OS appearance on a coarse tick.
-    // The read runs HERE in the map closure so the update arm receives a
-    // value and stays pure/testable. Always on (both batches) — the theme
-    // applies with or without an archive open.
-    let theme_follow_sub = iced::time::every(crate::theme::THEME_FOLLOW_TICK)
-        .map(|_| Message::OsAppearancePolled(crate::theme::read_os()));
+    // Live OS theme follow (#662). The appearance is pushed by
+    // `theme::appearance_stream`, so nothing here polls; see its doc for
+    // why the reading is taken from mundy rather than from iced. Always on
+    // (both batches): the theme applies with or without an archive open.
+    let theme_follow_sub =
+        iced::Subscription::run(theme::appearance_stream).map(Message::OsAppearance);
 
     // Ctrl+O (#662): on Windows/Linux the muda menu is never attached (see
     // crate::menu), so its Open accelerator never registers — this listener
@@ -4246,7 +4266,9 @@ mod tests {
             Message::RowToggled(0),
             Message::ConsoleTick,
             Message::MemoryTick,
-            Message::OsAppearancePolled(Some(crate::theme::OsReading::Dark)),
+            Message::OsAppearance(crate::theme::Appearance::Changed(
+                crate::theme::OsReading::Dark,
+            )),
             // About/Dismiss are teardown, not inheritance: they swap the
             // body, so `PaneLayout::about_visible` already fires and a
             // membership here could never change the outcome — the same
@@ -4265,7 +4287,7 @@ mod tests {
     }
 
     #[test]
-    fn os_appearance_poll_adopts_a_flip_and_updates_the_watermark() {
+    fn os_appearance_change_adopts_a_flip_and_updates_the_watermark() {
         use crate::theme::{Mode, OsReading};
         let mut app = App {
             mode: Mode::Dark,
@@ -4274,7 +4296,7 @@ mod tests {
         };
         let _ = update(
             &mut app,
-            Message::OsAppearancePolled(Some(OsReading::Light)),
+            Message::OsAppearance(crate::theme::Appearance::Changed(OsReading::Light)),
         );
         assert_eq!(app.mode, Mode::Light, "an OS flip is adopted");
         assert_eq!(
@@ -4288,7 +4310,7 @@ mod tests {
         app.mode = Mode::Dark;
         let _ = update(
             &mut app,
-            Message::OsAppearancePolled(Some(OsReading::NoPreference)),
+            Message::OsAppearance(crate::theme::Appearance::Changed(OsReading::NoPreference)),
         );
         assert_eq!(
             app.mode,
@@ -4298,22 +4320,29 @@ mod tests {
     }
 
     #[test]
-    fn failed_os_polls_change_nothing_at_all() {
-        use crate::theme::{Mode, OsReading};
-        // A transient dark-light error (None payload) is NOT a reading: it
-        // must touch neither the displayed mode nor the watermark — treating
-        // it as a value fabricated theme flips on loaded Linux systems.
+    fn an_adopted_os_change_discharges_the_choice_it_overrode() {
+        use crate::theme::{Appearance, Mode, OsReading};
+        // The override was against the OLD reading, so once the OS moves and
+        // the change is adopted, the choice is spent. Leaving the flag set
+        // would make a restating or indefinite re-read a no-op for the rest
+        // of the session, so after a session-bus loss the app would sit on
+        // the overridden theme until the OS signalled a change of its own.
         let mut app = App {
             mode: Mode::Light,
-            last_os_reading: Some(OsReading::Light),
+            last_os_reading: Some(OsReading::Dark),
             ..App::default()
         };
-        let _ = update(&mut app, Message::OsAppearancePolled(None));
-        assert_eq!(app.mode, Mode::Light, "mode must survive an error poll");
-        assert_eq!(
-            app.last_os_reading,
-            Some(OsReading::Light),
-            "the watermark must survive an error poll"
+        let _ = update(&mut app, Message::ToggleTheme);
+        assert!(app.theme_user_chose, "the choice stands");
+        assert_eq!(app.mode, Mode::Dark, "and it moved the mode off Light");
+        let _ = update(
+            &mut app,
+            Message::OsAppearance(Appearance::Changed(OsReading::Light)),
+        );
+        assert_eq!(app.mode, Mode::Light, "the OS change is adopted");
+        assert!(
+            !app.theme_user_chose,
+            "an adopted OS change discharges the choice it overrode"
         );
     }
 
@@ -4322,8 +4351,8 @@ mod tests {
         use crate::theme::{Mode, OsReading};
         // Startup read failed (None watermark), the user overrode the dark
         // default via a real toggle, and the OS never changed: the first
-        // SUCCESSFUL poll must not touch the mode — recovery is not an OS
-        // change — but must set the watermark so real later flips edge
+        // successful RE-READ must not touch the mode — a re-read is not an
+        // OS change — but must set the watermark so real later flips edge
         // normally.
         let mut app = App {
             mode: Mode::Dark,
@@ -4332,7 +4361,10 @@ mod tests {
         };
         let _ = update(&mut app, Message::ToggleTheme);
         assert_eq!(app.mode, Mode::Light, "override in place");
-        let _ = update(&mut app, Message::OsAppearancePolled(Some(OsReading::Dark)));
+        let _ = update(
+            &mut app,
+            Message::OsAppearance(crate::theme::Appearance::Read(OsReading::Dark)),
+        );
         assert_eq!(
             app.mode,
             Mode::Light,
@@ -4341,15 +4373,21 @@ mod tests {
         assert_eq!(
             app.last_os_reading,
             Some(OsReading::Dark),
-            "recovery establishes the watermark"
+            "recovery establishes the watermark, which is what the next \
+             signalled change edges against"
         );
         // A real flip after recovery edges normally.
         let _ = update(
             &mut app,
-            Message::OsAppearancePolled(Some(OsReading::Light)),
+            Message::OsAppearance(crate::theme::Appearance::Changed(OsReading::Light)),
         );
-        assert_eq!(app.mode, Mode::Light);
-        let _ = update(&mut app, Message::OsAppearancePolled(Some(OsReading::Dark)));
+        // The mode cannot discriminate here — every arm lands on Light — so
+        // assert the watermark, which is what makes the next change an edge.
+        assert_eq!(app.last_os_reading, Some(OsReading::Light));
+        let _ = update(
+            &mut app,
+            Message::OsAppearance(crate::theme::Appearance::Changed(OsReading::Dark)),
+        );
         assert_eq!(app.mode, Mode::Dark, "post-recovery flips are real edges");
     }
 
@@ -4367,7 +4405,7 @@ mod tests {
         };
         let _ = update(
             &mut app,
-            Message::OsAppearancePolled(Some(OsReading::Light)),
+            Message::OsAppearance(crate::theme::Appearance::Read(OsReading::Light)),
         );
         assert_eq!(
             app.mode,
@@ -4380,7 +4418,7 @@ mod tests {
     #[test]
     fn read_recovery_respects_an_even_toggle_count_as_a_choice() {
         use crate::theme::{Mode, OsReading};
-        // The R5 blind spot: the user peeks at Light and deliberately
+        // The blind spot: the user peeks at Light and deliberately
         // returns to Dark before the first successful read — the mode
         // equals the startup default again, but it IS a standing choice,
         // and recovery must not override it.
@@ -4394,44 +4432,50 @@ mod tests {
         assert_eq!(app.mode, Mode::Dark, "back at the default, by choice");
         let _ = update(
             &mut app,
-            Message::OsAppearancePolled(Some(OsReading::Light)),
+            Message::OsAppearance(crate::theme::Appearance::Read(OsReading::Light)),
         );
         assert_eq!(
             app.mode,
             Mode::Dark,
-            "an even toggle count is still a choice — recovery must not adopt"
+            "an even toggle count is still a choice — with no watermark to \
+             edge against, a re-read must not adopt"
         );
         assert_eq!(app.last_os_reading, Some(OsReading::Light));
     }
 
     #[test]
-    fn quiet_os_polls_leave_a_manual_theme_override_alone() {
+    fn quiet_os_changes_leave_a_manual_theme_override_alone() {
         // The regression this design exists to prevent: the user toggles the
-        // theme away from the OS value, and a poll that "re-matches the OS"
-        // would silently revert it within one tick interval.
-        use crate::theme::{Mode, OsReading};
+        // theme away from the OS value, and a reading that "re-matches the OS"
+        // would silently revert it as soon as the next reading arrived.
+        use crate::theme::{Appearance, Mode, OsReading};
         let mut app = App {
-            mode: Mode::Dark,
-            last_os_reading: Some(OsReading::Dark),
+            mode: Mode::Light,
+            last_os_reading: Some(OsReading::Light),
             ..App::default()
         };
         let _ = update(&mut app, Message::ToggleTheme);
-        assert_eq!(app.mode, Mode::Light, "manual override in place");
-        let _ = update(&mut app, Message::OsAppearancePolled(Some(OsReading::Dark)));
-        assert_eq!(
-            app.mode,
-            Mode::Light,
-            "an unchanged OS reading must not revert the override"
-        );
-        // A real OS change afterwards wins over the standing override.
+        assert_eq!(app.mode, Mode::Dark, "manual override in place");
         let _ = update(
             &mut app,
-            Message::OsAppearancePolled(Some(OsReading::Light)),
+            Message::OsAppearance(Appearance::Changed(OsReading::Light)),
         );
-        let _ = update(&mut app, Message::OsAppearancePolled(Some(OsReading::Dark)));
         assert_eq!(
             app.mode,
             Mode::Dark,
+            "an unchanged OS reading must not revert the override"
+        );
+        assert!(app.theme_user_chose, "the override is still standing");
+        // A real OS change wins over it — driven into NoPreference so the
+        // adopted mode DIFFERS from the standing one, or the write would be
+        // unobservable. GNOME's Light -> Default flip is exactly this.
+        let _ = update(
+            &mut app,
+            Message::OsAppearance(Appearance::Changed(OsReading::NoPreference)),
+        );
+        assert_eq!(
+            app.mode,
+            Mode::Light,
             "a fresh OS flip is newer intent than the old override"
         );
     }
@@ -6828,9 +6872,41 @@ mod tests {
         // would be 0 — a permanently-dead console. Kills the
         // delete-struct-field mutant on the boot path.
         let buffer = crate::state::log_buffer::LogBuffer::default();
-        let app = super::boot_app(buffer.clone());
+        // No live read here: this runs off the main thread, where mundy's
+        // macOS backend refuses.
+        let app = super::boot_app(buffer.clone(), None);
         buffer.push(tracing::Level::INFO, "t".into(), "x".into());
         assert_eq!(app.log_buffer.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn boot_seeds_the_appearance_before_the_first_frame() {
+        // The window is themed from `mode` before any message is applied,
+        // so dropping the seed would paint the default first and flip.
+        // NoPreference is the load-bearing input: it is Light under the
+        // sibling `adopted_mode` but Dark at startup, so a swap to the
+        // wrong mapping fails here. The rest stop a hardcoded mode passing.
+        for (reading, mode) in [
+            (Some(theme::OsReading::Light), theme::Mode::Light),
+            (Some(theme::OsReading::Dark), theme::Mode::Dark),
+            (Some(theme::OsReading::NoPreference), theme::Mode::Dark),
+        ] {
+            // `base_app`, not `boot_app`: the seed is device-free, and that
+            // is the whole reason the two are split. One `boot_app` call
+            // below covers the pass-through `main` depends on.
+            let buffer = crate::state::log_buffer::LogBuffer::default();
+            let app = super::base_app(buffer, reading);
+            assert_eq!(app.mode, mode, "startup mode for {reading:?}");
+            assert_eq!(
+                app.last_os_reading, reading,
+                "the watermark is seeded too: the first Changed after a \
+                 dropped opening read must edge against the real reading"
+            );
+        }
+        // And `boot_app` passes the reading through to it.
+        let buffer = crate::state::log_buffer::LogBuffer::default();
+        let booted = super::boot_app(buffer, Some(theme::OsReading::Light));
+        assert_eq!(booted.mode, theme::Mode::Light, "boot_app seeds from it");
     }
 
     #[test]
