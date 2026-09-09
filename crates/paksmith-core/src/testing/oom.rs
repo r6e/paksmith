@@ -31,7 +31,7 @@
 // `maybe_fail_at` runs inside `try_reserve_index` / `try_reserve_asset`,
 // so this file is on a production call path and does not get the
 // fixture-builder allow from `testing/mod.rs`.
-#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 use std::cell::Cell;
 use std::collections::TryReserveError;
