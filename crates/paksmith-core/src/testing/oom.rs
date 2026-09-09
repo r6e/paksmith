@@ -28,6 +28,11 @@
 //! variant + structured fields rather than the inner `TryReserveError`'s
 //! Display or `kind()` — forward-compat insurance.
 
+// `maybe_fail_at` runs inside `try_reserve_index` / `try_reserve_asset`,
+// so this file is on a production call path and does not get the
+// fixture-builder allow from `testing/mod.rs`.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 use std::cell::Cell;
 use std::collections::TryReserveError;
 use std::marker::PhantomData;
@@ -148,9 +153,14 @@ fn synthetic_try_reserve_error() -> TryReserveError {
     // is consulted. Platform-invariant on every supported target; if
     // this ever returns `Ok`, the stdlib `RawVec` invariants have
     // changed and the synthesis path needs revisiting.
-    Vec::<u8>::new()
-        .try_reserve_exact(usize::MAX)
-        .expect_err("usize::MAX byte reservation must fail (capacity overflow on isize::MAX guard)")
+    #[expect(
+        clippy::expect_used,
+        reason = "usize::MAX trips the RawVec isize::MAX guard before the allocator"
+    )]
+    let err = Vec::<u8>::new().try_reserve_exact(usize::MAX).expect_err(
+        "usize::MAX byte reservation must fail (capacity overflow on isize::MAX guard)",
+    );
+    err
 }
 
 #[cfg(test)]
