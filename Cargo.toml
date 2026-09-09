@@ -73,7 +73,7 @@ lz4_flex = { version = "0.14.0", default-features = false, features = [
 sha1 = "0.11"
 tempfile = "3"
 proptest = "1"
-zstd = "0.13"
+zstd = "0.14"
 brotli = "8"
 # Phase 3d Task 4: DataTable CSV export (RFC 4180 writer). MIT/Unlicense.
 csv = "1.3"
