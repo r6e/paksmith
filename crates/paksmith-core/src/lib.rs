@@ -37,7 +37,7 @@
 //! `docs/plans/ROADMAP.md`.
 
 // Lint-enforces the unwrap/expect half of CLAUDE.md's no-panic
-// guarantee; in-source test code is exempt via `not(test)`.
+// guarantee; `cfg(test)` code is exempt via `not(test)`.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod asset;
