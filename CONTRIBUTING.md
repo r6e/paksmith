@@ -49,7 +49,9 @@ docs: update ARCHITECTURE.md with export pipeline
 - Unit tests live alongside the code in `#[cfg(test)]` modules.
 - Integration tests live in each crate's `tests/` directory.
 - Test fixtures go in `tests/fixtures/`. Never commit real game assets.
-- Target 80%+ coverage on `paksmith-core`.
+- Target 80%+ coverage on `paksmith-core`. The CI floor measures core
+  `src/` including its in-source `#[cfg(test)]` blocks, so it gates a
+  regression tripwire, not a production-line figure.
 
 ### Always use `--workspace` for tests
 

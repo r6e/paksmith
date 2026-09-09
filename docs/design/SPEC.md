@@ -262,7 +262,10 @@ Non-blocking toast notifications for recoverable errors. Modal for archive-level
 - Matrix: Linux, macOS, Windows.
 - `cargo clippy --deny warnings`
 - `cargo fmt --check`
-- Coverage target: 80%+ on core crate.
+- Coverage target: 80%+ on core crate. The CI floor is measured over
+  core `src/` including its in-source `#[cfg(test)]` blocks, which
+  llvm-cov cannot separate, so the gated figure is a regression
+  tripwire rather than a production-line number.
 
 ## Non-Goals (for now)
 

@@ -598,8 +598,7 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
 
 /// Consume a capped `i32`-prefixed array of `elem_bytes`-sized elements,
 /// skipping the body. The `i32` count is capped at `cap` (negative → `NegativeValue`,
-/// over-cap → `BoundsExceeded { field }`) before any skip, so `count × elem_bytes`
-/// cannot overflow `u64` (`count` is the capped `u32`, `elem_bytes` a small constant).
+/// over-cap → `BoundsExceeded { field }`) before any skip.
 ///
 /// Used for both the inner cloth-mapping array (`cap = MAX_CLOTH_VERTS_PER_LOD_U32`,
 /// `elem_bytes = MESH_TO_MESH_VERT_DATA_BYTES`) and the dup-vert arrays
@@ -612,6 +611,10 @@ fn skip_capped_array<R: Read + ?Sized>(
     elem_bytes: u64,
 ) -> crate::Result<u32> {
     let count = read::read_capped_count(r, asset_path, field, cap)?;
+    #[expect(
+        clippy::expect_used,
+        reason = "capped u32 count times a small element size fits u64"
+    )]
     let span = u64::from(count)
         .checked_mul(elem_bytes)
         .expect("count is a capped u32; count*elem_bytes fits u64");
@@ -978,13 +981,14 @@ fn skip_cloth_buffer<R: Read>(
         .is_some_and(|v| v >= COMPACT_CLOTH_VERTEX_BUFFER)
     {
         // ClothIndexMapping = TArray<uint64>: a plain `i32` count + N × u64 (NOT
-        // a bulk array — no elementSize header). Capped before the `× 8` span.
+        // a bulk array — no elementSize header).
         let count = read::read_capped_count(
             r,
             asset_path,
             AssetWireField::SkelClothIndexMappingCount,
             MAX_CLOTH_VERTS_PER_LOD_U32,
         )?;
+        #[expect(clippy::expect_used, reason = "capped u32 count times 8 fits u64")]
         let span = u64::from(count)
             .checked_mul(8)
             .expect("count is a capped u32; count*8 fits u64");
@@ -1002,6 +1006,7 @@ fn skip_cloth_buffer<R: Read>(
         {
             // UE5 AddClothMappingLODBias trailer: `count × 4` bytes. Never fires
             // for UE4 (the version is absent); gated so a UE5 input stays aligned.
+            #[expect(clippy::expect_used, reason = "capped u32 count times 4 fits u64")]
             let bias_span = u64::from(count)
                 .checked_mul(4)
                 .expect("count is a capped u32; count*4 fits u64");

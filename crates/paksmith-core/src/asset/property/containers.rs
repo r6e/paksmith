@@ -305,6 +305,10 @@ fn read_array_value<R: Read + Seek>(
     )?;
 
     for _ in 0..count_usize {
+        #[expect(
+            clippy::expect_used,
+            reason = "inner_type validated by is_handled_element_type before the loop"
+        )]
         let elem = read_element_value(
             &tag.inner_type,
             AssetWireField::ArrayElementBody,
@@ -647,10 +651,13 @@ fn read_map_set_slot<R: Read + Seek>(
             asset_path,
         )
     } else {
-        Ok(
-            read_element_value(type_name, field, reader, ctx, asset_path, depth)?
-                .expect("primitive type validated by is_handled_element_type at the dispatch site"),
-        )
+        #[expect(
+            clippy::expect_used,
+            reason = "primitive slots are pre-validated by is_handled_element_type"
+        )]
+        let value = read_element_value(type_name, field, reader, ctx, asset_path, depth)?
+            .expect("primitive type validated by is_handled_element_type at the dispatch site");
+        Ok(value)
     }
 }
 

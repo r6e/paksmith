@@ -66,11 +66,16 @@ impl AesKey {
             if !chunk[0].is_ascii_hexdigit() || !chunk[1].is_ascii_hexdigit() {
                 return Err(AesKeyHexError::NonHex);
             }
-            bytes[i] = u8::from_str_radix(
+            #[expect(
+                clippy::expect_used,
+                reason = "pair validated as ASCII hex immediately above"
+            )]
+            let byte = u8::from_str_radix(
                 std::str::from_utf8(chunk).expect("ascii-validated above"),
                 16,
             )
             .expect("ascii-hex pair always parses");
+            bytes[i] = byte;
         }
         Ok(Self::new(bytes))
     }
@@ -82,6 +87,7 @@ impl AesKey {
         use std::fmt::Write as _;
         let mut s = String::with_capacity(64);
         for b in self.0 {
+            #[expect(clippy::expect_used, reason = "fmt::Write to String is infallible")]
             write!(s, "{b:02x}").expect("write to String is infallible");
         }
         s
@@ -266,5 +272,34 @@ mod tests {
             e.to_string().contains("64"),
             "message names the expected length: {e}"
         );
+    }
+
+    #[cfg(feature = "__test_utils")]
+    mod round_trip_props {
+        use proptest::prelude::*;
+
+        use super::super::{AesKey, aes256_ecb_decrypt, aes256_ecb_encrypt};
+
+        proptest! {
+            /// `decrypt(encrypt(x)) == x` for arbitrary keys and any
+            /// 16-aligned length, and encryption is never the identity
+            /// on non-empty input (kills a symmetric no-op pair the
+            /// round-trip equality alone would accept).
+            #[test]
+            fn encrypt_then_decrypt_round_trips(
+                key in any::<[u8; 32]>(),
+                blocks in prop::collection::vec(any::<[u8; 16]>(), 0..8),
+            ) {
+                let key = AesKey::new(key);
+                let plain: Vec<u8> = blocks.concat();
+                let mut data = plain.clone();
+                aes256_ecb_encrypt(&key, &mut data).unwrap();
+                if !plain.is_empty() {
+                    prop_assert_ne!(&data, &plain, "encrypt must not be the identity");
+                }
+                aes256_ecb_decrypt(&key, &mut data).unwrap();
+                prop_assert_eq!(data, plain);
+            }
+        }
     }
 }

@@ -502,11 +502,19 @@ impl ObjectExport {
         // == None`. write_to is `#[cfg(any(test, feature =
         // "__test_utils"))]` so panic-on-misuse is appropriate.
         if emits_script_serialization_tail(version, summary_package_flags) {
+            #[expect(
+                clippy::expect_used,
+                reason = "gate-mismatch panic is this test-only writer's documented contract"
+            )]
             let start = self.script_serialization_start_offset.expect(
                 "script_serialization_start_offset must be Some when \
                  SCRIPT_SERIALIZATION_OFFSET gate fires (UE5 >= 1010, \
                  !PKG_UnversionedProperties)",
             );
+            #[expect(
+                clippy::expect_used,
+                reason = "gate-mismatch panic is this test-only writer's documented contract"
+            )]
             let end = self.script_serialization_end_offset.expect(
                 "script_serialization_end_offset must be Some when \
                  SCRIPT_SERIALIZATION_OFFSET gate fires (UE5 >= 1010, \

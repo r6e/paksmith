@@ -74,6 +74,7 @@ impl KeyGuid {
         use std::fmt::Write as _;
         let mut s = String::with_capacity(32);
         for b in self.0 {
+            #[expect(clippy::expect_used, reason = "fmt::Write to String is infallible")]
             write!(s, "{b:02x}").expect("write to String is infallible");
         }
         s
@@ -100,11 +101,16 @@ impl KeyGuid {
             if !chunk[0].is_ascii_hexdigit() || !chunk[1].is_ascii_hexdigit() {
                 return Err(KeyGuidHexError::NonHex);
             }
-            bytes[i] = u8::from_str_radix(
+            #[expect(
+                clippy::expect_used,
+                reason = "pair validated as ASCII hex immediately above"
+            )]
+            let byte = u8::from_str_radix(
                 std::str::from_utf8(chunk).expect("ascii-validated above"),
                 16,
             )
             .expect("ascii-hex pair always parses");
+            bytes[i] = byte;
         }
         Ok(Self(bytes))
     }

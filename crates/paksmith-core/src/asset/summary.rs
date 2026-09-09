@@ -767,6 +767,10 @@ impl PackageSummary {
         // writer state and version is a programming error, not a runtime
         // condition the writer should silently paper over).
         if self.version.ue4_at_least(VER_UE4_ADDED_SEARCHABLE_NAMES) {
+            #[expect(
+                clippy::expect_used,
+                reason = "gate-mismatch panic is this test-only writer's documented contract"
+            )]
             let v = self.searchable_names_offset.expect(
                 "searchable_names_offset must be Some(_) at UE4 >= ADDED_SEARCHABLE_NAMES (510); \
                  write_to caller passed None at gate-fire",
@@ -810,11 +814,19 @@ impl PackageSummary {
             .version
             .ue4_at_least(VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS)
         {
+            #[expect(
+                clippy::expect_used,
+                reason = "gate-mismatch panic is this test-only writer's documented contract"
+            )]
             let c = self.preload_dependency_count.expect(
                 "preload_dependency_count must be Some(_) at UE4 >= \
                  PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507); write_to caller \
                  passed None at gate-fire",
             );
+            #[expect(
+                clippy::expect_used,
+                reason = "gate-mismatch panic is this test-only writer's documented contract"
+            )]
             let o = self.preload_dependency_offset.expect(
                 "preload_dependency_offset must be Some(_) at UE4 >= \
                  PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507); write_to caller \
