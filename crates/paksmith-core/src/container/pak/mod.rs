@@ -4453,7 +4453,7 @@ mod tests {
     /// and read the assembled entry back through the production path,
     /// asserting the written size. Returns the decoded bytes alongside
     /// the number of blocks actually assembled, so callers can pin the
-    /// shape of the entry they built rather than recomputing it.
+    /// shape of the entry they built.
     #[cfg(feature = "__test_utils")]
     fn multi_block_lz4_read_back(plaintext: &[u8], block_size: u32) -> (Vec<u8>, usize) {
         let streams: Vec<Vec<u8>> = plaintext
