@@ -5617,11 +5617,11 @@ mod tests {
         out
     }
 
-    /// #634: deterministic single-block
-    /// encrypted+LZ4 anchor (every vendored fixture is zlib; the
-    /// `codec_round_trip_props` property generalizes it over arbitrary
-    /// payloads). IN-SOURCE because `paksmith-core-tests` has no `aes`
-    /// dev-dep to synthesize the ciphertext.
+    /// #634: deterministic single-block encrypted+LZ4 anchor (no
+    /// vendored fixture is encrypted+LZ4; the `codec_round_trip_props`
+    /// property generalizes this over arbitrary payloads). IN-SOURCE
+    /// because `paksmith-core-tests` has no `aes` dev-dep to synthesize
+    /// the ciphertext.
     #[cfg(feature = "__test_utils")]
     #[test]
     fn reads_encrypted_lz4_entry_round_trips() {
