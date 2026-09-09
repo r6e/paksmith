@@ -332,21 +332,26 @@ jobs:
         run: cargo llvm-cov report --fail-under-lines 85
       # SPEC.md targets 80%+ on paksmith-core specifically, while the
       # workspace floor blends core with the lower-covered frontends and
-      # so tracks core only indirectly. Sibling crates are excluded by a
-      # derived alternation so a future crate cannot silently join the
-      # core number; core's own whole-file test modules are excluded by
-      # name and a new one belongs in that list. What remains is
-      # production code plus the in-source `#[cfg(test)]` blocks
-      # llvm-cov cannot separate from it, so this is a regression
-      # tripwire rather than a production-coverage figure. Measured
-      # 96.10%; 93 leaves a ~3pp buffer, matching the workspace floor's
-      # form above.
+      # so tracks core only indirectly. Sibling crates are excluded by
+      # an alternation derived from the workspace members themselves, so
+      # a member added anywhere cannot silently join the core number;
+      # core's own whole-file test modules are excluded by name and a
+      # new one belongs in that list. What remains is production code
+      # plus the in-source `#[cfg(test)]` blocks llvm-cov cannot
+      # separate from it, so this is a regression tripwire rather than a
+      # production-coverage figure. Measured 96.10% at introduction; 93
+      # leaves a ~3pp buffer.
       - name: Enforce core coverage floor (lines)
         shell: bash
         run: |
-          siblings="crates/($(ls crates | grep -vx paksmith-core | paste -sd'|' -))/"
+          meta=$(cargo metadata --no-deps --format-version 1)
+          root=$(jq -r '.workspace_root' <<<"$meta")
+          siblings=$(jq -r --arg r "$root/" \
+            '.packages[] | select(.name != "paksmith-core")
+             | (.manifest_path | ltrimstr($r) | rtrimstr("/Cargo.toml"))' <<<"$meta" \
+            | paste -sd'|' -)
           infra='crates/paksmith-core/src/(testing/|asset/property/test_utils\.rs|test_patch\.rs|test_spans\.rs)'
-          cargo llvm-cov report --fail-under-lines 93 --ignore-filename-regex "($siblings|$infra)"
+          cargo llvm-cov report --fail-under-lines 93 --ignore-filename-regex "(($siblings)/|$infra)"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-report
