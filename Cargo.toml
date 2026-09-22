@@ -74,7 +74,7 @@ sha1 = "0.11"
 tempfile = "3"
 proptest = "1"
 zstd = "0.14"
-brotli = "8"
+brotli = "9"
 # Phase 3d Task 4: DataTable CSV export (RFC 4180 writer). MIT/Unlicense.
 csv = "1.3"
 # Phase 3e-5: BC1-BC7 block decoders for texture export. Pure-Rust, MIT
