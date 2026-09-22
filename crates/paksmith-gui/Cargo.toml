@@ -37,7 +37,7 @@ memory-stats = { version = "1.2", features = ["always_use_statm"] }
 # Windows/Linux: menu built but not attached — see crate::menu's module doc
 # for the per-platform attach story (Windows: implementable follow-up via the
 # iced 0.14 window handle; Linux: blocked by muda's GTK backend).
-muda = "0.19.3"
+muda = "0.20.0"
 # Phase 6: core library for container I/O and asset parsing.
 paksmith-core = { path = "../paksmith-core", version = "0.1" }
 # Phase 7d: audio-output backend for the audio player. `default-features = false`
