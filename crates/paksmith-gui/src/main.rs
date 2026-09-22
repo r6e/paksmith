@@ -23,8 +23,9 @@ use app::App;
 
 // Binary entry point: installs the tracing subscriber, builds the native menu,
 // and runs the iced event loop — none of which is unit-testable (no test can
-// drive `iced::application().run()`). The one bit of real logic, sharing the
-// log buffer into the app, is extracted to the tested `app::boot_app`.
+// drive `iced::application().run()`). The real logic — sharing the log buffer
+// into the app, and seeding the appearance read taken here on the main thread
+// — is extracted to the tested `app::boot_app`.
 #[mutants::skip]
 fn main() -> iced::Result {
     // Capture tracing events into a bounded ring for the in-app debug console.
@@ -61,8 +62,13 @@ fn main() -> iced::Result {
         }
     };
 
+    // Read here, on the main thread, before iced takes it: mundy's macOS
+    // backend requires it and the value has to exist before the first
+    // window is themed.
+    let appearance = theme::startup_reading();
+
     iced::application(
-        move || app::boot_app(log_buffer.clone()),
+        move || app::boot_app(log_buffer.clone(), appearance),
         app::update,
         app::view,
     )

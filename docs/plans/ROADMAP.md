@@ -394,7 +394,7 @@ it. **Native-integration caveat:** macOS gets the full set (global menu bar +
 system accent); on Windows/Linux the native menu can't attach (iced 0.14 exposes
 no raw window handle) so menu actions live on the toolbar, and the system accent
 falls back to a built-in default — the native window and file dialogs are native
-on all three. New deps: `iced`, `rfd`, `muda`, `dark-light`, per-OS accent crates.
+on all three. New deps: `iced`, `rfd`, `muda`, `mundy`, per-OS accent crates.
 
 **Goal:** A working Iced application with the panel layout, file tree widget, and basic archive browsing. This is the GUI foundation — no asset rendering yet, just navigation.
 
