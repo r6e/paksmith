@@ -61,7 +61,7 @@ use crate::error::{AllocationContext, IndexParseFault, PaksmithError};
 /// Decomposition (v3+ layout) — FString filename header (5, shortest
 /// possible: `length(4) + null(1)`), offset (8), compressed_size (8),
 /// uncompressed_size (8), compression_method (4), sha1 (20),
-/// is_encrypted flag (1), compression_block_size (4) — totalling
+/// flags (1), compression_block_size (4) — totalling
 /// **58 bytes**.
 ///
 /// `compression_block_size` is present unconditionally for v3+
@@ -1506,7 +1506,7 @@ mod tests {
             compressed_size,
             uncompressed_size,
             compression_method: CompressionMethod::None,
-            is_encrypted: false,
+            flags: 0,
             compression_blocks: Vec::new(),
             compression_block_size: 0,
         }
@@ -4298,11 +4298,11 @@ mod tests {
     }
 
     #[test]
-    fn matches_payload_rejects_is_encrypted_mismatch() {
+    fn matches_payload_rejects_flags_mismatch() {
         let index = make_header(50, 100, [0xAA; 20]);
         let in_data = make_inline(
             EntryCommon {
-                is_encrypted: true,
+                flags: 1,
                 ..make_common(50, 100)
             },
             [0xAA; 20],
@@ -4311,7 +4311,11 @@ mod tests {
         match err {
             PaksmithError::InvalidIndex { fault } => {
                 let reason = fault.to_string();
-                assert!(reason.contains("is_encrypted"), "got: {reason}");
+                // Two inline copies are compared as whole bytes, so the
+                // fault names the flags field rather than the boolean
+                // derived from it.
+                assert!(reason.contains("flags"), "got: {reason}");
+                assert!(!reason.contains("is_encrypted"), "got: {reason}");
             }
             other => panic!("expected InvalidIndex, got {other:?}"),
         }

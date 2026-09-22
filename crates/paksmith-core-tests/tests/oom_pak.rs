@@ -82,7 +82,7 @@ fn build_v6_zlib_pak(decompressed: &[u8]) -> Vec<u8> {
         &sha1,
         &blocks,
         block_size,
-        false, // not encrypted
+        0, // not encrypted
     );
     data_section.extend_from_slice(&compressed);
 
@@ -99,7 +99,7 @@ fn build_v6_zlib_pak(decompressed: &[u8]) -> Vec<u8> {
         &sha1,
         &blocks,
         block_size,
-        false, // not encrypted
+        0, // not encrypted
     );
 
     let index_offset = data_section.len() as u64;
@@ -489,7 +489,7 @@ fn read_inline_compression_blocks_surfaces_allocation_failed_under_oom() {
         &sha1,
         &[(0, 0)], // 1 block
         0x10000,
-        false,
+        0,
     );
     let mut cursor = Cursor::new(buf);
 

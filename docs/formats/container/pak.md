@@ -216,7 +216,7 @@ invariant.
 | 24 | 4 or 1 | LE | `compression` | `u32` (V8B+: u32; V8A: u8) | Compression-method index (0 = no compression, 1+ = slot in footer's compression-method table). For v3–v7 archives that predate the FName table, this is a fixed enum identifier. |
 | 28 (V8B+) / 25 (V8A) | 20 | — | `sha1` | `Sha1Digest` | Payload SHA1. The field is fixed-width and always present; the format assigns no distinguished meaning to an all-zero value. Paksmith's interpretation of a zero here — "no claim" when the footer's `index_hash` is also zero, otherwise a strip signal — is paksmith policy, not a format rule; see [Paksmith implementation](#paksmith-implementation). |
 | `+ 20` | variable | — | `compression_blocks` | `CompressionBlock[]` | Present iff `compression != 0`. See below. |
-| `+ blocks` | 1 | — | `flags` | `u8` | Bitfield: bit 0 = AES-encrypted, bit 1 = delete record. Paksmith currently reads the whole byte as a bool, so any value with bit 0 clear and another bit set is misreported as encrypted — see issue #742. |
+| `+ blocks` | 1 | — | `flags` | `u8` | Bitfield: bit 0 = AES-encrypted, bit 1 = delete record. Paksmith decides encryption from bit 0 alone and gives bits 1–7 no meaning, no sampled writer's use of them being established. It does compare the byte whole between an entry's index and in-data copies, so those two must still agree in every bit. |
 | `+ 1` | 4 | LE | `compression_block_size` | `u32` | Block size (often `64 KiB`). |
 
 Per-block `CompressionBlock` (when present): two `u64` offsets `(start, end)`.

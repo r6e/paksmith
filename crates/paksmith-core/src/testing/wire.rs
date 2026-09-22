@@ -61,6 +61,10 @@ pub fn write_fstring_utf16(buf: &mut Vec<u8>, s: &str) {
 /// `compression_method` follows the raw v3-v7 ID convention
 /// (`0=None`, `1=Zlib`, etc.); v8+'s 1-based FName-table indexing is
 /// caller's responsibility.
+///
+/// `flags` is written verbatim as the per-entry flags byte, so callers
+/// can emit values the bool-shaped API could not express (bit 0 is
+/// encryption; see `docs/formats/container/pak.md`).
 #[allow(clippy::too_many_arguments)]
 pub fn write_pak_entry(
     buf: &mut Vec<u8>,
@@ -71,7 +75,7 @@ pub fn write_pak_entry(
     sha1: &[u8; 20],
     blocks: &[(u64, u64)],
     block_size: u32,
-    encrypted: bool,
+    flags: u8,
 ) {
     buf.write_u64::<LittleEndian>(offset_field).unwrap();
     buf.write_u64::<LittleEndian>(compressed_size).unwrap();
@@ -85,7 +89,7 @@ pub fn write_pak_entry(
             buf.write_u64::<LittleEndian>(*end).unwrap();
         }
     }
-    buf.push(u8::from(encrypted));
+    buf.push(flags);
     // Always written for v3+ regardless of compression method (real
     // UE writers emit this; matches PakEntryHeader::read_from).
     buf.write_u32::<LittleEndian>(block_size).unwrap();
@@ -93,7 +97,7 @@ pub fn write_pak_entry(
 
 /// Wire size of one v3+ FPakEntry record carrying `n` compression
 /// blocks: 3×u64 + method u32 + sha1(20) + (count u32 + n×2×u64) +
-/// encrypted u8 + block_size u32 = `57 + 16n`.
+/// flags u8 + block_size u32 = `57 + 16n`.
 ///
 /// COMPRESSED entries only (`compression_method != 0`):
 /// `write_pak_entry` omits the block-count u32 and block table
@@ -161,7 +165,7 @@ pub fn build_v8b_lz4_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size
             &sha1,
             &blocks,
             block_size,
-            false,
+            0,
         );
     };
 
@@ -236,23 +240,13 @@ mod tests {
 
     /// Hex-pin the uncompressed FPakEntry shape:
     /// u64 offset + u64 csize + u64 usize + u32 method + 20 sha1 +
-    /// (no block list because method==0) + u8 encrypted + u32 block_size
+    /// (no block list because method==0) + u8 flags + u32 block_size
     /// = 8+8+8+4+20+1+4 = 53 bytes.
     #[test]
     fn write_pak_entry_uncompressed_byte_layout() {
         let mut buf = Vec::new();
         let sha1 = [0xAAu8; 20];
-        write_pak_entry(
-            &mut buf,
-            0x1234,
-            0x100,
-            0x200,
-            0,
-            &sha1,
-            &[],
-            0x10000,
-            false,
-        );
+        write_pak_entry(&mut buf, 0x1234, 0x100, 0x200, 0, &sha1, &[], 0x10000, 0);
         assert_eq!(buf.len(), 53);
         // offset LE
         assert_eq!(&buf[0..8], &[0x34, 0x12, 0, 0, 0, 0, 0, 0]);
@@ -264,7 +258,7 @@ mod tests {
         assert_eq!(&buf[24..28], &[0, 0, 0, 0]);
         // sha1
         assert_eq!(&buf[28..48], &[0xAA; 20]);
-        // encrypted flag + block_size LE
+        // flags byte + block_size LE
         assert_eq!(&buf[48..53], &[0, 0x00, 0x00, 0x01, 0x00]);
     }
 
@@ -275,12 +269,12 @@ mod tests {
         let mut buf = Vec::new();
         let sha1 = [0u8; 20];
         let blocks = [(100u64, 200u64)];
-        write_pak_entry(&mut buf, 0, 100, 100, 1, &sha1, &blocks, 0x10000, true);
+        write_pak_entry(&mut buf, 0, 100, 100, 1, &sha1, &blocks, 0x10000, 1);
         // 48 common + 4 block_count + 16 per block + 5 trailer = 73 bytes.
         assert_eq!(buf.len(), 73);
         // block_count LE at offset 48
         assert_eq!(&buf[48..52], &[1, 0, 0, 0]);
-        // encrypted flag at offset 68
+        // flags byte at offset 68
         assert_eq!(buf[68], 1);
     }
 }
