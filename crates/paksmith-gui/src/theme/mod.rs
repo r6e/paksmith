@@ -615,10 +615,16 @@ mod tests {
     async fn the_composition_replaces_a_finished_source_without_rungs() {
         use iced::futures::StreamExt as _;
 
-        let wired: Vec<_> = composed(one_dark_reading, one_light_reading)
-            .take(3)
-            .collect()
-            .await;
+        // Bounded for the same reason as its sibling: a starving mutation
+        // would otherwise spin the paused clock rather than fail.
+        let wired: Vec<_> = tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            composed(one_dark_reading, one_light_reading)
+                .take(3)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("the composition must keep producing, not starve the stream");
         assert_eq!(
             wired,
             vec![Appearance::Read(OsReading::Dark); 3],
@@ -757,7 +763,15 @@ mod tests {
         use iced::futures::StreamExt as _;
 
         let start = tokio::time::Instant::now();
-        let replacements: Vec<_> = rebuilds(one_dark_reading).take(2).collect().await;
+        // Bounded on virtual time: a mutation that starves the stream leaves
+        // `take` unfilled while the rebuild loop keeps sleeping, so without
+        // this the clock advances forever and the test hangs.
+        let replacements: Vec<_> = tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            rebuilds(one_dark_reading).take(2).collect::<Vec<_>>(),
+        )
+        .await
+        .expect("a finished source must be replaced, not starve the stream");
         assert_eq!(
             replacements,
             vec![
