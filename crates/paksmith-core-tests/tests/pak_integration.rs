@@ -109,6 +109,21 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
 /// `PakReader::from_bytes` (issue #255). Exercises the end-to-end v7+ dispatch
 /// path that the v6 fixture skips.
 fn build_v7_pak(payload: &[u8]) -> Vec<u8> {
+    build_v7_pak_with_flags(payload, 0)
+}
+
+/// [`build_v7_pak`], but writing `flags` verbatim as the per-entry flags
+/// byte in both the index copy and the in-data copy. UE's byte is a
+/// bitfield (bit 0 = encrypted, bit 1 = delete record), so values with
+/// bit 0 clear must read as plaintext however the other bits are set.
+fn build_v7_pak_with_flags(payload: &[u8], flags: u8) -> Vec<u8> {
+    build_v7_pak_with_split_flags(payload, flags, flags)
+}
+
+/// [`build_v7_pak_with_flags`], but writing different flags bytes into the
+/// in-data copy and the index copy so the cross-check between them is
+/// observable.
+fn build_v7_pak_with_split_flags(payload: &[u8], in_data_flags: u8, index_flags: u8) -> Vec<u8> {
     let sha1 = [0u8; 20];
     let payload_size = payload.len() as u64;
 
@@ -124,7 +139,7 @@ fn build_v7_pak(payload: &[u8]) -> Vec<u8> {
         &sha1,
         &[],
         0,
-        false,
+        in_data_flags,
     );
     data_section.extend_from_slice(payload);
 
@@ -143,7 +158,7 @@ fn build_v7_pak(payload: &[u8]) -> Vec<u8> {
         &sha1,
         &[],
         0,
-        false,
+        index_flags,
     );
 
     let index_offset = data_section.len() as u64;
@@ -537,7 +552,7 @@ fn read_entry_returns_last_entry_bytes_on_duplicate_path() {
         &sha_first,
         &[],
         0,
-        false,
+        0,
     );
     let payload_first_offset = data.len();
     let _ = payload_first_offset;
@@ -552,7 +567,7 @@ fn read_entry_returns_last_entry_bytes_on_duplicate_path() {
         &sha_last,
         &[],
         0,
-        false,
+        0,
     );
     data.extend_from_slice(payload_last);
 
@@ -572,7 +587,7 @@ fn read_entry_returns_last_entry_bytes_on_duplicate_path() {
         &sha_first,
         &[],
         0,
-        false,
+        0,
     );
     write_fstring(&mut index, path_in_archive);
     write_pak_entry(
@@ -584,7 +599,7 @@ fn read_entry_returns_last_entry_bytes_on_duplicate_path() {
         &sha_last,
         &[],
         0,
-        false,
+        0,
     );
 
     let index_offset = data.len() as u64;
@@ -836,7 +851,7 @@ fn verify_entry_rejects_mixed_zero_entry_hash_when_index_has_hash() {
         &entry_sha1,
         &[],
         0,
-        false,
+        0,
     );
     data_section.extend_from_slice(payload);
 
@@ -854,7 +869,7 @@ fn verify_entry_rejects_mixed_zero_entry_hash_when_index_has_hash() {
         &entry_sha1,
         &[],
         0,
-        false,
+        0,
     );
 
     // REAL hash of the index — this is the key part: archive claims integrity.
@@ -915,7 +930,7 @@ fn verify_entry_integrity_strip_check_applies_to_encrypted_entries() {
         &entry_sha1,
         &[],
         0,
-        true, // encrypted
+        1, // encrypted
     );
     data_section.extend_from_slice(payload);
 
@@ -932,7 +947,7 @@ fn verify_entry_integrity_strip_check_applies_to_encrypted_entries() {
         &entry_sha1,
         &[],
         0,
-        true,
+        1,
     );
 
     // Real index hash — archive claims integrity.
@@ -1534,7 +1549,7 @@ fn build_single_entry_pak_with_flags(
         &sha1,
         blocks,
         block_size,
-        encrypted,
+        u8::from(encrypted),
     );
     data_section.extend_from_slice(payload);
 
@@ -1551,7 +1566,7 @@ fn build_single_entry_pak_with_flags(
         &sha1,
         blocks,
         block_size,
-        encrypted,
+        u8::from(encrypted),
     );
 
     let index_offset = data_section.len() as u64;
@@ -1962,7 +1977,7 @@ fn read_entry_rejects_v8b_zstd_named_compression_slot() {
         &sha1,
         &[(53, 53 + payload.len() as u64)], // one block; size doesn't matter, error fires before read
         1,
-        false,
+        0,
     );
     data_section.extend_from_slice(payload);
 
@@ -1979,7 +1994,7 @@ fn read_entry_rejects_v8b_zstd_named_compression_slot() {
         &sha1,
         &[(53, 53 + payload.len() as u64)],
         1,
-        false,
+        0,
     );
 
     let index_offset = data_section.len() as u64;
@@ -3743,4 +3758,84 @@ fn open_rejects_v9_frozen_index() {
         ),
         "expected UnsupportedVersion {{ version: 9 }}; got {err:?}"
     );
+}
+
+/// Issue #742: the per-entry flags byte is a bitfield — bit 0 is AES
+/// encryption, bit 1 is a delete record — so a byte with bit 0 clear names
+/// an unencrypted entry however its other bits are set. Reading the whole
+/// byte as a bool reported every such entry as encrypted, which without a
+/// key turns a readable entry into a hard `Decryption` error and with a key
+/// writes decrypted garbage while reporting success.
+///
+/// Both polarities are asserted because each catches a different way of
+/// getting the mask wrong: the unencrypted half fails if it widens (`&
+/// 0x03`, or back to `!= 0`), the encrypted half if it narrows to nothing.
+/// `0x03` sits in the encrypted set on purpose — bit 0 is set, so it is
+/// observationally identical to `0x01` and discriminates nothing on its
+/// own.
+#[test]
+fn entry_flags_byte_is_a_bitfield_not_a_bool() {
+    const PATH: &str = "Content/v7.uasset";
+    let payload: &[u8] = b"issue 742 flags-byte payload";
+
+    for flags in [0x00u8, 0x02, 0x04, 0x80, 0xfe] {
+        let reader = PakReader::from_bytes(build_v7_pak_with_flags(payload, flags)).unwrap();
+        let mut out = Vec::new();
+        let written = reader
+            .read_entry_to(PATH, &mut out)
+            .unwrap_or_else(|e| panic!("flags {flags:#04x} has bit 0 clear: {e:?}"));
+        assert_eq!(
+            out, payload,
+            "flags {flags:#04x} has bit 0 clear, so the payload must survive verbatim"
+        );
+        assert_eq!(written, payload.len() as u64);
+        let entries: Vec<_> = reader.entries().collect();
+        assert!(
+            !entries[0].is_encrypted(),
+            "flags {flags:#04x} has bit 0 clear and must not report as encrypted"
+        );
+    }
+
+    for flags in [0x01u8, 0x03, 0x81, 0xff] {
+        let reader = PakReader::from_bytes(build_v7_pak_with_flags(payload, flags)).unwrap();
+        let mut out = Vec::new();
+        let err = reader.read_entry_to(PATH, &mut out).unwrap_err();
+        assert!(
+            matches!(err, paksmith_core::PaksmithError::Decryption { .. }),
+            "flags {flags:#04x} has bit 0 set; expected Decryption, got {err:?}"
+        );
+        let entries: Vec<_> = reader.entries().collect();
+        assert!(
+            entries[0].is_encrypted(),
+            "flags {flags:#04x} has bit 0 set and must report as encrypted"
+        );
+    }
+}
+
+/// Issue #742: the index copy and the in-data copy of an inline entry both
+/// carry the flags byte, so a divergence between them means the two records
+/// disagree about one field — whatever the differing bit means. Decoding to
+/// a bool before comparing would hide every disagreement outside bit 0.
+#[test]
+fn diverging_entry_flags_bytes_are_a_field_mismatch() {
+    const PATH: &str = "Content/v7.uasset";
+    let payload: &[u8] = b"issue 742 split-flags payload";
+
+    // Differ in bit 1 only: both sides decode to "not encrypted", so this
+    // is caught only by comparing the byte whole.
+    let reader = PakReader::from_bytes(build_v7_pak_with_split_flags(payload, 0x02, 0x00)).unwrap();
+    let mut out = Vec::new();
+    let err = reader.read_entry_to(PATH, &mut out).unwrap_err();
+    assert!(
+        matches!(err, paksmith_core::PaksmithError::InvalidIndex { .. }),
+        "index 0x00 vs in-data 0x02 must not pass the cross-check; got {err:?}"
+    );
+
+    // Identical bytes still read cleanly, so the check cannot be satisfied
+    // by rejecting every non-zero flags byte.
+    let reader = PakReader::from_bytes(build_v7_pak_with_split_flags(payload, 0x02, 0x02)).unwrap();
+    let mut out = Vec::new();
+    let written = reader.read_entry_to(PATH, &mut out).unwrap();
+    assert_eq!(written, payload.len() as u64);
+    assert_eq!(out, payload);
 }

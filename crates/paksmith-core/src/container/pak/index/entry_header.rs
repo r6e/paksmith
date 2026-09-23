@@ -25,6 +25,10 @@ use crate::seams::PakSeam;
 /// 64KiB would be a 1TiB entry).
 const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
 
+/// AES-encryption bit of the per-entry flags byte. Bit 1 is a delete
+/// record, which paksmith does not model (issue #742).
+const ENTRY_FLAG_ENCRYPTED: u8 = 0x01;
+
 /// On-wire byte width of the per-entry compression-method field. Two
 /// possible widths in the v3+ FPakEntry record:
 ///
@@ -74,7 +78,7 @@ impl CompressionFieldWidth {
 ///
 /// V8B+/V10/V11 all use the same in-data record layout: u64 offset + u64
 /// compressed + u64 uncompressed + u32 method + 20-byte sha1 + (optional
-/// u32 block_count + N×16 blocks) + u8 encrypted + u32 block_size = 53
+/// u32 block_count + N×16 blocks) + u8 flags + u32 block_size = 53
 /// bytes uncompressed, or 53 + 4 + 16N compressed.
 ///
 /// Takes `&CompressionMethod` (not a bool) so call sites pass the
@@ -110,7 +114,10 @@ pub struct EntryCommon {
     pub(super) compressed_size: u64,
     pub(super) uncompressed_size: u64,
     pub(super) compression_method: CompressionMethod,
-    pub(super) is_encrypted: bool,
+    /// Raw per-entry flags byte. Kept whole rather than decoded to a
+    /// bool so the index and in-data copies can be compared bit-for-bit;
+    /// see [`PakEntryHeader::matches_payload`].
+    pub(super) flags: u8,
     pub(super) compression_blocks: Vec<CompressionBlock>,
     pub(super) compression_block_size: u32,
 }
@@ -206,7 +213,7 @@ impl PakEntryHeader {
     /// - `sha1: [u8; 20]`
     /// - if `compression_method != None`:
     ///     - `block_count: u32`, then `block_count` × `(start: u64, end: u64)`
-    /// - `is_encrypted: u8`
+    /// - `flags: u8` (bit 0 = encrypted)
     /// - **`compression_block_size: u32`** — present for ALL v3+ entries,
     ///   not just compressed ones. Real UE writers emit this field
     ///   unconditionally (with value 0 for uncompressed). Until #14's
@@ -300,7 +307,12 @@ impl PakEntryHeader {
             Vec::new()
         };
 
-        let is_encrypted = reader.read_u8()? != 0;
+        // Bitfield, not a bool: bit 0 is AES encryption and bit 1 is a
+        // delete record. Bits 1-7 are retained but carry no meaning here
+        // — no sampled writer's use of them is established, so refusing
+        // them would guess at wire states real archives may carry. See
+        // `docs/formats/container/pak.md`.
+        let flags = reader.read_u8()?;
 
         // Always present in v3+, regardless of compression. Stored as 0 for
         // uncompressed entries.
@@ -312,7 +324,7 @@ impl PakEntryHeader {
                 compressed_size,
                 uncompressed_size,
                 compression_method,
-                is_encrypted,
+                flags,
                 compression_blocks,
                 compression_block_size,
             },
@@ -658,7 +670,9 @@ impl PakEntryHeader {
                 compressed_size,
                 uncompressed_size,
                 compression_method,
-                is_encrypted,
+                // Synthesized: the encoded word carries encryption in
+                // bit 22 and has no other flag bits to recover.
+                flags: u8::from(is_encrypted),
                 compression_blocks,
                 compression_block_size,
             },
@@ -687,7 +701,7 @@ impl PakEntryHeader {
                 compressed_size: uncompressed_size,
                 uncompressed_size,
                 compression_method: CompressionMethod::None,
-                is_encrypted,
+                flags: u8::from(is_encrypted),
                 compression_blocks: Vec::new(),
                 compression_block_size: 0,
             },
@@ -705,14 +719,16 @@ impl PakEntryHeader {
         }
     }
 
-    /// Cross-validate this header (parsed from the entry's data section)
-    /// against the index entry's header. Returns `Err(InvalidIndex)` if any
+    /// Cross-validate this header (the index entry's) against the copy
+    /// parsed from the entry's data section, passed as `payload`. Returns `Err(InvalidIndex)` if any
     /// integrity-relevant field disagrees.
     ///
     /// Skips the `offset` field — UE writes the in-data copy's offset as `0`
     /// (self-reference), so it intentionally won't match the index value.
     /// Every other field, including the full compression-block layout, must
-    /// agree. Block layout matters because the reader relies on it to seek
+    /// agree; when either side is a v10+ encoded header the flags byte is
+    /// compared as its encryption bit alone, that form carrying no other
+    /// bits. Block layout matters because the reader relies on it to seek
     /// past the in-data record into the payload region; a mismatch here would
     /// silently shift the payload boundary.
     pub fn matches_payload(&self, payload: &Self, path: &str) -> crate::Result<()> {
@@ -747,11 +763,24 @@ impl PakEntryHeader {
                 format!("{:?}", rhs.compression_method),
             ));
         }
-        if lhs.is_encrypted != rhs.is_encrypted {
+        // Compare the byte whole where both copies carry a real one: a
+        // divergence in any bit means the two records disagree about one
+        // field, whatever that bit means.
+        let both_inline =
+            matches!(self, Self::Inline { .. }) && matches!(payload, Self::Inline { .. });
+        if both_inline {
+            if lhs.flags != rhs.flags {
+                return Err(mismatch(
+                    WireField::Flags,
+                    lhs.flags.to_string(),
+                    rhs.flags.to_string(),
+                ));
+            }
+        } else if self.is_encrypted() != payload.is_encrypted() {
             return Err(mismatch(
                 WireField::IsEncrypted,
-                lhs.is_encrypted.to_string(),
-                rhs.is_encrypted.to_string(),
+                self.is_encrypted().to_string(),
+                payload.is_encrypted().to_string(),
             ));
         }
         // SHA1 comparison is skipped ONLY for v10+ encoded entries —
@@ -835,7 +864,7 @@ impl PakEntryHeader {
     /// - 48 bytes common: offset(8) + compressed(8) + uncompressed(8) +
     ///   compression_method(4) + sha1(20)
     /// - if compressed: block_count(4) + N × (start(8) + end(8))
-    /// - 5 bytes always-present trailer: is_encrypted(1) + block_size(4)
+    /// - 5 bytes always-present trailer: flags(1) + block_size(4)
     ///
     /// V8A is 3 bytes shorter — the compression_method field is u8 instead
     /// of u32. Only [`PakEntryHeader::Inline`] carries a [`PakVersion`]
@@ -865,7 +894,7 @@ impl PakEntryHeader {
         if common.compression_method != CompressionMethod::None {
             size += 4 + (common.compression_blocks.len() as u64) * 16;
         }
-        // Trailer: is_encrypted u8 + compression_block_size u32. The block
+        // Trailer: flags u8 + compression_block_size u32. The block
         // size is always written (with value 0 for uncompressed entries),
         // not just when compression_blocks is non-empty.
         size += 1 + 4;
@@ -896,7 +925,7 @@ impl PakEntryHeader {
 
     /// Whether this entry's data is AES-encrypted.
     pub fn is_encrypted(&self) -> bool {
-        self.common().is_encrypted
+        self.common().flags & ENTRY_FLAG_ENCRYPTED != 0
     }
 
     /// SHA1 hash of the entry's stored bytes, when one is recorded on the
@@ -933,5 +962,168 @@ impl PakEntryHeader {
     /// Compression block size in bytes (0 when uncompressed).
     pub fn compression_block_size(&self) -> u32 {
         self.common().compression_block_size
+    }
+}
+
+#[cfg(test)]
+mod flags_tests {
+    use super::*;
+
+    fn inline_with_flags(flags: u8) -> PakEntryHeader {
+        PakEntryHeader::Inline {
+            common: EntryCommon {
+                offset: 0,
+                compressed_size: 10,
+                uncompressed_size: 10,
+                compression_method: CompressionMethod::None,
+                flags,
+                compression_blocks: Vec::new(),
+                compression_block_size: 0,
+            },
+            sha1: Sha1Digest::ZERO,
+            compression_field_width: CompressionFieldWidth::FourBytes,
+        }
+    }
+
+    fn encoded_with_encryption(is_encrypted: bool) -> PakEntryHeader {
+        PakEntryHeader::Encoded {
+            common: EntryCommon {
+                offset: 0,
+                compressed_size: 10,
+                uncompressed_size: 10,
+                compression_method: CompressionMethod::None,
+                flags: u8::from(is_encrypted),
+                compression_blocks: Vec::new(),
+                compression_block_size: 0,
+            },
+        }
+    }
+
+    /// A v3+ inline record carrying `flags`, uncompressed so no block
+    /// list intervenes: offset, compressed, uncompressed, method u32,
+    /// sha1, flags, block_size.
+    fn inline_record_bytes(flags: u8) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&10u64.to_le_bytes());
+        buf.extend_from_slice(&10u64.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 20]);
+        buf.push(flags);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf
+    }
+
+    /// Drives the real parse: `read_from` must take encryption from bit
+    /// 0 of the wire byte and carry the byte through whole. Collapsing
+    /// it back to `!= 0` fails here.
+    #[test]
+    fn read_from_takes_encryption_from_bit_zero() {
+        for (flags, expected) in [
+            (0x00, false),
+            (0x01, true),
+            (0x02, false),
+            (0x03, true),
+            (0x80, false),
+            (0xff, true),
+        ] {
+            let header = PakEntryHeader::read_from(
+                &mut inline_record_bytes(flags).as_slice(),
+                PakVersion::EncryptionKeyGuid,
+                &[],
+            )
+            .unwrap_or_else(|e| panic!("{flags:#04x} must parse: {e:?}"));
+            assert_eq!(
+                header.is_encrypted(),
+                expected,
+                "{flags:#04x}: encryption is bit 0 alone"
+            );
+            let PakEntryHeader::Inline { ref common, .. } = header else {
+                panic!("expected Inline")
+            };
+            assert_eq!(common.flags, flags, "the whole byte must survive the parse");
+        }
+    }
+
+    /// Only bit 0 names encryption; every other bit is inert to the
+    /// decision. Both polarities, so widening the mask is observable.
+    #[test]
+    fn only_bit_zero_decides_encryption() {
+        for flags in [0x00, 0x02, 0x04, 0x80, 0xfe] {
+            assert!(
+                !inline_with_flags(flags).is_encrypted(),
+                "{flags:#04x} has bit 0 clear"
+            );
+        }
+        for flags in [0x01, 0x03, 0x81, 0xff] {
+            assert!(
+                inline_with_flags(flags).is_encrypted(),
+                "{flags:#04x} has bit 0 set"
+            );
+        }
+    }
+
+    /// Two inline copies are compared as whole bytes, so a divergence
+    /// confined to bits both copies agree are non-encrypting is still a
+    /// mismatch — and it is reported under its own field token, not
+    /// under a boolean one whose value domain it does not share.
+    #[test]
+    fn inline_pairs_compare_the_whole_byte() {
+        let err = inline_with_flags(0x00)
+            .matches_payload(&inline_with_flags(0x02), "p")
+            .unwrap_err();
+        let PaksmithError::InvalidIndex {
+            fault:
+                IndexParseFault::FieldMismatch {
+                    field,
+                    index_value,
+                    payload_value,
+                    ..
+                },
+        } = err
+        else {
+            panic!("expected FieldMismatch, got {err:?}")
+        };
+        assert_eq!(field.to_string(), "flags");
+        assert_eq!((index_value.as_str(), payload_value.as_str()), ("0", "2"));
+
+        inline_with_flags(0x02)
+            .matches_payload(&inline_with_flags(0x02), "p")
+            .expect("identical bytes agree");
+    }
+
+    /// The v10+ encoded form carries no flag bit but bit 0, so pairing
+    /// one against an inline record compares the encryption bit alone.
+    /// Without that fallback every even non-zero in-data byte would
+    /// mismatch an encoded index entry that is simply unencrypted.
+    #[test]
+    fn encoded_pairs_compare_the_encryption_bit_only() {
+        for flags in [0x00, 0x02, 0x80, 0xfe] {
+            encoded_with_encryption(false)
+                .matches_payload(&inline_with_flags(flags), "p")
+                .unwrap_or_else(|e| panic!("{flags:#04x} is unencrypted on both sides: {e:?}"));
+        }
+        let err = encoded_with_encryption(true)
+            .matches_payload(&inline_with_flags(0x02), "p")
+            .unwrap_err();
+        let PaksmithError::InvalidIndex {
+            fault:
+                IndexParseFault::FieldMismatch {
+                    field,
+                    index_value,
+                    payload_value,
+                    ..
+                },
+        } = err
+        else {
+            panic!("expected FieldMismatch, got {err:?}")
+        };
+        // The boolean token and its boolean value domain, so neither
+        // half of the field split can be swapped unnoticed.
+        assert_eq!(field.to_string(), "is_encrypted");
+        assert_eq!(
+            (index_value.as_str(), payload_value.as_str()),
+            ("true", "false")
+        );
     }
 }

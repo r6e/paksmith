@@ -72,7 +72,7 @@ blocks as explicit 16-byte pairs:
 |-------|------|------|-----------|
 | `compression_blocks_count` | 4 | `u32` LE | Number of blocks. Present only when `compression_method != None`. |
 | `compression_blocks` | `count × 16` | `CompressionBlock[]` | Per-block `(start: u64 LE, end: u64 LE)` pairs. |
-| `encrypted` | 1 | `u8` | Per-entry AES-256 ECB flag. When `1`, the compressed bytes within each block must be decrypted before decompression. |
+| `flags` | 1 | `u8` | Per-entry bitfield. When bit 0 is set, the compressed bytes within each block must be decrypted (AES-256 ECB) before decompression. |
 | `compression_block_size` | 4 | `u32` LE | Uncompressed bytes per block (typically `64 * 1024 = 65,536`). Last block may be smaller. Always present in v3+, value `0` for uncompressed entries. |
 
 Each `CompressionBlock` record on disk is two LE `u64`s: 16 bytes total.
@@ -211,7 +211,7 @@ in practice; paksmith handles them defensively for malformed input.
 - **`compression_blocks_count`** (v3-v9 inline form): `u32` LE; present only when `compression_method != None`.
 - **`CompressionBlock`** (v3-v9 inline form): 16 bytes — `start: u64 LE + end: u64 LE`. Both offsets must satisfy `start <= end`.
 - **`compression_block_size`**: `u32` LE; typically `0x10000` (64 KiB). Always present in v3+; `0` for uncompressed entries.
-- **`encrypted`** (v3-v9 inline form): `u8`; only `0` / `1` semantically valid.
+- **`flags`** (v3-v9 inline form): `u8` bitfield; bit 0 = AES-encrypted. See [`container/pak.md`](../container/pak.md) for the full bit layout.
 - **V10+ encoded form**: per-block compressed size is `u32` LE (when `block_count > 1` or `is_encrypted`); single-block-non-encrypted shortcut omits the size entirely and derives it from the entry's `compressed_size`.
 - **AES-block alignment** (encrypted entries on the v10+ encoded path): cursor advances `(block_compressed_size + 15) & !15`.
 

@@ -5445,7 +5445,7 @@ mod tests {
     /// carries one compression-name slot (`method_name`, resolved via the
     /// per-entry 1-based `method_index`; pass 0 for `None`-method entries,
     /// whose records omit the block table) and a PLAINTEXT index (footer
-    /// encrypted byte = 0); the per-entry `is_encrypted` flag is set, so
+    /// encrypted byte = 0); bit 0 of the per-entry `flags` byte is set, so
     /// `from_reader_with_key` reads the index keylessly and `read_entry`
     /// decrypts the payload with the key. `payload` is the exact on-disk
     /// (already AES-encrypted, 16-aligned) entry bytes; `compressed_size` /
@@ -5485,7 +5485,7 @@ mod tests {
                 &sha1,
                 blocks,
                 block_size,
-                true, // per-entry encrypted
+                1, // per-entry encrypted
             );
         };
 

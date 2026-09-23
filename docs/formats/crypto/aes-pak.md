@@ -20,8 +20,8 @@ UE optionally encrypts pak archive content with AES-256 in **ECB mode**
   (the bytes between
   `index_offset` and `index_offset + index_size`) is ciphertext. The
   reader must decrypt before parsing entry records.
-- **Per-entry encryption** (V3+, gated by each entry's `encrypted`
-  byte in its header): an individual entry's payload is ciphertext.
+- **Per-entry encryption** (V3+, gated by bit 0 of each entry's
+  `flags` byte in its header): an individual entry's payload is ciphertext.
   The reader decrypts the full compressed payload (16-byte-aligned)
   then decompresses by block — decryption precedes decompression.
   See [`../compression/pak-block-framing.md`](../compression/pak-block-framing.md)
@@ -55,7 +55,7 @@ verification no longer skips them.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| Wire version 3 (UE 4.4) | Per-entry encryption introduced. Encryption signaled by the entry header's `encrypted` byte; no index encryption yet. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
+| Wire version 3 (UE 4.4) | Per-entry encryption introduced. Encryption signaled by bit 0 of the entry header's `flags` byte; no index encryption yet. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
 | Wire version 4 (UE 4.16, `IndexEncryption`) | Index encryption introduced. The whole index region is AES-encrypted when the writer enables it; reader must decrypt before parsing entries. The footer gains a 1-byte `encrypted` field. (paksmith does not currently read this byte for V4-V6 archives — see Wire layout §Footer fields for the gap.) | Same[^1] |
 | Wire version 7 (UE 4.22, `EncryptionKeyGuid`) | 16-byte `encryption_key_guid` field added to the footer. Identifies which key the archive uses when a project ships multiple. Zero GUID = no specific key assigned. | Same[^1] |
 
@@ -102,8 +102,8 @@ encoded-form headers — see [`../container/pak.md`](../container/pak.md)):
 
 | field | encoding | semantics |
 |-------|----------|-----------|
-| `encrypted` (V3–V9 flat form) | `u8` after the compression-blocks array | `1` = entry payload is AES-encrypted. |
-| `encrypted` (V10+ encoded form) | bit 22 of the encoding's packed `bits` u32 (per `entry_header.rs:367`) | Same semantics; bit-packed. |
+| `flags` (V3–V9 flat form) | `u8` bitfield after the compression-blocks array | Bit 0 set = entry payload is AES-encrypted. See [`../container/pak.md`](../container/pak.md) for the full bit layout. |
+| `encrypted` (V10+ encoded form) | bit 22 of the encoding's packed `bits` u32 (per `PakEntryHeader::read_encoded`) | Same semantics; bit-packed. |
 
 ### `Crypto.json` (UE 4.20+ key-file format)
 
@@ -195,21 +195,21 @@ Offset (within footer)  Bytes (LE)                                       Field
 +16                     01                                                encrypted = 1
 ```
 
-### Worked example — V3-V9 per-entry encrypted flag
+### Worked example — V3-V9 per-entry flags byte
 
-For a V3-V9 flat-form entry, the `encrypted` field is a single `u8`
+For a V3-V9 flat-form entry, the `flags` field is a single `u8`
 that appears at a fixed position in the entry header per
 [`../container/pak.md`](../container/pak.md) §*Entry header
 (flat-index, v3–v9)*. A value of `01` marks the payload encrypted;
 per the same pak.md section, the next field on the wire is
 `compression_block_size: u32` (4 bytes LE), NOT the compression-method
 field (which lives much earlier in the header, before the SHA1 hash).
-A 6-byte fragment showing the encrypted-byte position and its
+A 6-byte fragment showing the flags-byte position and its
 trailing `compression_block_size`:
 
 ```
 ... compression-blocks array ...
-01                    encrypted = 1 (payload is AES-encrypted)
+01                    flags = 0x01 — bit 0 set, payload is AES-encrypted
 00 00 01 00           compression_block_size = 0x00010000 = 65536 (u32 LE)
 ```
 
@@ -243,10 +243,10 @@ encrypted to test the detection.
 Four wire-possible combinations (per the Wire layout footer and
 per-entry flag tables above):
 
-- **Plaintext** — `footer.encrypted == 0` and no entry has `encrypted == 1`.
-- **Per-entry-only** — `footer.encrypted == 0`; one or more entries have `encrypted == 1`. Index is plaintext; individual payloads are ciphertext.
-- **Index-only** — `footer.encrypted == 1`; no entry has `encrypted == 1`. Wire-possible but operationally moot for paksmith: the archive is rejected at `from_reader` before any entry is inspected.
-- **Whole-archive** — `footer.encrypted == 1` and entries have `encrypted == 1`. Both index and payloads are ciphertext.
+- **Plaintext** — `footer.encrypted == 0` and no entry sets bit 0 of its `flags` byte.
+- **Per-entry-only** — `footer.encrypted == 0`; one or more entries set bit 0 of their `flags` byte. Index is plaintext; individual payloads are ciphertext.
+- **Index-only** — `footer.encrypted == 1`; no entry sets bit 0 of its `flags` byte. Index is ciphertext; payloads are plaintext. (Index encryption does not exist before wire version 4. For how paksmith handles each class, and the V4-V6 footer gap, see *Paksmith implementation* and *Known divergences* below.)
+- **Whole-archive** — `footer.encrypted == 1` and entries set bit 0 of their `flags` byte. Both index and payloads are ciphertext.
 
 See Paksmith implementation for the precise rejection points per combination.
 
@@ -273,8 +273,10 @@ doesn't yet act on it.
   undefined. The byte itself has no overflow surface.
 - **Footer `encryption_key_guid`:** fixed `[u8; 16]` — no length to
   bound.
-- **Per-entry `encrypted` flag (V3-V9 flat form):** `u8`.
-- **Per-entry `encrypted` flag (V10+ encoded form):** 1 bit (bit 22
+- **Per-entry `flags` byte (V3-V9 flat form):** `u8` bitfield; bit 0 =
+  AES-encrypted. See [`../container/pak.md`](../container/pak.md) for
+  the full bit layout.
+- **Per-entry encryption (V10+ encoded form):** 1 bit (bit 22
   of the `bits: u32` field per
   [`../container/pak.md`](../container/pak.md)).
 - **AES-256 block size:** 16 bytes (128 bits, AES-fixed per NIST FIPS 197).
@@ -389,8 +391,8 @@ above).
 - `crates/paksmith-core/src/container/pak/footer.rs` — `PakFooter::encryption_key_guid`,
   `PakFooter::is_encrypted`.
 - `crates/paksmith-core/src/container/pak/index/entry_header.rs` —
-  per-entry `is_encrypted` field, in both flat-form (V3–V9) and
-  encoded-form (V10+, bit 22) readers; the encoded-form
+  per-entry encryption, in both flat-form (V3–V9, bit 0 of the `flags`
+  byte) and encoded-form (V10+, bit 22) readers; the encoded-form
   `compressed_size` cross-check expects the aligned footprint sum for
   encrypted entries.
 - `crates/paksmith-core/src/container/pak/crypto.rs` —

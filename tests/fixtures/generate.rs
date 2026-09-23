@@ -43,7 +43,7 @@ use sha1::{Digest, Sha1};
 /// - 48 bytes common: offset(8) + compressed(8) + uncompressed(8) +
 ///   method(4) + sha1(20)
 /// - if compressed: block_count(4) + N × 16
-/// - 5 bytes always-present trailer: is_encrypted(1) + block_size(4)
+/// - 5 bytes always-present trailer: flags(1) + block_size(4)
 fn in_data_header_size(compressed: bool, block_count: usize) -> u64 {
     let mut size: u64 = 8 + 8 + 8 + 4 + 20;
     if compressed {
@@ -107,7 +107,7 @@ fn prepare(spec: &EntrySpec) -> PreparedEntry {
             &sha1,
             &[],
             0,
-            false,
+            0,
         );
         record.extend_from_slice(&spec.payload);
         return PreparedEntry {
@@ -167,7 +167,7 @@ fn prepare(spec: &EntrySpec) -> PreparedEntry {
         &sha1,
         &blocks,
         block_size,
-        false,
+        0,
     );
     record.extend_from_slice(&compressed_payload);
 
@@ -261,7 +261,7 @@ fn main() {
             &entry.sha1,
             &entry.blocks,
             entry.block_size,
-            false,
+            0,
         );
     }
 

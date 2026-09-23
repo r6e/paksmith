@@ -1330,8 +1330,12 @@ pub enum WireField {
     BlockCount,
     /// Per-entry: SHA-1 digest field.
     Sha1,
-    /// Per-entry: encryption flag.
+    /// Per-entry: encryption flag. Carries a boolean rendering.
     IsEncrypted,
+    /// Per-entry: the whole flags byte, rendered as a decimal u8.
+    /// Distinct from [`Self::IsEncrypted`] so one field token never
+    /// carries two value domains.
+    Flags,
     /// Per-entry: compression method discriminant.
     CompressionMethod,
     /// Per-entry: full compression-block layout (used by
@@ -1375,6 +1379,7 @@ impl fmt::Display for WireField {
             Self::BlockCount => "block_count",
             Self::Sha1 => "sha1",
             Self::IsEncrypted => "is_encrypted",
+            Self::Flags => "flags",
             Self::CompressionMethod => "compression_method",
             Self::CompressionBlocks => "compression_blocks",
             Self::FlatEntryCount => "entry_count",
@@ -7277,6 +7282,7 @@ mod tests {
             (WireField::BlockCount, "block_count"),
             (WireField::Sha1, "sha1"),
             (WireField::IsEncrypted, "is_encrypted"),
+            (WireField::Flags, "flags"),
             (WireField::CompressionMethod, "compression_method"),
             (WireField::CompressionBlocks, "compression_blocks"),
             (WireField::FlatEntryCount, "entry_count"),

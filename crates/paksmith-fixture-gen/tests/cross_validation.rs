@@ -87,7 +87,7 @@ struct OracleEntry {
 /// - Inline FPakEntry: `offset u64 + compressed_size u64 +
 ///   uncompressed_size u64 + compression u32-or-u8 + sha1[20] +
 ///   if compressed { block_count u32 + N×(start u64, end u64) } +
-///   is_encrypted u8 + compression_block_size u32`.
+///   flags u8 + compression_block_size u32`.
 /// - Compression byte width: v3-v7 = u32, V8A = u8, V8B+/v9 = u32.
 /// - The index region is `[mount FString, entry_count u32, N ×
 ///   (filename FString, FPakEntry)]`. Mount and the per-entry
@@ -194,7 +194,7 @@ fn oracle_read_fpakentry<R: Read>(
     // Skip the 20-byte SHA1 digest.
     let mut _sha1 = [0u8; 20];
     reader.read_exact(&mut _sha1)?;
-    // Compressed entries carry a block list before is_encrypted.
+    // Compressed entries carry a block list before the flags byte.
     if is_compressed {
         let block_count = reader.read_u32::<LittleEndian>()?;
         for _ in 0..block_count {
@@ -202,7 +202,10 @@ fn oracle_read_fpakentry<R: Read>(
             let _end = reader.read_u64::<LittleEndian>()?;
         }
     }
-    let is_encrypted = reader.read_u8()? != 0;
+    // Bit 0 of the flags byte, matching repak and the production reader.
+    // Collapsing the whole byte to a bool here would make this oracle
+    // agree with the defect it exists to catch (issue #742).
+    let is_encrypted = reader.read_u8()? & 0x01 != 0;
     // Skip the trailing compression_block_size u32 (always present
     // in v3+ — paksmith's reader has a comment on this since #14).
     let _block_size = reader.read_u32::<LittleEndian>()?;
@@ -344,10 +347,9 @@ fn read_with_paksmith(name: &str) -> PaksmithSnapshot {
 ///   theoretically possible with adversarial input but vanishingly
 ///   rare for real assets, and the fixture corpus doesn't exercise
 ///   it.)
-/// - **`is_encrypted`**: per the fixture corpus, no test pak is AES-
-///   encrypted (paksmith currently rejects encryption in `open`).
-///   Pin `false` to catch a regression that surfaced encrypted
-///   entries through this path.
+/// - **`is_encrypted`**: no repak-written fixture sets the flags byte's
+///   encryption bit, so pin `false` to catch a regression that surfaced
+///   encrypted entries through this path.
 // `too_many_lines`: the function is structurally a sequence of
 // independent cross-parser invariant checks; splitting just spreads
 // the assertion-message-formatting context across multiple
@@ -433,15 +435,15 @@ fn assert_cross_parser_agreement(name: &str) {
             paksmith_entry.uncompressed_size
         );
 
-        // No fixture in the corpus is AES-encrypted (paksmith rejects
-        // encrypted entries at `open` today). Pin `false` so a
-        // regression that started surfacing encrypted entries through
-        // this path would fail loudly.
+        // None of the repak-written fixtures cross-validated here sets
+        // bit 0 of the flags byte. Pin `false` so a regression that
+        // started surfacing encrypted entries through this path would
+        // fail loudly.
         assert!(
             !paksmith_entry.is_encrypted,
             "{name}: entry `{path}` reports is_encrypted=true; \
-             no fixture in the corpus should be encrypted, and \
-             paksmith should reject encrypted archives at open"
+             no repak-written fixture in this set sets bit 0 of its \
+             flags byte"
         );
 
         // Layer-3 oracle cross-checks (issue #69). Skipped on v10+
