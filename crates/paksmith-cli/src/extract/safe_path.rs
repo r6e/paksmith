@@ -21,10 +21,11 @@ impl std::fmt::Display for SafePathError {
 
 /// Map an untrusted pak `entry_path` to a path strictly under `output_root`.
 ///
-/// Lexical only — never canonicalizes (targets don't exist yet; canonicalize
-/// is TOCTOU-prone). Backslashes are normalized to `/` so Windows-style
-/// separators can't smuggle traversal. Rejects `..`, absolute roots, and
-/// Windows drive/UNC prefixes.
+/// Lexical only — never canonicalizes: the leaf does not exist yet, and where
+/// the existing ancestor chain RESOLVES is checked by
+/// `verify_resolves_inside_root` in `extract/mod.rs`. Backslashes are
+/// normalized to `/` so Windows-style separators can't smuggle traversal.
+/// Rejects `..`, absolute roots, and Windows drive/UNC prefixes.
 pub(crate) fn safe_join(
     output_root: &Path,
     entry_path: &str,
