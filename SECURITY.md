@@ -31,6 +31,7 @@ Only the latest release on `main` is actively supported with security fixes.
 - AES keys are never logged. Tracing spans for decryption operations omit key material.
 - Network requests use HTTPS exclusively. Registry endpoints validate TLS certificates.
 - File extraction respects path boundaries — no path traversal via crafted archive entries.
+- **An entry whose parent resolves outside `extract --output` through a symlink is refused, not warned** (issue #723): per entry, unconditionally, with no opt-out. A symlink at the destination itself is never followed — refused, or replaced under `--overwrite`. `--output` itself is followed as the caller's spelling, so in a directory others can write to, create it yourself first. Changing the output tree, or anything a link in it resolves through, *during* extraction is out of scope.
 
 ## Threat Model
 

@@ -31,7 +31,11 @@ pub(crate) struct ExtractArgs {
     /// collisions.
     pub(crate) pak: Option<PathBuf>,
 
-    /// Output directory (created if absent).
+    /// Output directory (created if absent; a path that is itself a symlink
+    /// is followed, so create it yourself in shared locations). An entry
+    /// whose containing directory resolves outside it through a symlink is
+    /// refused; a symlinked destination file is refused, or with
+    /// `--overwrite` replaced rather than followed.
     #[arg(short, long)]
     pub(crate) output: PathBuf,
 
@@ -89,17 +93,6 @@ pub(crate) fn run(
     let pattern = crate::path_util::compile_opt_glob_arg("--filter", args.filter.as_deref())?;
 
     let registry = HandlerRegistry::all_default_handlers();
-    let cfg = ExtractConfig {
-        output_dir: args.output.clone(),
-        flat: args.flat,
-        dry_run: args.dry_run,
-        overwrite: args.overwrite,
-        prefs: FormatPrefs {
-            audio: args.audio_format,
-            datatable: args.datatable_format,
-            locres: args.locres_format,
-        },
-    };
     let opened = open_and_collect(
         &sources,
         args.mappings.as_deref(),
@@ -108,6 +101,38 @@ pub(crate) fn run(
         detect,
         pattern.as_ref(),
     )?;
+    // Every argument the run can be rejected on settles before `prepare`
+    // creates the output root, or an exit-2 rejection leaves it behind.
+    let pool = args
+        .jobs
+        .map(|n| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n as usize)
+                .build()
+                .map_err(|e| PaksmithError::InvalidArgument {
+                    arg: "--jobs",
+                    reason: e.to_string(),
+                })
+        })
+        .transpose()?;
+
+    let cfg = ExtractConfig::prepare(
+        &args.output,
+        crate::extract::ExtractFlags {
+            flat: args.flat,
+            dry_run: args.dry_run,
+            overwrite: args.overwrite,
+        },
+        FormatPrefs {
+            audio: args.audio_format,
+            datatable: args.datatable_format,
+            locres: args.locres_format,
+        },
+    )
+    .map_err(|e| PaksmithError::InvalidArgument {
+        arg: "--output",
+        reason: format!("{}: {e}", args.output.display()),
+    })?;
     let winning = winning_entries(&opened.entry_lists);
 
     // FIX 6: hide progress when stderr is not a TTY (e.g. CI, piped
@@ -129,19 +154,6 @@ pub(crate) fn run(
         ProgressStyle::with_template("{bar:40} {pos}/{len} {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
-    let pool = args
-        .jobs
-        .map(|n| {
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(n as usize)
-                .build()
-                .map_err(|e| PaksmithError::InvalidArgument {
-                    arg: "--jobs",
-                    reason: e.to_string(),
-                })
-        })
-        .transpose()?;
-
     let mut all_outcomes = Vec::new();
     for (reader, entries) in opened.readers.iter().zip(&winning) {
         let job = ExtractJob {
@@ -163,7 +175,7 @@ pub(crate) fn run(
     // carry the machine-readable `sources` array.
     let mut summary = ExtractSummary::from_outcomes(
         crate::profile_paks::join_display(&sources),
-        args.output.display().to_string(),
+        cfg.output_dir().display().to_string(),
         args.dry_run,
         all_outcomes,
     );

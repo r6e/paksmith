@@ -454,6 +454,154 @@ fn extract_missing_pak_is_fatal() {
         .code(2);
 }
 
+/// A RELATIVE `--output` that does not exist yet is the canonical invocation
+/// from a project directory, and both modes must agree on it. The unit tests
+/// cannot cover it: they hand in absolute `tempdir()` roots, and setting a
+/// relative cwd is process-global while the suite runs in parallel — so the
+/// cwd is set on the child process instead.
+#[test]
+fn dry_run_previews_a_relative_output_root_the_real_run_creates() {
+    let cwd = tempdir().unwrap();
+
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .current_dir(cwd.path())
+        .args(["extract"])
+        .arg(fixture_pak())
+        .args(["--dry-run", "-o", "out/nested"])
+        .assert()
+        .code(0);
+    assert!(
+        !cwd.path().join("out").exists(),
+        "--dry-run created the relative root it only previewed"
+    );
+
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .current_dir(cwd.path())
+        .args(["extract"])
+        .arg(fixture_pak())
+        .args(["-o", "out/nested"])
+        .assert()
+        .code(0);
+    assert!(
+        cwd.path().join("out/nested").is_dir(),
+        "the real run must create the same relative root, missing parent and all"
+    );
+}
+
+/// An unusable `--output` is a run-level error (exit 2, no summary), even
+/// when the filter matches nothing.
+#[test]
+fn extract_unusable_output_dir_is_a_run_level_error() {
+    let dir = tempdir().unwrap();
+    let blocking_file = dir.path().join("not-a-dir");
+    std::fs::write(&blocking_file, b"x").unwrap();
+
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["extract"])
+        .arg(fixture_pak())
+        .arg("-o")
+        .arg(&blocking_file)
+        .assert()
+        .code(2)
+        // The message, not just the code: `create_dir_all` alone would answer
+        // `EEXIST` for an existing non-directory, and "File exists" reads as
+        // benign against "created if absent".
+        .stderr(predicates::str::contains("invalid argument `--output`"))
+        .stderr(predicates::str::contains("not a directory"));
+
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["extract"])
+        .arg(fixture_pak())
+        .args(["--filter", "nothing/matches/**", "-o"])
+        .arg(&blocking_file)
+        .assert()
+        .code(2);
+}
+
+/// A dangling symlink at or above `--output` must be reported AS a symlink.
+/// The resolve error for that shape is itself `ENOENT`, which names an
+/// absence "created if absent" promises to fill and invites a `mkdir -p`
+/// that then fails with `EEXIST` without ever mentioning the link.
+#[cfg(unix)]
+#[test]
+fn a_dangling_symlink_output_is_reported_as_a_symlink() {
+    let dir = tempdir().unwrap();
+    let dangling = dir.path().join("dangling");
+    std::os::unix::fs::symlink(dir.path().join("hold/nowhere"), &dangling).unwrap();
+
+    for root in [dangling.clone(), dangling.join("out")] {
+        for dry_run in [true, false] {
+            let mut cmd = Command::cargo_bin("paksmith").unwrap();
+            let _ = cmd.args(["extract"]).arg(fixture_pak());
+            if dry_run {
+                let _ = cmd.arg("--dry-run");
+            }
+            let _ = cmd
+                .arg("-o")
+                .arg(&root)
+                .assert()
+                .code(2)
+                .stderr(predicates::str::contains("invalid argument `--output`"))
+                .stderr(predicates::str::contains(
+                    "symlink whose target does not exist",
+                ));
+        }
+    }
+    assert!(
+        !dir.path().join("hold").exists(),
+        "a dangling root's target must never be created"
+    );
+}
+
+/// The root is created up front, so a run that writes NOTHING still creates
+/// it. Only an ABSENT root can observe this: handed a live directory,
+/// creating it again is a silent no-op.
+#[test]
+fn a_filter_matching_nothing_still_creates_the_output_root() {
+    let dir = tempdir().unwrap();
+    let fresh = dir.path().join("fresh");
+
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["extract"])
+        .arg(fixture_pak())
+        .args(["--filter", "nothing/matches/**", "-o"])
+        .arg(&fresh)
+        .assert()
+        .code(0);
+
+    assert!(
+        fresh.is_dir(),
+        "the output root must exist once the run is accepted"
+    );
+}
+
+/// A run that cannot read its input must not leave an output directory behind,
+/// which holds the ordering: the archives are opened before the config
+/// constructor creates and resolves the root. Only a root that does NOT exist
+/// can catch a regression — every other input-failure test hands in a live
+/// tempdir, where creating it again is a silent no-op.
+#[test]
+fn extract_with_unreadable_input_creates_no_output_dir() {
+    let parent = tempdir().unwrap();
+    let out = parent.path().join("never-created");
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["extract", "/no/such.pak", "-o"])
+        .arg(&out)
+        .assert()
+        .code(2);
+    assert!(
+        !out.exists(),
+        "a run that failed to open its input created {}",
+        out.display()
+    );
+}
+
 #[test]
 fn extract_filter_matches_subset() {
     // Game/** should match Game/Maps/Demo.uasset (the fixture's only entry).
@@ -522,6 +670,43 @@ fn extract_flat_strips_dirs() {
         output_path.ends_with("Demo.uasset") && !output_path.contains("Game"),
         "output path should be flat, got: {output_path}"
     );
+}
+
+/// Every `outputs[].output` is built from the constructor-normalized root, so
+/// the summary's `output_dir` has to be that same spelling. `-o dir/.` is the
+/// spelling `"$BASE/$SUB"` produces with `SUB=.`, and a consumer
+/// computing `output.strip_prefix(output_dir)` gets nothing if the two fields
+/// of one document disagree on the root.
+#[test]
+fn the_summary_output_dir_is_the_root_the_outputs_are_built_from() {
+    for dry_run in [true, false] {
+        let out = tempdir().unwrap();
+        let spelled = format!("{}/.", out.path().display());
+        let mut cmd = Command::cargo_bin("paksmith").unwrap();
+        let _ = cmd.args(["--format", "json", "extract"]).arg(fixture_pak());
+        if dry_run {
+            let _ = cmd.arg("--dry-run");
+        }
+        let assert = cmd.arg("-o").arg(&spelled).assert().success();
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+        let output_dir = v["output_dir"].as_str().unwrap();
+        let outputs = v["outputs"].as_array().unwrap();
+        assert!(!outputs.is_empty(), "fixture must produce outputs");
+        for o in outputs {
+            let output = o["output"].as_str().unwrap();
+            // A string prefix followed by a separator: `Path::starts_with`
+            // drops `.` components and would accept the raw spelling.
+            let under = output
+                .strip_prefix(output_dir)
+                .is_some_and(|rest| rest.starts_with(std::path::MAIN_SEPARATOR));
+            assert!(
+                under,
+                "dry_run={dry_run}: {output} is not under the document's own output_dir {output_dir}"
+            );
+        }
+    }
 }
 
 #[test]
