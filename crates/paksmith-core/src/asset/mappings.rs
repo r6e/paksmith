@@ -136,6 +136,15 @@ const MAX_USMAP_NAME_COUNT: u32 = 131_072;
 /// Exposed via [`max_usmap_flattened_total_entries`].
 const MAX_USMAP_FLATTENED_TOTAL_ENTRIES: u64 = 4_194_304;
 
+/// Hard cap on type-tree nodes summed across a whole schema table. Every
+/// node but a row's root is one `Arc` allocation of a few dozen bytes and
+/// can cost a single wire byte, so the decompressed-size cap alone allowed gigabytes of type
+/// trees. Real rows run to a few nodes each; 4 Mi nodes keeps the worst
+/// case near 160 MiB.
+///
+/// Exposed via [`max_usmap_type_nodes`].
+const MAX_USMAP_TYPE_NODES: u64 = 4_194_304;
+
 /// Hard cap on the wire-claimed `cv_count` in the .usmap versioning
 /// block. Real-world `CustomVersionContainer`s top out in the low
 /// tens (Fortnite ships `cv_count = 3`); 1_024 leaves wide headroom.
@@ -209,6 +218,14 @@ pub fn max_usmap_flattened_total_entries() -> u64 {
     MAX_USMAP_FLATTENED_TOTAL_ENTRIES
 }
 
+/// Test-only accessor for `MAX_USMAP_TYPE_NODES`. Same rationale as
+/// [`max_usmap_enum_count`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_type_nodes() -> u64 {
+    MAX_USMAP_TYPE_NODES
+}
+
 /// Test-only accessor for `MAX_USMAP_NAME_COUNT`. Same rationale as
 /// [`max_usmap_enum_count`].
 #[cfg(feature = "__test_utils")]
@@ -244,8 +261,8 @@ enum UsmapCompression {
 
 /// The Rust-side property type derived from a usmap `EPropertyType` byte.
 ///
-/// `#[non_exhaustive]` so future variants (Map / Set / Delegate /
-/// FieldPath, currently the `Unknown(byte)` catch-all) can land as
+/// `#[non_exhaustive]` so future variants (Delegate / FieldPath,
+/// currently the `Unknown(byte)` catch-all) can land as
 /// source-compatible additions. The enum is already semver-broken
 /// by issue #397 sub-fix A's `String → Arc<str>` field-type change
 /// on the `Enum` and `Struct` payloads — the attribute landed in the
@@ -311,23 +328,24 @@ pub enum MappedPropertyType {
     SoftObject,
     /// `ArrayProperty` — variable-length array with a single inner type.
     Array {
-        /// The element type.
-        inner: Box<MappedPropertyType>,
+        /// The element type, shared by every slot and cache entry that
+        /// holds this type.
+        inner: Arc<MappedPropertyType>,
     },
     /// `SetProperty` — variable-length set with a single element type.
     /// Wire shape mirrors `Array` plus a leading `num_to_remove` prefix.
     Set {
-        /// The element type.
-        inner: Box<MappedPropertyType>,
+        /// The element type, shared like [`Self::Array`]'s.
+        inner: Arc<MappedPropertyType>,
     },
     /// `MapProperty` — key→value map. The `.usmap` schema encodes the
     /// key type first, then the value type (CUE4Parse `EPropertyType`
     /// `MapProperty` = byte 24, two recursive inner types).
     Map {
-        /// The key type.
-        key: Box<MappedPropertyType>,
-        /// The value type.
-        value: Box<MappedPropertyType>,
+        /// The key type, shared like [`Self::Array`]'s element type.
+        key: Arc<MappedPropertyType>,
+        /// The value type, shared the same way.
+        value: Arc<MappedPropertyType>,
     },
     /// Unrecognised or unsupported type byte. Carries the raw byte for
     /// diagnostics so downstream readers can emit
@@ -460,9 +478,9 @@ pub struct Usmap {
     /// `absolute_index`. Computed once in [`Self::from_bytes`] so the
     /// inheritance walk and three Vec/HashSet allocations
     /// `get_all_properties` used to do per call are eliminated on the
-    /// hot per-export path. `MappedProperty` clones are cheap (the
-    /// name + type fields are `Arc<str>`), and the cache is bounded by
-    /// the per-class caps already enforced upstream.
+    /// hot per-export path. `MappedProperty` clones are cheap (the name
+    /// and any nested type sit behind `Arc`), and the cache is bounded by
+    /// [`MAX_USMAP_FLATTENED_TOTAL_ENTRIES`].
     flattened: HashMap<String, Vec<ResolvedProperty>>,
 }
 
@@ -770,16 +788,21 @@ impl Usmap {
             }
         };
 
-        Self::parse_schema_data(&data, version)
+        Self::parse_schema_data(&data, version, SchemaBudgets::DEFAULT)
     }
 
+    /// `budgets` caps totals across every schema row: expanded properties,
+    /// which past [`MAX_USMAP_FLATTENED_TOTAL_ENTRIES`] cannot build the
+    /// cache unless repeated schema names overwrite each other, and
+    /// type-tree nodes. Both refuse during the walk, before the rest is
+    /// allocated.
     #[allow(
         clippy::too_many_lines,
         reason = "single linear wire-format read: name table, enum table (with v2/v3/v4 \
                   version-gated branches), schema table; splitting into helpers would shred \
                   the shared `cur`/`names`/`enums` flow that each section feeds into the next"
     )]
-    fn parse_schema_data(data: &[u8], version: u8) -> crate::Result<Self> {
+    fn parse_schema_data(data: &[u8], version: u8, budgets: SchemaBudgets) -> crate::Result<Self> {
         let mut cur = Cursor::new(data);
 
         // Name table.
@@ -912,6 +935,8 @@ impl Usmap {
                 )
             })?;
 
+        let mut expanded = Tally::expanded_properties(budgets.expanded_properties);
+        let mut type_nodes = Tally::type_nodes(budgets.type_nodes);
         for _ in 0..schema_count {
             let name = read_name(&mut cur, &names)?;
             let super_type_str = read_name(&mut cur, &names)?;
@@ -958,13 +983,6 @@ impl Usmap {
             for _ in 0..serial_count {
                 let schema_index = cur.read_u16::<LE>()?;
                 let array_size = cur.read_u8()?;
-                // `prop_name`: read as `Arc<str>` ONCE per row so the
-                // inner `array_size` expansion loop clones a refcount
-                // per slot instead of a heap-allocated name buffer
-                // (issue #397 sub-fix A; see `read_name_arc`).
-                let prop_name = read_name_arc(&mut cur, &names)?;
-                let prop_type = read_mapped_type(&mut cur, &names, 0)?;
-
                 // u32 arithmetic is sufficient: `properties.len()` is
                 // bounded above by `serial_count × array_size` =
                 // 65535 × 255 < u32::MAX, and `array_size` is u8.
@@ -981,6 +999,13 @@ impl Usmap {
                         limit: MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA,
                     }));
                 }
+                expanded.charge(u64::from(array_size))?;
+                // `prop_name`: read as `Arc<str>` ONCE per row so the
+                // inner `array_size` expansion loop clones a refcount
+                // per slot instead of a heap-allocated name buffer
+                // (issue #397 sub-fix A; see `read_name_arc`).
+                let prop_name = read_name_arc(&mut cur, &names)?;
+                let prop_type = read_mapped_type(&mut cur, &names, 0, &mut type_nodes)?;
                 properties
                     .try_reserve(usize::from(array_size))
                     .map_err(|source| {
@@ -1282,11 +1307,8 @@ impl Usmap {
 /// The owned-property form (vs a borrowed `&'a MappedProperty`) lets
 /// `Usmap` store a pre-sorted flattened cache for every class
 /// without self-referential-lifetime gymnastics — `MappedProperty`'s
-/// `name` is `Arc<str>` and most `prop_type` variants are trivially-
-/// sized, so most clones reduce to refcount bumps. The exception is
-/// `MappedPropertyType::Array { inner: Box<...> }`, which deep-clones
-/// the `Box` per cache slot; bounded by parse-time caps and only
-/// paid once at parse, so the cost is structural and small.
+/// `name` is `Arc<str>` and every nested `prop_type` sits behind an `Arc`,
+/// so a clone is a handful of refcount bumps.
 ///
 /// `#[non_exhaustive]` matches the file-wide precedent
 /// ([`Usmap`], [`MappedProperty`], [`ClassSchema`],
@@ -1350,6 +1372,7 @@ fn read_mapped_type(
     cur: &mut Cursor<&[u8]>,
     names: &[Arc<str>],
     depth: usize,
+    nodes: &mut Tally,
 ) -> crate::Result<MappedPropertyType> {
     if depth > MAX_USMAP_ARRAY_NESTING_DEPTH {
         return Err(fault(MappingsParseFault::ArrayNestingTooDeep {
@@ -1357,6 +1380,7 @@ fn read_mapped_type(
             limit: MAX_USMAP_ARRAY_NESTING_DEPTH,
         }));
     }
+    nodes.charge(1)?;
     let type_byte = cur.read_u8()?;
     // EPropertyType discriminants per the oracle's `pub enum EPropertyType`
     // at `unreal_asset_base/src/unversioned/properties/mod.rs`. Pinned
@@ -1375,9 +1399,9 @@ fn read_mapped_type(
             // wire like `08 08 08 ... <leaf>` is rejected before
             // the stack-overflow danger zone (security cap added
             // for #443; see MAX_USMAP_ARRAY_NESTING_DEPTH docstring).
-            let inner = read_mapped_type(cur, names, depth + 1)?;
+            let inner = read_mapped_type(cur, names, depth + 1, nodes)?;
             MappedPropertyType::Array {
-                inner: Box::new(inner),
+                inner: Arc::new(inner),
             }
         }
         9 => {
@@ -1407,19 +1431,19 @@ fn read_mapped_type(
             // WITHOUT consuming them desyncs the schema table for every
             // subsequent property (there is no per-property size to
             // resync on). #639.
-            let key = read_mapped_type(cur, names, depth + 1)?;
-            let value = read_mapped_type(cur, names, depth + 1)?;
+            let key = read_mapped_type(cur, names, depth + 1, nodes)?;
+            let value = read_mapped_type(cur, names, depth + 1, nodes)?;
             MappedPropertyType::Map {
-                key: Box::new(key),
-                value: Box::new(value),
+                key: Arc::new(key),
+                value: Arc::new(value),
             }
         }
         25 => {
             // SetProperty — single element inner type (same recursive
             // shape as ArrayProperty). #639.
-            let inner = read_mapped_type(cur, names, depth + 1)?;
+            let inner = read_mapped_type(cur, names, depth + 1, nodes)?;
             MappedPropertyType::Set {
-                inner: Box::new(inner),
+                inner: Arc::new(inner),
             }
         }
         26 => {
@@ -1431,6 +1455,56 @@ fn read_mapped_type(
         27 => MappedPropertyType::Unknown(type_byte), // FieldPathProperty
         other => MappedPropertyType::Unknown(other),
     })
+}
+
+/// Caps summed across a whole schema table rather than per schema.
+#[derive(Clone, Copy)]
+struct SchemaBudgets {
+    expanded_properties: u64,
+    type_nodes: u64,
+}
+
+impl SchemaBudgets {
+    const DEFAULT: Self = Self {
+        expanded_properties: MAX_USMAP_FLATTENED_TOTAL_ENTRIES,
+        type_nodes: MAX_USMAP_TYPE_NODES,
+    };
+}
+
+/// A total summed across the schema table, refused once it passes `limit`.
+struct Tally {
+    used: u64,
+    limit: u64,
+    exceeded: fn(u64, u64) -> MappingsParseFault,
+}
+
+impl Tally {
+    fn expanded_properties(limit: u64) -> Self {
+        Self {
+            used: 0,
+            limit,
+            exceeded: |requested, limit| MappingsParseFault::ExpandedPropertiesTotalExceeded {
+                requested,
+                limit,
+            },
+        }
+    }
+
+    fn type_nodes(limit: u64) -> Self {
+        Self {
+            used: 0,
+            limit,
+            exceeded: |requested, limit| MappingsParseFault::TypeNodesExceeded { requested, limit },
+        }
+    }
+
+    fn charge(&mut self, n: u64) -> crate::Result<()> {
+        self.used += n;
+        if self.used > self.limit {
+            return Err(fault((self.exceeded)(self.used, self.limit)));
+        }
+        Ok(())
+    }
 }
 
 fn is_large_window_brotli(stream: &[u8]) -> bool {
@@ -2105,10 +2179,13 @@ mod tests {
         data.extend_from_slice(&rows.to_le_bytes()); // prop_count
         data.extend_from_slice(&rows.to_le_bytes()); // serial_count
         // Each row: schema_index=0, array_size=255, name_idx=2 (P), type=IntProperty.
-        for _ in 0..rows {
+        // The first row to overshoot names index 99, out of range, so the cap
+        // must fire before the row's name is read.
+        for row in 0..rows {
+            let name_idx: i32 = if u32::from(row) == cap / 255 { 99 } else { 2 };
             data.extend_from_slice(&0u16.to_le_bytes()); // schema_index
             data.push(255u8); // array_size — maximal expansion
-            data.extend_from_slice(&2i32.to_le_bytes()); // name idx = "P"
+            data.extend_from_slice(&name_idx.to_le_bytes());
             data.push(2u8); // IntProperty
         }
         let data_len = u32::try_from(data.len()).unwrap();
@@ -2322,7 +2399,7 @@ mod tests {
         let is_too_deep = |bytes: &[u8], depth: usize| -> bool {
             let mut cur = Cursor::new(bytes);
             matches!(
-                read_mapped_type(&mut cur, &names, depth),
+                read_mapped_type(&mut cur, &names, depth, &mut Tally::type_nodes(u64::MAX)),
                 Err(crate::PaksmithError::MappingsParse {
                     fault: MappingsParseFault::ArrayNestingTooDeep { .. },
                 })
@@ -2375,6 +2452,13 @@ mod tests {
 
     fn schema_payload() -> Vec<u8> {
         minimal_usmap_none()[HEADER_LEN..].to_vec()
+    }
+
+    fn schema_fault(data: &[u8], budgets: SchemaBudgets) -> crate::error::MappingsParseFault {
+        match Usmap::parse_schema_data(data, 0, budgets) {
+            Err(crate::PaksmithError::MappingsParse { fault }) => fault,
+            other => panic!("expected a mappings fault, got {other:?}"),
+        }
     }
 
     fn parse_fault(bytes: &[u8]) -> crate::error::MappingsParseFault {
@@ -2687,6 +2771,233 @@ mod tests {
             Arc::ptr_eq(&props[0].name, &props[1].name),
             "property names"
         );
+    }
+
+    fn push_names(data: &mut Vec<u8>, names: &[&str]) {
+        data.extend_from_slice(&u32::try_from(names.len()).unwrap().to_le_bytes());
+        for name in names {
+            data.push(u8::try_from(name.len()).unwrap());
+            data.extend_from_slice(name.as_bytes());
+        }
+    }
+
+    /// One schema, name 0 over super 1, whose rows are all property 2 of
+    /// `row_type`, one row per entry of `array_sizes`.
+    fn push_repeated_schema(data: &mut Vec<u8>, array_sizes: &[u8], row_type: &[u8]) {
+        data.extend_from_slice(&0i32.to_le_bytes());
+        data.extend_from_slice(&1i32.to_le_bytes());
+        data.extend_from_slice(&u16::MAX.to_le_bytes()); // prop_count
+        data.extend_from_slice(&u16::try_from(array_sizes.len()).unwrap().to_le_bytes());
+        for &array_size in array_sizes {
+            data.extend_from_slice(&0u16.to_le_bytes());
+            data.push(array_size);
+            data.extend_from_slice(&2i32.to_le_bytes());
+            data.extend_from_slice(row_type);
+        }
+    }
+
+    /// One schema whose single row, `prop`, expands into `slots` slots of
+    /// Map<Array<Int>, Set<Float>>: five type nodes.
+    fn push_map_row_schema(data: &mut Vec<u8>, class: i32, super_class: i32, prop: i32, slots: u8) {
+        data.extend_from_slice(&class.to_le_bytes());
+        data.extend_from_slice(&super_class.to_le_bytes());
+        data.extend_from_slice(&u16::from(slots).to_le_bytes()); // prop_count
+        data.extend_from_slice(&1u16.to_le_bytes()); // serial_count
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(slots);
+        data.extend_from_slice(&prop.to_le_bytes());
+        data.extend_from_slice(&[24, 8, 2, 25, 3]);
+    }
+
+    /// The slots a row expands into, and the flattened cache's copies of
+    /// them, share one type tree.
+    #[test]
+    fn expanded_slots_and_the_cache_share_one_type_tree() {
+        let mut data: Vec<u8> = Vec::new();
+        push_names(&mut data, &["Hero", "None", "m"]);
+        data.extend_from_slice(&0u32.to_le_bytes()); // no enums
+        data.extend_from_slice(&1u32.to_le_bytes()); // one schema
+        push_map_row_schema(&mut data, 0, 1, 2, 3);
+
+        let usmap =
+            Usmap::from_bytes(&usmap_with(UsmapCompression::None, &data, data.len())).unwrap();
+        let halves_of = |prop_type: &MappedPropertyType| match prop_type {
+            MappedPropertyType::Map { key, value } => (Arc::clone(key), Arc::clone(value)),
+            other => panic!("{other:?}"),
+        };
+        let slots = &usmap.schemas["Hero"].properties;
+        let cached = usmap.get_all_properties("Hero");
+        assert_eq!((slots.len(), cached.len()), (3, 3));
+        let (key, value) = halves_of(&slots[0].prop_type);
+        for prop_type in slots
+            .iter()
+            .map(|p| &p.prop_type)
+            .chain(cached.iter().map(|r| &r.property.prop_type))
+        {
+            let (k, v) = halves_of(prop_type);
+            assert!(Arc::ptr_eq(&key, &k) && Arc::ptr_eq(&value, &v));
+        }
+    }
+
+    /// Expanded properties are counted across every schema, and a file past
+    /// the budget is refused while the walk is still reading it: the third
+    /// schema would take a later check to six.
+    #[test]
+    fn schema_walk_refuses_expanded_properties_past_the_file_budget() {
+        let mut data: Vec<u8> = Vec::new();
+        push_names(&mut data, &["A", "B", "C", "None", "x"]);
+        data.extend_from_slice(&0u32.to_le_bytes()); // no enums
+        data.extend_from_slice(&3u32.to_le_bytes()); // three schemas
+        for class_name in [0i32, 1, 2] {
+            data.extend_from_slice(&class_name.to_le_bytes());
+            data.extend_from_slice(&3i32.to_le_bytes());
+            data.extend_from_slice(&2u16.to_le_bytes()); // prop_count
+            data.extend_from_slice(&1u16.to_le_bytes()); // serial_count
+            // One row, `x`: two Int slots.
+            data.extend_from_slice(&0u16.to_le_bytes());
+            data.push(2);
+            data.extend_from_slice(&4i32.to_le_bytes());
+            data.push(2);
+        }
+        let budgets = |expanded_properties| SchemaBudgets {
+            expanded_properties,
+            type_nodes: u64::MAX,
+        };
+
+        assert!(Usmap::parse_schema_data(&data, 0, budgets(6)).is_ok());
+        assert_eq!(
+            schema_fault(&data, budgets(3)),
+            crate::error::MappingsParseFault::ExpandedPropertiesTotalExceeded {
+                requested: 4,
+                limit: 3
+            }
+        );
+    }
+
+    /// A row's slots are charged as soon as its `array_size` is read, so a
+    /// row past the budget is refused before its name or type is.
+    #[test]
+    fn a_rows_slots_are_charged_before_its_type_is_read() {
+        let mut data: Vec<u8> = Vec::new();
+        push_names(&mut data, &["A", "B", "None", "x"]);
+        data.extend_from_slice(&0u32.to_le_bytes()); // no enums
+        data.extend_from_slice(&2u32.to_le_bytes()); // two schemas
+        for (class, prop) in [(0i32, 3i32), (1, 99)] {
+            data.extend_from_slice(&class.to_le_bytes());
+            data.extend_from_slice(&2i32.to_le_bytes());
+            data.extend_from_slice(&2u16.to_le_bytes()); // prop_count
+            data.extend_from_slice(&1u16.to_le_bytes()); // serial_count
+            data.extend_from_slice(&0u16.to_le_bytes());
+            data.push(2);
+            data.extend_from_slice(&prop.to_le_bytes());
+            data.push(2);
+        }
+        let budgets = SchemaBudgets {
+            expanded_properties: 3,
+            type_nodes: u64::MAX,
+        };
+
+        assert_eq!(
+            schema_fault(&data, budgets),
+            crate::error::MappingsParseFault::ExpandedPropertiesTotalExceeded {
+                requested: 4,
+                limit: 3
+            }
+        );
+    }
+
+    /// Type-tree nodes are summed across the file and refused as soon as the
+    /// total passes the budget: two five-node schemas, where a per-schema
+    /// count never reaches eight and a check after the walk would say ten.
+    #[test]
+    fn schema_walk_refuses_type_nodes_past_the_file_budget() {
+        let mut data: Vec<u8> = Vec::new();
+        push_names(&mut data, &["A", "B", "None", "m"]);
+        data.extend_from_slice(&0u32.to_le_bytes()); // no enums
+        data.extend_from_slice(&2u32.to_le_bytes()); // two schemas
+        for class in [0, 1] {
+            push_map_row_schema(&mut data, class, 2, 3, 1);
+        }
+        let budgets = |type_nodes| SchemaBudgets {
+            expanded_properties: u64::MAX,
+            type_nodes,
+        };
+
+        assert!(Usmap::parse_schema_data(&data, 0, budgets(10)).is_ok());
+        assert_eq!(
+            schema_fault(&data, budgets(7)),
+            crate::error::MappingsParseFault::TypeNodesExceeded {
+                requested: 8,
+                limit: 7
+            }
+        );
+    }
+
+    /// `from_bytes` applies the flattened-cache cap to the whole file. The
+    /// schemas share one name, so each overwrites the last and the walk
+    /// holds at most two of them at once.
+    #[test]
+    fn from_bytes_caps_expanded_properties_across_repeated_schemas() {
+        let per_schema = usize::try_from(max_usmap_expanded_properties_per_schema()).unwrap();
+        let full_schemas = MAX_USMAP_FLATTENED_TOTAL_ENTRIES / u64::try_from(per_schema).unwrap();
+        let mut data: Vec<u8> = Vec::new();
+        push_names(&mut data, &["S", "None", "x"]);
+        data.extend_from_slice(&0u32.to_le_bytes()); // no enums
+        data.extend_from_slice(&u32::try_from(full_schemas + 1).unwrap().to_le_bytes());
+        let mut full = vec![255u8; per_schema / 255];
+        full.push(u8::try_from(per_schema % 255).unwrap());
+        for _ in 0..full_schemas {
+            push_repeated_schema(&mut data, &full, &[2]);
+        }
+        push_repeated_schema(&mut data, &[1], &[2]);
+
+        assert_eq!(
+            parse_fault(&usmap_with(UsmapCompression::None, &data, data.len())),
+            crate::error::MappingsParseFault::ExpandedPropertiesTotalExceeded {
+                requested: MAX_USMAP_FLATTENED_TOTAL_ENTRIES + 1,
+                limit: MAX_USMAP_FLATTENED_TOTAL_ENTRIES
+            }
+        );
+    }
+
+    /// `from_bytes` applies the type-node cap to the whole file. Every row
+    /// has no slots, so its tree is dropped as soon as it is read and the
+    /// walk holds at most one.
+    #[test]
+    fn from_bytes_caps_type_nodes_across_the_file() {
+        // An Array nested to the depth limit around an Int.
+        let mut row_type = vec![8u8; MAX_USMAP_ARRAY_NESTING_DEPTH];
+        row_type.push(2);
+        let rows = MAX_USMAP_TYPE_NODES / u64::try_from(row_type.len()).unwrap() + 1;
+        let per_schema = u64::from(u16::MAX);
+        let mut data: Vec<u8> = Vec::new();
+        push_names(&mut data, &["S", "None", "x"]);
+        data.extend_from_slice(&0u32.to_le_bytes()); // no enums
+        data.extend_from_slice(
+            &u32::try_from(rows.div_ceil(per_schema))
+                .unwrap()
+                .to_le_bytes(),
+        );
+        let mut left = rows;
+        while left > 0 {
+            let serial_count = left.min(per_schema);
+            let no_slots = vec![0u8; usize::try_from(serial_count).unwrap()];
+            push_repeated_schema(&mut data, &no_slots, &row_type);
+            left -= serial_count;
+        }
+
+        assert_eq!(
+            parse_fault(&usmap_with(UsmapCompression::None, &data, data.len())),
+            crate::error::MappingsParseFault::TypeNodesExceeded {
+                requested: MAX_USMAP_TYPE_NODES + 1,
+                limit: MAX_USMAP_TYPE_NODES
+            }
+        );
+    }
+
+    #[test]
+    fn max_usmap_type_nodes_accessor_returns_expected_value() {
+        assert_eq!(max_usmap_type_nodes(), 4_194_304);
     }
 
     #[test]
