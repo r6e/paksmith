@@ -367,6 +367,17 @@ fn class_name(pkg: &Package, class_index: PackageIndex) -> String {
 mod tests {
     use super::*;
 
+    /// An object reference renders as its name, or `null` when it has none.
+    #[test]
+    fn scalar_renders_an_object_reference_by_name() {
+        let object = |name: &str| PropertyValue::Object {
+            kind: PackageIndex::Null,
+            name: name.into(),
+        };
+        assert_eq!(scalar(&object("/Game/Mesh.Mesh")), "/Game/Mesh.Mesh");
+        assert_eq!(scalar(&object("")), "null");
+    }
+
     #[test]
     fn typed_variant_label_consults_texture_kind() {
         use paksmith_core::asset::{Texture2DData, TextureKind};
