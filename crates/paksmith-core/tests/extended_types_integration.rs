@@ -89,7 +89,7 @@ mod tests {
                 inner_type: Arc::from("EnumProperty"),
                 elements: vec![PropertyValue::Enum {
                     type_name: Arc::from(""),
-                    value: Arc::from("EColor__Red"),
+                    value: "EColor__Red".into(),
                 }],
             }
         );

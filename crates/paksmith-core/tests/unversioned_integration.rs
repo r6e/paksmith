@@ -14,8 +14,8 @@
 mod tests {
     use paksmith_core::PaksmithError;
     use paksmith_core::asset::Package;
-    use paksmith_core::asset::mappings::Usmap;
-    use paksmith_core::asset::property::primitives::PropertyValue;
+    use paksmith_core::asset::mappings::{MappedPropertyType, Usmap};
+    use paksmith_core::asset::property::primitives::{EnumValue, PropertyValue};
     use paksmith_core::asset::property::{Property, PropertyBag};
     use paksmith_core::error::AssetParseFault;
     use paksmith_core::testing::uasset::{MinimalPackage, build_minimal_ue4_27_unversioned};
@@ -211,19 +211,15 @@ mod tests {
         match &speed.value {
             PropertyValue::Enum { type_name, value } => {
                 assert_eq!(type_name.as_ref(), "HeroDifficulty");
-                assert_eq!(value.as_ref(), "Normal");
+                assert_eq!(value.name(), Some("Normal"));
             }
             other => panic!("expected Enum, got {other:?}"),
         }
     }
 
-    /// `EnumProperty` ordinal that exceeds the enum's value count
-    /// must produce the typed fallback string `"<enum_name>::<idx>"`
-    /// rather than panicking or returning Err. Pins the
-    /// `unwrap_or_else` branch at
-    /// `unversioned.rs::read_unversioned_value::MT::Enum` — the only
-    /// path through which a misconfigured `.usmap` surfaces as
-    /// decoded output rather than an error.
+    /// An ordinal the `.usmap` has no name for decodes to an unnamed
+    /// ordinal that shares the schema's enum name and renders as
+    /// `<enum>::<ordinal>`.
     #[test]
     fn enum_property_falls_back_on_out_of_range_ordinal() {
         let usmap_bytes =
@@ -245,10 +241,26 @@ mod tests {
             PropertyValue::Enum { type_name, value } => {
                 assert_eq!(type_name.as_ref(), "HeroDifficulty");
                 assert_eq!(
-                    value.as_ref(),
+                    value.to_string(),
                     "HeroDifficulty::99",
                     "fallback format should be `<enum_name>::<ordinal>`"
                 );
+                // The fallback holds the ordinal and the schema's own enum
+                // name, so no decoded value copies it.
+                let EnumValue::Ordinal { enum_name, ordinal } = value else {
+                    panic!("expected an unnamed ordinal, got {value:?}");
+                };
+                let schema_enum = usmap.schemas["Hero"]
+                    .properties
+                    .iter()
+                    .find_map(|p| match &p.prop_type {
+                        MappedPropertyType::Enum { enum_name } => Some(enum_name),
+                        _ => None,
+                    })
+                    .expect("Speed is enum-typed");
+                assert!(std::sync::Arc::ptr_eq(enum_name, schema_enum));
+                assert!(std::sync::Arc::ptr_eq(type_name, schema_enum));
+                assert_eq!(*ordinal, 99);
             }
             other => panic!("expected Enum, got {other:?}"),
         }

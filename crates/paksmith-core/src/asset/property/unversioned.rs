@@ -27,7 +27,7 @@ use crate::asset::AssetContext;
 use crate::asset::package_index::PackageIndex;
 use crate::asset::property::bag::MAX_PROPERTY_DEPTH;
 use crate::asset::property::primitives::{
-    MapEntry, PropertyValue, read_soft_path_payload, resolve_package_index,
+    EnumValue, MapEntry, PropertyValue, read_soft_path_payload, resolve_package_index,
 };
 use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::property::{MAX_COLLECTION_ELEMENTS, Property, read_fname_pair};
@@ -461,15 +461,20 @@ fn read_unversioned_value(
             // && type == NORMAL`): a single u8 ordinal — the default ByteProperty
             // storage. Non-byte underlying types are rare and deferred.
             let idx = cur.read_u8().map_err(|_| value_eof())?;
-            // Both `type_name` and `value` are now `Arc<str>` on
-            // `PropertyValue::Enum` (#365). `Arc::clone` for the
-            // enum-pool hit (refcount bump); one `Arc::from(format!)`
-            // allocation on the fallback "<enum>::<idx>" path.
+            // A name the `.usmap` has is shared; an ordinal it has no name
+            // for keeps the enum's name by refcount rather than formatting a
+            // copy of it per decoded value.
             let value = usmap
                 .enums
                 .get(enum_name.as_ref())
                 .and_then(|values| values.get(&u64::from(idx)))
-                .map_or_else(|| Arc::from(format!("{enum_name}::{idx}")), Arc::clone);
+                .map_or_else(
+                    || EnumValue::Ordinal {
+                        enum_name: Arc::clone(enum_name),
+                        ordinal: idx,
+                    },
+                    |name| EnumValue::Named(Arc::clone(name)),
+                );
             PropertyValue::Enum {
                 type_name: Arc::clone(enum_name),
                 value,
