@@ -274,7 +274,7 @@ pub fn scalar_display(v: &PropertyValue) -> Option<String> {
             if name.is_empty() {
                 Some("<null>".to_string())
             } else {
-                Some(name.clone())
+                Some(name.to_string())
             }
         }
         // Container variants — expandable; return count summary.
@@ -838,7 +838,7 @@ mod tests {
     fn scalar_display_object_null() {
         let v = PropertyValue::Object {
             kind: paksmith_core::PackageIndex::Null,
-            name: String::new(),
+            name: "".into(),
         };
         assert_eq!(
             scalar_display(&v).as_deref(),

@@ -107,7 +107,7 @@ mod tests {
                 PropertyValue::Object {
                     kind: PackageIndex::Import(0),
                     name,
-                } if name == &expected_name
+                } if **name == *expected_name
             ),
             "unexpected value: {:?}",
             obj_prop.value

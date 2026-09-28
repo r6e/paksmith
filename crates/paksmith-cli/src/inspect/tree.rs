@@ -258,7 +258,7 @@ fn scalar(value: &PropertyValue) -> String {
             }
         }
         PropertyValue::Object { name, .. } if name.is_empty() => "null".to_string(),
-        PropertyValue::Object { name, .. } => name.clone(),
+        PropertyValue::Object { name, .. } => name.to_string(),
         // Container variants are normally handled by `render_property`; if one
         // appears nested as a key/value/element, name it terselessly.
         PropertyValue::Array { inner_type, .. } | PropertyValue::Set { inner_type, .. } => {
