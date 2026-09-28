@@ -136,7 +136,7 @@ pub enum PaksmithError {
     ///
     /// `fault` categorizes the wire-format failure (invalid magic,
     /// unsupported version/compression, truncation, size-cap overflow,
-    /// zero-length name, mismatched decompressed size). The
+    /// mismatched decompressed size). The
     /// [`Display`] impl on [`MappingsParseFault`] is derived via
     /// `thiserror`; per-variant unit tests pin the exact strings so log
     /// greps + monitoring rules survive future variant additions.
@@ -5088,6 +5088,15 @@ pub enum MappingsParseFault {
         method: u8,
     },
 
+    /// The Brotli stream uses the large-window extension. It is not part of
+    /// RFC 7932, and its header can size the decoder's ring buffer at up to
+    /// 1 GiB before any output is produced.
+    #[error(
+        "brotli large-window streams are not supported \
+         (RFC 7932 caps the window at 16 MiB)"
+    )]
+    BrotliLargeWindowUnsupported,
+
     /// Decompressed output length did not match the header's declared size.
     #[error("decompressed size mismatch: expected {expected} bytes, got {found}")]
     DecompressedSizeMismatch {
@@ -6183,6 +6192,18 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "usmap deserialization failed: unsupported usmap compression method 1 (Oodle requires Phase 8 system-library support)"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_brotli_large_window() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::BrotliLargeWindowUnsupported,
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: brotli large-window streams are not supported \
+             (RFC 7932 caps the window at 16 MiB)"
         );
     }
 
