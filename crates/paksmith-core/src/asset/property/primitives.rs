@@ -96,12 +96,7 @@ impl std::fmt::Display for EnumValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Named(name) => f.pad(name),
-            // Formatted separately only when a width or precision needs the
-            // whole string to pad or truncate.
-            Self::Ordinal { enum_name, ordinal } if f.width().or(f.precision()).is_some() => {
-                f.pad(&format!("{enum_name}::{ordinal}"))
-            }
-            Self::Ordinal { enum_name, ordinal } => write!(f, "{enum_name}::{ordinal}"),
+            Self::Ordinal { enum_name, ordinal } => f.pad(&format!("{enum_name}::{ordinal}")),
         }
     }
 }
