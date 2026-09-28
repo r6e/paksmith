@@ -2959,6 +2959,49 @@ mod tests {
         );
     }
 
+    /// `from_bytes` applies the type-node cap to the whole file. Every row
+    /// has no slots, so its tree is dropped as soon as it is read and the
+    /// walk holds at most one.
+    #[test]
+    fn from_bytes_caps_type_nodes_across_the_file() {
+        // An Array nested to the depth limit around an Int.
+        let mut row_type = vec![8u8; MAX_USMAP_ARRAY_NESTING_DEPTH];
+        row_type.push(2);
+        let rows = MAX_USMAP_TYPE_NODES / u64::try_from(row_type.len()).unwrap() + 1;
+        let per_schema = u64::from(u16::MAX);
+        let mut data: Vec<u8> = Vec::new();
+        push_names(&mut data, &["S", "None", "x"]);
+        data.extend_from_slice(&0u32.to_le_bytes()); // no enums
+        data.extend_from_slice(
+            &u32::try_from(rows.div_ceil(per_schema))
+                .unwrap()
+                .to_le_bytes(),
+        );
+        let mut left = rows;
+        while left > 0 {
+            let serial_count = u16::try_from(left.min(per_schema)).unwrap();
+            data.extend_from_slice(&0i32.to_le_bytes());
+            data.extend_from_slice(&1i32.to_le_bytes());
+            data.extend_from_slice(&u16::MAX.to_le_bytes()); // prop_count
+            data.extend_from_slice(&serial_count.to_le_bytes());
+            for _ in 0..serial_count {
+                data.extend_from_slice(&0u16.to_le_bytes());
+                data.push(0);
+                data.extend_from_slice(&2i32.to_le_bytes());
+                data.extend_from_slice(&row_type);
+            }
+            left -= u64::from(serial_count);
+        }
+
+        assert_eq!(
+            parse_fault(&usmap_with(UsmapCompression::None, &data, data.len())),
+            crate::error::MappingsParseFault::TypeNodesExceeded {
+                requested: MAX_USMAP_TYPE_NODES + 1,
+                limit: MAX_USMAP_TYPE_NODES
+            }
+        );
+    }
+
     #[test]
     fn max_usmap_type_nodes_accessor_returns_expected_value() {
         assert_eq!(max_usmap_type_nodes(), 4_194_304);
