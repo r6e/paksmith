@@ -504,14 +504,14 @@ pub(crate) fn property_bool(data: &Texture2DData, name: &str) -> Option<bool> {
 /// `"TextureCompressionSettings::TC_Normalmap"` match `variant = "TC_Normalmap"`.
 pub(crate) fn has_enum(data: &Texture2DData, name: &str, variant: &str) -> bool {
     scalar_property(data, name).is_some_and(|p| match &p.value {
-        PropertyValue::Enum { value, .. } => {
-            let stored = value.as_ref();
+        // An ordinal the `.usmap` has no name for matches no variant.
+        PropertyValue::Enum { value, .. } => value.name().is_some_and(|stored| {
             // Strip up to and including the first `::` (the enum-type qualifier).
             let bare = stored
                 .split_once("::")
                 .map_or(stored, |(_, variant_name)| variant_name);
             bare == variant
-        }
+        }),
         _ => false,
     })
 }

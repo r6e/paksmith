@@ -116,7 +116,7 @@ fn read_element_value<R: Read + Seek>(
                 // unavailable. Shared empty Arc — refcount bump per
                 // element instead of a fresh heap allocation.
                 type_name: Arc::clone(&EMPTY_ARC_STR),
-                value,
+                value: value.into(),
             }
         }
         "ByteProperty" => {
@@ -1478,7 +1478,7 @@ mod tests {
             v,
             PropertyValue::Enum {
                 type_name: Arc::from(""),
-                value: Arc::from("EColor__Red"),
+                value: "EColor__Red".into(),
             }
         );
     }

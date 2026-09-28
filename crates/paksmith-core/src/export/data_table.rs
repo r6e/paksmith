@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(
             value_to_csv_cell(&PropertyValue::Enum {
                 type_name: std::sync::Arc::from("EColor"),
-                value: std::sync::Arc::from("EColor__Red"),
+                value: "EColor__Red".into(),
             }),
             "EColor__Red"
         );

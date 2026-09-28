@@ -60,6 +60,94 @@ pub struct MapEntry {
     pub value: PropertyValue,
 }
 
+/// An enum property's value: the variant name the asset or the `.usmap`
+/// gives it, or the enum and ordinal when the `.usmap` has no name for it.
+///
+/// Both forms render and serialize as one string, the unnamed ordinal as
+/// `"<enum>::<ordinal>"`, and a name equals the ordinal it spells. The
+/// ordinal form shares the property's enum name, so an unnamed value costs
+/// no copy of it however long the name is.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum EnumValue {
+    /// A resolved variant name.
+    Named(Arc<str>),
+    /// An ordinal the `.usmap` has no name for.
+    Ordinal {
+        /// The enum's name, shared with the property's `type_name`.
+        enum_name: Arc<str>,
+        /// The raw ordinal from the asset.
+        ordinal: u8,
+    },
+}
+
+impl EnumValue {
+    /// The resolved variant name, or `None` for an unnamed ordinal.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Named(name) => Some(name),
+            Self::Ordinal { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for EnumValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Named(name) => f.pad(name),
+            Self::Ordinal { enum_name, ordinal } => f.pad(&format!("{enum_name}::{ordinal}")),
+        }
+    }
+}
+
+impl PartialEq for EnumValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Named(a), Self::Named(b)) => a == b,
+            (
+                Self::Ordinal {
+                    enum_name: a,
+                    ordinal: x,
+                },
+                Self::Ordinal {
+                    enum_name: b,
+                    ordinal: y,
+                },
+            ) => a == b && x == y,
+            (Self::Named(name), Self::Ordinal { enum_name, ordinal })
+            | (Self::Ordinal { enum_name, ordinal }, Self::Named(name)) => name
+                .strip_prefix(&**enum_name)
+                .and_then(|rest| rest.strip_prefix("::"))
+                .is_some_and(|digits| digits == ordinal.to_string()),
+        }
+    }
+}
+
+impl Serialize for EnumValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for EnumValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Arc::<str>::deserialize(deserializer).map(Self::Named)
+    }
+}
+
+impl From<Arc<str>> for EnumValue {
+    fn from(name: Arc<str>) -> Self {
+        Self::Named(name)
+    }
+}
+
+impl From<&str> for EnumValue {
+    fn from(name: &str) -> Self {
+        Self::Named(Arc::from(name))
+    }
+}
+
 /// Decoded property value.
 ///
 /// `#[non_exhaustive]` — Phase 2b variants cover primitives; Phase 2c
@@ -116,8 +204,9 @@ pub enum PropertyValue {
         /// The enum type name from `tag.enum_name`; may be empty if
         /// the encoder omitted it (see variant docs).
         type_name: Arc<str>,
-        /// The enum variant name resolved from the payload FName.
-        value: Arc<str>,
+        /// The enum variant name resolved from the payload FName, or the
+        /// raw ordinal when a `.usmap` has no name for it.
+        value: EnumValue,
     },
     /// `TextProperty`.
     Text(FText),
@@ -452,7 +541,7 @@ pub fn read_primitive_value<R: Read + Seek>(
                 read_fname_pair(reader, ctx, asset_path, AssetWireField::PropertyTagEnumName)?;
             PropertyValue::Enum {
                 type_name: tag.enum_name.clone(),
-                value,
+                value: value.into(),
             }
         }
 
@@ -467,7 +556,7 @@ pub fn read_primitive_value<R: Read + Seek>(
                     read_fname_pair(reader, ctx, asset_path, AssetWireField::PropertyTagEnumName)?;
                 PropertyValue::Enum {
                     type_name: tag.enum_name.clone(),
-                    value,
+                    value: value.into(),
                 }
             }
         }
@@ -650,6 +739,61 @@ mod tests {
     use crate::asset::property::test_utils::{make_ctx, make_ctx_with_import};
     use std::io::Cursor;
 
+    fn ordinal(enum_name: &str, ordinal: u8) -> EnumValue {
+        EnumValue::Ordinal {
+            enum_name: Arc::from(enum_name),
+            ordinal,
+        }
+    }
+
+    #[test]
+    fn an_unnamed_ordinal_renders_as_enum_and_ordinal() {
+        assert_eq!(ordinal("EColor", 7).to_string(), "EColor::7");
+        assert_eq!(EnumValue::from("EColor::Red").to_string(), "EColor::Red");
+        // Width and precision apply as they did to the `Arc<str>` it replaced.
+        assert_eq!(format!("[{:>10}]", ordinal("EColor", 7)), "[ EColor::7]");
+        assert_eq!(format!("[{:.3}]", ordinal("EColor", 7)), "[ECo]");
+        assert_eq!(format!("[{:<5}]", EnumValue::from("E::A")), "[E::A ]");
+        assert_eq!(ordinal("EColor", 7).name(), None);
+        assert_eq!(EnumValue::from("EColor::Red").name(), Some("EColor::Red"));
+    }
+
+    /// JSON for an unnamed ordinal is the same string its named spelling
+    /// gives, so output does not change with how a value was resolved.
+    #[test]
+    fn an_unnamed_ordinal_serializes_as_its_string() {
+        let enum_value = |value| PropertyValue::Enum {
+            type_name: Arc::from("EColor"),
+            value,
+        };
+        let as_ordinal = serde_json::to_string(&enum_value(ordinal("EColor", 7))).unwrap();
+        let as_name = serde_json::to_string(&enum_value(EnumValue::from("EColor::7"))).unwrap();
+        assert_eq!(as_ordinal, as_name);
+        assert_eq!(
+            serde_json::from_str::<PropertyValue>(&as_ordinal).unwrap(),
+            enum_value(ordinal("EColor", 7))
+        );
+    }
+
+    #[test]
+    fn a_name_equals_only_the_ordinal_it_spells() {
+        let seven = ordinal("EColor", 7);
+        assert_eq!(EnumValue::from("EColor::7"), seven);
+        assert_eq!(seven, EnumValue::from("EColor::7"));
+        for other in [
+            "EColor::70",
+            "EColor::07",
+            "EShape::7",
+            "EColor7",
+            "EColor::",
+        ] {
+            assert_ne!(EnumValue::from(other), seven, "{other}");
+        }
+        assert_ne!(ordinal("EColor", 8), seven);
+        assert_ne!(ordinal("EShape", 7), seven);
+        assert_eq!(ordinal("EColor", 7), seven);
+    }
+
     fn make_test_ctx_with_export(export_name: &str) -> AssetContext {
         use crate::asset::{
             AssetContext,
@@ -819,7 +963,7 @@ mod tests {
             val,
             PropertyValue::Enum {
                 type_name: Arc::from("EMyEnum"),
-                value: Arc::from("EMyEnum__Val"),
+                value: "EMyEnum__Val".into(),
             }
         );
     }
@@ -963,7 +1107,7 @@ mod tests {
             val,
             PropertyValue::Enum {
                 type_name: Arc::from("EDirection"),
-                value: Arc::from("EDirection__Forward"),
+                value: "EDirection__Forward".into(),
             }
         );
     }

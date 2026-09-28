@@ -113,7 +113,7 @@ pub type Result<T> = std::result::Result<T, PaksmithError>;
 // Pin against specific paksmith versions if you rely on bidirectional
 // JSON round-trips of stored content.
 pub use asset::property::text::{FText, FTextFormatArg, FTextHistory, FTextNamedArg};
-pub use asset::property::{MapEntry, Property, PropertyValue};
+pub use asset::property::{EnumValue, MapEntry, Property, PropertyValue};
 pub use asset::structs::TypedStructValue;
 pub use asset::{
     Asset, AssetContext, AssetVersion, CustomVersion, CustomVersionContainer, EngineVersion,
@@ -280,6 +280,7 @@ mod send_sync_assertions {
         assert_send_sync::<Property>();
         assert_send_sync::<PropertyValue>();
         assert_send_sync::<MapEntry>();
+        assert_send_sync::<EnumValue>();
         assert_send_sync::<FText>();
         assert_send_sync::<FTextHistory>();
 
