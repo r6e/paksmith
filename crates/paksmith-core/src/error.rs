@@ -5168,6 +5168,25 @@ pub enum MappingsParseFault {
         limit: u32,
     },
 
+    /// Expanded properties summed across every schema row exceed the
+    /// flattened-property cache cap.
+    #[error("usmap expanded property total {requested} exceeds cap {limit}")]
+    ExpandedPropertiesTotalExceeded {
+        /// The running total that would have been reached.
+        requested: u64,
+        /// The structural cap the value exceeded.
+        limit: u64,
+    },
+
+    /// Type-tree nodes summed across every schema row exceed the cap.
+    #[error("usmap type-node total {requested} exceeds cap {limit}")]
+    TypeNodesExceeded {
+        /// The running total that would have been reached.
+        requested: u64,
+        /// The structural cap the value exceeded.
+        limit: u64,
+    },
+
     /// Wire-claimed `schema_count` exceeds the structural cap. Each
     /// schema costs a `String` key + `ClassSchema` struct (~110 bytes)
     /// in `Usmap::schemas`; without this cap the `MAX_USMAP_DECOMPRESSED_SIZE`
@@ -6189,6 +6208,34 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "usmap deserialization failed: unsupported usmap compression method 1 (Oodle requires Phase 8 system-library support)"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_type_nodes() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::TypeNodesExceeded {
+                requested: 4_194_305,
+                limit: 4_194_304,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap type-node total 4194305 exceeds cap 4194304"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_expanded_properties_total() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::ExpandedPropertiesTotalExceeded {
+                requested: 4_194_305,
+                limit: 4_194_304,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap expanded property total 4194305 exceeds cap 4194304"
         );
     }
 

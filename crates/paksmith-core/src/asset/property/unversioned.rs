@@ -1155,7 +1155,7 @@ mod tests {
     #[test]
     fn unversioned_set_of_int_decodes() {
         let usmap = single_prop_usmap(MappedPropertyType::Set {
-            inner: Box::new(MappedPropertyType::Int32),
+            inner: Arc::new(MappedPropertyType::Int32),
         });
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&0x0300u16.to_le_bytes()); // 1 serialized property
@@ -1182,8 +1182,8 @@ mod tests {
     #[test]
     fn unversioned_map_int_to_int_decodes() {
         let usmap = single_prop_usmap(MappedPropertyType::Map {
-            key: Box::new(MappedPropertyType::Int32),
-            value: Box::new(MappedPropertyType::Int32),
+            key: Arc::new(MappedPropertyType::Int32),
+            value: Arc::new(MappedPropertyType::Int32),
         });
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&0x0300u16.to_le_bytes());
@@ -1214,8 +1214,8 @@ mod tests {
     #[test]
     fn unversioned_map_num_keys_to_remove_consumes_keys() {
         let usmap = single_prop_usmap(MappedPropertyType::Map {
-            key: Box::new(MappedPropertyType::Int32),
-            value: Box::new(MappedPropertyType::Int32),
+            key: Arc::new(MappedPropertyType::Int32),
+            value: Arc::new(MappedPropertyType::Int32),
         });
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&0x0300u16.to_le_bytes());
@@ -1245,7 +1245,7 @@ mod tests {
     #[test]
     fn unversioned_set_negative_count_rejected() {
         let usmap = single_prop_usmap(MappedPropertyType::Set {
-            inner: Box::new(MappedPropertyType::Int32),
+            inner: Arc::new(MappedPropertyType::Int32),
         });
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&0x0300u16.to_le_bytes());
@@ -1390,7 +1390,7 @@ mod tests {
     #[test]
     fn unversioned_array_of_typed_struct_decodes() {
         let usmap = single_prop_usmap(MappedPropertyType::Array {
-            inner: Box::new(MappedPropertyType::Struct {
+            inner: Arc::new(MappedPropertyType::Struct {
                 struct_name: Arc::from("Vector"),
             }),
         });
@@ -1527,7 +1527,7 @@ mod tests {
         assert!(
             too_deep(read_at(
                 MappedPropertyType::Array {
-                    inner: Box::new(int())
+                    inner: Arc::new(int())
                 },
                 &[1, 0, 0, 0, 0, 0, 0, 0], // count=1, element i32
                 cap,
@@ -1538,7 +1538,7 @@ mod tests {
         assert!(
             too_deep(read_at(
                 MappedPropertyType::Set {
-                    inner: Box::new(int())
+                    inner: Arc::new(int())
                 },
                 &[0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0], // num_remove=0, count=1, element
                 cap,
@@ -1549,7 +1549,7 @@ mod tests {
         assert!(
             too_deep(read_at(
                 MappedPropertyType::Set {
-                    inner: Box::new(int())
+                    inner: Arc::new(int())
                 },
                 &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], // num_remove=1, removed i32, count=0
                 cap,
@@ -1560,8 +1560,8 @@ mod tests {
         assert!(
             too_deep(read_at(
                 MappedPropertyType::Map {
-                    key: Box::new(int()),
-                    value: Box::new(int())
+                    key: Arc::new(int()),
+                    value: Arc::new(int())
                 },
                 &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], // num_remove=1, removed key i32, count=0
                 cap,
@@ -1573,10 +1573,10 @@ mod tests {
         assert!(
             too_deep(read_at(
                 MappedPropertyType::Map {
-                    key: Box::new(MappedPropertyType::Array {
-                        inner: Box::new(int())
+                    key: Arc::new(MappedPropertyType::Array {
+                        inner: Arc::new(int())
                     }),
-                    value: Box::new(int()),
+                    value: Arc::new(int()),
                 },
                 &[
                     0, 0, 0, 0, // num_remove=0
@@ -1594,9 +1594,9 @@ mod tests {
         assert!(
             too_deep(read_at(
                 MappedPropertyType::Map {
-                    key: Box::new(int()),
-                    value: Box::new(MappedPropertyType::Array {
-                        inner: Box::new(int())
+                    key: Arc::new(int()),
+                    value: Arc::new(MappedPropertyType::Array {
+                        inner: Arc::new(int())
                     }),
                 },
                 &[
