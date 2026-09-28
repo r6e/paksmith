@@ -61,10 +61,9 @@ pub const MAX_USMAP_DECOMPRESSED_SIZE: u32 = 256 * 1024 * 1024;
 /// `B: A`) would loop forever otherwise.
 const MAX_INHERITANCE_DEPTH: usize = 64;
 
-/// Hard cap on `enum_count` to bound the v3/v4 enum-table heap cost.
-/// Per-enum `HashMap<u64, String>` overhead is ~5-8x the wire size,
-/// so the global `MAX_USMAP_DECOMPRESSED_SIZE` cap alone allowed
-/// ~1 GiB of heap growth on a maxed-out enum table. Realistic UE
+/// Hard cap on `enum_count` to bound the enum-table heap cost. Each value
+/// costs a map entry and a refcount on a shared name, so with the per-enum
+/// value cap a maxed-out table stays near 200 MiB. Realistic UE
 /// mappings carry <1k enums (Fortnite tops out around a few hundred);
 /// 4096 is a wide safety margin.
 ///
@@ -74,8 +73,8 @@ const MAX_USMAP_ENUM_COUNT: u32 = 4_096;
 /// Hard cap on per-enum `value_count`. `LargeEnums` (v3) widened the
 /// wire field to `u16` (65535 max); no real-world enum has that many
 /// values — even unwieldy Unreal enums top out in the low hundreds.
-/// 1024 leaves room for outliers while bounding the per-enum heap
-/// to a few KiB.
+/// 1024 leaves room for outliers while bounding the per-enum map to
+/// tens of KiB: each value is a key and a refcount on a shared name.
 ///
 /// Exposed via [`max_usmap_values_per_enum`].
 const MAX_USMAP_VALUES_PER_ENUM: u32 = 1_024;
@@ -111,7 +110,7 @@ const MAX_USMAP_SCHEMA_COUNT: u32 = 4_096;
 /// OOM rather than a typed wire-cap rejection. Real-world `.usmap`
 /// name tables top out around 10k entries (very large games);
 /// 131_072 (128k) leaves wide headroom and bounds the pre-allocation
-/// to a single-digit-MiB `Vec<String>` slot reservation.
+/// to a single-digit-MiB slot reservation.
 ///
 /// Exposed via [`max_usmap_name_count`].
 const MAX_USMAP_NAME_COUNT: u32 = 131_072;
@@ -295,9 +294,7 @@ pub enum MappedPropertyType {
         /// the name. Under `MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA
         /// = 65,536` slots and maximal-LongFName names that's ~4 GiB
         /// of clone-only heap per schema — now one refcount bump per
-        /// expanded slot. The TOTAL per-name heap (one alloc per
-        /// wire row) is still bounded by `MAX_USMAP_DECOMPRESSED_SIZE
-        /// = 256 MiB` on the input side. Issue #397 sub-fix A.
+        /// expanded slot. Issue #397 sub-fix A.
         enum_name: Arc<str>,
     },
     /// `StructProperty` — nested struct with its own schema.
@@ -358,10 +355,8 @@ pub struct MappedProperty {
     /// **expansion-clone amplification** specifically: pre-migration
     /// each clone allocated up to 65535 bytes (LongFName max) and
     /// the 65,536 `MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA` cap
-    /// permitted ~4 GiB of clone-only heap per schema. The TOTAL
-    /// per-name heap (one alloc per wire row, independent of
-    /// `array_size`) is still bounded by `MAX_USMAP_DECOMPRESSED_SIZE
-    /// = 256 MiB` on the input side. Issue #397 sub-fix A.
+    /// permitted ~4 GiB of clone-only heap per schema. Issue #397
+    /// sub-fix A.
     pub name: Arc<str>,
     /// 0-based index within the class's serialisation order.
     pub schema_index: u16,
@@ -806,7 +801,7 @@ impl Usmap {
                 limit: MAX_USMAP_NAME_COUNT,
             }));
         }
-        let mut names: Vec<String> = Vec::new();
+        let mut names: Vec<Arc<str>> = Vec::new();
         names.try_reserve(name_count as usize).map_err(|source| {
             mappings_alloc_failed(
                 MappingsAllocationContext::NameTable,
@@ -836,7 +831,7 @@ impl Usmap {
                 );
                 String::new()
             });
-            names.push(name);
+            names.push(Arc::from(name));
         }
 
         // Enum table — REQUIRED for unversioned `EnumProperty` reads
@@ -1315,18 +1310,22 @@ pub struct ResolvedProperty {
 /// schema-table walk, the enum-table walk, and `read_mapped_type`'s
 /// inner-name reads.
 ///
+/// Returns the table's own entry, so every reference to one name shares
+/// its allocation: a name referenced by thousands of enum values, rows or
+/// type names costs a refcount each, not a copy.
+///
 /// An out-of-range index surfaces as
 /// [`MappingsParseFault::NameIndexOutOfRange`] (issue #417 —
 /// previously misnomered as `Truncated`, which implied a short read
 /// even though the wire bytes were fully readable).
-fn read_name(cur: &mut Cursor<&[u8]>, names: &[String]) -> crate::Result<String> {
+fn read_name_arc(cur: &mut Cursor<&[u8]>, names: &[Arc<str>]) -> crate::Result<Arc<str>> {
     let idx = cur.read_i32::<LE>()?;
     #[allow(
         clippy::cast_sign_loss,
         reason = "negative indices wrap to a huge usize that fails the get() bounds check, surfacing as NameIndexOutOfRange"
     )]
     let idx_usz = idx as usize;
-    names.get(idx_usz).cloned().ok_or_else(|| {
+    names.get(idx_usz).map(Arc::clone).ok_or_else(|| {
         fault(MappingsParseFault::NameIndexOutOfRange {
             idx,
             table_len: names.len(),
@@ -1334,20 +1333,10 @@ fn read_name(cur: &mut Cursor<&[u8]>, names: &[String]) -> crate::Result<String>
     })
 }
 
-/// `read_name` + `Arc::from` in one step.
-///
-/// Materializes the looked-up name as `Arc<str>` so downstream
-/// clones (e.g., the `array_size` expansion loop in
-/// `Usmap::from_bytes` cloning a property name into every expanded
-/// slot, or the `MappedPropertyType::Struct` / `Enum` variant
-/// construction in `read_mapped_type`) bump a refcount instead of
-/// allocating a fresh heap buffer. Bounds the per-schema heap
-/// amplification surface flagged in issue #397 sub-fix A —
-/// pre-migration a maximal-LongFName name multiplied by the
-/// 65,536-entry `MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA` cap
-/// permitted ~4 GiB of name clones per schema.
-fn read_name_arc(cur: &mut Cursor<&[u8]>, names: &[String]) -> crate::Result<Arc<str>> {
-    Ok(Arc::from(read_name(cur, names)?))
+/// [`read_name_arc`] as an owned `String`, for [`ClassSchema`]'s public
+/// `String` fields.
+fn read_name(cur: &mut Cursor<&[u8]>, names: &[Arc<str>]) -> crate::Result<String> {
+    Ok(read_name_arc(cur, names)?.to_string())
 }
 
 #[allow(
@@ -1359,7 +1348,7 @@ fn read_name_arc(cur: &mut Cursor<&[u8]>, names: &[String]) -> crate::Result<Arc
 )]
 fn read_mapped_type(
     cur: &mut Cursor<&[u8]>,
-    names: &[String],
+    names: &[Arc<str>],
     depth: usize,
 ) -> crate::Result<MappedPropertyType> {
     if depth > MAX_USMAP_ARRAY_NESTING_DEPTH {
@@ -2329,7 +2318,7 @@ mod tests {
     #[test]
     fn read_mapped_type_container_increments_depth() {
         let cap = MAX_USMAP_ARRAY_NESTING_DEPTH;
-        let names: Vec<String> = Vec::new();
+        let names: Vec<Arc<str>> = Vec::new();
         let is_too_deep = |bytes: &[u8], depth: usize| -> bool {
             let mut cur = Cursor::new(bytes);
             matches!(
@@ -2644,6 +2633,60 @@ mod tests {
         stored.extend_from_slice(&zstd_compress(&payload, true));
         let bytes = usmap_with(UsmapCompression::ZStandard, &stored, payload.len());
         assert_matches_uncompressed(&Usmap::from_bytes(&bytes).unwrap());
+    }
+
+    /// Every reference to one name-table entry shares that entry's single
+    /// allocation: enum names and values, property names, and struct and
+    /// enum type names.
+    #[test]
+    fn name_references_share_one_allocation() {
+        let mut data: Vec<u8> = Vec::new();
+        // Names: "E"(0), "V"(1), "Hero"(2), "None"(3), "p"(4).
+        data.extend_from_slice(&5u32.to_le_bytes());
+        for name in ["E", "V", "Hero", "None", "p"] {
+            data.push(u8::try_from(name.len()).unwrap());
+            data.extend_from_slice(name.as_bytes());
+        }
+        // One enum, "E", whose two positional values are both "V".
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&0i32.to_le_bytes());
+        data.push(2);
+        data.extend_from_slice(&1i32.to_le_bytes());
+        data.extend_from_slice(&1i32.to_le_bytes());
+        // One schema, "Hero", with two rows both named "p": a struct typed
+        // "V" and an enum typed "E".
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&2i32.to_le_bytes());
+        data.extend_from_slice(&3i32.to_le_bytes());
+        data.extend_from_slice(&2u16.to_le_bytes());
+        data.extend_from_slice(&2u16.to_le_bytes());
+        for (schema_index, type_bytes, type_name_idx) in
+            [(0u16, &[9u8][..], 1i32), (1, &[26, 0][..], 0)]
+        {
+            data.extend_from_slice(&schema_index.to_le_bytes());
+            data.push(1);
+            data.extend_from_slice(&4i32.to_le_bytes());
+            data.extend_from_slice(type_bytes);
+            data.extend_from_slice(&type_name_idx.to_le_bytes());
+        }
+
+        let usmap =
+            Usmap::from_bytes(&usmap_with(UsmapCompression::None, &data, data.len())).unwrap();
+        let (enum_key, values) = usmap.enums.get_key_value("E").unwrap();
+        let props = &usmap.schemas["Hero"].properties;
+        let MappedPropertyType::Struct { struct_name } = &props[0].prop_type else {
+            panic!("{:?}", props[0].prop_type);
+        };
+        let MappedPropertyType::Enum { enum_name } = &props[1].prop_type else {
+            panic!("{:?}", props[1].prop_type);
+        };
+        assert!(Arc::ptr_eq(&values[&0], &values[&1]), "enum values");
+        assert!(Arc::ptr_eq(&values[&0], struct_name), "struct type name");
+        assert!(Arc::ptr_eq(enum_key, enum_name), "enum type name");
+        assert!(
+            Arc::ptr_eq(&props[0].name, &props[1].name),
+            "property names"
+        );
     }
 
     #[test]

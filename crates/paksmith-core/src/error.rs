@@ -4668,11 +4668,11 @@ impl fmt::Display for CollectionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MappingsAllocationContext {
-    /// `Vec<String>` for the `.usmap` name table.
+    /// `Vec<Arc<str>>` for the `.usmap` name table.
     NameTable,
-    /// `HashMap<String, HashMap<u64, String>>` for the enum table.
+    /// `HashMap<Arc<str>, HashMap<u64, Arc<str>>>` for the enum table.
     EnumTable,
-    /// `HashMap<u64, String>` for one enum's value map.
+    /// `HashMap<u64, Arc<str>>` for one enum's value map.
     EnumValues,
     /// `HashMap<String, ClassSchema>` for the schema table.
     SchemaTable,
@@ -5129,11 +5129,8 @@ pub enum MappingsParseFault {
         limit: u32,
     },
 
-    /// Wire-claimed `enum_count` exceeds the structural cap. Per-enum
-    /// `HashMap<u64, String>` overhead is ~5-8x the wire encoding, so
-    /// the `MAX_USMAP_DECOMPRESSED_SIZE` cap alone permitted ~1 GiB of
-    /// heap for a maxed-out v3/v4 enum table; this cap brings the
-    /// per-section heap allocation back inside conservative limits.
+    /// Wire-claimed `enum_count` exceeds the structural cap that bounds
+    /// the enum table's heap.
     #[error("usmap enum_count {count} exceeds cap {limit}")]
     EnumCountTooLarge {
         /// The wire-claimed `enum_count`.
