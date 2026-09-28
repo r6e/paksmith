@@ -170,6 +170,8 @@ pub const MAX_ROWS_PER_DATATABLE: usize = 1_048_576;
 /// - [`AssetParseFault::PropertyTagCountExceeded`] if the tag count
 ///   hits [`MAX_TAGS_PER_EXPORT`] without a terminator.
 /// - [`AssetParseFault::PropertyTagSizeMismatch`] on cursor mismatch.
+/// - [`AssetParseFault::DerivedStringBudgetExceeded`] when an unknown
+///   tag's copied type name passes the package's derived-string budget.
 /// - Any error from [`read_tag`] or the primitive/text readers.
 pub fn read_properties<R: Read + Seek>(
     reader: &mut R,
@@ -262,12 +264,7 @@ pub fn read_properties<R: Read + Seek>(
                 AssetWireField::PropertyTagSize,
             )?;
             PropertyValue::Unknown {
-                // PropertyValue::Unknown.type_name is `String` (out
-                // of #365's scope — not on the issue's explicit
-                // PropertyValue field list). One alloc here per
-                // Unknown property; cold relative to the per-element
-                // hot path the issue targets.
-                type_name: tag.type_name.to_string(),
+                type_name: ctx.charge_derived(tag.type_name.to_string(), asset_path)?,
                 skipped_bytes: n,
             }
         };
@@ -385,7 +382,9 @@ pub(crate) fn read_object_guid_tail<R: Read + Seek>(
 mod tests {
     use super::*;
     use crate::asset::AssetContext;
-    use crate::asset::property::test_utils::make_ctx;
+    use crate::asset::property::test_utils::{
+        assert_derived_budget_exceeded, make_ctx, with_derived_budget,
+    };
     use std::io::Cursor;
 
     /// UE5 ≥ 1011: the pre-byte is consumed (0x00), and 0x02 also
@@ -483,6 +482,25 @@ mod tests {
         let buf: Vec<u8> = Vec::new();
         let props = read_properties(&mut Cursor::new(&buf[..]), &ctx, 0, 0, "x.uasset").unwrap();
         assert!(props.is_empty());
+    }
+
+    #[test]
+    fn unknown_type_name_is_charged_to_the_derived_budget() {
+        let limit = "LazyObjectProperty".len() as u64;
+        let ctx = with_derived_budget(make_ctx(&["None", "Target", "LazyObjectProperty"]), limit);
+        let mut buf = Vec::new();
+        for field in [1i32, 0, 2, 0, 0, 0] {
+            buf.extend_from_slice(&field.to_le_bytes()); // Name, Type, Size 0, ArrayIndex
+        }
+        buf.push(0u8); // HasPropertyGuid
+        buf.extend_from_slice(&[0u8; 8]); // None terminator
+        let end = buf.len() as u64;
+        let read = || read_properties(&mut Cursor::new(&buf[..]), &ctx, 0, end, "x.uasset");
+        assert!(matches!(
+            read().unwrap()[0].value,
+            PropertyValue::Unknown { .. }
+        ));
+        assert_derived_budget_exceeded(read(), limit);
     }
 
     #[test]

@@ -2705,6 +2705,14 @@ pub enum AssetParseFault {
         /// The cap (`MAX_TAGS_PER_EXPORT = 65_536`).
         limit: usize,
     },
+    /// Names and paths copied out of the name table while decoding one
+    /// package exceeded `MAX_DERIVED_STRING_BYTES`. A copied name costs
+    /// a few wire bytes but can be 64 Ki characters long, so this caps
+    /// the total a small crafted asset can make the decoder allocate.
+    DerivedStringBudgetExceeded {
+        /// The per-package budget in bytes.
+        limit: u64,
+    },
     /// An array/map/set's on-wire element count exceeds
     /// `MAX_COLLECTION_ELEMENTS` or is negative. Prevents adversarial
     /// cooked assets from forcing unbounded Vec allocation.
@@ -3456,6 +3464,12 @@ impl fmt::Display for AssetParseFault {
                 write!(
                     f,
                     "property tag count exceeded limit {limit} (missing None terminator?)"
+                )
+            }
+            Self::DerivedStringBudgetExceeded { limit } => {
+                write!(
+                    f,
+                    "copied names and paths exceeded the per-package budget of {limit} bytes"
                 )
             }
             Self::CollectionElementCountExceeded {
@@ -6623,6 +6637,19 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `x.uasset`: \
              property tag count exceeded limit 65536 (missing None terminator?)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_derived_string_budget_exceeded() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::DerivedStringBudgetExceeded { limit: 268_435_456 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             copied names and paths exceeded the per-package budget of 268435456 bytes"
         );
     }
 

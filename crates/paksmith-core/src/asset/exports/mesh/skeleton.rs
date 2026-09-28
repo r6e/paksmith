@@ -56,6 +56,8 @@ pub(crate) const MAX_BONES_PER_SKELETON: usize = 1 << 16; // 65_536
 /// - [`AssetParseFault::UnexpectedEof`] on any short count / parent / value
 ///   read; nested FName / FTransform faults from [`read_fname_pair`] /
 ///   [`FTransform::read_from`].
+/// - [`AssetParseFault::DerivedStringBudgetExceeded`] when the copied
+///   bone names pass the package's derived-string budget.
 pub(crate) fn read_reference_skeleton<R: Read + Seek + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
@@ -105,7 +107,7 @@ pub(crate) fn read_reference_skeleton<R: Read + Seek + ?Sized>(
             ));
         }
         bones.push(crate::asset::BoneInfo {
-            name: name.to_string(),
+            name: ctx.charge_derived(name.to_string(), asset_path)?,
             parent_index,
         });
     }
@@ -221,6 +223,7 @@ mod tests {
     use crate::asset::export_table::ExportTable;
     use crate::asset::import_table::ImportTable;
     use crate::asset::name_table::{FName, NameTable};
+    use crate::asset::property::test_utils::{assert_derived_budget_exceeded, with_derived_budget};
     use crate::asset::version::AssetVersion;
 
     /// Build an `AssetContext` with the given name table (in wire order) at
@@ -354,6 +357,29 @@ mod tests {
         assert_eq!(skel.bind_pose[1].scale_3d, UNIT_SCALE);
         // whole body consumed — pins that the name-map is read, not skipped.
         assert_eq!(cur.position(), total);
+    }
+
+    #[test]
+    fn bone_names_are_charged_to_the_derived_budget() {
+        let limit = ("Root".len() + "Hip".len()) as u64;
+        let ctx = with_derived_budget(test_ctx_ue4(&["Root", "Hip"]), limit);
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(&2i32.to_le_bytes()); // FinalRefBoneInfo count
+        fname(&mut body, 0);
+        body.extend_from_slice(&(-1i32).to_le_bytes());
+        fname(&mut body, 1);
+        body.extend_from_slice(&0i32.to_le_bytes());
+        body.extend_from_slice(&2i32.to_le_bytes()); // FinalRefBonePose count
+        body.extend_from_slice(&identity_ftransform_ue4());
+        body.extend_from_slice(&identity_ftransform_ue4());
+        body.extend_from_slice(&2i32.to_le_bytes()); // FinalNameToIndexMap count
+        for bone in [0, 1] {
+            fname(&mut body, bone);
+            body.extend_from_slice(&bone.to_le_bytes());
+        }
+        let read = || read_reference_skeleton(&mut Cursor::new(&body), &ctx, "Test.uasset");
+        assert_eq!(read().unwrap().bones.len(), 2);
+        assert_derived_budget_exceeded(read(), limit);
     }
 
     #[test]

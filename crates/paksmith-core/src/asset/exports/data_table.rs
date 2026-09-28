@@ -58,6 +58,8 @@ const MIN_ROW_BYTES: u64 = 16;
 ///   unterminated row body surfaces as `PropertyTagSizeMismatch`).
 /// - [`AssetParseFault::AllocationFailed`] if the row-vec reservation
 ///   is refused.
+/// - [`AssetParseFault::DerivedStringBudgetExceeded`] when the copied
+///   row names pass the package's derived-string budget.
 pub(crate) fn read_from(
     payload: &[u8],
     ctx: &AssetContext,
@@ -131,7 +133,7 @@ pub(crate) fn read_from(
         // surfaces as `PropertyTagSizeMismatch` from `read_properties`.
         let properties = read_properties(&mut cur, ctx, 0, total_len, asset_path)?;
         rows.push(DataTableRow {
-            name: name.to_string(),
+            name: ctx.charge_derived(name.to_string(), asset_path)?,
             properties,
         });
     }
@@ -199,7 +201,9 @@ pub(crate) fn read_typed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::property::test_utils::make_ctx;
+    use crate::asset::property::test_utils::{
+        assert_derived_budget_exceeded, make_ctx, with_derived_budget,
+    };
 
     // --- wire-byte builders (kept explicit so the fixture bytes are
     // independently auditable against the format doc, not circular
@@ -360,6 +364,24 @@ mod tests {
         assert_eq!(data.rows[1].properties.len(), 1);
         assert_eq!(data.rows[1].properties[0].name(), "Damage");
         assert_eq!(data.rows[1].properties[0].value, PropertyValue::Int(42));
+    }
+
+    #[test]
+    fn row_names_are_charged_to_the_derived_budget() {
+        let limit = ("RowAlpha".len() + "RowBeta".len()) as u64;
+        let ctx = with_derived_budget(make_ctx(&["None", "RowAlpha", "RowBeta"]), limit);
+        let mut bytes = Vec::new();
+        object_end(&mut bytes);
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // NumRows = 2
+        for row in [1, 2] {
+            fname(&mut bytes, row);
+            none(&mut bytes);
+        }
+        assert_eq!(
+            read_from(&bytes, &ctx, "test.uasset").unwrap().rows.len(),
+            2
+        );
+        assert_derived_budget_exceeded(read_from(&bytes, &ctx, "test.uasset"), limit);
     }
 
     #[test]

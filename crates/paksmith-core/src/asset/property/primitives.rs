@@ -353,6 +353,8 @@ pub enum PropertyValue {
 /// - [`AssetParseFault::UnsupportedSoftObjectPathLayout`] when the asset
 ///   uses the index-serialized form (`ctx.soft_object_paths_indexed`).
 /// - Any error surfaced by [`super::read_fname_pair`] for either FName.
+/// - [`AssetParseFault::DerivedStringBudgetExceeded`] when the composed
+///   `asset_path` passes the package's derived-string budget.
 /// - [`crate::error::AssetParseFault::FStringMalformed`] for a malformed
 ///   `sub_path` FString.
 ///
@@ -441,6 +443,7 @@ pub(super) fn read_soft_path_payload<R: Read>(
             name.to_string()
         }
     };
+    let obj_path = ctx.charge_derived(obj_path, asset_path)?;
     // FString `SubPathString`. On very recent engine builds this slot is
     // an `FUtf8String` (gated on a custom FFortniteMainBranchObjectVersion,
     // not the UE5 object version); an empty sub_path — the common cooked
@@ -731,7 +734,9 @@ pub(crate) fn resolve_package_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::property::test_utils::{make_ctx, make_ctx_with_import};
+    use crate::asset::property::test_utils::{
+        assert_derived_budget_exceeded, make_ctx, make_ctx_with_import, with_derived_budget,
+    };
     use std::io::Cursor;
 
     fn ordinal(enum_name: &str, ordinal: u8) -> EnumValue {
@@ -850,6 +855,7 @@ mod tests {
             soft_object_paths_indexed: false,
             data_resources: std::sync::Arc::from(Vec::new()),
             engine_version_hint: None,
+            derived_strings: Arc::default(),
         }
     }
 
@@ -1410,6 +1416,27 @@ mod tests {
                 sub_path: String::new(),
             }
         );
+    }
+
+    #[test]
+    fn soft_object_path_is_charged_to_the_derived_budget() {
+        let tag = make_tag("SoftObjectProperty", 21);
+        let mut ctx = make_ctx(&["None", "/Game/Data/Hero", "Hero"]);
+        ctx.version.file_version_ue4 = 522;
+        ctx.version.file_version_ue5 = Some(1007);
+        let limit = "/Game/Data/Hero.Hero".len() as u64;
+        let ctx = with_derived_budget(ctx, limit);
+        let mut buf: Vec<u8> = Vec::new();
+        for field in [1i32, 0, 2, 0, 1] {
+            buf.extend_from_slice(&field.to_le_bytes());
+        }
+        buf.push(b'\0');
+        let read = || read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0);
+        assert!(matches!(
+            read().unwrap(),
+            Some(PropertyValue::SoftObjectPath { .. })
+        ));
+        assert_derived_budget_exceeded(read(), limit);
     }
 
     /// AssetName resolves to `None` → `asset_path` is PackageName alone,

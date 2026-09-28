@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use crate::asset::{
-    AssetContext,
+    AssetContext, DerivedStringBudget,
     custom_version::CustomVersionContainer,
     export_table::ExportTable,
     import_table::{ImportTable, ObjectImport},
@@ -53,6 +53,29 @@ pub fn make_ctx(names: &[&str]) -> AssetContext {
         Arc::new(CustomVersionContainer::default()),
         None,
     )
+}
+
+/// Give `ctx` a fresh derived-string budget of `limit` bytes, so a
+/// test reaches the cap with a few short names.
+#[must_use]
+pub fn with_derived_budget(mut ctx: AssetContext, limit: u64) -> AssetContext {
+    ctx.derived_strings = Arc::new(DerivedStringBudget::new(limit));
+    ctx
+}
+
+/// Assert `result` is the derived-string budget refusal for `limit`.
+///
+/// # Panics
+///
+/// When `result` is anything else.
+pub fn assert_derived_budget_exceeded<T: std::fmt::Debug>(result: crate::Result<T>, limit: u64) {
+    match result {
+        Err(crate::PaksmithError::AssetParse {
+            fault: crate::error::AssetParseFault::DerivedStringBudgetExceeded { limit: got },
+            ..
+        }) => assert_eq!(got, limit),
+        other => panic!("expected DerivedStringBudgetExceeded {{ limit: {limit} }}, got {other:?}"),
+    }
 }
 
 /// Build an `AssetContext` with one `ObjectImport` whose `object_name`
@@ -219,6 +242,12 @@ pub fn make_ctx_with_version_and_names(ue4: i32, ue5: Option<i32>, names: &[&str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "expected DerivedStringBudgetExceeded")]
+    fn assert_derived_budget_exceeded_rejects_a_success() {
+        assert_derived_budget_exceeded(Ok(()), 1);
+    }
 
     #[test]
     fn make_ctx_with_version_sets_legacy_file_version_correctly() {

@@ -817,6 +817,7 @@ impl Package {
             soft_object_paths_indexed: summary.soft_object_paths_indexed(),
             data_resources: Arc::clone(&data_resources),
             engine_version_hint: opts.engine_version_hint,
+            derived_strings: Arc::default(),
         };
 
         // Phase 2f: dispatch the unversioned (schema-driven) property
@@ -1255,6 +1256,7 @@ impl Package {
             soft_object_paths_indexed: self.summary.soft_object_paths_indexed(),
             data_resources: Arc::clone(&self.data_resources),
             engine_version_hint: self.engine_version_hint,
+            derived_strings: Arc::default(),
         }
     }
 }
@@ -1558,12 +1560,57 @@ mod tests {
     use super::*;
     use crate::error::CompanionFileKind;
     use crate::testing::uasset::{
-        MinimalPackage, build_minimal_ue4_27, build_minimal_ue4_27_split,
-        build_minimal_ue4_27_with_data_table,
+        MinimalPackage, MinimalPackageSpec, build_minimal, build_minimal_ue4_27,
+        build_minimal_ue4_27_split, build_minimal_ue4_27_with_data_table,
         build_minimal_ue4_27_with_valid_and_corrupt_data_tables, build_minimal_ue5_1010,
         build_minimal_ue5_1010_with_data_resources, build_minimal_ue5_1012, build_minimal_ue5_1013,
         build_minimal_with_texture2d,
     };
+
+    /// One package draws on one derived-string budget: once an export
+    /// spends it, the next export's tagged decode trips and falls back
+    /// to `Opaque` while the package read itself succeeds.
+    #[test]
+    fn derived_string_budget_spans_the_exports_of_one_decode() {
+        let mut spec = MinimalPackageSpec::default();
+        spec.names.names.extend([
+            crate::asset::FName::new("Score"),
+            crate::asset::FName::new("IntProperty"),
+        ]);
+        // IntProperty tag named `Score_0` (index 3, number 1), value 7,
+        // then the `(0, 0)` terminator.
+        let mut payload = Vec::new();
+        for field in [3i32, 1, 4, 0, 4, 0] {
+            payload.extend_from_slice(&field.to_le_bytes());
+        }
+        payload.push(0); // HasPropertyGuid
+        payload.extend_from_slice(&7i32.to_le_bytes());
+        payload.extend_from_slice(&[0u8; 8]);
+        let mut export = spec.exports.exports[0];
+        export.serial_size = i64::try_from(payload.len()).unwrap();
+        spec.exports.exports = vec![export, export];
+        spec.payloads = vec![payload.clone(), payload];
+        let MinimalPackage { bytes, .. } = build_minimal(spec);
+
+        let pkg = Package::read_from(&bytes, None, None, "x.uasset").unwrap();
+        assert!(pkg.payloads.iter().all(|asset| matches!(
+            asset,
+            crate::asset::Asset::Generic(PropertyBag::Tree { .. })
+        )));
+        let ctx = crate::asset::property::test_utils::with_derived_budget(
+            pkg.context(),
+            "Score_0".len() as u64,
+        );
+        let (payloads, _) = read_payloads(&bytes, &pkg.exports, &ctx, "x.uasset").unwrap();
+        assert!(matches!(
+            &payloads[0],
+            crate::asset::Asset::Generic(PropertyBag::Tree { .. })
+        ));
+        assert!(matches!(
+            &payloads[1],
+            crate::asset::Asset::Generic(PropertyBag::Opaque { .. })
+        ));
+    }
 
     /// End-to-end acceptance (#643): UE 5.4 (1012) and 5.5 (1013)
     /// packages with a REAL complete-type-name tagged payload parse
