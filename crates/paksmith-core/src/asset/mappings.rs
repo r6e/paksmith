@@ -2179,10 +2179,13 @@ mod tests {
         data.extend_from_slice(&rows.to_le_bytes()); // prop_count
         data.extend_from_slice(&rows.to_le_bytes()); // serial_count
         // Each row: schema_index=0, array_size=255, name_idx=2 (P), type=IntProperty.
-        for _ in 0..rows {
+        // The first row to overshoot names index 99, out of range, so the cap
+        // must fire before the row's name is read.
+        for row in 0..rows {
+            let name_idx: i32 = if u32::from(row) == cap / 255 { 99 } else { 2 };
             data.extend_from_slice(&0u16.to_le_bytes()); // schema_index
             data.push(255u8); // array_size — maximal expansion
-            data.extend_from_slice(&2i32.to_le_bytes()); // name idx = "P"
+            data.extend_from_slice(&name_idx.to_le_bytes());
             data.push(2u8); // IntProperty
         }
         let data_len = u32::try_from(data.len()).unwrap();
@@ -2449,6 +2452,13 @@ mod tests {
 
     fn schema_payload() -> Vec<u8> {
         minimal_usmap_none()[HEADER_LEN..].to_vec()
+    }
+
+    fn schema_fault(data: &[u8], budgets: SchemaBudgets) -> crate::error::MappingsParseFault {
+        match Usmap::parse_schema_data(data, 0, budgets) {
+            Err(crate::PaksmithError::MappingsParse { fault }) => fault,
+            other => panic!("expected a mappings fault, got {other:?}"),
+        }
     }
 
     fn parse_fault(bytes: &[u8]) -> crate::error::MappingsParseFault {
@@ -2771,6 +2781,21 @@ mod tests {
         }
     }
 
+    /// One schema, name 0 over super 1, whose rows are all property 2 of
+    /// `row_type`, one row per entry of `array_sizes`.
+    fn push_repeated_schema(data: &mut Vec<u8>, array_sizes: &[u8], row_type: &[u8]) {
+        data.extend_from_slice(&0i32.to_le_bytes());
+        data.extend_from_slice(&1i32.to_le_bytes());
+        data.extend_from_slice(&u16::MAX.to_le_bytes()); // prop_count
+        data.extend_from_slice(&u16::try_from(array_sizes.len()).unwrap().to_le_bytes());
+        for &array_size in array_sizes {
+            data.extend_from_slice(&0u16.to_le_bytes());
+            data.push(array_size);
+            data.extend_from_slice(&2i32.to_le_bytes());
+            data.extend_from_slice(row_type);
+        }
+    }
+
     /// One schema whose single row, `prop`, expands into `slots` slots of
     /// Map<Array<Int>, Set<Float>>: five type nodes.
     fn push_map_row_schema(data: &mut Vec<u8>, class: i32, super_class: i32, prop: i32, slots: u8) {
@@ -2840,12 +2865,8 @@ mod tests {
         };
 
         assert!(Usmap::parse_schema_data(&data, 0, budgets(6)).is_ok());
-        let err = Usmap::parse_schema_data(&data, 0, budgets(3)).unwrap_err();
-        let crate::PaksmithError::MappingsParse { fault } = err else {
-            panic!("{err}");
-        };
         assert_eq!(
-            fault,
+            schema_fault(&data, budgets(3)),
             crate::error::MappingsParseFault::ExpandedPropertiesTotalExceeded {
                 requested: 4,
                 limit: 3
@@ -2876,12 +2897,8 @@ mod tests {
             type_nodes: u64::MAX,
         };
 
-        let err = Usmap::parse_schema_data(&data, 0, budgets).unwrap_err();
-        let crate::PaksmithError::MappingsParse { fault } = err else {
-            panic!("{err}");
-        };
         assert_eq!(
-            fault,
+            schema_fault(&data, budgets),
             crate::error::MappingsParseFault::ExpandedPropertiesTotalExceeded {
                 requested: 4,
                 limit: 3
@@ -2907,12 +2924,8 @@ mod tests {
         };
 
         assert!(Usmap::parse_schema_data(&data, 0, budgets(10)).is_ok());
-        let err = Usmap::parse_schema_data(&data, 0, budgets(7)).unwrap_err();
-        let crate::PaksmithError::MappingsParse { fault } = err else {
-            panic!("{err}");
-        };
         assert_eq!(
-            fault,
+            schema_fault(&data, budgets(7)),
             crate::error::MappingsParseFault::TypeNodesExceeded {
                 requested: 8,
                 limit: 7
@@ -2931,24 +2944,12 @@ mod tests {
         push_names(&mut data, &["S", "None", "x"]);
         data.extend_from_slice(&0u32.to_le_bytes()); // no enums
         data.extend_from_slice(&u32::try_from(full_schemas + 1).unwrap().to_le_bytes());
-        let mut push_schema = |slot_rows: &[u8]| {
-            data.extend_from_slice(&0i32.to_le_bytes());
-            data.extend_from_slice(&1i32.to_le_bytes());
-            data.extend_from_slice(&u16::MAX.to_le_bytes()); // prop_count
-            data.extend_from_slice(&u16::try_from(slot_rows.len()).unwrap().to_le_bytes());
-            for &array_size in slot_rows {
-                data.extend_from_slice(&0u16.to_le_bytes());
-                data.push(array_size);
-                data.extend_from_slice(&2i32.to_le_bytes());
-                data.push(2);
-            }
-        };
         let mut full = vec![255u8; per_schema / 255];
         full.push(u8::try_from(per_schema % 255).unwrap());
         for _ in 0..full_schemas {
-            push_schema(&full);
+            push_repeated_schema(&mut data, &full, &[2]);
         }
-        push_schema(&[1]);
+        push_repeated_schema(&mut data, &[1], &[2]);
 
         assert_eq!(
             parse_fault(&usmap_with(UsmapCompression::None, &data, data.len())),
@@ -2979,18 +2980,10 @@ mod tests {
         );
         let mut left = rows;
         while left > 0 {
-            let serial_count = u16::try_from(left.min(per_schema)).unwrap();
-            data.extend_from_slice(&0i32.to_le_bytes());
-            data.extend_from_slice(&1i32.to_le_bytes());
-            data.extend_from_slice(&u16::MAX.to_le_bytes()); // prop_count
-            data.extend_from_slice(&serial_count.to_le_bytes());
-            for _ in 0..serial_count {
-                data.extend_from_slice(&0u16.to_le_bytes());
-                data.push(0);
-                data.extend_from_slice(&2i32.to_le_bytes());
-                data.extend_from_slice(&row_type);
-            }
-            left -= u64::from(serial_count);
+            let serial_count = left.min(per_schema);
+            let no_slots = vec![0u8; usize::try_from(serial_count).unwrap()];
+            push_repeated_schema(&mut data, &no_slots, &row_type);
+            left -= serial_count;
         }
 
         assert_eq!(
