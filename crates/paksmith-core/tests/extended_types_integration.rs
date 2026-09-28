@@ -62,7 +62,7 @@ mod tests {
             PropertyValue::Object {
                 kind: PackageIndex::Import(0),
                 name,
-            } if name == "Default__Object"
+            } if &**name == "Default__Object"
         ));
     }
 

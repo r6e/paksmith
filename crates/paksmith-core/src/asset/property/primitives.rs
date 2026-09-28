@@ -312,10 +312,10 @@ pub enum PropertyValue {
     Object {
         /// Typed package-index discriminator from `PackageIndex::try_from_raw`.
         kind: PackageIndex,
-        /// Resolved name string from `resolve_package_index`. Empty for `Null`;
+        /// Resolved name from `resolve_package_index`. Empty for `Null`;
         /// out-of-bounds indices return `AssetParseFault::PackageIndexOob`
         /// rather than synthesizing a fallback string.
-        name: String,
+        name: Arc<str>,
     },
 }
 
@@ -677,10 +677,10 @@ pub(crate) fn resolve_package_index(
     kind: PackageIndex,
     ctx: &AssetContext,
     asset_path: &str,
-) -> crate::Result<String> {
-    use crate::asset::property::tag::resolve_fname;
+) -> crate::Result<Arc<str>> {
+    use crate::asset::property::tag::{EMPTY_ARC_STR, resolve_fname};
     match kind {
-        PackageIndex::Null => Ok(String::new()),
+        PackageIndex::Null => Ok(Arc::clone(&EMPTY_ARC_STR)),
         PackageIndex::Import(n) => {
             let idx = n as usize;
             let imp = ctx
@@ -695,9 +695,6 @@ pub(crate) fn resolve_package_index(
                         table_size: u32::try_from(ctx.imports.imports.len()).unwrap_or(u32::MAX),
                     },
                 })?;
-            // PropertyValue::Object.name is `String` (out of #365
-            // scope); convert from Arc<str>. One alloc per Object
-            // property.
             resolve_fname(
                 i32::try_from(imp.object_name).unwrap_or(i32::MAX),
                 i32::try_from(imp.object_name_number).unwrap_or(i32::MAX),
@@ -705,7 +702,6 @@ pub(crate) fn resolve_package_index(
                 asset_path,
                 AssetWireField::ObjectPropertyIndex,
             )
-            .map(|arc| arc.to_string())
         }
         PackageIndex::Export(n) => {
             let idx = n as usize;
@@ -728,7 +724,6 @@ pub(crate) fn resolve_package_index(
                 asset_path,
                 AssetWireField::ObjectPropertyIndex,
             )
-            .map(|arc| arc.to_string())
         }
     }
 }
@@ -862,21 +857,46 @@ mod tests {
     fn resolve_package_index_null_is_empty_string() {
         let ctx = make_ctx_with_import("/Game/Mesh.Mesh");
         let name = resolve_package_index(PackageIndex::Null, &ctx, "x.uasset").unwrap();
-        assert_eq!(name, "");
+        assert_eq!(&*name, "");
+    }
+
+    /// Each arm hands back one shared allocation rather than a copy per
+    /// resolution: an import or export its name-table entry, `Null` one
+    /// empty name.
+    #[test]
+    fn resolve_package_index_shares_one_allocation_per_arm() {
+        let resolve =
+            |kind, ctx: &AssetContext| resolve_package_index(kind, ctx, "x.uasset").unwrap();
+        let imports = make_ctx_with_import("/Game/Mesh.Mesh");
+        let entry = imports.names.get(3).unwrap().clone_arc();
+        assert!(Arc::ptr_eq(
+            &resolve(PackageIndex::Import(0), &imports),
+            &entry
+        ));
+        let exports = make_test_ctx_with_export("Hero");
+        let entry = exports.names.get(1).unwrap().clone_arc();
+        assert!(Arc::ptr_eq(
+            &resolve(PackageIndex::Export(0), &exports),
+            &entry
+        ));
+        assert!(Arc::ptr_eq(
+            &resolve(PackageIndex::Null, &imports),
+            &resolve(PackageIndex::Null, &exports)
+        ));
     }
 
     #[test]
     fn resolve_package_index_import_ref() {
         let ctx = make_ctx_with_import("/Game/Mesh.Mesh");
         let name = resolve_package_index(PackageIndex::Import(0), &ctx, "x.uasset").unwrap();
-        assert_eq!(name, "/Game/Mesh.Mesh");
+        assert_eq!(&*name, "/Game/Mesh.Mesh");
     }
 
     #[test]
     fn resolve_package_index_export_ref() {
         let ctx = make_test_ctx_with_export("Hero");
         let name = resolve_package_index(PackageIndex::Export(0), &ctx, "x.uasset").unwrap();
-        assert_eq!(name, "Hero");
+        assert_eq!(&*name, "Hero");
     }
 
     #[test]
@@ -1206,7 +1226,7 @@ mod tests {
     fn property_value_object_import_serializes() {
         let v = PropertyValue::Object {
             kind: PackageIndex::Import(2),
-            name: "SomeImport".to_string(),
+            name: "SomeImport".into(),
         };
         let json = serde_json::to_string(&v).unwrap();
         assert_eq!(
@@ -1219,7 +1239,7 @@ mod tests {
     fn property_value_object_null_serializes() {
         let v = PropertyValue::Object {
             kind: PackageIndex::Null,
-            name: String::new(),
+            name: "".into(),
         };
         let json = serde_json::to_string(&v).unwrap();
         assert_eq!(json, r#"{"Object":{"kind":"Null","name":""}}"#);
@@ -1229,7 +1249,7 @@ mod tests {
     fn property_value_object_export_serializes() {
         let v = PropertyValue::Object {
             kind: PackageIndex::Export(1),
-            name: "SomeExport".to_string(),
+            name: "SomeExport".into(),
         };
         let json = serde_json::to_string(&v).unwrap();
         assert_eq!(
@@ -1323,7 +1343,7 @@ mod tests {
             val,
             PropertyValue::Object {
                 kind: PackageIndex::Null,
-                name: String::new(),
+                name: "".into(),
             }
         );
     }
@@ -1341,7 +1361,7 @@ mod tests {
             val,
             PropertyValue::Object {
                 kind: PackageIndex::Import(0),
-                name: "/Game/Mesh.Mesh".to_string(),
+                name: "/Game/Mesh.Mesh".into(),
             }
         );
     }
@@ -1358,7 +1378,7 @@ mod tests {
             val,
             PropertyValue::Object {
                 kind: PackageIndex::Export(0),
-                name: "Hero".to_string(),
+                name: "Hero".into(),
             }
         );
     }

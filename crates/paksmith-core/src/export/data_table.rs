@@ -477,7 +477,7 @@ mod tests {
         // shared arm body beyond TypedStruct.
         let obj = PropertyValue::Object {
             kind: crate::asset::PackageIndex::Import(0),
-            name: "ItemRow".to_string(),
+            name: "ItemRow".into(),
         };
         let obj_cell = value_to_csv_cell(&obj);
         assert!(obj_cell.contains("Object"), "got: {obj_cell}");

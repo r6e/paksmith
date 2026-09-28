@@ -2353,9 +2353,36 @@ mod tests {
             v,
             PropertyValue::Object {
                 kind: PackageIndex::Import(0),
-                name: "/Game/Mesh.Mesh".to_string(),
+                name: "/Game/Mesh.Mesh".into(),
             }
         );
+    }
+
+    /// Two object-reference elements naming one import share its name.
+    #[test]
+    fn object_property_elements_share_the_imports_name() {
+        let ctx = make_ctx_with_import("/Game/Mesh.Mesh");
+        let read = |r: &mut Cursor<Vec<u8>>| {
+            read_element_value(
+                "ObjectProperty",
+                AssetWireField::ArrayElementBody,
+                r,
+                &ctx,
+                "x.uasset",
+                0,
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let mut bytes = (-1i32).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&(-1i32).to_le_bytes());
+        let mut r = Cursor::new(bytes);
+        let (PropertyValue::Object { name: a, .. }, PropertyValue::Object { name: b, .. }) =
+            (read(&mut r), read(&mut r))
+        else {
+            panic!("expected two object references");
+        };
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
     }
 
     #[test]

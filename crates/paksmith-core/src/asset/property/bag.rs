@@ -516,7 +516,7 @@ mod tests {
                 guid: None,
                 value: PropertyValue::Object {
                     kind: crate::asset::PackageIndex::Null,
-                    name: String::new(),
+                    name: "".into(),
                 },
             },
         ]);

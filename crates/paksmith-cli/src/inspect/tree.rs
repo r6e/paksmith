@@ -258,7 +258,7 @@ fn scalar(value: &PropertyValue) -> String {
             }
         }
         PropertyValue::Object { name, .. } if name.is_empty() => "null".to_string(),
-        PropertyValue::Object { name, .. } => name.clone(),
+        PropertyValue::Object { name, .. } => name.to_string(),
         // Container variants are normally handled by `render_property`; if one
         // appears nested as a key/value/element, name it terselessly.
         PropertyValue::Array { inner_type, .. } | PropertyValue::Set { inner_type, .. } => {
@@ -366,6 +366,17 @@ fn class_name(pkg: &Package, class_index: PackageIndex) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An object reference renders as its name, or `null` when it has none.
+    #[test]
+    fn scalar_renders_an_object_reference_by_name() {
+        let object = |name: &str| PropertyValue::Object {
+            kind: PackageIndex::Null,
+            name: name.into(),
+        };
+        assert_eq!(scalar(&object("/Game/Mesh.Mesh")), "/Game/Mesh.Mesh");
+        assert_eq!(scalar(&object("")), "null");
+    }
 
     #[test]
     fn typed_variant_label_consults_texture_kind() {

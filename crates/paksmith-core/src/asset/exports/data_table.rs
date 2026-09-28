@@ -163,7 +163,7 @@ fn resolve_row_struct(class_props: &[Property], asset_path: &str) -> String {
         .find(|p| p.name() == "RowStruct")
         .map(|p| &p.value)
     {
-        Some(PropertyValue::Object { name, .. }) => name.clone(),
+        Some(PropertyValue::Object { name, .. }) => name.to_string(),
         Some(_) => {
             tracing::warn!(
                 asset = asset_path,
@@ -402,7 +402,7 @@ mod tests {
                 "RowStruct",
                 PropertyValue::Object {
                     kind: crate::asset::PackageIndex::Import(0),
-                    name: "ItemRow".to_string(),
+                    name: "ItemRow".into(),
                 },
             ),
         ];

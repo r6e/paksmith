@@ -850,8 +850,7 @@ impl Package {
             for export in &exports.exports {
                 // Propagate OOB errors here rather than swallowing them
                 // with `unwrap_or_default()`. `PackageIndex::Null`
-                // already returns `Ok(String::new())` from
-                // `resolve_package_index`, so null class refs flow
+                // resolves to an empty name, so null class refs flow
                 // through cleanly and `get_all_properties("")` returns
                 // an empty schema (handled inside the decoder).
                 let class_name = crate::asset::property::primitives::resolve_package_index(
@@ -1388,7 +1387,7 @@ fn read_payloads(
             asset_path,
         )?;
         if let Some(read_typed) =
-            crate::asset::exports::dispatch::class_dispatch().get(class_name.as_str())
+            crate::asset::exports::dispatch::class_dispatch().get(&*class_name)
         {
             // Typed reader registered for this class (3d+ populate the
             // dispatch table). On success, push the typed Asset and
@@ -1440,7 +1439,7 @@ fn read_payloads(
                 Err(err) => {
                     tracing::warn!(
                         asset = asset_path,
-                        export.class = class_name.as_str(),
+                        export.class = &*class_name,
                         error = %err,
                         "typed reader failed; falling back to generic property-bag parse"
                     );
@@ -1453,7 +1452,7 @@ fn read_payloads(
             // of distinct classes, Phase 3 covers only a handful.
             tracing::trace!(
                 asset = asset_path,
-                export.class = class_name.as_str(),
+                export.class = &*class_name,
                 "no typed reader registered; using Generic property-bag iteration"
             );
         }
