@@ -263,7 +263,7 @@ hardening*.
 |----------|-------|--------|
 | `MAX_FRAGMENTS_PER_HEADER` | 65535 (`u16::MAX`) | Prevents unbounded `Vec` growth from an adversarial `is_last=0` fragment stream. Implementations SHOULD enforce a tighter cap if profiling reveals real assets never exceed a few hundred fragments. |
 | `MAX_USMAP_COMPRESSED_SIZE` | 64 MiB | Bounds pre-decompression allocation from a malicious size claim. |
-| `MAX_USMAP_DECOMPRESSED_SIZE` | 256 MiB | Prevents decompression bombs from exhausting memory. |
+| `MAX_USMAP_DECOMPRESSED_SIZE` | 256 MiB | Bounds the output buffer reserved for the declared size. A decoder's own working memory is separate; see the Brotli and ZStandard notes below. |
 | `MAX_USMAP_ENUM_COUNT` | 4096 | Bounds the enum-table `HashMap` heap cost per `.usmap`. |
 | `MAX_USMAP_VALUES_PER_ENUM` | 1024 | Bounds per-enum `HashMap` heap cost. |
 | `MAX_INHERITANCE_DEPTH` | 64 | Breaks cyclic `super_type` chains in `.usmap`; a malicious cycle would otherwise loop forever in `get_all_properties`. |
@@ -279,6 +279,24 @@ Additional implementation hardening notes:
 - **Decompressed size MUST match the header's stated value.** A
   decompressor that returns more or fewer bytes than declared
   indicates corruption or a decompression-bomb attempt; reject.
+- **Brotli: reject the large-window extension.** RFC 7932 caps the
+  window at 16 MiB (`WBITS` ≤ 24). The large-window extension is
+  signalled by a first byte of `0x11`, whose window code RFC 7932 §9.1
+  leaves invalid, and allows windows far beyond 16 MiB; the reference
+  decoder accepts up to 1 GiB. A decoder's ring
+  buffer is sized from the declared window and may be allocated before
+  any output is produced. A strict RFC 7932 decoder rejects the marker.
+- **ZStandard: accept only v1 and skippable frames.** A v1 frame starts
+  with magic `0xFD2FB528` and a skippable frame with `0x184D2A50` to
+  `0x184D2A5F`. Any other magic is a pre-v1 legacy frame or not zstd at
+  all. Check every frame, not only the first.
+- **ZStandard: decode one-shot into the declared-size buffer.** A zstd
+  frame header declares a window size, and a streaming decoder may
+  allocate a buffer up to that window before producing output. The
+  format permits windows far larger than any `.usmap` needs; libzstd's
+  default decoder limit is 128 MiB. A one-shot decode into a buffer of
+  the declared decompressed size uses that buffer as its window and
+  needs no other.
 - **Cyclic `super_type` chains MUST be detected.** A schema whose
   super-type chain `A → B → C → A` would loop indefinitely in
   `get_all_properties` without depth bounding. Paksmith uses

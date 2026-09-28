@@ -35,15 +35,25 @@ const USMAP_VERSION_LARGE_ENUMS: u8 = 3;
 const USMAP_VERSION_EXPLICIT_ENUM_VALUES: u8 = 4;
 const MAX_USMAP_VERSION: u8 = USMAP_VERSION_EXPLICIT_ENUM_VALUES; // EUsmapVersion::Latest
 
+/// The large-window extension's first byte, whose window code RFC 7932 §9.1
+/// leaves invalid. With its top bit set it is invalid to every decoder.
+const BROTLI_LARGE_WINDOW_MARKER: u8 = 0x11;
+
+// zstd frame magics: the v1 frame's, and the range of sixteen that mark a
+// skippable frame.
+const ZSTD_FRAME_MAGIC: u32 = 0xFD2F_B528;
+const ZSTD_SKIPPABLE_MAGIC_FIRST: u32 = 0x184D_2A50;
+const ZSTD_SKIPPABLE_MAGIC_LAST: u32 = 0x184D_2A5F;
+
 /// Hard cap on the wire-claimed `compressed_size` of a `.usmap` file.
 /// Community-distributed usmaps are typically <1 MiB; 64 MiB gives huge
 /// headroom while bounding allocation from a malicious header that
 /// claims `u32::MAX` (~4 GiB).
 pub const MAX_USMAP_COMPRESSED_SIZE: u32 = 64 * 1024 * 1024;
 
-/// Hard cap on the wire-claimed `decompressed_size`. Same rationale —
-/// prevent a decompression bomb from claiming a 4 GiB output buffer
-/// and stalling allocation before the decoder even runs.
+/// Hard cap on the wire-claimed `decompressed_size`, and so on the output
+/// buffer reserved for it: a header claiming `u32::MAX` would otherwise
+/// reserve 4 GiB before the decoder runs.
 pub const MAX_USMAP_DECOMPRESSED_SIZE: u32 = 256 * 1024 * 1024;
 
 /// Hard cap on the inheritance chain length when walking
@@ -673,6 +683,12 @@ impl Usmap {
             reason = "compressed_size <= 64 MiB cap, well within usize on 32-bit+"
         )]
         let compressed_size_usz = compressed_size as usize;
+        let payload_offset = position_usize(&cur);
+        if compressed_size_usz > bytes.len().saturating_sub(payload_offset) {
+            return Err(fault(MappingsParseFault::Truncated {
+                offset: payload_offset,
+            }));
+        }
         compressed
             .try_reserve_exact(compressed_size_usz)
             .map_err(|_| {
@@ -691,77 +707,61 @@ impl Usmap {
             reason = "decompressed_size <= 256 MiB cap, well within usize on 32-bit+"
         )]
         let decompressed_size_usz = decompressed_size as usize;
+        // One spare byte, so an overshoot lands in place and reads as a
+        // mismatch: without it, `read_to_end` doubles the buffer to fit one
+        // byte, and a one-shot decode has nowhere to put it.
+        let reserve_output = || -> crate::Result<Vec<u8>> {
+            let mut out: Vec<u8> = Vec::new();
+            out.try_reserve_exact(decompressed_size_usz + 1)
+                .map_err(|_| {
+                    fault(MappingsParseFault::DecompressedSizeTooLarge {
+                        size: decompressed_size,
+                        limit: MAX_USMAP_DECOMPRESSED_SIZE,
+                    })
+                })?;
+            Ok(out)
+        };
+        let check_len = |out: Vec<u8>| {
+            if out.len() != decompressed_size_usz {
+                return Err(fault(MappingsParseFault::DecompressedSizeMismatch {
+                    expected: decompressed_size,
+                    found: out.len(),
+                }));
+            }
+            Ok(out)
+        };
 
         let data = match compression_byte {
-            x if x == UsmapCompression::None as u8 => {
-                if compressed_size != decompressed_size {
-                    return Err(fault(MappingsParseFault::DecompressedSizeMismatch {
-                        expected: decompressed_size,
-                        found: compressed_size_usz,
-                    }));
-                }
-                compressed
-            }
+            x if x == UsmapCompression::None as u8 => check_len(compressed)?,
             x if x == UsmapCompression::Brotli as u8 => {
-                // The `brotli` crate (v7) exposes `Decompressor::new` which
-                // wraps a reader and produces decompressed bytes via `Read`.
-                // Wrap with `Read::take(decompressed_size + 1)` so a
-                // decompression bomb can't produce more than the header
-                // claims (the +1 lets us detect over-production and error
-                // out before the Vec grows past the declared size).
+                // `Decompressor::new` accepts the large-window extension, and
+                // the decoder allocates its ring buffer at the window the
+                // stream header names before producing any output.
+                if is_large_window_brotli(&compressed) {
+                    return Err(fault(MappingsParseFault::BrotliLargeWindowUnsupported));
+                }
                 let limit = u64::from(decompressed_size) + 1;
                 let decoder = brotli::Decompressor::new(Cursor::new(compressed), 4096);
-                let mut limited = std::io::Read::take(decoder, limit);
-                let mut out: Vec<u8> = Vec::new();
-                out.try_reserve_exact(decompressed_size_usz).map_err(|_| {
-                    fault(MappingsParseFault::DecompressedSizeTooLarge {
-                        size: decompressed_size,
-                        limit: MAX_USMAP_DECOMPRESSED_SIZE,
-                    })
-                })?;
+                let mut out = reserve_output()?;
                 let pos = position_usize(&cur);
-                let _ = limited
+                let _ = std::io::Read::take(decoder, limit)
                     .read_to_end(&mut out)
                     .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos }))?;
-                if out.len() != decompressed_size_usz {
-                    return Err(fault(MappingsParseFault::DecompressedSizeMismatch {
-                        expected: decompressed_size,
-                        found: out.len(),
-                    }));
-                }
-                out
+                check_len(out)?
             }
             x if x == UsmapCompression::ZStandard as u8 => {
-                // Stream-decode through a Decoder + take(N) bound rather
-                // than `decode_all`, so a zstd bomb can't produce GBs of
-                // output beyond what the header claimed.
-                let limit = u64::from(decompressed_size) + 1;
-                let pos_at_decoder = position_usize(&cur);
-                let decoder =
-                    zstd::stream::Decoder::new(Cursor::new(compressed)).map_err(|_| {
-                        fault(MappingsParseFault::Truncated {
-                            offset: pos_at_decoder,
-                        })
-                    })?;
-                let mut limited = std::io::Read::take(decoder, limit);
-                let mut out: Vec<u8> = Vec::new();
-                out.try_reserve_exact(decompressed_size_usz).map_err(|_| {
-                    fault(MappingsParseFault::DecompressedSizeTooLarge {
-                        size: decompressed_size,
-                        limit: MAX_USMAP_DECOMPRESSED_SIZE,
-                    })
-                })?;
+                // One-shot, straight into the reserved output. The streaming
+                // decoder allocates a buffer up to the frame's declared window,
+                // 128 MiB by default; a one-shot decode writes into `out`.
                 let pos = position_usize(&cur);
-                let _ = limited
-                    .read_to_end(&mut out)
-                    .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos }))?;
-                if out.len() != decompressed_size_usz {
-                    return Err(fault(MappingsParseFault::DecompressedSizeMismatch {
-                        expected: decompressed_size,
-                        found: out.len(),
-                    }));
+                if !is_zstd_v1_stream(&compressed) {
+                    return Err(fault(MappingsParseFault::Truncated { offset: pos }));
                 }
-                out
+                let mut out = reserve_output()?;
+                let _ = zstd::bulk::Decompressor::new()
+                    .and_then(|mut decoder| decoder.decompress_to_buffer(&compressed, &mut out))
+                    .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos }))?;
+                check_len(out)?
             }
             x if x == UsmapCompression::Oodle as u8 => {
                 return Err(fault(MappingsParseFault::UsmapCompressionUnsupported {
@@ -1442,6 +1442,38 @@ fn read_mapped_type(
         27 => MappedPropertyType::Unknown(type_byte), // FieldPathProperty
         other => MappedPropertyType::Unknown(other),
     })
+}
+
+fn is_large_window_brotli(stream: &[u8]) -> bool {
+    stream.first() == Some(&BROTLI_LARGE_WINDOW_MARKER)
+}
+
+/// Whether `stream` is one or more zstd v1 or skippable frames. libzstd is
+/// built with its pre-v1 decoders, and a one-shot decode hands each frame to
+/// whichever decoder its magic names.
+fn is_zstd_v1_stream(mut stream: &[u8]) -> bool {
+    if stream.is_empty() {
+        return false;
+    }
+    while !stream.is_empty() {
+        let Some(magic) = stream.first_chunk::<4>().map(|m| u32::from_le_bytes(*m)) else {
+            return false;
+        };
+        if !matches!(
+            magic,
+            ZSTD_FRAME_MAGIC | ZSTD_SKIPPABLE_MAGIC_FIRST..=ZSTD_SKIPPABLE_MAGIC_LAST
+        ) {
+            return false;
+        }
+        let Some(rest) = zstd::zstd_safe::find_frame_compressed_size(stream)
+            .ok()
+            .and_then(|len| stream.get(len..))
+        else {
+            return false;
+        };
+        stream = rest;
+    }
+    true
 }
 
 fn fault(f: MappingsParseFault) -> PaksmithError {
@@ -2336,6 +2368,282 @@ mod tests {
                 fault: crate::error::MappingsParseFault::UsmapCompressionUnsupported { method: 1 }
             }
         ));
+    }
+
+    /// The minimal fixture's header with `method`, `stored` as its payload,
+    /// and `declared` as its decompressed size.
+    fn usmap_with(method: UsmapCompression, stored: &[u8], declared: usize) -> Vec<u8> {
+        let mut bytes = minimal_usmap_none()[..4].to_vec();
+        bytes[3] = method as u8;
+        bytes.extend_from_slice(&u32::try_from(stored.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(declared).unwrap().to_le_bytes());
+        bytes.extend_from_slice(stored);
+        bytes
+    }
+
+    /// The fixture header's length: magic, version, compression, two sizes.
+    const HEADER_LEN: usize = 12;
+
+    fn schema_payload() -> Vec<u8> {
+        minimal_usmap_none()[HEADER_LEN..].to_vec()
+    }
+
+    fn parse_fault(bytes: &[u8]) -> crate::error::MappingsParseFault {
+        match Usmap::from_bytes(bytes) {
+            Err(crate::PaksmithError::MappingsParse { fault }) => fault,
+            other => panic!("expected a mappings fault, got {other:?}"),
+        }
+    }
+
+    fn brotli_compress(payload: &[u8], large_window: bool, lgwin: i32) -> Vec<u8> {
+        let params = brotli::enc::BrotliEncoderParams {
+            large_window,
+            lgwin,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let _ = brotli::BrotliCompress(&mut &payload[..], &mut out, &params).unwrap();
+        out
+    }
+
+    fn zstd_compress(payload: &[u8], content_size: bool) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
+        if content_size {
+            encoder
+                .set_pledged_src_size(Some(u64::try_from(payload.len()).unwrap()))
+                .unwrap();
+        }
+        encoder.write_all(payload).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// A pre-v1 zstd frame holding `payload` in one raw block: v0.2 has no
+    /// frame header byte, v0.4 has one.
+    fn zstd_legacy_frame(magic: u32, header: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut frame = magic.to_le_bytes().to_vec();
+        frame.extend_from_slice(header);
+        frame.extend_from_slice(&[0x40, 0, u8::try_from(payload.len()).unwrap()]);
+        frame.extend_from_slice(payload);
+        frame.extend_from_slice(&[0xC0, 0, 0]);
+        frame
+    }
+
+    fn assert_matches_uncompressed(usmap: &Usmap) {
+        let expected = Usmap::from_bytes(&minimal_usmap_none()).unwrap();
+        assert_eq!(usmap.schemas.len(), expected.schemas.len());
+        assert_eq!(
+            format!("{:?}", usmap.schemas.get("Hero")),
+            format!("{:?}", expected.schemas.get("Hero"))
+        );
+    }
+
+    /// Today's encoders' output for the minimal schema payload, frozen so a
+    /// codec bump that changes how an existing stream decodes fails a test.
+    /// Brotli at the standard 22-bit window; zstd with its content size.
+    const FROZEN_BROTLI: &[u8] = &[
+        0x1b, 0x3e, 0x00, 0xf8, 0x87, 0xc0, 0x6e, 0xbf, 0x6d, 0xe4, 0x2c, 0x29, 0x4d, 0xe5, 0x0e,
+        0x4c, 0xe4, 0xc0, 0xbd, 0xd0, 0x73, 0xff, 0xf6, 0x06, 0xc0, 0x01, 0x85, 0x3c, 0xf2, 0x1a,
+        0xbd, 0xce, 0x7f, 0xbd, 0xdf, 0x3d, 0x73, 0x80, 0x1c, 0x09, 0x0a, 0x04, 0x9c, 0x29, 0x11,
+        0x89, 0x0c, 0x51, 0x50,
+    ];
+    const FROZEN_ZSTD: &[u8] = &[
+        0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x3f, 0xdd, 0x01, 0x00, 0xd4, 0x02, 0x04, 0x00, 0x00, 0x00,
+        0x04, 0x48, 0x65, 0x72, 0x6f, 0x04, 0x4e, 0x6f, 0x6e, 0x65, 0x06, 0x48, 0x65, 0x61, 0x6c,
+        0x74, 0x68, 0x05, 0x53, 0x70, 0x65, 0x65, 0x64, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02,
+        0x00, 0x02, 0x02, 0x01, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x03, 0x04, 0x00, 0x28, 0x01,
+        0x6a, 0xc6, 0xac, 0x04, 0x90, 0x01, 0x3c, 0x01,
+    ];
+
+    #[test]
+    fn frozen_brotli_and_zstd_payloads_decode_to_the_uncompressed_schema() {
+        let n = schema_payload().len();
+        for (method, stored) in [
+            (UsmapCompression::Brotli, FROZEN_BROTLI),
+            (UsmapCompression::ZStandard, FROZEN_ZSTD),
+        ] {
+            let usmap = Usmap::from_bytes(&usmap_with(method, stored, n)).unwrap();
+            assert_matches_uncompressed(&usmap);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn assert_matches_uncompressed_rejects_a_different_schema() {
+        let int_speed = crate::testing::usmap::build_hero_usmap_bytes(2);
+        assert_matches_uncompressed(&Usmap::from_bytes(&int_speed).unwrap());
+    }
+
+    /// Every RFC 7932 window, including those whose first byte shares the
+    /// large-window marker's low bits.
+    #[test]
+    fn parse_usmap_brotli_standard_windows_decode() {
+        let payload = schema_payload();
+        let mut first_bytes = std::collections::HashSet::new();
+        for lgwin in 10..=24 {
+            let stream = brotli_compress(&payload, false, lgwin);
+            let _ = first_bytes.insert(stream[0]);
+            let bytes = usmap_with(UsmapCompression::Brotli, &stream, payload.len());
+            let usmap = Usmap::from_bytes(&bytes).unwrap_or_else(|e| panic!("lgwin={lgwin}: {e}"));
+            assert_matches_uncompressed(&usmap);
+        }
+        assert_eq!(first_bytes.len(), 15, "each window has its own header code");
+    }
+
+    #[test]
+    fn parse_usmap_brotli_large_window_rejected() {
+        let payload = schema_payload();
+        let stream = brotli_compress(&payload, true, 24);
+        assert_eq!(
+            parse_fault(&usmap_with(
+                UsmapCompression::Brotli,
+                &stream,
+                payload.len()
+            )),
+            crate::error::MappingsParseFault::BrotliLargeWindowUnsupported
+        );
+    }
+
+    #[test]
+    fn parse_usmap_zstd_decodes_with_and_without_content_size() {
+        let payload = schema_payload();
+        for content_size in [false, true] {
+            let stream = zstd_compress(&payload, content_size);
+            let bytes = usmap_with(UsmapCompression::ZStandard, &stream, payload.len());
+            let usmap = Usmap::from_bytes(&bytes)
+                .unwrap_or_else(|e| panic!("content_size={content_size}: {e}"));
+            assert_matches_uncompressed(&usmap);
+        }
+    }
+
+    /// One byte off the declared size either way is a mismatch in every arm.
+    /// Two bytes over, brotli still stops one past the declared size, while a
+    /// one-shot zstd decode has no room left and fails.
+    #[test]
+    fn parse_usmap_decompressed_size_mismatch_rejected() {
+        use crate::error::MappingsParseFault as F;
+        use UsmapCompression::{Brotli, None as Stored, ZStandard};
+        let payload = schema_payload();
+        let n = payload.len();
+        let mismatch = |declared: usize, found: usize| F::DecompressedSizeMismatch {
+            expected: u32::try_from(declared).unwrap(),
+            found,
+        };
+        let brotli = brotli_compress(&payload, false, 22);
+        let mut cases = vec![
+            ("none", Stored, payload.clone(), n + 1, mismatch(n + 1, n)),
+            ("none", Stored, payload.clone(), n - 1, mismatch(n - 1, n)),
+            ("brotli", Brotli, brotli.clone(), n + 1, mismatch(n + 1, n)),
+            ("brotli", Brotli, brotli.clone(), n - 1, mismatch(n - 1, n)),
+            ("brotli", Brotli, brotli, n - 2, mismatch(n - 2, n - 1)),
+        ];
+        for (label, stream) in [
+            ("zstd", zstd_compress(&payload, false)),
+            ("zstd+size", zstd_compress(&payload, true)),
+        ] {
+            let no_room = F::Truncated {
+                offset: HEADER_LEN + stream.len(),
+            };
+            cases.push((label, ZStandard, stream.clone(), n + 1, mismatch(n + 1, n)));
+            cases.push((label, ZStandard, stream.clone(), n - 1, mismatch(n - 1, n)));
+            cases.push((label, ZStandard, stream, n - 2, no_room));
+        }
+        for (label, method, stream, declared, expected) in cases {
+            let fault = parse_fault(&usmap_with(method, &stream, declared));
+            assert_eq!(fault, expected, "{label} declared={declared}");
+        }
+    }
+
+    /// Only zstd v1 and skippable frames reach the decoder: a pre-v1 frame is
+    /// refused alone or after a valid one, and so is an empty payload. Each
+    /// legacy frame is first shown to decode, so the refusal is the guard's.
+    #[test]
+    fn parse_usmap_zstd_rejects_legacy_frames_and_empty_payloads() {
+        let payload = schema_payload();
+        let n = payload.len();
+        let v02 = zstd_legacy_frame(0xFD2F_B522, &[], &payload);
+        let v04 = zstd_legacy_frame(0xFD2F_B524, &[0], &payload);
+        for frame in [&v02, &v04] {
+            assert_eq!(zstd::bulk::decompress(frame, n).unwrap(), payload);
+        }
+        let mut v1_then_legacy = zstd_compress(&payload, true);
+        v1_then_legacy.extend_from_slice(&v02);
+        for (label, stored, declared) in [
+            ("v0.2", v02.clone(), n),
+            ("v0.4", v04, n),
+            ("v1 then v0.2", v1_then_legacy, 2 * n),
+            ("empty", Vec::new(), n),
+            ("empty, declared empty", Vec::new(), 0),
+        ] {
+            assert_eq!(
+                parse_fault(&usmap_with(UsmapCompression::ZStandard, &stored, declared)),
+                crate::error::MappingsParseFault::Truncated {
+                    offset: HEADER_LEN + stored.len()
+                },
+                "{label}"
+            );
+        }
+    }
+
+    /// A stream cut short, or bytes that are no stream at all, are refused by
+    /// both codecs.
+    #[test]
+    fn parse_usmap_truncated_and_garbage_payloads_rejected() {
+        let n = schema_payload().len();
+        let garbage = b"not a compressed stream".to_vec();
+        for (label, method, stored) in [
+            (
+                "brotli cut",
+                UsmapCompression::Brotli,
+                FROZEN_BROTLI[..FROZEN_BROTLI.len() - 8].to_vec(),
+            ),
+            ("brotli garbage", UsmapCompression::Brotli, garbage.clone()),
+            (
+                "zstd cut",
+                UsmapCompression::ZStandard,
+                FROZEN_ZSTD[..FROZEN_ZSTD.len() - 8].to_vec(),
+            ),
+            ("zstd garbage", UsmapCompression::ZStandard, garbage),
+        ] {
+            assert_eq!(
+                parse_fault(&usmap_with(method, &stored, n)),
+                crate::error::MappingsParseFault::Truncated {
+                    offset: HEADER_LEN + stored.len()
+                },
+                "{label}"
+            );
+        }
+    }
+
+    /// A header claiming more stored bytes than the file holds is refused
+    /// before a buffer is sized from the claim.
+    #[test]
+    fn parse_usmap_compressed_size_past_the_end_rejected() {
+        let payload = schema_payload();
+        let cap = usize::try_from(MAX_USMAP_COMPRESSED_SIZE).unwrap();
+        for claimed in [payload.len() + 1, cap] {
+            let mut bytes = usmap_with(UsmapCompression::None, &payload, payload.len());
+            bytes[4..8].copy_from_slice(&u32::try_from(claimed).unwrap().to_le_bytes());
+            assert_eq!(
+                parse_fault(&bytes),
+                crate::error::MappingsParseFault::Truncated { offset: HEADER_LEN },
+                "claimed={claimed}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_usmap_zstd_skips_skippable_frames() {
+        let payload = schema_payload();
+        let mut stored = Vec::new();
+        for magic in [0x184D_2A50u32, 0x184D_2A5F] {
+            stored.extend_from_slice(&magic.to_le_bytes());
+            stored.extend_from_slice(&4u32.to_le_bytes());
+            stored.extend_from_slice(b"skip");
+        }
+        stored.extend_from_slice(&zstd_compress(&payload, true));
+        let bytes = usmap_with(UsmapCompression::ZStandard, &stored, payload.len());
+        assert_matches_uncompressed(&Usmap::from_bytes(&bytes).unwrap());
     }
 
     #[test]

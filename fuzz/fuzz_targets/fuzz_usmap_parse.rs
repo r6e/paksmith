@@ -5,7 +5,7 @@
 // Target-specific arms this exercises:
 //   - `MAX_USMAP_*` wire caps (name count, schema count, decompressed
 //     size) rejecting over-cap headers before allocation.
-//   - Compression byte dispatch (none / zstd / oodle).
+//   - Compression byte dispatch (none / brotli / zstd / oodle).
 //   - Schema-table inheritance walk + per-class property iteration.
 //
 // Seed corpus lives at `fuzz/corpus/fuzz_usmap_parse/` and is
