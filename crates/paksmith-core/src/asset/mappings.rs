@@ -983,13 +983,6 @@ impl Usmap {
             for _ in 0..serial_count {
                 let schema_index = cur.read_u16::<LE>()?;
                 let array_size = cur.read_u8()?;
-                // `prop_name`: read as `Arc<str>` ONCE per row so the
-                // inner `array_size` expansion loop clones a refcount
-                // per slot instead of a heap-allocated name buffer
-                // (issue #397 sub-fix A; see `read_name_arc`).
-                let prop_name = read_name_arc(&mut cur, &names)?;
-                let prop_type = read_mapped_type(&mut cur, &names, 0, &mut type_nodes)?;
-
                 // u32 arithmetic is sufficient: `properties.len()` is
                 // bounded above by `serial_count × array_size` =
                 // 65535 × 255 < u32::MAX, and `array_size` is u8.
@@ -1007,6 +1000,12 @@ impl Usmap {
                     }));
                 }
                 expanded.charge(u64::from(array_size))?;
+                // `prop_name`: read as `Arc<str>` ONCE per row so the
+                // inner `array_size` expansion loop clones a refcount
+                // per slot instead of a heap-allocated name buffer
+                // (issue #397 sub-fix A; see `read_name_arc`).
+                let prop_name = read_name_arc(&mut cur, &names)?;
+                let prop_type = read_mapped_type(&mut cur, &names, 0, &mut type_nodes)?;
                 properties
                     .try_reserve(usize::from(array_size))
                     .map_err(|source| {
@@ -2842,6 +2841,42 @@ mod tests {
 
         assert!(Usmap::parse_schema_data(&data, 0, budgets(6)).is_ok());
         let err = Usmap::parse_schema_data(&data, 0, budgets(3)).unwrap_err();
+        let crate::PaksmithError::MappingsParse { fault } = err else {
+            panic!("{err}");
+        };
+        assert_eq!(
+            fault,
+            crate::error::MappingsParseFault::ExpandedPropertiesTotalExceeded {
+                requested: 4,
+                limit: 3
+            }
+        );
+    }
+
+    /// A row's slots are charged as soon as its `array_size` is read, so a
+    /// row past the budget is refused before its name or type is.
+    #[test]
+    fn a_rows_slots_are_charged_before_its_type_is_read() {
+        let mut data: Vec<u8> = Vec::new();
+        push_names(&mut data, &["A", "B", "None", "x"]);
+        data.extend_from_slice(&0u32.to_le_bytes()); // no enums
+        data.extend_from_slice(&2u32.to_le_bytes()); // two schemas
+        for (class, prop) in [(0i32, 3i32), (1, 99)] {
+            data.extend_from_slice(&class.to_le_bytes());
+            data.extend_from_slice(&2i32.to_le_bytes());
+            data.extend_from_slice(&2u16.to_le_bytes()); // prop_count
+            data.extend_from_slice(&1u16.to_le_bytes()); // serial_count
+            data.extend_from_slice(&0u16.to_le_bytes());
+            data.push(2);
+            data.extend_from_slice(&prop.to_le_bytes());
+            data.push(2);
+        }
+        let budgets = SchemaBudgets {
+            expanded_properties: 3,
+            type_nodes: u64::MAX,
+        };
+
+        let err = Usmap::parse_schema_data(&data, 0, budgets).unwrap_err();
         let crate::PaksmithError::MappingsParse { fault } = err else {
             panic!("{err}");
         };
