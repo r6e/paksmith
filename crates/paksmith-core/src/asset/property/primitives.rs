@@ -427,7 +427,7 @@ pub(super) fn read_soft_path_payload<R: Read>(
         } else if asset.as_ref() == "None" {
             package.to_string()
         } else {
-            format!("{package}.{asset}")
+            [package.as_ref(), ".", asset.as_ref()].concat()
         }
     } else {
         // UE4 >= 514 / UE5 < 1007: a single `FName AssetPathName` (the
