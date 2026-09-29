@@ -316,10 +316,8 @@ mod tests {
 
     // ===== Task 4: happy path =====
 
-    #[test]
-    fn reads_two_bone_reference_skeleton_ue4_single_precision() {
-        // Name table maps index 0 -> "Root", 1 -> "Hip".
-        let ctx = test_ctx_ue4(&["Root", "Hip"]);
+    /// Two-bone UE4 reference skeleton over names 0 = "Root", 1 = "Hip".
+    fn two_bone_body_ue4() -> Vec<u8> {
         let mut body: Vec<u8> = Vec::new();
         // FinalRefBoneInfo count = 2
         body.extend_from_slice(&2i32.to_le_bytes());
@@ -339,6 +337,13 @@ mod tests {
         body.extend_from_slice(&0i32.to_le_bytes());
         fname(&mut body, 1);
         body.extend_from_slice(&1i32.to_le_bytes());
+        body
+    }
+
+    #[test]
+    fn reads_two_bone_reference_skeleton_ue4_single_precision() {
+        let ctx = test_ctx_ue4(&["Root", "Hip"]);
+        let body = two_bone_body_ue4();
 
         // Core body (BoneInfo 28 + BonePose 84) = 112 per skeleton.md;
         // FinalNameToIndexMap adds 28 → 140 total, all consumed.
@@ -363,20 +368,7 @@ mod tests {
     fn bone_names_are_charged_to_the_derived_budget() {
         let limit = ("Root".len() + "Hip".len()) as u64;
         let ctx = with_derived_budget(test_ctx_ue4(&["Root", "Hip"]), limit);
-        let mut body: Vec<u8> = Vec::new();
-        body.extend_from_slice(&2i32.to_le_bytes()); // FinalRefBoneInfo count
-        fname(&mut body, 0);
-        body.extend_from_slice(&(-1i32).to_le_bytes());
-        fname(&mut body, 1);
-        body.extend_from_slice(&0i32.to_le_bytes());
-        body.extend_from_slice(&2i32.to_le_bytes()); // FinalRefBonePose count
-        body.extend_from_slice(&identity_ftransform_ue4());
-        body.extend_from_slice(&identity_ftransform_ue4());
-        body.extend_from_slice(&2i32.to_le_bytes()); // FinalNameToIndexMap count
-        for bone in [0, 1] {
-            fname(&mut body, bone);
-            body.extend_from_slice(&bone.to_le_bytes());
-        }
+        let body = two_bone_body_ue4();
         let read = || read_reference_skeleton(&mut Cursor::new(&body), &ctx, "Test.uasset");
         assert_eq!(read().unwrap().bones.len(), 2);
         assert_derived_budget_exceeded(read(), limit);

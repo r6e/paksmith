@@ -2709,6 +2709,7 @@ pub enum AssetParseFault {
     /// package exceeded `MAX_DERIVED_STRING_BYTES`. A copied name costs
     /// a few wire bytes but can be 64 Ki characters long, so this caps
     /// the total a small crafted asset can make the decoder allocate.
+    /// Fails the whole package read.
     DerivedStringBudgetExceeded {
         /// The per-package budget in bytes.
         limit: u64,

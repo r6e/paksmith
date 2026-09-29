@@ -165,9 +165,10 @@ The wire shape is uniform across all property types; per-type variance lives in 
   (`crates/paksmith-core/src/asset/mod.rs`). Per-package budget for
   strings copied out of the name table while decoding: suffixed FNames
   (`Name_N`), soft-object paths, unknown-type names, string-table ids,
-  DataTable row names and bone names. An 8-byte FName reference can
-  name a 64 Ki-character entry, so each copy is charged against one
-  running total. Surfaces as
+  DataTable row names and row structs, and bone and material slot
+  names. An 8-byte FName reference can name a 64 Ki-character entry,
+  so each copy is charged against one running total. Passing it fails
+  the package read with
   `AssetParseFault::DerivedStringBudgetExceeded { limit }`.
 
 See `docs/security/allocation-caps.md` for the broader policy.

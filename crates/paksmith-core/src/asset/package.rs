@@ -38,7 +38,6 @@ use std::sync::{Arc, OnceLock};
 use serde::Serialize;
 use serde::ser::SerializeStruct;
 
-use crate::asset::AssetContext;
 use crate::asset::bulk_data::{
     BulkData, BulkDataResolver, FByteBulkData, MAX_BULK_DATA_RECORDS_PER_EXPORT,
     missing_companion_loader,
@@ -50,6 +49,7 @@ use crate::asset::name_table::NameTable;
 use crate::asset::property::PropertyBag;
 use crate::asset::property::unversioned::read_unversioned_properties;
 use crate::asset::summary::{PKG_UNVERSIONED_PROPERTIES, PackageSummary};
+use crate::asset::{AssetContext, is_derived_budget_trip};
 use crate::error::{
     AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,
     CompanionFileKind, PaksmithError, try_reserve_asset,
@@ -1237,12 +1237,10 @@ impl Package {
     ///
     /// Two independent calls produce semantically-equal contexts.
     /// `names` / `imports` / `exports` / `mappings` are all
-    /// refcount-shared via `Arc` (#369) — context() is essentially
-    /// allocator-free (only the `custom_versions` field still pays a
-    /// `clone` because `PackageSummary` stores it by value).
-    /// Pointer-equal via [`Arc::ptr_eq`] across calls; use that as a
-    /// cache key on the individual fields, not the full context
-    /// struct.
+    /// refcount-shared via `Arc` (#369) and pointer-equal via
+    /// [`Arc::ptr_eq`] across calls; use that as a cache key on the
+    /// individual fields, not the full context struct. Each call starts
+    /// a fresh budget for copied names.
     #[must_use]
     pub fn context(&self) -> AssetContext {
         AssetContext {
@@ -1422,15 +1420,17 @@ fn read_payloads(
                 // fail fast). The caps (e.g. `DataTableRowCountExceeded`)
                 // are deliberately NOT environmental: they fire before
                 // allocating, so a malicious oversized-count export still
-                // degrades like any other malformed body below.
+                // degrades like any other malformed body below. The
+                // package-wide copied-name budget is the exception.
                 Err(err)
-                    if matches!(
-                        &err,
-                        PaksmithError::AssetParse {
-                            fault: AssetParseFault::AllocationFailed { .. },
-                            ..
-                        }
-                    ) =>
+                    if is_derived_budget_trip(&err)
+                        || matches!(
+                            &err,
+                            PaksmithError::AssetParse {
+                                fault: AssetParseFault::AllocationFailed { .. },
+                                ..
+                            }
+                        ) =>
                 {
                     return Err(err);
                 }
@@ -1497,6 +1497,7 @@ fn read_payloads(
                 );
                 PropertyBag::tree(props)
             }
+            Err(err) if is_derived_budget_trip(&err) => return Err(err),
             Err(err) => {
                 tracing::warn!(
                     asset = asset_path,
@@ -1558,18 +1559,20 @@ mod read_options_tests {
 #[cfg(all(test, feature = "__test_utils"))]
 mod tests {
     use super::*;
+    use crate::asset::property::test_utils::{assert_derived_budget_exceeded, with_derived_budget};
     use crate::error::CompanionFileKind;
     use crate::testing::uasset::{
         MinimalPackage, MinimalPackageSpec, build_minimal, build_minimal_ue4_27,
         build_minimal_ue4_27_split, build_minimal_ue4_27_with_data_table,
+        build_minimal_ue4_27_with_data_table_rows,
         build_minimal_ue4_27_with_valid_and_corrupt_data_tables, build_minimal_ue5_1010,
         build_minimal_ue5_1010_with_data_resources, build_minimal_ue5_1012, build_minimal_ue5_1013,
         build_minimal_with_texture2d,
     };
 
-    /// One package draws on one derived-string budget: once an export
-    /// spends it, the next export's tagged decode trips and falls back
-    /// to `Opaque` while the package read itself succeeds.
+    /// One package draws on one derived-string budget, and a trip in a
+    /// later export's generic decode fails the read instead of
+    /// degrading that export to `Opaque`.
     #[test]
     fn derived_string_budget_spans_the_exports_of_one_decode() {
         let mut spec = MinimalPackageSpec::default();
@@ -1597,19 +1600,35 @@ mod tests {
             asset,
             crate::asset::Asset::Generic(PropertyBag::Tree { .. })
         )));
-        let ctx = crate::asset::property::test_utils::with_derived_budget(
-            pkg.context(),
-            "Score_0".len() as u64,
+        let limit = "Score_0".len() as u64;
+        let ctx = with_derived_budget(pkg.context(), limit);
+        assert_derived_budget_exceeded(
+            read_payloads(&bytes, &pkg.exports, &ctx, "x.uasset"),
+            limit,
         );
-        let (payloads, _) = read_payloads(&bytes, &pkg.exports, &ctx, "x.uasset").unwrap();
-        assert!(matches!(
-            &payloads[0],
-            crate::asset::Asset::Generic(PropertyBag::Tree { .. })
-        ));
-        assert!(matches!(
-            &payloads[1],
-            crate::asset::Asset::Generic(PropertyBag::Opaque { .. })
-        ));
+    }
+
+    /// A trip inside a typed reader fails the read rather than falling
+    /// through to the generic parse, which here charges nothing.
+    #[test]
+    fn derived_string_budget_trip_in_a_typed_reader_fails_the_read() {
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27_with_data_table_rows();
+        let pkg = Package::read_from(&bytes, None, None, "x.uasset").unwrap();
+        assert!(matches!(pkg.payloads[0], crate::asset::Asset::DataTable(_)));
+        let ctx = with_derived_budget(pkg.context(), 0);
+        assert_derived_budget_exceeded(read_payloads(&bytes, &pkg.exports, &ctx, "x.uasset"), 0);
+    }
+
+    #[test]
+    fn each_context_call_starts_a_fresh_derived_string_budget() {
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
+        let pkg = Package::read_from(&bytes, None, None, "x.uasset").unwrap();
+        let (a, b) = (pkg.context(), pkg.context());
+        assert!(!Arc::ptr_eq(&a.derived_strings, &b.derived_strings));
+        assert_eq!(
+            a.derived_strings.limit,
+            crate::asset::MAX_DERIVED_STRING_BYTES
+        );
     }
 
     /// End-to-end acceptance (#643): UE 5.4 (1012) and 5.5 (1013)

@@ -283,7 +283,7 @@ impl PropertyTag {
     }
 }
 
-/// Resolve a wire-format `(index, number)` FName pair to a `String`.
+/// Resolve a wire-format `(index, number)` FName pair to its name.
 ///
 /// `number <= 0` → no suffix; `number > 0` → `"Base_N"` where
 /// `N = number − 1` (UE stores the suffix offset by `+1` so that `0`

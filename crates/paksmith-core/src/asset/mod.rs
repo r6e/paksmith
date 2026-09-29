@@ -861,11 +861,13 @@ pub struct Texture2DMipMap {
 ///
 /// Most name-derived values share the table's `Arc<str>`, but a
 /// suffixed FName, a soft-object path and a few `String` fields
-/// (DataTable row names, bone names, unknown type names, string-table
-/// ids) build a fresh copy per decoded value. The copied entry can be
-/// 64 Ki characters while the reference to it costs a few wire bytes.
-/// 256 MiB leaves a `MAX_ROWS_PER_DATATABLE` table 256 bytes of copied
-/// names per row.
+/// (DataTable row names and row structs, bone and material slot names,
+/// unknown type names, string-table ids) build a fresh copy per decoded
+/// value. The copied entry can be 64 Ki characters while the reference
+/// to it costs a few wire bytes. A suffixed name copied into a `String`
+/// is charged twice, once when resolved and once when copied. 256 MiB
+/// matches the per-export `MAX_PAYLOAD_BYTES`; passing it fails the whole
+/// package read.
 pub(crate) const MAX_DERIVED_STRING_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Test-only accessor for `MAX_DERIVED_STRING_BYTES` (256 MiB).
@@ -873,6 +875,18 @@ pub(crate) const MAX_DERIVED_STRING_BYTES: u64 = 256 * 1024 * 1024;
 #[must_use]
 pub fn max_derived_string_bytes() -> u64 {
     MAX_DERIVED_STRING_BYTES
+}
+
+/// Whether `err` is an [`AssetContext::charge_derived`] refusal, which
+/// ends the package read instead of degrading one export.
+pub(crate) fn is_derived_budget_trip(err: &crate::PaksmithError) -> bool {
+    matches!(
+        err,
+        crate::PaksmithError::AssetParse {
+            fault: crate::error::AssetParseFault::DerivedStringBudgetExceeded { .. },
+            ..
+        }
+    )
 }
 
 /// Running total of the bytes charged by
@@ -906,14 +920,13 @@ impl Default for DerivedStringBudget {
 ///
 /// **Thread safety:** `AssetContext: Send + Sync`. All components are
 /// `Arc`-shared immutable data apart from the derived-string budget's
-/// atomic counter — safe to clone and share across worker threads. Pinned by the `send_sync_assertions` test in
-/// `lib.rs`.
+/// atomic counter — safe to clone and share across worker threads.
+/// Pinned by the `send_sync_assertions` test in `lib.rs`.
 ///
 /// `Arc`-wrapped components so `clone()` is a handful of atomic refcount
-/// bumps — important because the GUI's PropertyInspector widget holds a
-/// context across many event-loop ticks and must not block on table
-/// copies. (`version` is `Copy`; `mappings` is `Option<Arc<_>>`.) Built
-/// from a parsed [`Package`] via [`Package::context`].
+/// bumps. (`version` is `Copy`; `mappings` is `Option<Arc<_>>`.) Clones
+/// share one budget for copied names that never resets; each
+/// [`AssetContext::new`] or [`Package::context`] call starts a fresh one.
 ///
 /// Marked `#[non_exhaustive]` because additional version-gate fields
 /// land here without a major bump (`custom_versions` shipped with #355;
@@ -1110,7 +1123,7 @@ mod derived_string_budget_tests {
     }
 
     #[test]
-    fn new_contexts_get_a_fresh_full_budget() {
+    fn asset_context_new_starts_a_full_budget() {
         let ctx = make_ctx(&[]);
         assert_eq!(ctx.derived_strings.limit, MAX_DERIVED_STRING_BYTES);
         assert_eq!(ctx.derived_strings.used.load(Ordering::Relaxed), 0);

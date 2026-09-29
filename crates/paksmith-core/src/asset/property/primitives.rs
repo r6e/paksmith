@@ -451,10 +451,6 @@ pub(super) fn read_soft_path_payload<R: Read>(
     // correct for the vast majority of content. Non-empty UTF-8 sub_paths
     // on those builds are unhandled (#638 limitation).
     let sub = crate::asset::read_asset_fstring(reader, asset_path)?;
-    // SoftObjectPath / SoftClassPath still store `asset_path: String`
-    // (out of #365's scope — those variants weren't on the issue's
-    // explicit field list). One allocation per soft-path read; cold
-    // relative to the per-property hot path.
     Ok((obj_path, sub))
 }
 
