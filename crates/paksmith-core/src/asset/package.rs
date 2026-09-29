@@ -61,12 +61,10 @@ use crate::error::{
 #[cfg_attr(not(feature = "__test_utils"), allow(unused_imports))]
 use crate::seams::{AssetSeam, SeamSite, seam_check};
 
-/// Maximum permitted per-export payload size. Defense-in-depth against
-/// crafted assets that declare overlapping or oversized export ranges:
-/// a single export can encode an arbitrary `i64` `serial_size` on the
-/// wire, and the per-export `try_reserve_exact` below would otherwise
-/// be the only allocator gate between malicious bytes and a process-
-/// wide OOM. 256 MiB is far above any cooked-game export observed in
+/// Maximum permitted per-export payload size. A single export can
+/// encode an arbitrary `i64` `serial_size` on the wire; overlapping
+/// ranges are bounded separately by `check_export_payload_total`.
+/// 256 MiB is far above any cooked-game export observed in
 /// practice (typical asset payloads are kilobytes; the largest cooked
 /// textures are tens of megabytes) and well below the `usize::MAX`
 /// allocator-domain ceiling on 32-bit targets.
@@ -545,6 +543,10 @@ impl Package {
     ///   extends past `uasset.len()` and no `.uexp` was provided
     /// - [`AssetParseFault::SplitAssetSizeMismatch`] when a `.uexp` is
     ///   needed but `uasset.len() != total_header_size`
+    /// - [`AssetParseFault::BoundsExceeded`] with
+    ///   `field = AssetWireField::ExportSerialSizeTotal` when the exports'
+    ///   sizes sum past the bytes they address (the `.uasset`, plus the
+    ///   `.uexp` when they reach into it), which implies overlapping ranges
     /// - [`AssetParseFault::DerivedStringBudgetExceeded`] when the names
     ///   and paths copied while decoding the exports pass the package's
     ///   budget
@@ -781,6 +783,13 @@ impl Package {
                 });
             }
         }
+
+        let export_region = if needs_uexp {
+            bytes
+        } else {
+            &bytes[..uasset.len()]
+        };
+        check_export_payload_total(export_region, &exports, asset_path)?;
 
         // Phase 3b: construct the bulk-data resolver from the stitched
         // buffer + the caller-provided companion loaders. Built before the
@@ -1266,13 +1275,13 @@ impl Package {
 /// Validate and carve out an `&[u8]` view of `export`'s payload from
 /// the stitched asset buffer.
 ///
-/// `bytes` is the full stitched `.uasset` + `.uexp` buffer (must not
-/// be a sub-view — the bounds reporting uses `bytes.len()` as the
-/// asset-size in error payloads). Checks `serial_size`, computes
+/// `bytes` is the region the exports address: the stitched buffer, or
+/// the `.uasset` prefix when the `.uexp` is ignored. Range faults report
+/// `bytes.len()` as the asset size. Checks `serial_size`, computes
 /// `offset + size`, validates against `bytes.len()`, and returns the
-/// borrowed slice. Both Phase 2f's unversioned branch in
-/// `Package::read_from` and `read_payloads` route through this helper
-/// so the bounds-check ordering stays identical at both sites.
+/// borrowed slice. [`check_export_payload_total`] runs it on every
+/// export before either decode path; `read_payloads` and the
+/// unversioned branch reuse it to take each slice.
 ///
 /// # Errors
 /// - [`AssetParseFault::BoundsExceeded`] for `serial_size >
@@ -1342,6 +1351,41 @@ fn carve_export_slice<'a>(
     )]
     let end_usize = end as usize;
     Ok(&bytes[start..end_usize])
+}
+
+/// Validate every export's range, then refuse a table whose sizes sum
+/// past `bytes.len()`, which disjoint ranges never do. `bytes` is what
+/// the exports address: the `.uasset`, plus the `.uexp` when they reach
+/// into it. This bounds the export bytes decoded to that length.
+///
+/// # Errors
+///
+/// - Any [`carve_export_slice`] fault for a single export's range.
+/// - [`AssetParseFault::BoundsExceeded`] with
+///   `field: AssetWireField::ExportSerialSizeTotal` when the sizes sum
+///   past `bytes.len()`.
+fn check_export_payload_total(
+    bytes: &[u8],
+    exports: &ExportTable,
+    asset_path: &str,
+) -> crate::Result<()> {
+    let mut total: u64 = 0;
+    for export in &exports.exports {
+        total += carve_export_slice(bytes, export, asset_path)?.len() as u64;
+    }
+    let asset_size = bytes.len() as u64;
+    if total > asset_size {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::BoundsExceeded {
+                field: AssetWireField::ExportSerialSizeTotal,
+                value: total,
+                limit: asset_size,
+                unit: BoundsUnit::Bytes,
+            },
+        });
+    }
+    Ok(())
 }
 
 /// Per-export `FByteBulkData` records surfaced by typed readers, paired
@@ -2067,14 +2111,8 @@ mod tests {
         }
     }
 
-    /// Direct unit test on `carve_export_slice` — exercises the
-    /// `end > asset_size` branch the helper shares between
-    /// `read_payloads` and the Phase 2f unversioned branch. Without a
-    /// test that targets the helper directly, the two call sites
-    /// share coverage only through whichever integration test happens
-    /// to drive each path (the unversioned branch's bounds-check has
-    /// no integration-test coverage today). Architect retro on PR
-    /// `chore/retro-review-batch`.
+    /// Direct unit test on `carve_export_slice`'s `end > asset_size`
+    /// branch.
     #[test]
     fn carve_export_slice_rejects_offset_plus_size_past_buffer() {
         let bytes = vec![0u8; 100];
@@ -2097,8 +2135,7 @@ mod tests {
     }
 
     /// Companion to the bounds-past-buffer test: confirms the
-    /// `serial_size > MAX_PAYLOAD_BYTES` cap fires on the helper
-    /// (same cap both call sites share).
+    /// `serial_size > MAX_PAYLOAD_BYTES` cap fires on the helper.
     #[test]
     fn carve_export_slice_rejects_serial_size_over_cap() {
         let bytes = vec![0u8; 16];
@@ -2122,16 +2159,201 @@ mod tests {
         );
     }
 
+    fn carve_exports(ranges: &[(i64, i64)]) -> ExportTable {
+        ExportTable {
+            exports: ranges
+                .iter()
+                .map(|&(offset, size)| make_carve_export(offset, size))
+                .collect(),
+        }
+    }
+
+    fn assert_export_total_exceeded(err: &PaksmithError, total: u64, asset_size: u64) {
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::ExportSerialSizeTotal,
+                        value,
+                        limit,
+                        unit: BoundsUnit::Bytes,
+                    },
+                    ..
+                } if *value == total && *limit == asset_size
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected error")]
+    fn assert_export_total_exceeded_rejects_another_fault() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::UnversionedWithoutMappings,
+        };
+        assert_export_total_exceeded(&err, 1, 1);
+    }
+
+    #[test]
+    fn export_sizes_may_sum_to_the_asset_length() {
+        let bytes = vec![0u8; 100];
+        check_export_payload_total(&bytes, &carve_exports(&[(0, 60), (60, 40)]), "x.uasset")
+            .unwrap();
+    }
+
+    #[test]
+    fn export_sizes_summing_past_the_asset_are_refused() {
+        let bytes = vec![0u8; 100];
+        let err =
+            check_export_payload_total(&bytes, &carve_exports(&[(0, 60), (59, 41)]), "x.uasset")
+                .unwrap_err();
+        assert_export_total_exceeded(&err, 101, 100);
+    }
+
+    #[test]
+    fn a_range_past_the_asset_keeps_its_own_fault_in_the_total_check() {
+        let bytes = vec![0u8; 100];
+        let err =
+            check_export_payload_total(&bytes, &carve_exports(&[(0, 100), (80, 40)]), "x.uasset")
+                .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::InvalidOffset {
+                        field: AssetWireField::ExportSerialOffset,
+                        offset: 80,
+                        asset_size: 100,
+                    },
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    const ALIAS_EXPORTS: usize = 8;
+    const ALIAS_PAYLOAD: usize = 1024;
+    const ALIAS_TOTAL: usize = ALIAS_EXPORTS * ALIAS_PAYLOAD;
+
+    /// Serialize `exports` over the export table already in `bytes`,
+    /// returning the table's length.
+    fn splice_export_table(
+        bytes: &mut [u8],
+        summary: &PackageSummary,
+        exports: &ExportTable,
+    ) -> usize {
+        let mut table = Vec::new();
+        exports
+            .write_to(&mut table, summary.version, summary.package_flags)
+            .unwrap();
+        let at = usize::try_from(summary.export_offset).unwrap();
+        bytes[at..at + table.len()].copy_from_slice(&table);
+        table.len()
+    }
+
+    /// `ALIAS_EXPORTS` exports of `ALIAS_PAYLOAD` bytes laid out one after
+    /// another, or, when `aliased`, every row pointed at the first payload
+    /// with the rest cut off.
+    fn alias_test_package(package_flags: u32, aliased: bool) -> Vec<u8> {
+        let mut spec = MinimalPackageSpec {
+            package_flags,
+            ..MinimalPackageSpec::default()
+        };
+        let mut export = spec.exports.exports[0];
+        export.serial_size = i64::try_from(ALIAS_PAYLOAD).unwrap();
+        spec.exports.exports = vec![export; ALIAS_EXPORTS];
+        spec.payloads = vec![vec![0u8; ALIAS_PAYLOAD]; ALIAS_EXPORTS];
+        let MinimalPackage {
+            mut bytes,
+            summary,
+            mut exports,
+            ..
+        } = build_minimal(spec);
+        if aliased {
+            let first = exports.exports[0].serial_offset;
+            for export in &mut exports.exports {
+                export.serial_offset = first;
+            }
+            let _ = splice_export_table(&mut bytes, &summary, &exports);
+            bytes.truncate(usize::try_from(first).unwrap() + ALIAS_PAYLOAD);
+        }
+        bytes
+    }
+
+    #[test]
+    fn read_from_refuses_export_rows_that_alias_one_payload() {
+        let cooked = MinimalPackageSpec::default().package_flags;
+        let disjoint = alias_test_package(cooked, false);
+        assert_eq!(
+            Package::read_from(&disjoint, None, None, "x.uasset")
+                .unwrap()
+                .payloads
+                .len(),
+            ALIAS_EXPORTS
+        );
+        let aliased = alias_test_package(cooked, true);
+        let err = Package::read_from(&aliased, None, None, "x.uasset").unwrap_err();
+        assert_export_total_exceeded(&err, ALIAS_TOTAL as u64, aliased.len() as u64);
+    }
+
+    #[test]
+    fn an_ignored_uexp_does_not_raise_the_export_total_limit() {
+        let aliased = alias_test_package(MinimalPackageSpec::default().package_flags, true);
+        let ignored_uexp = vec![0u8; ALIAS_TOTAL];
+        let err = Package::read_from(&aliased, Some(&ignored_uexp), None, "x.uasset").unwrap_err();
+        assert_export_total_exceeded(&err, ALIAS_TOTAL as u64, aliased.len() as u64);
+    }
+
+    #[test]
+    fn the_export_total_is_checked_before_the_unversioned_branch() {
+        let flags = MinimalPackageSpec::default().package_flags | PKG_UNVERSIONED_PROPERTIES;
+        let disjoint = alias_test_package(flags, false);
+        assert!(matches!(
+            Package::read_from(&disjoint, None, None, "x.uasset"),
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::UnversionedWithoutMappings,
+                ..
+            })
+        ));
+        let aliased = alias_test_package(flags, true);
+        let err = Package::read_from(&aliased, None, None, "x.uasset").unwrap_err();
+        assert_export_total_exceeded(&err, ALIAS_TOTAL as u64, aliased.len() as u64);
+    }
+
+    /// A `.uasset` longer than its header plus a short `.uexp`: the
+    /// split mismatch is reported, not the range the short `.uexp`
+    /// leaves out of bounds.
+    #[test]
+    fn split_size_mismatch_is_reported_before_the_export_ranges() {
+        let pkg = build_minimal_ue4_27();
+        let split_at = usize::try_from(pkg.summary.total_header_size).unwrap();
+        let mut uasset = pkg.bytes[..split_at].to_vec();
+        uasset.extend_from_slice(&[0u8; 8]);
+        let uexp = &pkg.bytes[split_at..split_at + 4];
+        let err = Package::read_from(&uasset, Some(uexp), None, "test.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::SplitAssetSizeMismatch { .. },
+                    ..
+                }
+            ),
+            "expected SplitAssetSizeMismatch; got {err:?}"
+        );
+    }
+
     #[test]
     fn rejects_export_payload_past_eof() {
         // Phase 2e: with the companion-file detection in place, a
         // monolithic-shape truncated asset trips `MissingCompanionFile`
         // first (any payload extending past `uasset.len()` is now
-        // treated as a split-asset hint). To exercise the original
-        // `InvalidOffset` path inside `read_payloads`, split the fixture
-        // into header + truncated-uexp so companion detection sees the
-        // uexp and the `end > asset_size` check in `read_payloads`
-        // fires on the post-stitch buffer length.
+        // treated as a split-asset hint). Split the fixture into header
+        // + truncated uexp so companion detection sees the uexp and the
+        // per-export range check fires on the stitched length.
         let pkg = build_minimal_ue4_27();
         #[allow(
             clippy::cast_sign_loss,
@@ -2174,9 +2396,7 @@ mod tests {
         // also pushes `end > uasset.len()` and trips
         // `MissingCompanionFile` first when fed as a monolithic blob.
         // Split into header + tiny-uexp so detection is satisfied and
-        // execution reaches `read_payloads` — where the actual
-        // `MAX_PAYLOAD_BYTES` cap check lives and the test's intent
-        // applies.
+        // the per-export `MAX_PAYLOAD_BYTES` check applies.
         use crate::asset::export_table::EXPORT_RECORD_SIZE_UE4_27;
 
         let MinimalPackage {
@@ -2189,17 +2409,10 @@ mod tests {
         // serial_offset stays valid (still points at end-of-header);
         // the cap check fires before the offset+size bounds check.
         exports.exports[0].serial_size = MAX_PAYLOAD_BYTES as i64 + 1;
-        let mut export_buf = Vec::new();
-        exports
-            .write_to(&mut export_buf, summary.version, summary.package_flags)
-            .unwrap();
-        assert_eq!(export_buf.len(), EXPORT_RECORD_SIZE_UE4_27);
-        // summary.export_offset is set by the fixture builder to the
-        // header's end position — always positive in this test.
-        #[allow(clippy::cast_sign_loss)]
-        let export_offset = summary.export_offset as usize;
-        bytes[export_offset..export_offset + EXPORT_RECORD_SIZE_UE4_27]
-            .copy_from_slice(&export_buf);
+        assert_eq!(
+            splice_export_table(&mut bytes, &summary, &exports),
+            EXPORT_RECORD_SIZE_UE4_27
+        );
 
         #[allow(
             clippy::cast_sign_loss,

@@ -254,17 +254,23 @@ shapes) are rejected.
 ### Implementation hardening (recommended for any parser)
 
 paksmith enforces structural caps to prevent attacker-controlled
-allocation amplification. Every cap exposes a
-`#[cfg(feature = "__test_utils")]` accessor for boundary tests.
+allocation amplification.
 
 - **`MAX_TOTAL_HEADER_SIZE = 256 MiB`**
   (`crates/paksmith-core/src/asset/summary.rs:46`). Largest acceptable
   `total_header_size`. Surfaces as
   `AssetParseFault::BoundsExceeded { field: TotalHeaderSize, … }`.
 - **`MAX_PAYLOAD_BYTES = 256 MiB`**
-  (`crates/paksmith-core/src/asset/package.rs:68`). Largest single
+  (`crates/paksmith-core/src/asset/package.rs`). Largest single
   per-export payload. Surfaces as
   `AssetParseFault::BoundsExceeded { field: ExportSerialSize, … }`.
+- **Export sizes must fit the asset**
+  (`crates/paksmith-core/src/asset/package.rs`, `check_export_payload_total`).
+  The exports' `SerialSize` values may not sum past the bytes they
+  address: the `.uasset`, plus the `.uexp` when exports reach into it.
+  Disjoint ranges never do, so a larger total implies rows that point at
+  the same bytes, which would decode them once per row. Surfaces as
+  `AssetParseFault::BoundsExceeded { field: ExportSerialSizeTotal, … }`.
 - **`MAX_GENERATION_COUNT = 1_024`**
   (`crates/paksmith-core/src/asset/summary.rs:51`).
 - **`MAX_ADDITIONAL_PACKAGES_TO_COOK_COUNT = 4_096`**

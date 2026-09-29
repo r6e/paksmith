@@ -2458,27 +2458,27 @@ pub enum AssetParseFault {
         /// The table's entry count.
         entry_count: usize,
     },
-    /// A wire-claimed count or size exceeds a structural cap. Same
+    /// A count, size or total exceeds its limit. Same
     /// shape as [`IndexParseFault::BoundsExceeded`] (issue #133);
     /// separate variant because the field set is asset-specific.
     /// Carries `unit` so operators can disambiguate bytes-bounded
-    /// fields (`TotalHeaderSize`, `NameOffset`, etc.) from
+    /// fields (`TotalHeaderSize`, etc.) from
     /// items-bounded fields (`NameCount`, `ImportCount`, etc.) at
     /// log-grep time.
     BoundsExceeded {
         /// Wire-format field name.
         field: AssetWireField,
-        /// The header-claimed value.
+        /// The offending value.
         value: u64,
-        /// The cap it exceeds.
+        /// The limit it exceeds.
         limit: u64,
         /// Unit the cap is expressed in.
         unit: BoundsUnit,
     },
     /// A wire-claimed `i32` or `u32` offset/count is negative when the
     /// field is documented non-negative, or it points past the end of
-    /// the asset bytes. Distinct from [`Self::BoundsExceeded`] because
-    /// the limit is the asset's byte length, not a structural cap.
+    /// the asset bytes. Distinct from [`Self::BoundsExceeded`], which
+    /// covers counts, sizes and totals rather than a single offset.
     InvalidOffset {
         /// Wire-format field name.
         field: AssetWireField,
@@ -3792,6 +3792,10 @@ pub enum AssetWireField {
     ExportSerialOffset,
     /// `FObjectExport::SerialSize`.
     ExportSerialSize,
+    /// The sum of every export's `SerialSize`, which can only pass the
+    /// bytes the exports address (the `.uasset`, plus the `.uexp` when
+    /// they reach into it) when export ranges overlap.
+    ExportSerialSizeTotal,
     /// An FName index referenced anywhere in the header (import/export
     /// name slot, custom-version name, folder name, etc.).
     NameIndex,
@@ -4382,6 +4386,7 @@ impl fmt::Display for AssetWireField {
             Self::ExportTemplateIndex => "export_template_index",
             Self::ExportSerialOffset => "export_serial_offset",
             Self::ExportSerialSize => "export_serial_size",
+            Self::ExportSerialSizeTotal => "export_serial_size_total",
             Self::NameIndex => "name_index",
             Self::GenerationCount => "generation_count",
             Self::AdditionalPackagesToCookCount => "additional_packages_to_cook_count",
@@ -7706,6 +7711,10 @@ mod tests {
             (AssetWireField::ExportTemplateIndex, "export_template_index"),
             (AssetWireField::ExportSerialOffset, "export_serial_offset"),
             (AssetWireField::ExportSerialSize, "export_serial_size"),
+            (
+                AssetWireField::ExportSerialSizeTotal,
+                "export_serial_size_total",
+            ),
             (AssetWireField::NameIndex, "name_index"),
             (AssetWireField::GenerationCount, "generation_count"),
             (
