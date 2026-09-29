@@ -13,6 +13,12 @@ concurrency:
 permissions:
   security-events: write
 
+# An explicit `bash` runs with `-eo pipefail`, so a clippy failure in
+# the SARIF pipe below reds the step instead of being masked by the pipe.
+defaults:
+  run:
+    shell: bash
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -40,11 +46,7 @@ jobs:
       - name: Run Clippy with SARIF output
         # `--all-features` activates the `__test_utils` feature so
         # lints in the test-utils surface (`crates/paksmith-core/src/testing/`)
-        # are scanned too. Issue #89 originally only hardened the
-        # required Lint job in `ci.yml`; this gate is what actually
-        # feeds GHAS code-scanning, so it needed the same treatment
-        # for convergence — without it, the GHAS panel silently
-        # missed the gated library code.
+        # are scanned too.
         #
         # No command injection surface: the command line is fully
         # static (no `${{ github.event.* }}` interpolation), and
@@ -55,9 +57,9 @@ jobs:
           | clippy-sarif
           | tee results.sarif
           | sarif-fmt
-        continue-on-error: true
 
       - name: Upload SARIF to GitHub
+        if: ${{ !cancelled() && hashFiles('results.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           sarif_file: results.sarif

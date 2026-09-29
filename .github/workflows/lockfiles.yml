@@ -1,0 +1,27 @@
+name: Lockfiles
+
+# Post-merge only, and not a required check: neither Dependabot nor
+# release-please re-locks `fuzz/Cargo.lock`, so a release or a bump to a
+# requirement `paksmith-core` inherits leaves it stale until a normal PR
+# re-locks it (`cargo update --manifest-path fuzz/Cargo.toml -p <crate>`).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-lockfile:
+    name: Fuzz lockfile matches manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: cargo metadata --locked (fuzz workspace)
+        run: cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
