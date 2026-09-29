@@ -38,7 +38,7 @@ use zeroize::Zeroizing;
 use super::compression::CompressionMethod;
 use super::entry_header::PakEntryHeader;
 use super::fstring::read_fstring;
-use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry, fnv64_path};
+use super::{PakIndex, PakIndexEntry, entry_min_record_bytes, fnv64_path};
 use crate::container::pak::crypto::{self, AesKey};
 use crate::container::pak::version::PakVersion;
 use crate::error::{
@@ -437,7 +437,7 @@ impl PakIndex {
         // fit the bit-packed format. Stored as regular v8b-shape FPakEntry
         // records.
         let non_encoded_count = idx.read_u32::<LittleEndian>()?;
-        let max_non_encoded = index_size / ENTRY_MIN_RECORD_BYTES;
+        let max_non_encoded = index_size / entry_min_record_bytes(PakVersion::PathHashIndex);
         if u64::from(non_encoded_count) > max_non_encoded {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {

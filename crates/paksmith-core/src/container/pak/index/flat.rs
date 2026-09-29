@@ -15,7 +15,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 use super::compression::CompressionMethod;
 use super::fstring::read_fstring;
-use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
+use super::{PakIndex, PakIndexEntry, entry_min_record_bytes};
 use crate::container::pak::version::PakVersion;
 use crate::error::{
     AllocationContext, BoundsUnit, IndexParseFault, PaksmithError, WireField, try_reserve_index,
@@ -94,7 +94,7 @@ impl PakIndex {
         // residual case where index_size itself is legitimately huge
         // (multi-GB pak) and entry_count fits the budget but exceeds
         // available memory.
-        let max_entries = index_size / ENTRY_MIN_RECORD_BYTES;
+        let max_entries = index_size / entry_min_record_bytes(version);
         if u64::from(entry_count) > max_entries {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {

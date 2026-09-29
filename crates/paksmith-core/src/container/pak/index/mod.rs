@@ -55,23 +55,25 @@ use crate::container::pak::crypto::AesKey;
 use crate::container::pak::version::PakVersion;
 use crate::error::{AllocationContext, IndexParseFault, PaksmithError};
 
-/// Minimum on-disk size of an index entry record. Used to bound
-/// `entry_count` against `index_size`.
+/// Minimum on-disk size of an index entry record for `version`. Used to
+/// bound `entry_count` against `index_size`.
 ///
 /// Decomposition (v3+ layout) — FString filename header (5, shortest
 /// possible: `length(4) + null(1)`), offset (8), compressed_size (8),
-/// uncompressed_size (8), compression_method (4), sha1 (20),
-/// flags (1), compression_block_size (4) — totalling
-/// **58 bytes**.
+/// uncompressed_size (8), compression_method (1 for V8A, 4 otherwise;
+/// see [`CompressionFieldWidth`]), sha1 (20), flags (1),
+/// compression_block_size (4) — **55 bytes for V8A, 58 otherwise**.
 ///
 /// `compression_block_size` is present unconditionally for v3+
 /// entries (see `PakEntryHeader::read_from` in `entry_header.rs`).
-/// Pre-#344 this constant was 54 — the field was omitted from the
-/// calculation, leaving the per-archive flat-index ceiling
-/// (`index_size / ENTRY_MIN_RECORD_BYTES`) ~7% looser than spec;
-/// `MAX_FLAT_INDEX_ENTRIES = 10_000_000` is the global second-line
-/// defense.
-pub(super) const ENTRY_MIN_RECORD_BYTES: u64 = 5 + 8 + 8 + 8 + 4 + 20 + 1 + 4;
+/// Pre-#344 the minimum omitted it, leaving the per-archive flat-index
+/// ceiling ~7% looser than spec; `MAX_FLAT_INDEX_ENTRIES = 10_000_000`
+/// is the global second-line defense.
+///
+/// [`CompressionFieldWidth`]: entry_header::CompressionFieldWidth
+pub(super) fn entry_min_record_bytes(version: PakVersion) -> u64 {
+    5 + 8 + 8 + 8 + entry_header::CompressionFieldWidth::for_version(version).bytes() + 20 + 1 + 4
+}
 
 /// Cap on how many duplicate filenames we sample for the dedupe warning.
 /// Prevents the warn-log payload from growing with `dup_count`.
@@ -3056,11 +3058,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn entry_minimum_follows_the_compression_field_width() {
+        assert_eq!(entry_min_record_bytes(PakVersion::V8A), 55);
+        assert_eq!(entry_min_record_bytes(PakVersion::V8B), 58);
+        assert_eq!(entry_min_record_bytes(PakVersion::FrozenIndex), 58);
+    }
+
+    /// A V8A flat index claiming `count` entries, holding five minimal
+    /// ones (one-character name, uncompressed: 56 bytes each) in 289 bytes.
+    fn dense_v8a_index(count: u32) -> Vec<u8> {
+        let mut buf: Vec<u8> = Vec::new();
+        write_fstring(&mut buf, "");
+        buf.write_u32::<LittleEndian>(count).unwrap();
+        for name in ["a", "b", "c", "d", "e"] {
+            write_fstring(&mut buf, name);
+            buf.write_u64::<LittleEndian>(0).unwrap(); // offset
+            buf.write_u64::<LittleEndian>(0).unwrap(); // compressed_size
+            buf.write_u64::<LittleEndian>(0).unwrap(); // uncompressed_size
+            buf.push(0); // V8A: u8 compression index, 0 = none
+            buf.extend_from_slice(&[0u8; 20]); // sha1
+            buf.push(0); // flags
+            buf.write_u32::<LittleEndian>(0).unwrap(); // compression_block_size
+        }
+        assert_eq!(buf.len(), 289);
+        buf
+    }
+
+    fn read_dense_v8a_index(count: u32) -> crate::Result<PakIndex> {
+        PakIndex::read_from(
+            &mut Cursor::new(dense_v8a_index(count)),
+            PakVersion::V8A,
+            0,
+            289,
+            u64::MAX,
+            &[],
+        )
+    }
+
+    /// `289 / 58 = 4` would refuse the fifth entry; V8A's own 55-byte
+    /// minimum admits all five (#751).
+    #[test]
+    fn a_densely_packed_v8a_index_fits_its_own_entry_minimum() {
+        assert_eq!(read_dense_v8a_index(5).unwrap().entries().len(), 5);
+    }
+
+    /// The same 289 bytes cannot hold a sixth: the budget is `289 / 55 = 5`.
+    #[test]
+    fn a_v8a_entry_count_past_the_byte_budget_is_refused() {
+        let err = read_dense_v8a_index(6).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::FlatEntryCount,
+                        value: 6,
+                        limit: 5,
+                        ..
+                    }
+                }
+            ),
+            "got: {err:?}"
+        );
+    }
+
     /// Issue #181 (#128 follow-up): v3-v9 sibling of
     /// `read_v10_plus_rejects_index_size_above_cap`. Without
     /// `MAX_FLAT_INDEX_ENTRIES`, a header claiming
     /// `entry_count > 10M` would pass the prior `entry_count >
-    /// index_size / ENTRY_MIN_RECORD_BYTES` byte-budget check
+    /// index_size / entry_min_record_bytes(version)` byte-budget check
     /// against a 50 GB archive (~946M allowed) and then drive a
     /// huge `try_reserve_exact` attempt. Cap surfaces as
     /// `BoundsExceeded { EntryCount, value, limit, .. }` BEFORE
@@ -3074,7 +3141,7 @@ mod tests {
         crate::testing::wire::write_fstring(&mut buf, "");
         buf.extend_from_slice(&oversized.to_le_bytes());
         // index_size = u64::MAX so the byte-budget check
-        // (entry_count > index_size / ENTRY_MIN_RECORD_BYTES) can't
+        // (entry_count > index_size / entry_min_record_bytes(version)) can't
         // fire first.
         let mut cursor = Cursor::new(buf);
         let err = PakIndex::read_from(
@@ -3408,9 +3475,11 @@ mod tests {
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
                         field: WireField::V10NonEncodedCount,
+                        value,
+                        limit,
                         ..
                     }
-                }
+                } if *value == u64::from(u32::MAX) && *limit == main_size / 58
             ),
             "got: {err:?}"
         );

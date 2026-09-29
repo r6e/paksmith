@@ -325,7 +325,7 @@ the literal.
   (`crates/paksmith-core/src/container/pak/index/flat.rs:55`).
   Hard cap of 10,000,000 entries for the flat index (`MAX_FLAT_INDEX_ENTRIES`);
   the parser also derives a per-archive ceiling from `index_size /
-  ENTRY_MIN_RECORD_BYTES` (58). Surfaces as
+  entry_min_record_bytes(version)` (55 for V8A, 58 otherwise). Surfaces as
   `IndexParseFault::BoundsExceeded { field: WireField::FlatEntryCount, … }`.
 - **`max_index_bytes()`**
   (`crates/paksmith-core/src/container/pak/index/path_hash.rs:86`).
@@ -334,15 +334,10 @@ the literal.
 - **`max_fdi_bytes()`**
   (`crates/paksmith-core/src/container/pak/index/path_hash.rs:79`).
   Cap on the FDI subregion size in v10+ archives.
-- **`ENTRY_MIN_RECORD_BYTES = 58`**
+- **`entry_min_record_bytes(version)` = 55 for V8A, 58 otherwise**
   (`crates/paksmith-core/src/container/pak/index/mod.rs`).
   Used to bound `entry_count` against `index_size`. Computed as
-  `5 (min FString) + 8 (offset) + 8 (compressed_size) + 8 (uncompressed_size) + 4 (compr method) + 20 (sha1) + 1 (flags) + 4 (compression_block_size, present unconditionally for v3+)`.
-  Note the `4` is the v3–v7/V8B+ width: **V8A's compression field is 1
-  byte**, so a V8A entry's true floor is 55, not 58. The constant does
-  not distinguish, which makes the derived per-archive ceiling
-  (`index_size / 58`) TIGHTER than V8A's wire minimum rather than
-  looser — see issue #751.
+  `5 (min FString) + 8 (offset) + 8 (compressed_size) + 8 (uncompressed_size) + 1 or 4 (compr method: 1 byte for V8A) + 20 (sha1) + 1 (flags) + 4 (compression_block_size, present unconditionally for v3+)`.
 
 See `docs/security/allocation-caps.md` for the broader allocation-cap
 policy.
@@ -442,7 +437,7 @@ policy.
 - `crates/paksmith-core/src/container/pak/mod.rs` — `PakReader`,
   `MAX_UNCOMPRESSED_ENTRY_BYTES`, the `ContainerReader` trait impl.
 - `crates/paksmith-core/src/container/pak/index/mod.rs` — `PakIndex`
-  dispatcher, FNV-1a constants, `ENTRY_MIN_RECORD_BYTES`.
+  dispatcher, FNV-1a constants, `entry_min_record_bytes`.
 - `crates/paksmith-core/src/container/pak/index/flat.rs` — flat-index
   parser, `max_flat_index_entries`.
 - `crates/paksmith-core/src/container/pak/index/path_hash.rs` — path-hash +
