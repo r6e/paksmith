@@ -61,7 +61,7 @@ impl CompressionFieldWidth {
     /// [`PakEntryHeader::wire_size`] to compute the in-data record
     /// length.
     #[must_use]
-    pub fn bytes(self) -> u64 {
+    pub const fn bytes(self) -> u64 {
         match self {
             Self::OneByte => 1,
             Self::FourBytes => 4,
@@ -87,7 +87,7 @@ pub(super) const fn encoded_entry_in_data_record_size(
     method: &CompressionMethod,
     block_count: usize,
 ) -> u64 {
-    let mut size: u64 = 8 + 8 + 8 + 4 + 20 + 1 + 4;
+    let mut size = PakEntryHeader::fixed_wire_bytes(CompressionFieldWidth::FourBytes);
     if !matches!(method, CompressionMethod::None) {
         size += 4 + (block_count as u64) * 16;
     }
@@ -866,11 +866,9 @@ impl PakEntryHeader {
     /// - if compressed: block_count(4) + N × (start(8) + end(8))
     /// - 5 bytes always-present trailer: flags(1) + block_size(4)
     ///
-    /// V8A is 3 bytes shorter — the compression_method field is u8 instead
-    /// of u32. Only [`PakEntryHeader::Inline`] carries a [`PakVersion`]
-    /// (set at parse time); the V8A check fires only on Inline. Encoded
-    /// entries fall through to the V8B+/v3-v7 branch — they are v10+ only
-    /// and were never V8A.
+    /// V8A is 3 bytes shorter (u8 compression field): `Inline` records its
+    /// `compression_field_width`; `Encoded` entries are v10+ and always use
+    /// the u32 width.
     ///
     /// Issue #85 added a second caller in `PakReader::open`'s open-time
     /// per-entry payload-end check, which calls `wire_size` on the
@@ -907,7 +905,7 @@ impl PakEntryHeader {
     /// The fields every header carries: offset, both sizes, the
     /// compression field, SHA-1, flags and compression_block_size (the
     /// block size is written even for uncompressed entries).
-    fn fixed_wire_bytes(width: CompressionFieldWidth) -> u64 {
+    const fn fixed_wire_bytes(width: CompressionFieldWidth) -> u64 {
         8 + 8 + 8 + width.bytes() + 20 + 1 + 4
     }
 

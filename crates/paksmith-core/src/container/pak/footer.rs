@@ -31,8 +31,8 @@ pub struct PakFooter {
     /// or 5 (V8B / V9 / V10 / V11). Slot index 0 in this vec maps to
     /// per-entry compression byte value 1 (the on-disk convention is
     /// 1-based; byte 0 means "no compression" and skips the table).
-    /// Empty slots — and slots holding unrecognized FName strings — are
-    /// `None`.
+    /// Empty slots are `None`; an unrecognized name is
+    /// `Some(CompressionMethod::UnknownByName(name))`.
     compression_methods: Vec<Option<CompressionMethod>>,
 }
 
@@ -679,8 +679,7 @@ mod tests {
     #[test]
     fn parse_compression_slot_keeps_embedded_space() {
         for name in ["LZ4 turbo", " Zlib"] {
-            let mut data = build_v8a_footer(0, 0, 100, None);
-            data[161..161 + name.len()].copy_from_slice(name.as_bytes());
+            let data = build_v8a_footer(0, 0, 100, Some(name));
             let footer = PakFooter::read_from(&mut Cursor::new(data)).unwrap();
             assert_eq!(
                 footer.compression_methods()[0],
@@ -695,9 +694,7 @@ mod tests {
     /// known codec (#753).
     #[test]
     fn reject_a_space_padded_compression_slot_without_a_nul() {
-        let mut data = build_v8a_footer(0, 0, 100, None);
-        data[161..161 + 32].copy_from_slice(&[b' '; 32]);
-        data[161..164].copy_from_slice(b"LZ4");
+        let data = build_v8a_footer(0, 0, 100, Some(&format!("{:<32}", "LZ4")));
         let err = PakFooter::read_from(&mut Cursor::new(data)).unwrap_err();
         assert!(
             matches!(

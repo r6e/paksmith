@@ -5696,7 +5696,7 @@ mod tests {
     /// padding is refused against the claimed extent, not the footprint.
     #[cfg(feature = "__test_utils")]
     #[test]
-    fn reject_encrypted_block_ending_in_aes_padding() {
+    fn read_encrypted_entry_rejects_block_ending_in_aes_padding() {
         let (plaintext, lz4) = unaligned_lz4_fixture();
         let claim = lz4.len() as u64;
         let reader = encrypted_single_block_reader("LZ4", &lz4, plaintext.len(), claim, claim + 1);

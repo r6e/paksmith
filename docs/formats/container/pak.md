@@ -450,9 +450,9 @@ policy.
 - `crates/paksmith-core/src/container/pak/mod.rs` — `PakReader`,
   `MAX_UNCOMPRESSED_ENTRY_BYTES`, the `ContainerReader` trait impl.
 - `crates/paksmith-core/src/container/pak/index/mod.rs` — `PakIndex`
-  dispatcher, FNV-1a constants, `entry_min_record_bytes`.
+  dispatcher, FNV-1a constants.
 - `crates/paksmith-core/src/container/pak/index/flat.rs` — flat-index
-  parser, `max_flat_index_entries`.
+  parser, `max_flat_index_entries`, `entry_min_record_bytes`.
 - `crates/paksmith-core/src/container/pak/index/path_hash.rs` — path-hash +
   encoded directory index parser, `max_index_bytes`, `max_fdi_bytes`.
 - `crates/paksmith-core/src/container/pak/index/entry_header.rs` —

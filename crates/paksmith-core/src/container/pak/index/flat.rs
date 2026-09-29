@@ -15,7 +15,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 use super::compression::CompressionMethod;
 use super::fstring::read_fstring;
-use super::{PakIndex, PakIndexEntry, entry_min_record_bytes};
+use super::{PakEntryHeader, PakIndex, PakIndexEntry};
 use crate::container::pak::version::PakVersion;
 use crate::error::{
     AllocationContext, BoundsUnit, IndexParseFault, PaksmithError, WireField, try_reserve_index,
@@ -49,6 +49,14 @@ use crate::seams::PakSeam;
 /// consumer against the largest UE archive worth accepting.
 /// Exposed via [`max_flat_index_entries`].
 pub(super) const MAX_FLAT_INDEX_ENTRIES: u32 = 10_000_000;
+
+/// Minimum on-disk size of a flat-index entry record for `version`: the
+/// shortest filename FString (5 bytes: `length(4) + null(1)`) plus
+/// [`PakEntryHeader::min_wire_size`] — **55 bytes for V8A, 58
+/// otherwise**. Used to bound `entry_count` against `index_size`.
+pub(super) fn entry_min_record_bytes(version: PakVersion) -> u64 {
+    5 + PakEntryHeader::min_wire_size(version)
+}
 
 /// Test-only accessor for `MAX_FLAT_INDEX_ENTRIES`. Same convention
 /// as [`super::path_hash::max_index_bytes`].
