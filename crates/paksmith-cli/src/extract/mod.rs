@@ -813,6 +813,31 @@ mod write_output_tests {
         );
     }
 
+    /// An entry naming a DOS device is refused before any of its directories
+    /// is created, on every platform, in the real run and in a preview,
+    /// including a preview of an absent root, where containment has no root to
+    /// compare against (#811).
+    #[test]
+    fn an_entry_naming_a_dos_device_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let existing = base.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        let absent = base.path().join("absent");
+        for (root, dry_run) in [(&existing, false), (&existing, true), (&absent, true)] {
+            let c = cfg(root, false, dry_run, false);
+            let err = write_output(&c, "Game/NUL.uasset", Some("png"), b"DATA").unwrap_err();
+            let case = format!("{} dry_run={dry_run}", root.display());
+            assert!(
+                err.starts_with("entry path names a reserved device"),
+                "{case}: {err}"
+            );
+            assert!(
+                !root.join("Game").exists(),
+                "{case}: the entry's directory was created"
+            );
+        }
+    }
+
     /// Containment compares COMPONENTS, not the path string: a sibling whose
     /// name extends the root's is a string prefix but not a component prefix.
     #[cfg(unix)]
