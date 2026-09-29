@@ -838,6 +838,55 @@ mod write_output_tests {
         }
     }
 
+    /// A directory junction needs no privilege on Windows, so it is the
+    /// planted-intermediate shape reachable there (#808).
+    #[cfg(windows)]
+    fn junction(link: &std::path::Path, target: &std::path::Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed: {status}");
+    }
+
+    /// The junction twin of the planted-symlink escape: refused, victim
+    /// untouched.
+    #[cfg(windows)]
+    #[test]
+    fn a_planted_junction_cannot_redirect_a_write_outside_the_output_root() {
+        let root = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        junction(&root.path().join("sub"), victim.path());
+
+        let c = cfg(root.path(), false, false, false);
+        let err = write_output(&c, "sub/x.bin", None, b"PWNED").unwrap_err();
+
+        assert!(
+            !victim.path().join("x.bin").exists(),
+            "write escaped the output root through a planted junction: {err}"
+        );
+        assert!(
+            err.contains("resolves outside the output directory"),
+            "got {err}"
+        );
+    }
+
+    /// The junction twin of a link back inside the root: written through.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_back_inside_the_root_is_written_through() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("b");
+        std::fs::create_dir(&real).unwrap();
+        junction(&root.path().join("a"), &real);
+
+        let c = cfg(root.path(), false, false, false);
+        let _reported = write_output(&c, "a/x.bin", None, b"X").unwrap();
+        assert_eq!(std::fs::read(real.join("x.bin")).unwrap(), b"X");
+    }
+
     /// Containment compares COMPONENTS, not the path string: a sibling whose
     /// name extends the root's is a string prefix but not a component prefix.
     #[cfg(unix)]
