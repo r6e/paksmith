@@ -352,8 +352,9 @@ impl PakFooter {
 }
 
 /// Read the v8+ compression-method FName table — `slot_count` × 32-byte
-/// blocks each holding a UTF-8 FName string padded with NULL or space
-/// bytes. Empty slots parse as `None`; non-empty slots parse via
+/// blocks each holding a NUL-terminated UTF-8 FName string. A space is
+/// part of the name, as in repak. Empty slots parse as `None`; non-empty
+/// slots parse via
 /// [`CompressionMethod::from_name`] (which preserves the raw name for
 /// later operator-visible diagnostics if it's unrecognized).
 ///
@@ -371,21 +372,16 @@ fn read_compression_method_table<R: Read>(
     let mut buf = [0u8; COMPRESSION_SLOT_BYTES];
     for slot_index in 0..slot_count {
         reader.read_exact(&mut buf)?;
-        // FName slots are padded with NULL or space; stop at the
-        // first. Issue #132 (item 2): a 32-byte slot with no
-        // terminator is structurally not a UE-written archive —
-        // UE writers always zero-pad unused tail bytes. Pre-fix
-        // the parser took the full 32 bytes verbatim and (if
-        // valid UTF-8) resolved a 32-character `UnknownByName`,
-        // letting a malicious archive smuggle FName slots that
-        // pass superficial inspection.
+        // Issue #132 (item 2): a 32-byte slot with no NUL is
+        // structurally not a UE-written archive — UE writers always
+        // zero-pad unused tail bytes.
         let end = buf
             .iter()
-            .position(|&b| b == 0 || b == b' ')
+            .position(|&b| b == 0)
             .ok_or_else(|| PaksmithError::InvalidFooter {
                 fault: InvalidFooterFault::OtherUnpromoted {
                     reason: format!(
-                        "compression slot {slot_index} not nul/space-terminated within {} bytes",
+                        "compression slot {slot_index} not NUL-terminated within {} bytes",
                         buf.len()
                     ),
                 },
@@ -649,8 +645,8 @@ mod tests {
         }
     }
 
-    /// Issue #132 (item 2): a 32-byte FName slot with no nul or
-    /// space terminator is structurally not a UE-written archive
+    /// Issue #132 (item 2): a 32-byte FName slot with no NUL
+    /// terminator is structurally not a UE-written archive
     /// — UE writers always zero-pad unused tail bytes. Pre-fix the
     /// parser took the full 32 bytes verbatim and (if valid UTF-8)
     /// resolved a 32-character `UnknownByName` compression method.
@@ -679,7 +675,7 @@ mod tests {
                 } => {
                     assert!(
                         reason.contains(&format!("compression slot {slot_index}"))
-                            && reason.contains("not nul/space-terminated"),
+                            && reason.contains("not NUL-terminated"),
                         "expected typed reason for slot {slot_index}; got: {reason}"
                     );
                 }
@@ -688,6 +684,43 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// A space is part of a slot's name, not a terminator (#753): repak
+    /// keeps it too, and stopping there resolved `LZ4 turbo` to the LZ4
+    /// codec and ` Zlib` to an empty slot.
+    #[test]
+    fn a_space_in_a_compression_slot_is_part_of_the_name() {
+        for name in ["LZ4 turbo", " Zlib"] {
+            let mut data = build_v8a_footer(0, 0, 100, None);
+            data[161..161 + name.len()].copy_from_slice(name.as_bytes());
+            let footer = PakFooter::read_from(&mut Cursor::new(data)).unwrap();
+            assert_eq!(
+                footer.compression_methods()[0],
+                Some(CompressionMethod::UnknownByName(name.to_owned())),
+                "slot {name:?}"
+            );
+        }
+    }
+
+    /// Space padding is not a terminator: a slot that fills its 32 bytes
+    /// without a NUL is refused even when the name before the padding is a
+    /// known codec (#753).
+    #[test]
+    fn reject_a_space_padded_compression_slot_without_a_nul() {
+        let mut data = build_v8a_footer(0, 0, 100, None);
+        data[161..161 + 32].copy_from_slice(&[b' '; 32]);
+        data[161..164].copy_from_slice(b"LZ4");
+        let err = PakFooter::read_from(&mut Cursor::new(data)).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidFooter {
+                    fault: InvalidFooterFault::OtherUnpromoted { reason },
+                } if reason.contains("compression slot 0 not NUL-terminated")
+            ),
+            "got {err:?}"
+        );
     }
 
     /// Issue #132 (item 2) boundary pin: a 32-byte FName slot
