@@ -545,6 +545,10 @@ impl Package {
     ///   extends past `uasset.len()` and no `.uexp` was provided
     /// - [`AssetParseFault::SplitAssetSizeMismatch`] when a `.uexp` is
     ///   needed but `uasset.len() != total_header_size`
+    /// - [`AssetParseFault::BoundsExceeded`] with
+    ///   `field = AssetWireField::ExportSerialSizeTotal` when the exports'
+    ///   sizes sum past the stitched buffer, which implies overlapping
+    ///   ranges
     /// - [`AssetParseFault::DerivedStringBudgetExceeded`] when the names
     ///   and paths copied while decoding the exports pass the package's
     ///   budget
@@ -781,6 +785,8 @@ impl Package {
                 });
             }
         }
+
+        check_export_payload_total(bytes, &exports, asset_path)?;
 
         // Phase 3b: construct the bulk-data resolver from the stitched
         // buffer + the caller-provided companion loaders. Built before the
@@ -1342,6 +1348,41 @@ fn carve_export_slice<'a>(
     )]
     let end_usize = end as usize;
     Ok(&bytes[start..end_usize])
+}
+
+/// Validate every export's range, then refuse a table whose sizes sum
+/// past the asset — only possible when ranges overlap — so decoding the
+/// exports reads each asset byte at most as often as disjoint ranges
+/// would.
+///
+/// # Errors
+///
+/// - Any [`carve_export_slice`] fault for a single export's range.
+/// - [`AssetParseFault::BoundsExceeded`] with
+///   `field: AssetWireField::ExportSerialSizeTotal` when the sizes sum
+///   past `bytes.len()`.
+fn check_export_payload_total(
+    bytes: &[u8],
+    exports: &ExportTable,
+    asset_path: &str,
+) -> crate::Result<()> {
+    let mut total: u64 = 0;
+    for export in &exports.exports {
+        total += carve_export_slice(bytes, export, asset_path)?.len() as u64;
+    }
+    let asset_size = bytes.len() as u64;
+    if total > asset_size {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::BoundsExceeded {
+                field: AssetWireField::ExportSerialSizeTotal,
+                value: total,
+                limit: asset_size,
+                unit: BoundsUnit::Bytes,
+            },
+        });
+    }
+    Ok(())
 }
 
 /// Per-export `FByteBulkData` records surfaced by typed readers, paired
@@ -2094,6 +2135,148 @@ mod tests {
             ),
             "unexpected error: {err:?}"
         );
+    }
+
+    fn carve_exports(ranges: &[(i64, i64)]) -> ExportTable {
+        ExportTable {
+            exports: ranges
+                .iter()
+                .map(|&(offset, size)| make_carve_export(offset, size))
+                .collect(),
+        }
+    }
+
+    fn assert_export_total_exceeded(err: &PaksmithError, total: u64, asset_size: u64) {
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::ExportSerialSizeTotal,
+                        value,
+                        limit,
+                        unit: BoundsUnit::Bytes,
+                    },
+                    ..
+                } if *value == total && *limit == asset_size
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected error")]
+    fn assert_export_total_exceeded_rejects_another_fault() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::UnversionedWithoutMappings,
+        };
+        assert_export_total_exceeded(&err, 1, 1);
+    }
+
+    #[test]
+    fn export_sizes_may_sum_to_the_asset_length() {
+        let bytes = vec![0u8; 100];
+        check_export_payload_total(&bytes, &carve_exports(&[(0, 60), (60, 40)]), "x.uasset")
+            .unwrap();
+    }
+
+    #[test]
+    fn export_sizes_summing_past_the_asset_are_refused() {
+        let bytes = vec![0u8; 100];
+        let err =
+            check_export_payload_total(&bytes, &carve_exports(&[(0, 60), (59, 41)]), "x.uasset")
+                .unwrap_err();
+        assert_export_total_exceeded(&err, 101, 100);
+    }
+
+    #[test]
+    fn a_range_past_the_asset_keeps_its_own_fault_in_the_total_check() {
+        let bytes = vec![0u8; 100];
+        let err =
+            check_export_payload_total(&bytes, &carve_exports(&[(0, 100), (80, 40)]), "x.uasset")
+                .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::InvalidOffset {
+                        field: AssetWireField::ExportSerialOffset,
+                        offset: 80,
+                        asset_size: 100,
+                    },
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// Eight 1 KiB exports laid out one after another, or, when
+    /// `aliased`, every row pointed at the first payload with the rest
+    /// cut off.
+    fn eight_export_package(package_flags: u32, aliased: bool) -> Vec<u8> {
+        const PAYLOAD: usize = 1024;
+        let mut spec = MinimalPackageSpec {
+            package_flags,
+            ..MinimalPackageSpec::default()
+        };
+        let mut export = spec.exports.exports[0];
+        export.serial_size = i64::try_from(PAYLOAD).unwrap();
+        spec.exports.exports = vec![export; 8];
+        spec.payloads = vec![vec![0u8; PAYLOAD]; 8];
+        let MinimalPackage {
+            mut bytes,
+            summary,
+            mut exports,
+            ..
+        } = build_minimal(spec);
+        if aliased {
+            let first = exports.exports[0].serial_offset;
+            for export in &mut exports.exports {
+                export.serial_offset = first;
+            }
+            let mut table = Vec::new();
+            exports
+                .write_to(&mut table, summary.version, summary.package_flags)
+                .unwrap();
+            let at = usize::try_from(summary.export_offset).unwrap();
+            bytes[at..at + table.len()].copy_from_slice(&table);
+            bytes.truncate(usize::try_from(first).unwrap() + PAYLOAD);
+        }
+        bytes
+    }
+
+    #[test]
+    fn read_from_refuses_export_rows_that_alias_one_payload() {
+        let cooked = MinimalPackageSpec::default().package_flags;
+        let disjoint = eight_export_package(cooked, false);
+        assert_eq!(
+            Package::read_from(&disjoint, None, None, "x.uasset")
+                .unwrap()
+                .payloads
+                .len(),
+            8
+        );
+        let aliased = eight_export_package(cooked, true);
+        let err = Package::read_from(&aliased, None, None, "x.uasset").unwrap_err();
+        assert_export_total_exceeded(&err, 8 * 1024, aliased.len() as u64);
+    }
+
+    #[test]
+    fn the_export_total_is_checked_before_the_unversioned_branch() {
+        let flags = MinimalPackageSpec::default().package_flags | PKG_UNVERSIONED_PROPERTIES;
+        let disjoint = eight_export_package(flags, false);
+        assert!(matches!(
+            Package::read_from(&disjoint, None, None, "x.uasset"),
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::UnversionedWithoutMappings,
+                ..
+            })
+        ));
+        let aliased = eight_export_package(flags, true);
+        let err = Package::read_from(&aliased, None, None, "x.uasset").unwrap_err();
+        assert_export_total_exceeded(&err, 8 * 1024, aliased.len() as u64);
     }
 
     /// Companion to the bounds-past-buffer test: confirms the

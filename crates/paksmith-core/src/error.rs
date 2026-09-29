@@ -3792,6 +3792,9 @@ pub enum AssetWireField {
     ExportSerialOffset,
     /// `FObjectExport::SerialSize`.
     ExportSerialSize,
+    /// The sum of every export's `SerialSize`, which can only pass the
+    /// asset's length when export ranges overlap.
+    ExportSerialSizeTotal,
     /// An FName index referenced anywhere in the header (import/export
     /// name slot, custom-version name, folder name, etc.).
     NameIndex,
@@ -4382,6 +4385,7 @@ impl fmt::Display for AssetWireField {
             Self::ExportTemplateIndex => "export_template_index",
             Self::ExportSerialOffset => "export_serial_offset",
             Self::ExportSerialSize => "export_serial_size",
+            Self::ExportSerialSizeTotal => "export_serial_size_total",
             Self::NameIndex => "name_index",
             Self::GenerationCount => "generation_count",
             Self::AdditionalPackagesToCookCount => "additional_packages_to_cook_count",
@@ -7706,6 +7710,10 @@ mod tests {
             (AssetWireField::ExportTemplateIndex, "export_template_index"),
             (AssetWireField::ExportSerialOffset, "export_serial_offset"),
             (AssetWireField::ExportSerialSize, "export_serial_size"),
+            (
+                AssetWireField::ExportSerialSizeTotal,
+                "export_serial_size_total",
+            ),
             (AssetWireField::NameIndex, "name_index"),
             (AssetWireField::GenerationCount, "generation_count"),
             (
