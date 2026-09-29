@@ -71,6 +71,7 @@ pub(super) fn unexpected_eof(asset_path: &str, field: AssetWireField) -> Paksmit
 /// - [`AssetParseFault::UnexpectedEof`] on a short read of either i32.
 /// - [`AssetParseFault::PackageIndexUnderflow`] for `index < 0`.
 /// - [`AssetParseFault::PackageIndexOob`] for index past the name table.
+/// - [`AssetParseFault::DerivedStringBudgetExceeded`] from [`resolve_fname`].
 pub(super) fn read_fname_pair<R: Read + ?Sized>(
     reader: &mut R,
     ctx: &AssetContext,
@@ -485,7 +486,8 @@ mod tests {
     }
 
     /// One `Target: LazyObjectProperty` tag with an 8-byte body, then the
-    /// None terminator.
+    /// None terminator. `LazyObjectProperty` has no reader, so it decodes
+    /// as `PropertyValue::Unknown`.
     fn lazy_object_property_stream() -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes()); // Name: Target
@@ -518,13 +520,6 @@ mod tests {
 
     #[test]
     fn unknown_type_stored_as_unknown_variant() {
-        // LazyObjectProperty is unhandled by both primitive and
-        // container readers as of Phase 2d Task 3, so it falls through
-        // to the skip path. (Pre-Task 7 this test used ArrayProperty;
-        // Task 7 wired ArrayProperty into the container dispatcher;
-        // Phase 2d Task 3 wires ObjectProperty into the primitive
-        // dispatcher, so the test moves again to a type that is still
-        // genuinely unhandled.)
         let ctx = make_ctx(&["None", "Target", "LazyObjectProperty"]);
         let buf = lazy_object_property_stream();
         let export_end = buf.len() as u64;

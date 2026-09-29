@@ -670,8 +670,7 @@ pub fn read_primitive_value<R: Read + Seek>(
 ///
 /// - [`AssetParseFault::PackageIndexOob`] when `Import(N)` / `Export(N)` indexes past
 ///   the corresponding table.
-/// - Any error surfaced by [`resolve_fname`](crate::asset::property::tag::resolve_fname)
-///   when the import/export's `object_name` index falls outside `ctx.names`.
+/// - Any error surfaced by [`resolve_fname`](crate::asset::property::tag::resolve_fname).
 pub(crate) fn resolve_package_index(
     kind: PackageIndex,
     ctx: &AssetContext,

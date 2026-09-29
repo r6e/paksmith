@@ -919,8 +919,9 @@ impl Default for DerivedStringBudget {
 /// (Phase 2b+).
 ///
 /// **Thread safety:** `AssetContext: Send + Sync`. All components are
-/// `Arc`-shared immutable data apart from the derived-string budget's
-/// atomic counter — safe to clone and share across worker threads.
+/// `Arc`-shared; the bulk resolver's caches and the derived-string
+/// budget use atomics / `OnceLock`, so the context is safe to clone and
+/// share across worker threads.
 /// Pinned by the `send_sync_assertions` test in `lib.rs`.
 ///
 /// `Arc`-wrapped components so `clone()` is a handful of atomic refcount
