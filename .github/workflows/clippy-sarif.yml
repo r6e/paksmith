@@ -14,7 +14,7 @@ permissions:
   security-events: write
 
 # An explicit `bash` runs with `-eo pipefail`, so a clippy failure in
-# the SARIF pipe below reds the step instead of vanishing into `tee`.
+# the SARIF pipe below reds the step instead of being masked by the pipe.
 defaults:
   run:
     shell: bash
