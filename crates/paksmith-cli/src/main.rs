@@ -187,6 +187,42 @@ fn main() -> ExitCode {
 mod tests {
     use super::parse_aes_key;
 
+    /// `--jobs` is capped at parse time, so an out-of-range value is refused
+    /// before any thread is spawned, and the help states the live ceiling
+    /// (#807).
+    #[test]
+    fn jobs_is_capped_at_parse_time() {
+        use clap::{CommandFactory, Parser};
+
+        use super::commands::extract::MAX_JOBS;
+
+        let parse = |jobs: i64| {
+            let jobs = jobs.to_string();
+            super::Cli::try_parse_from([
+                "paksmith", "extract", "x.pak", "-o", "out", "--jobs", &jobs,
+            ])
+        };
+        assert!(parse(MAX_JOBS).is_ok());
+        let err = parse(MAX_JOBS + 1)
+            .err()
+            .expect("above the cap must be refused");
+        assert!(
+            err.to_string().contains(&format!("1..={MAX_JOBS}")),
+            "got {err}"
+        );
+
+        let help = super::Cli::command()
+            .find_subcommand("extract")
+            .and_then(|extract| extract.get_arguments().find(|a| a.get_id() == "jobs"))
+            .and_then(clap::Arg::get_help)
+            .map(ToString::to_string)
+            .expect("extract --jobs has help");
+        assert!(
+            help.contains(&format!("at most {MAX_JOBS}")),
+            "got {help:?}"
+        );
+    }
+
     #[test]
     fn parse_aes_key_accepts_64_hex_no_prefix() {
         let k = parse_aes_key(&"ab".repeat(32)).unwrap();

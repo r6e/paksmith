@@ -8,6 +8,10 @@ pub(crate) enum SafePathError {
     Escapes(String),
     /// The entry path was empty.
     Empty,
+    /// A joined component names a Windows DOS device (`NUL`, `CON`, `COM1`, …),
+    /// which Win32 can route to the device instead of a file. Carries
+    /// the offending entry path.
+    DeviceName(String),
 }
 
 impl std::fmt::Display for SafePathError {
@@ -15,8 +19,39 @@ impl std::fmt::Display for SafePathError {
         match self {
             Self::Escapes(p) => write!(f, "entry path escapes output directory: {p}"),
             Self::Empty => write!(f, "empty entry path"),
+            Self::DeviceName(p) => write!(f, "entry path names a reserved device: {p}"),
         }
     }
+}
+
+/// Whether Win32 would route `component` to a DOS device: its name up to
+/// the first `.` or `:`, with trailing spaces dropped, is a reserved device
+/// name in any case, so `NUL`, `con.txt`, `aux:stream` and `COM1 .bin` all
+/// qualify. This is the widest mapping; Windows 11 routes fewer shapes.
+fn is_dos_device_name(component: &str) -> bool {
+    let stem = component
+        .split_once(['.', ':'])
+        .map_or(component, |(stem, _)| stem)
+        .trim_end_matches(' ');
+    is_reserved_device(&stem.to_ascii_uppercase())
+}
+
+fn is_reserved_device(upper: &str) -> bool {
+    if matches!(upper, "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
+        return true;
+    }
+    let Some(port) = upper
+        .strip_prefix("COM")
+        .or_else(|| upper.strip_prefix("LPT"))
+    else {
+        return false;
+    };
+    // Microsoft's naming doc also reserves the ISO 8859-1 superscripts as ports.
+    let mut chars = port.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('1'..='9' | '¹' | '²' | '³'), None)
+    )
 }
 
 /// Map an untrusted pak `entry_path` to a path strictly under `output_root`.
@@ -25,7 +60,10 @@ impl std::fmt::Display for SafePathError {
 /// the existing ancestor chain RESOLVES is checked by
 /// `verify_resolves_inside_root` in `extract/mod.rs`. Backslashes are
 /// normalized to `/` so Windows-style separators can't smuggle traversal.
-/// Rejects `..`, absolute roots, and Windows drive/UNC prefixes.
+/// Rejects `..`, absolute roots, and Windows drive/UNC prefixes. Also rejects,
+/// on every platform, any joined component that names a DOS device, since
+/// `create_dir_all` makes each directory the last component of its own call;
+/// under `flat` only the file name is joined.
 pub(crate) fn safe_join(
     output_root: &Path,
     entry_path: &str,
@@ -71,6 +109,9 @@ pub(crate) fn safe_join(
 
     let mut candidate = output_root.to_path_buf();
     for part in chosen {
+        if is_dos_device_name(part) {
+            return Err(SafePathError::DeviceName(entry_path.to_string()));
+        }
         // Windows-only prefix re-parse guard; the mechanism is documented on
         // `paksmith_core`'s detection `safe_join` (#658). Site-specific reason
         // it is needed HERE: the leading-drive check above inspects offsets 0-1
@@ -128,6 +169,109 @@ mod tests {
         assert!(escapes.contains("../etc/passwd"), "got {escapes}");
         assert!(escapes.contains("escapes"), "got {escapes}");
         assert_eq!(SafePathError::Empty.to_string(), "empty entry path");
+        assert_eq!(
+            SafePathError::DeviceName("Game/NUL".to_string()).to_string(),
+            "entry path names a reserved device: Game/NUL"
+        );
+    }
+
+    /// Every component an entry adds is checked, not only the file name (#811).
+    #[test]
+    fn rejects_dos_device_names_in_any_joined_component() {
+        for entry in [
+            "Game/NUL",
+            "Game/con",
+            "Game/CON.uasset",
+            "Game/nul.tar.gz",
+            "Game/Aux.",
+            "Game/PRN ",
+            "Game/NUL .txt",
+            "Game/COM1",
+            "Game/LPT9.txt",
+            "Game/COM¹",
+            "Game/lpt²",
+            "Game/lpt³.dat",
+            "Game/NUL:",
+            "Game/aux:stream",
+            "Game/NUL:.txt",
+            "Game/CONIN$",
+            "Game/conout$.txt",
+            "CON/Hero.uasset",
+            "Game/NUL/Hero.uasset",
+        ] {
+            assert!(
+                matches!(
+                    safe_join(&root(), entry, false),
+                    Err(SafePathError::DeviceName(_))
+                ),
+                "{entry:?} must be refused"
+            );
+        }
+    }
+
+    /// `--flat` joins only the file name: a device-named file is refused, and
+    /// a device-named directory it discards is never created, so it is not
+    /// refused.
+    #[test]
+    fn flat_checks_only_the_file_name_for_devices() {
+        assert!(matches!(
+            safe_join(&root(), "Game/Sub/PRN.bin", true),
+            Err(SafePathError::DeviceName(_))
+        ));
+        let p = safe_join(&root(), "CON/Hero.uasset", true).unwrap();
+        assert_eq!(p, PathBuf::from("/out/Hero.uasset"));
+    }
+
+    const DEVICE_LOOKALIKES: &[&str] = &[
+        "CONSOLE.uasset",
+        "NULL",
+        "COM10",
+        "LPT",
+        "con_data.bin",
+        "xCON",
+        " NUL",
+        "COM1x.bin",
+        "CONIN",
+        "CONERR$",
+        "data:stream",
+        "data:COM1",
+        "com0.bin",
+        "LPT0",
+    ];
+
+    #[test]
+    fn accepts_names_that_only_resemble_devices() {
+        for name in DEVICE_LOOKALIKES {
+            let entry = format!("Game/{name}");
+            assert!(
+                safe_join(&root(), &entry, false).is_ok(),
+                "{entry:?} must be accepted"
+            );
+        }
+    }
+
+    /// The host's own path API agrees that no accepted lookalike is a device,
+    /// as a whole path or as a leaf of an existing directory: `GetFullPathNameW`
+    /// rewrites a device path to `\\.\<device>`, as it does for a bare `COM1`
+    /// and a leaf `NUL` (#811).
+    #[cfg(windows)]
+    #[test]
+    fn the_host_maps_no_accepted_lookalike_to_a_device() {
+        let maps_to_device = |path: &Path| {
+            std::path::absolute(path)
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(r"\\.\")
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let leaf = |name: &str| dir.path().join(name);
+        assert!(maps_to_device(Path::new("COM1")), "bare control");
+        assert!(maps_to_device(&leaf("NUL")), "leaf control");
+        for &name in DEVICE_LOOKALIKES {
+            for path in [PathBuf::from(name), leaf(name)] {
+                assert!(!maps_to_device(&path), "{path:?} maps to a device");
+            }
+        }
     }
 
     #[test]
