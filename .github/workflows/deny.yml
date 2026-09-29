@@ -34,10 +34,7 @@ jobs:
       # disallowed license/advisory/source would slip through review.
       # Sharing `deny.toml` keeps policy consistent across both
       # workspaces; the libfuzzer-sys NCSA exception lives there.
-      # Not `--locked`: neither Dependabot nor release-please updates
-      # `fuzz/Cargo.lock`, so a required check on it could never go
-      # green on their PRs. This audits the re-resolved graph that
-      # `cargo fuzz build` uses; drift is caught after merge below.
+      # Not `--locked`: see `lockfiles.yml`.
       - name: cargo-deny (fuzz workspace)
         if: ${{ !cancelled() }}
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
@@ -45,17 +42,3 @@ jobs:
           command: check all
           arguments: --all-features
           manifest-path: fuzz/Cargo.toml
-
-  # Post-merge only, and not a required check: a root requirement bump
-  # or a release leaves `fuzz/Cargo.lock` stale, and a normal PR can
-  # re-lock it once the bump has landed on main.
-  fuzz-lockfile:
-    name: Fuzz lockfile matches manifests
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: cargo metadata --locked (fuzz workspace)
-        run: cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
