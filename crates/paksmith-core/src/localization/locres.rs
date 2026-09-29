@@ -66,6 +66,20 @@ pub const MAX_LOCRES_COUNT: usize = 1_048_576;
 /// bounds check in `docs/formats/data/locres.md`).
 const MIN_STRINGS_OFFSET: usize = 25;
 
+/// Cap on the bytes of localized strings resolved from the strings
+/// array across one file. Each key entry references the deduplicated
+/// array by a 4-byte index and gets its own copy, so every entry can
+/// name the same 64 Ki-unit string; this bounds the copies. Real game
+/// files hold tens of MB.
+const MAX_LOCRES_RESOLVED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Test-only accessor for `MAX_LOCRES_RESOLVED_BYTES` (256 MiB).
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_locres_resolved_bytes() -> u64 {
+    MAX_LOCRES_RESOLVED_BYTES
+}
+
 /// Maximum length (in code units for UTF-16, bytes for ANSI, both
 /// including the terminator) accepted for one `FString`. Mirrors the
 /// pak index reader's `FSTRING_MAX_LEN`; comfortably exceeds any real
@@ -74,6 +88,13 @@ const MIN_STRINGS_OFFSET: usize = 25;
 /// bounds the read against the file, but this bounds the ALLOCATION
 /// independently of file size).
 const MAX_LOCRES_STRING_LEN: usize = 65_536;
+
+/// Test-only accessor for `MAX_LOCRES_STRING_LEN` (65,536).
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_locres_string_len() -> usize {
+    MAX_LOCRES_STRING_LEN
+}
 
 /// `ELocResVersion` — the version byte after the magic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -162,10 +183,17 @@ impl LocresResource {
     /// Parse a `.locres` file from `bytes`.
     ///
     /// # Errors
-    /// [`PaksmithError::LocresParse`] with a [`LocresParseFault`]
-    /// naming the offending wire field; see the module doc for the
-    /// deliberate fail-closed divergences from CUE4Parse.
+    /// - [`PaksmithError::LocresParse`] with a [`LocresParseFault`]
+    ///   naming the offending wire field for malformed input; see the
+    ///   module doc for the deliberate fail-closed divergences from
+    ///   CUE4Parse.
+    /// - [`LocresParseFault::ResolvedStringsExceeded`] when the strings
+    ///   copied out of the strings array pass 256 MiB in total.
     pub fn parse(bytes: &[u8]) -> crate::Result<Self> {
+        Self::parse_capped(bytes, MAX_LOCRES_RESOLVED_BYTES)
+    }
+
+    fn parse_capped(bytes: &[u8], resolved_limit: u64) -> crate::Result<Self> {
         let mut cur = Cursor { bytes, pos: 0 };
 
         // Magic-or-legacy discrimination (oracle: seek back to 0 and
@@ -205,6 +233,7 @@ impl LocresResource {
             namespace_count,
             LocresAllocationContext::Namespaces,
         )?;
+        let mut resolved_bytes: u64 = 0;
 
         for _ in 0..namespace_count {
             let namespace_hash = if version.is_optimized() {
@@ -243,6 +272,12 @@ impl LocresResource {
                                 count: strings.len(),
                             })
                         })?;
+                    resolved_bytes += localized.len() as u64;
+                    if resolved_bytes > resolved_limit {
+                        return Err(fault(LocresParseFault::ResolvedStringsExceeded {
+                            limit: resolved_limit,
+                        }));
+                    }
                     localized.clone()
                 } else {
                     cur.read_fstring(LocresWireField::LocalizedString)?
@@ -499,26 +534,98 @@ mod tests {
         b
     }
 
-    /// Build a v1 (Compact) file: magic + version + strings array at a
-    /// trailing offset, no hashes, no EntriesCount.
-    fn build_v1() -> Vec<u8> {
+    const SHARED: &str = "Bonjour";
+
+    /// Build a v1 (Compact) file: magic + version, the namespace table
+    /// `write_namespaces` emits, then a one-entry strings array holding
+    /// `SHARED` at a trailing offset. No hashes, no EntriesCount.
+    fn build_v1_with(write_namespaces: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(&LOCRES_MAGIC);
         b.push(1);
         let offset_pos = b.len();
         b.extend_from_slice(&0i64.to_le_bytes()); // patched below
-        b.extend_from_slice(&1u32.to_le_bytes()); // namespace count
-        push_ansi_fstring(&mut b, "Game");
-        b.extend_from_slice(&1u32.to_le_bytes()); // key count
-        push_ansi_fstring(&mut b, "greeting");
-        b.extend_from_slice(&0x1234_5678u32.to_le_bytes()); // SourceStringHash
-        b.extend_from_slice(&0i32.to_le_bytes()); // string index
+        write_namespaces(&mut b);
         let strings_at = b.len();
         b.extend_from_slice(&1i32.to_le_bytes()); // strings count
-        push_ansi_fstring(&mut b, "Bonjour"); // NO RefCount at v1
+        push_ansi_fstring(&mut b, SHARED); // NO RefCount at v1
         let off = i64::try_from(strings_at).unwrap();
         b[offset_pos..offset_pos + 8].copy_from_slice(&off.to_le_bytes());
         b
+    }
+
+    /// A v1 file whose namespaces hold one entry per index in
+    /// `namespaces[i]`, each entry naming that index.
+    fn build_v1_indexed(namespaces: &[&[i32]]) -> Vec<u8> {
+        build_v1_with(|b| {
+            b.extend_from_slice(&u32::try_from(namespaces.len()).unwrap().to_le_bytes());
+            for (ns, indices) in namespaces.iter().enumerate() {
+                push_ansi_fstring(b, &format!("ns{ns}"));
+                b.extend_from_slice(&u32::try_from(indices.len()).unwrap().to_le_bytes());
+                for (key, index) in indices.iter().enumerate() {
+                    push_ansi_fstring(b, &format!("k{key}"));
+                    b.extend_from_slice(&0u32.to_le_bytes()); // SourceStringHash
+                    b.extend_from_slice(&index.to_le_bytes()); // string index
+                }
+            }
+        })
+    }
+
+    fn assert_resolved_exceeded(result: crate::Result<LocresResource>, limit: u64) {
+        match result {
+            Err(PaksmithError::LocresParse {
+                fault: LocresParseFault::ResolvedStringsExceeded { limit: got },
+            }) => assert_eq!(got, limit),
+            other => panic!("expected ResolvedStringsExceeded {{ limit: {limit} }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolved_strings_are_charged_up_to_the_limit() {
+        let bytes = build_v1_indexed(&[&[0, 0, 0, 0]]);
+        let limit = 4 * SHARED.len() as u64;
+        let parsed = LocresResource::parse_capped(&bytes, limit).unwrap();
+        assert_eq!(parsed.entry_count(), 4);
+        assert_resolved_exceeded(LocresResource::parse_capped(&bytes, limit - 1), limit - 1);
+    }
+
+    /// Three copies fit either two-entry namespace but not both.
+    #[test]
+    fn the_resolved_strings_budget_spans_namespaces() {
+        let limit = 3 * SHARED.len() as u64;
+        assert_resolved_exceeded(
+            LocresResource::parse_capped(&build_v1_indexed(&[&[0, 0], &[0, 0]]), limit),
+            limit,
+        );
+    }
+
+    /// The trip happens at the entry that passes the limit, before the
+    /// out-of-range fourth entry is read.
+    #[test]
+    fn the_resolved_strings_budget_trips_before_later_entries() {
+        let limit = 2 * SHARED.len() as u64;
+        assert_resolved_exceeded(
+            LocresResource::parse_capped(&build_v1_indexed(&[&[0, 0, 0, 99]]), limit),
+            limit,
+        );
+    }
+
+    #[test]
+    fn inline_legacy_strings_are_not_charged() {
+        let parsed = LocresResource::parse_capped(&build_v0(), 0).unwrap();
+        assert_eq!(parsed.namespaces[0].entries[0].localized, "Hallo");
+    }
+
+    #[test]
+    fn resolved_strings_cap_is_256_mib() {
+        assert_eq!(MAX_LOCRES_RESOLVED_BYTES, 256 * 1024 * 1024);
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn cap_accessors_read_the_live_values() {
+        assert_eq!(max_locres_resolved_bytes(), MAX_LOCRES_RESOLVED_BYTES);
+        assert_eq!(max_locres_string_len(), MAX_LOCRES_STRING_LEN);
     }
 
     /// `checked_count` accepts exactly the cap and rejects one over —
@@ -587,7 +694,7 @@ mod tests {
 
     #[test]
     fn parses_v1_compact_without_hashes_or_entries_count() {
-        let r = LocresResource::parse(&build_v1()).expect("v1 must parse");
+        let r = LocresResource::parse(&build_v1_indexed(&[&[0]])).expect("v1 must parse");
         assert_eq!(r.version, LocresVersion::Compact);
         assert_eq!(r.namespaces[0].entries[0].localized, "Bonjour");
         assert_eq!(r.namespaces[0].entries[0].key_hash, 0);

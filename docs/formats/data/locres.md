@@ -348,6 +348,14 @@ parser bugs / DoS vectors, not format-spec violations.
   (`LocresParseFault::StringIndexOutOfRange`) — it does not port the
   oracle's negative-index crash, and it does not attempt any fallback
   `FString` read (a fallback would corrupt the read position).
+- **Resolved-strings total.** From `Compact` on, each key entry's
+  `StringIndex` names its localized string in the deduplicated
+  strings array, so every entry can name the same string. A reader
+  that gives each entry its own copy SHOULD bound the total it
+  copies. paksmith caps the bytes resolved from the array across one
+  file at `MAX_LOCRES_RESOLVED_BYTES` = 256 MiB
+  (`crates/paksmith-core/src/localization/locres.rs`) and fails with
+  `LocresParseFault::ResolvedStringsExceeded { limit }`.
 - **`StringsArrayOffset == -1` + non-(-1) `StringIndex`.** When
   the strings array is absent, all `StringIndex` references MUST be
   treated as invalid (effectively empty array). Do not attempt to
