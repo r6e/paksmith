@@ -2477,8 +2477,8 @@ pub enum AssetParseFault {
     },
     /// A wire-claimed `i32` or `u32` offset/count is negative when the
     /// field is documented non-negative, or it points past the end of
-    /// the asset bytes. Distinct from [`Self::BoundsExceeded`] because
-    /// the limit is the asset's byte length, not a structural cap.
+    /// the asset bytes. Distinct from [`Self::BoundsExceeded`], which
+    /// covers counts, sizes and totals rather than a single offset.
     InvalidOffset {
         /// Wire-format field name.
         field: AssetWireField,
@@ -3793,7 +3793,7 @@ pub enum AssetWireField {
     /// `FObjectExport::SerialSize`.
     ExportSerialSize,
     /// The sum of every export's `SerialSize`, which can only pass the
-    /// asset's length when export ranges overlap.
+    /// stitched `.uasset` + `.uexp` length when export ranges overlap.
     ExportSerialSizeTotal,
     /// An FName index referenced anywhere in the header (import/export
     /// name slot, custom-version name, folder name, etc.).

@@ -1276,9 +1276,9 @@ impl Package {
 /// be a sub-view — the bounds reporting uses `bytes.len()` as the
 /// asset-size in error payloads). Checks `serial_size`, computes
 /// `offset + size`, validates against `bytes.len()`, and returns the
-/// borrowed slice. Both Phase 2f's unversioned branch in
-/// `Package::read_from` and `read_payloads` route through this helper
-/// so the bounds-check ordering stays identical at both sites.
+/// borrowed slice. [`check_export_payload_total`] runs it on every
+/// export before either decode path; `read_payloads` and the
+/// unversioned branch reuse it to take each slice.
 ///
 /// # Errors
 /// - [`AssetParseFault::BoundsExceeded`] for `serial_size >
@@ -1351,9 +1351,8 @@ fn carve_export_slice<'a>(
 }
 
 /// Validate every export's range, then refuse a table whose sizes sum
-/// past the asset — only possible when ranges overlap — so decoding the
-/// exports reads each asset byte at most as often as disjoint ranges
-/// would.
+/// past `bytes.len()`, which disjoint ranges never do. This bounds the
+/// export bytes decoded to the stitched buffer's length.
 ///
 /// # Errors
 ///
@@ -2108,14 +2107,8 @@ mod tests {
         }
     }
 
-    /// Direct unit test on `carve_export_slice` — exercises the
-    /// `end > asset_size` branch the helper shares between
-    /// `read_payloads` and the Phase 2f unversioned branch. Without a
-    /// test that targets the helper directly, the two call sites
-    /// share coverage only through whichever integration test happens
-    /// to drive each path (the unversioned branch's bounds-check has
-    /// no integration-test coverage today). Architect retro on PR
-    /// `chore/retro-review-batch`.
+    /// Direct unit test on `carve_export_slice`'s `end > asset_size`
+    /// branch.
     #[test]
     fn carve_export_slice_rejects_offset_plus_size_past_buffer() {
         let bytes = vec![0u8; 100];
@@ -2305,16 +2298,37 @@ mod tests {
         );
     }
 
+    /// A `.uasset` longer than its header plus a short `.uexp`: the
+    /// split mismatch is reported, not the range the short `.uexp`
+    /// leaves out of bounds.
+    #[test]
+    fn split_size_mismatch_is_reported_before_the_export_ranges() {
+        let pkg = build_minimal_ue4_27();
+        let split_at = usize::try_from(pkg.summary.total_header_size).unwrap();
+        let mut uasset = pkg.bytes[..split_at].to_vec();
+        uasset.extend_from_slice(&[0u8; 8]);
+        let uexp = &pkg.bytes[split_at..split_at + 4];
+        let err = Package::read_from(&uasset, Some(uexp), None, "test.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::SplitAssetSizeMismatch { .. },
+                    ..
+                }
+            ),
+            "expected SplitAssetSizeMismatch; got {err:?}"
+        );
+    }
+
     #[test]
     fn rejects_export_payload_past_eof() {
         // Phase 2e: with the companion-file detection in place, a
         // monolithic-shape truncated asset trips `MissingCompanionFile`
         // first (any payload extending past `uasset.len()` is now
-        // treated as a split-asset hint). To exercise the original
-        // `InvalidOffset` path inside `read_payloads`, split the fixture
-        // into header + truncated-uexp so companion detection sees the
-        // uexp and the `end > asset_size` check in `read_payloads`
-        // fires on the post-stitch buffer length.
+        // treated as a split-asset hint). Split the fixture into header
+        // + truncated uexp so companion detection sees the uexp and the
+        // per-export range check fires on the stitched length.
         let pkg = build_minimal_ue4_27();
         #[allow(
             clippy::cast_sign_loss,
@@ -2357,9 +2371,7 @@ mod tests {
         // also pushes `end > uasset.len()` and trips
         // `MissingCompanionFile` first when fed as a monolithic blob.
         // Split into header + tiny-uexp so detection is satisfied and
-        // execution reaches `read_payloads` — where the actual
-        // `MAX_PAYLOAD_BYTES` cap check lives and the test's intent
-        // applies.
+        // the per-export `MAX_PAYLOAD_BYTES` check applies.
         use crate::asset::export_table::EXPORT_RECORD_SIZE_UE4_27;
 
         let MinimalPackage {
