@@ -698,7 +698,7 @@ pub enum IndexParseFault {
     /// A header-claimed count or size exceeds a structural cap.
     /// E.g. `block_count > MAX_BLOCKS_PER_ENTRY`,
     /// `file_count > fdi_size / 9`,
-    /// `entry_count > index_size / ENTRY_MIN_RECORD_BYTES`,
+    /// `entry_count > index_size / entry_min_record_bytes(version)`,
     /// `encoded_entries_size > index_size`,
     /// `fdi_size > MAX_FDI_BYTES`.
     ///

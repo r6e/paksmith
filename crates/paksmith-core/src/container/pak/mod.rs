@@ -5589,26 +5589,56 @@ mod tests {
         compressed: &[u8],
         plaintext_len: usize,
     ) -> Vec<u8> {
-        let uncompressed_size = plaintext_len as u64;
-        let block_size = u32::try_from(plaintext_len).expect("plaintext len fits u32");
+        let footprint = compressed.len().next_multiple_of(16) as u64;
+        encrypted_single_block_read_back_claiming(method, compressed, plaintext_len, footprint)
+    }
+
+    /// A reader over a synthetic v8b pak holding one encrypted entry:
+    /// `compressed` zero-padded to the AES footprint and encrypted, one
+    /// block of `block_len` bytes, and the given `compressed_size` claim.
+    #[cfg(feature = "__test_utils")]
+    fn encrypted_single_block_reader(
+        method: &str,
+        compressed: &[u8],
+        plaintext_len: usize,
+        compressed_size: u64,
+        block_len: u64,
+    ) -> PakReader {
         let mut payload = compressed.to_vec();
         payload.resize(payload.len().next_multiple_of(16), 0);
         let key = AesKey::new(FIXTURE_AES_KEY);
         crypto::aes256_ecb_encrypt(&key, &mut payload).expect("encrypt aligned payload");
-
         let payload_start = crate::testing::wire::pak_entry_wire_size(1);
-        let blocks = [(payload_start, payload_start + compressed.len() as u64)];
         let pak = build_v8b_encrypted_single_entry(
             1,
             method,
             &payload,
-            payload.len() as u64,
-            uncompressed_size,
-            &blocks,
-            block_size,
+            compressed_size,
+            plaintext_len as u64,
+            &[(payload_start, payload_start + block_len)],
+            u32::try_from(plaintext_len).expect("plaintext len fits u32"),
         );
-        let reader = PakReader::from_reader_with_key(std::io::Cursor::new(pak), key)
-            .expect("open synthetic encrypted v8b pak");
+        PakReader::from_reader_with_key(std::io::Cursor::new(pak), key)
+            .expect("open synthetic encrypted v8b pak")
+    }
+
+    /// [`encrypted_single_block_read_back`] with the entry's
+    /// `compressed_size` claim chosen by the caller.
+    #[cfg(feature = "__test_utils")]
+    fn encrypted_single_block_read_back_claiming(
+        method: &str,
+        compressed: &[u8],
+        plaintext_len: usize,
+        compressed_size: u64,
+    ) -> Vec<u8> {
+        let uncompressed_size = plaintext_len as u64;
+        let reader = encrypted_single_block_reader(
+            method,
+            compressed,
+            plaintext_len,
+            compressed_size,
+            compressed.len() as u64,
+        );
         let mut out = Vec::new();
         let written = reader
             .read_entry_to("Content/x.uasset", &mut out)
@@ -5625,10 +5655,66 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn reads_encrypted_lz4_entry_round_trips() {
-        let plaintext: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
-        let lz4 = lz4_flex::block::compress(&plaintext);
+        let (plaintext, lz4) = unaligned_lz4_fixture();
         let out = encrypted_single_block_read_back("LZ4", &lz4, plaintext.len());
         assert_eq!(out, plaintext, "encrypted+LZ4 decode must be byte-exact");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    fn unaligned_lz4_fixture() -> (Vec<u8>, Vec<u8>) {
+        let plaintext: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+        let lz4 = lz4_flex::block::compress(&plaintext);
+        assert_ne!(
+            lz4.len() % 16,
+            0,
+            "the claim must be unaligned to exercise the align-up"
+        );
+        (plaintext, lz4)
+    }
+
+    /// #767: an encrypted compressed entry whose `compressed_size` claims
+    /// the UNALIGNED compressed length still round-trips. UnrealPak's
+    /// encrypted compressed entries claim the aligned footprint (its
+    /// uncompressed ones claim the unaligned length). The read is aligned
+    /// up to the AES footprint so the ciphertext decrypts, then truncated
+    /// back to the claim.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn reads_encrypted_entry_claiming_its_unaligned_compressed_size() {
+        let (plaintext, lz4) = unaligned_lz4_fixture();
+        let out = encrypted_single_block_read_back_claiming(
+            "LZ4",
+            &lz4,
+            plaintext.len(),
+            lz4.len() as u64,
+        );
+        assert_eq!(out, plaintext);
+    }
+
+    /// #767: with an unaligned `compressed_size` claim, the AES padding past
+    /// the claim is not part of the payload. A block ending inside that
+    /// padding is refused against the claimed extent, not the footprint.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_encrypted_entry_rejects_block_ending_in_aes_padding() {
+        let (plaintext, lz4) = unaligned_lz4_fixture();
+        let claim = lz4.len() as u64;
+        let reader = encrypted_single_block_reader("LZ4", &lz4, plaintext.len(), claim, claim + 1);
+        let err = reader
+            .read_entry("Content/x.uasset")
+            .expect_err("a block ending in the AES padding must be refused");
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BlockBoundsViolation {
+                        kind: BlockBoundsKind::EndPastFileSize { .. },
+                        ..
+                    }
+                }
+            ),
+            "got {err:?}"
+        );
     }
 
     /// #634 (R8 architect): a MULTI-BLOCK encrypted+compressed entry

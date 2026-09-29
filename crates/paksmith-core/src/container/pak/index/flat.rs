@@ -15,7 +15,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 use super::compression::CompressionMethod;
 use super::fstring::read_fstring;
-use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
+use super::{PakEntryHeader, PakIndex, PakIndexEntry};
 use crate::container::pak::version::PakVersion;
 use crate::error::{
     AllocationContext, BoundsUnit, IndexParseFault, PaksmithError, WireField, try_reserve_index,
@@ -40,8 +40,8 @@ use crate::seams::PakSeam;
 /// filename `String`. Without the cap, an attacker-recorded
 /// `entry_count = 946M` would drive 946M loop iterations, each
 /// doing the per-entry heap allocation + slot commit, while
-/// upstream-bounded only by the much-larger `index_size / 9`
-/// byte-budget cap.
+/// upstream-bounded only by the much-larger
+/// `index_size / entry_min_record_bytes(version)` byte-budget cap.
 ///
 /// See `docs/security/allocation-caps.md` for the empirical data
 /// and the cap-tuning rationale. Tuning this constant should weigh
@@ -49,6 +49,14 @@ use crate::seams::PakSeam;
 /// consumer against the largest UE archive worth accepting.
 /// Exposed via [`max_flat_index_entries`].
 pub(super) const MAX_FLAT_INDEX_ENTRIES: u32 = 10_000_000;
+
+/// Minimum on-disk size of a flat-index entry record for `version`: the
+/// shortest filename FString (5 bytes: `length(4) + null(1)`) plus
+/// [`PakEntryHeader::min_wire_size`] — **55 bytes for V8A, 58
+/// otherwise**. Used to bound `entry_count` against `index_size`.
+pub(super) fn entry_min_record_bytes(version: PakVersion) -> u64 {
+    5 + PakEntryHeader::min_wire_size(version)
+}
 
 /// Test-only accessor for `MAX_FLAT_INDEX_ENTRIES`. Same convention
 /// as [`super::path_hash::max_index_bytes`].
@@ -94,7 +102,7 @@ impl PakIndex {
         // residual case where index_size itself is legitimately huge
         // (multi-GB pak) and entry_count fits the budget but exceeds
         // available memory.
-        let max_entries = index_size / ENTRY_MIN_RECORD_BYTES;
+        let max_entries = index_size / entry_min_record_bytes(version);
         if u64::from(entry_count) > max_entries {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
