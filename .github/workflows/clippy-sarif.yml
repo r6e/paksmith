@@ -13,6 +13,12 @@ concurrency:
 permissions:
   security-events: write
 
+# An explicit `bash` runs with `-eo pipefail`, so a clippy failure in
+# the SARIF pipe below reds the step instead of vanishing into `tee`.
+defaults:
+  run:
+    shell: bash
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -55,9 +61,9 @@ jobs:
           | clippy-sarif
           | tee results.sarif
           | sarif-fmt
-        continue-on-error: true
 
       - name: Upload SARIF to GitHub
+        if: ${{ !cancelled() }}
         uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           sarif_file: results.sarif
