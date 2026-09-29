@@ -147,12 +147,13 @@ name.
 wire fact.**
 
 Paksmith takes the "name" as the slot text up to the first NUL, not its
-32 bytes; a space is part of the name, as in repak. So a slot reading
-`LZ4 turbo` is an unrecognized name, never the LZ4 codec.
+32 bytes, and a space is part of it. So a slot reading `LZ4 turbo` is an
+unrecognized name, never the LZ4 codec. How this differs from repak is in
+Known divergences.
 
 That rule is not total, and the remaining cases are fail-closed:
-a slot with no NUL in its 32 bytes, and a non-empty
-slot that is not valid UTF-8, both make paksmith reject the ARCHIVE
+a slot with no NUL in its 32 bytes, and a slot whose name (the bytes
+before the first NUL) is not valid UTF-8, both make paksmith reject the ARCHIVE
 with `InvalidFooter` rather than yield a name. repak takes neither
 exit — it strips NULs, decodes the rest byte-for-byte as Latin-1, and
 lets an unmatched name resolve to no method — so it opens files
@@ -334,10 +335,13 @@ the literal.
 - **`max_fdi_bytes()`**
   (`crates/paksmith-core/src/container/pak/index/path_hash.rs:79`).
   Cap on the FDI subregion size in v10+ archives.
-- **`entry_min_record_bytes(version)` = 55 for V8A, 58 otherwise**
-  (`crates/paksmith-core/src/container/pak/index/mod.rs`).
-  Used to bound `entry_count` against `index_size`. Computed as
-  `5 (min FString) + 8 (offset) + 8 (compressed_size) + 8 (uncompressed_size) + 1 or 4 (compr method: 1 byte for V8A) + 20 (sha1) + 1 (flags) + 4 (compression_block_size, present unconditionally for v3+)`.
+- **Entry-record minimums** (`crates/paksmith-core/src/container/pak/index/`).
+  `PakEntryHeader::min_wire_size(version)` is the smallest entry header:
+  `8 (offset) + 8 (compressed_size) + 8 (uncompressed_size) + 1 or 4 (compr method: 1 byte for V8A) + 20 (sha1) + 1 (flags) + 4 (compression_block_size, present unconditionally for v3+)`,
+  so 50 for V8A and 53 otherwise; it bounds the v10+ non-encoded entry
+  count, whose records carry no filename. `entry_min_record_bytes(version)`
+  adds the shortest filename FString (5), so 55 for V8A and 58 otherwise;
+  it bounds the flat index's `entry_count`.
 
 See `docs/security/allocation-caps.md` for the broader allocation-cap
 policy.
@@ -408,18 +412,27 @@ policy.
     cooked archives use ASCII-only paths, so the practical impact is nil
     — but a non-ASCII fixture would fail to open. See
     `crates/paksmith-core/src/container/pak/index/mod.rs` `fn fnv64_path`.
-  - **Compression-slot rejection (no terminator / non-UTF-8).** Two
-    more exits from the same function, both fail-closed where repak is
+  - **Compression-slot name.** Paksmith ends the name at the first NUL
+    and ignores the rest of the slot, then matches codec names
+    case-insensitively. repak removes every NUL in the slot and joins the
+    remaining bytes (`(ch != 0).then_some(ch as char)`), and its
+    `Compression` parse is case-sensitive. So `LZ4\0turbo` is LZ4 to
+    paksmith but `LZ4turbo`, no method, raw output, to repak; `\0Zlib` is
+    an empty slot to paksmith but Zlib to repak; and `lz4` is LZ4 to
+    paksmith but no method to repak. UE zero-fills the slot after the name
+    and writes canonical case, so cooked archives are unaffected.
+  - **Compression-slot rejection (no NUL / non-UTF-8).** Two exits from
+    `read_compression_method_table`, both fail-closed where repak is
     total. A slot with no NUL in its 32 bytes is
     `InvalidFooter` ("compression slot N not NUL-terminated
     within 32 bytes", hardening from issue #132, which closed a hole
-    where such a slot resolved to a 32-character name); a non-empty
-    slot that is not valid UTF-8 is `InvalidFooter` too, deliberately,
+    where such a slot resolved to a 32-character name); a slot whose name
+    before the first NUL is not valid UTF-8 is `InvalidFooter` too, deliberately,
     since silently treating it as empty would serve an entry
     referencing it as uncompressed. repak does neither: it decodes the
     non-NUL bytes as Latin-1 (`ch as char`, which cannot fail) and an
     unmatched name simply resolves to no method. So a pak with a
-    32-character codec FName, 0xFF padding, or a CP-1252 name opens in
+    32-character codec FName, 0xFF padding with no NUL, or a CP-1252 name opens in
     repak and is REJECTED by paksmith — a whole-archive refusal, not a
     per-entry difference.
   - **V8A default decoding.** `PakVersion::try_from(8)` returns `V8B`;

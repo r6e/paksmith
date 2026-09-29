@@ -686,9 +686,7 @@ mod tests {
         }
     }
 
-    /// A space is part of a slot's name, not a terminator (#753): repak
-    /// keeps it too, and stopping there resolved `LZ4 turbo` to the LZ4
-    /// codec and ` Zlib` to an empty slot.
+    /// A space is part of a slot's name, as in repak (#753).
     #[test]
     fn a_space_in_a_compression_slot_is_part_of_the_name() {
         for name in ["LZ4 turbo", " Zlib"] {

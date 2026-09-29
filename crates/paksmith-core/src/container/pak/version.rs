@@ -67,7 +67,7 @@ pub(super) const COMPRESSION_SLOTS_V8B_PLUS: usize = 5;
 pub(super) const COMPRESSION_SLOTS_V8A: usize = 4;
 
 /// Width of one compression-method FName slot: a fixed 32-byte block holding
-/// a null- or whitespace-terminated UTF-8 string (`"Zlib"`, `"Oodle"`, etc.).
+/// a NUL-terminated, NUL-padded UTF-8 string (`"Zlib"`, `"Oodle"`, etc.).
 pub(super) const COMPRESSION_SLOT_BYTES: usize = 32;
 
 /// Pak file format version.

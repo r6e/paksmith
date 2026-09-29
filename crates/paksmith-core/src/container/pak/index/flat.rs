@@ -40,8 +40,8 @@ use crate::seams::PakSeam;
 /// filename `String`. Without the cap, an attacker-recorded
 /// `entry_count = 946M` would drive 946M loop iterations, each
 /// doing the per-entry heap allocation + slot commit, while
-/// upstream-bounded only by the much-larger `index_size / 9`
-/// byte-budget cap.
+/// upstream-bounded only by the much-larger
+/// `index_size / entry_min_record_bytes(version)` byte-budget cap.
 ///
 /// See `docs/security/allocation-caps.md` for the empirical data
 /// and the cap-tuning rationale. Tuning this constant should weigh

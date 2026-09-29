@@ -901,6 +901,13 @@ impl PakEntryHeader {
         size
     }
 
+    /// Smallest [`Self::wire_size`] for `version`: an uncompressed
+    /// record with no block table (50 bytes for V8A, 53 otherwise).
+    #[must_use]
+    pub(super) fn min_wire_size(version: PakVersion) -> u64 {
+        8 + 8 + 8 + CompressionFieldWidth::for_version(version).bytes() + 20 + 1 + 4
+    }
+
     /// Byte offset stored in this header. For index headers this is the file
     /// offset of the entry's record. For in-data headers UE writes it as `0`
     /// (self-reference), so callers should not rely on it for in-data copies.

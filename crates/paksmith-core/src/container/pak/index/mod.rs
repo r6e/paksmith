@@ -55,24 +55,13 @@ use crate::container::pak::crypto::AesKey;
 use crate::container::pak::version::PakVersion;
 use crate::error::{AllocationContext, IndexParseFault, PaksmithError};
 
-/// Minimum on-disk size of an index entry record for `version`. Used to
-/// bound `entry_count` against `index_size`.
-///
-/// Decomposition (v3+ layout) — FString filename header (5, shortest
-/// possible: `length(4) + null(1)`), offset (8), compressed_size (8),
-/// uncompressed_size (8), compression_method (1 for V8A, 4 otherwise;
-/// see [`CompressionFieldWidth`]), sha1 (20), flags (1),
-/// compression_block_size (4) — **55 bytes for V8A, 58 otherwise**.
-///
-/// `compression_block_size` is present unconditionally for v3+
-/// entries (see `PakEntryHeader::read_from` in `entry_header.rs`).
-/// Pre-#344 the minimum omitted it, leaving the per-archive flat-index
-/// ceiling ~7% looser than spec; `MAX_FLAT_INDEX_ENTRIES = 10_000_000`
-/// is the global second-line defense.
-///
-/// [`CompressionFieldWidth`]: entry_header::CompressionFieldWidth
+/// Minimum on-disk size of a flat-index entry record for `version`: the
+/// shortest filename FString (5 bytes: `length(4) + null(1)`) plus
+/// [`PakEntryHeader::min_wire_size`] — **55 bytes for V8A, 58
+/// otherwise**. Used to bound `entry_count` against `index_size`;
+/// `MAX_FLAT_INDEX_ENTRIES` is the global second-line cap.
 pub(super) fn entry_min_record_bytes(version: PakVersion) -> u64 {
-    5 + 8 + 8 + 8 + entry_header::CompressionFieldWidth::for_version(version).bytes() + 20 + 1 + 4
+    5 + PakEntryHeader::min_wire_size(version)
 }
 
 /// Cap on how many duplicate filenames we sample for the dedupe warning.
@@ -3059,7 +3048,10 @@ mod tests {
     }
 
     #[test]
-    fn entry_minimum_follows_the_compression_field_width() {
+    fn entry_minimums_follow_the_compression_field_width() {
+        assert_eq!(PakEntryHeader::min_wire_size(PakVersion::V8A), 50);
+        assert_eq!(PakEntryHeader::min_wire_size(PakVersion::V8B), 53);
+        assert_eq!(PakEntryHeader::min_wire_size(PakVersion::PathHashIndex), 53);
         assert_eq!(entry_min_record_bytes(PakVersion::V8A), 55);
         assert_eq!(entry_min_record_bytes(PakVersion::V8B), 58);
         assert_eq!(entry_min_record_bytes(PakVersion::FrozenIndex), 58);
@@ -3479,7 +3471,73 @@ mod tests {
                         limit,
                         ..
                     }
-                } if *value == u64::from(u32::MAX) && *limit == main_size / 58
+                } if *value == u64::from(u32::MAX) && *limit == main_size / 53
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// A v10 main index holding `records` minimal uncompressed
+    /// non-encoded entries (53 bytes each, no filename: the FDI names
+    /// them), with the header claiming `claimed` of them.
+    fn dense_non_encoded_v10(records: u32, claimed: u32) -> (Vec<u8>, u64) {
+        let mut non_enc = Vec::new();
+        for _ in 0..records {
+            write_v10_non_encoded_uncompressed(&mut non_enc, 0, 0);
+        }
+        let files = (1..=records)
+            .map(|i| (format!("f{i}.uasset"), -i32::try_from(i).unwrap()))
+            .collect();
+        build_v10_buffer(V10Fixture {
+            file_count: records,
+            non_encoded_records: non_enc,
+            non_encoded_count: claimed,
+            fdi: vec![("/Content/".into(), files)],
+            ..V10Fixture::default()
+        })
+    }
+
+    fn read_v10(buf: Vec<u8>, main_size: u64) -> crate::Result<PakIndex> {
+        let file_size = buf.len() as u64;
+        PakIndex::read_from(
+            &mut Cursor::new(buf),
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+    }
+
+    /// Non-encoded v10+ records carry no filename, so their floor is the
+    /// 53-byte header alone. A 58-byte divisor would refuse these 25.
+    #[test]
+    fn a_densely_packed_non_encoded_v10_index_fits_the_header_minimum() {
+        let (buf, main_size) = dense_non_encoded_v10(25, 25);
+        assert!(
+            main_size / 58 < 25,
+            "the index must be too dense for a 58-byte floor"
+        );
+        assert_eq!(read_v10(buf, main_size).unwrap().entries().len(), 25);
+    }
+
+    #[test]
+    fn a_non_encoded_count_one_past_the_byte_budget_is_refused() {
+        let (_, main_size) = dense_non_encoded_v10(25, 25);
+        let claimed = u32::try_from(main_size / 53 + 1).unwrap();
+        let (buf, main_size) = dense_non_encoded_v10(25, claimed);
+        let err = read_v10(buf, main_size).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::V10NonEncodedCount,
+                        value,
+                        limit,
+                        ..
+                    }
+                } if *value == u64::from(claimed) && *limit == main_size / 53
             ),
             "got: {err:?}"
         );

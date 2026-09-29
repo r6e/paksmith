@@ -121,7 +121,7 @@ a filename `String`. Without the cap, an attacker-recorded
 per-entry allocation + slot commit, even though the `try_reserve_exact`
 call itself is microseconds.
 
-(The upstream `index_size / ENTRY_MIN_RECORD_BYTES` byte-budget check
+(The upstream `index_size / entry_min_record_bytes(version)` byte-budget check
 truncates `entry_count` against the actual index byte size — but at a
 50 GB archive that's still ~946M permitted entries without the
 `MAX_FLAT_INDEX_ENTRIES` cap fired on top.)
