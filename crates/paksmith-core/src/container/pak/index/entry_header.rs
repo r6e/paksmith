@@ -879,25 +879,21 @@ impl PakEntryHeader {
     /// the same value as `encoded_entry_in_data_record_size` by design
     /// (the v10+ encoded entry's in-data record uses the V8B+ shape).
     pub fn wire_size(&self) -> u64 {
-        let compression_field_bytes: u64 = match self {
+        let width = match self {
             Self::Inline {
                 compression_field_width,
                 ..
-            } => compression_field_width.bytes(),
+            } => *compression_field_width,
             // Encoded entries always use the V8B+ shape's u32
             // compression-method field; there is no V8A sub-variant
             // for encoded entries.
-            Self::Encoded { .. } => 4,
+            Self::Encoded { .. } => CompressionFieldWidth::FourBytes,
         };
         let common = self.common();
-        let mut size: u64 = 8 + 8 + 8 + compression_field_bytes + 20;
+        let mut size = Self::fixed_wire_bytes(width);
         if common.compression_method != CompressionMethod::None {
             size += 4 + (common.compression_blocks.len() as u64) * 16;
         }
-        // Trailer: flags u8 + compression_block_size u32. The block
-        // size is always written (with value 0 for uncompressed entries),
-        // not just when compression_blocks is non-empty.
-        size += 1 + 4;
         size
     }
 
@@ -905,7 +901,14 @@ impl PakEntryHeader {
     /// record with no block table (50 bytes for V8A, 53 otherwise).
     #[must_use]
     pub(super) fn min_wire_size(version: PakVersion) -> u64 {
-        8 + 8 + 8 + CompressionFieldWidth::for_version(version).bytes() + 20 + 1 + 4
+        Self::fixed_wire_bytes(CompressionFieldWidth::for_version(version))
+    }
+
+    /// The fields every header carries: offset, both sizes, the
+    /// compression field, SHA-1, flags and compression_block_size (the
+    /// block size is written even for uncompressed entries).
+    fn fixed_wire_bytes(width: CompressionFieldWidth) -> u64 {
+        8 + 8 + 8 + width.bytes() + 20 + 1 + 4
     }
 
     /// Byte offset stored in this header. For index headers this is the file

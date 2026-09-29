@@ -60,7 +60,7 @@ use crate::error::{AllocationContext, IndexParseFault, PaksmithError};
 /// [`PakEntryHeader::min_wire_size`] — **55 bytes for V8A, 58
 /// otherwise**. Used to bound `entry_count` against `index_size`;
 /// `MAX_FLAT_INDEX_ENTRIES` is the global second-line cap.
-pub(super) fn entry_min_record_bytes(version: PakVersion) -> u64 {
+fn entry_min_record_bytes(version: PakVersion) -> u64 {
     5 + PakEntryHeader::min_wire_size(version)
 }
 
@@ -3091,13 +3091,13 @@ mod tests {
     /// `289 / 58 = 4` would refuse the fifth entry; V8A's own 55-byte
     /// minimum admits all five (#751).
     #[test]
-    fn a_densely_packed_v8a_index_fits_its_own_entry_minimum() {
+    fn accept_dense_v8a_index_at_its_entry_minimum() {
         assert_eq!(read_dense_v8a_index(5).unwrap().entries().len(), 5);
     }
 
     /// The same 289 bytes cannot hold a sixth: the budget is `289 / 55 = 5`.
     #[test]
-    fn a_v8a_entry_count_past_the_byte_budget_is_refused() {
+    fn reject_v8a_entry_count_past_byte_budget() {
         let err = read_dense_v8a_index(6).unwrap_err();
         assert!(
             matches!(
@@ -3512,7 +3512,7 @@ mod tests {
     /// Non-encoded v10+ records carry no filename, so their floor is the
     /// 53-byte header alone. A 58-byte divisor would refuse these 25.
     #[test]
-    fn a_densely_packed_non_encoded_v10_index_fits_the_header_minimum() {
+    fn accept_dense_non_encoded_v10_index_at_header_minimum() {
         let (buf, main_size) = dense_non_encoded_v10(25, 25);
         assert!(
             main_size / 58 < 25,
@@ -3521,26 +3521,60 @@ mod tests {
         assert_eq!(read_v10(buf, main_size).unwrap().entries().len(), 25);
     }
 
+    /// A count of exactly `main_size / 53` passes the byte budget (the read
+    /// then runs out of records, which is a different fault).
     #[test]
-    fn a_non_encoded_count_one_past_the_byte_budget_is_refused() {
+    fn accept_non_encoded_count_at_byte_budget() {
         let (_, main_size) = dense_non_encoded_v10(25, 25);
-        let claimed = u32::try_from(main_size / 53 + 1).unwrap();
+        let claimed = u32::try_from(main_size / 53).unwrap();
         let (buf, main_size) = dense_non_encoded_v10(25, claimed);
         let err = read_v10(buf, main_size).unwrap_err();
         assert!(
-            matches!(
+            !matches!(
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
                         field: WireField::V10NonEncodedCount,
-                        value,
-                        limit,
                         ..
                     }
-                } if *value == u64::from(claimed) && *limit == main_size / 53
+                }
             ),
-            "got: {err:?}"
+            "the budget must admit exactly main_size / 53; got: {err:?}"
         );
+    }
+
+    /// A flat index whose `entry_count` header claims `count` against a
+    /// 400-byte budget: `400 / 55 = 7` for V8A and `400 / 58 = 6`
+    /// otherwise, while a filename-less divisor would give 8 or 7.
+    fn read_flat_count_against_400_bytes(version: PakVersion, count: u32) -> PaksmithError {
+        let mut buf: Vec<u8> = Vec::new();
+        write_fstring(&mut buf, "");
+        buf.write_u32::<LittleEndian>(count).unwrap();
+        PakIndex::read_from(&mut Cursor::new(buf), version, 0, 400, u64::MAX, &[]).unwrap_err()
+    }
+
+    #[test]
+    fn reject_flat_entry_count_past_byte_budget_per_version() {
+        for (version, count, limit) in [
+            (PakVersion::V8A, 8, 7),
+            (PakVersion::V8B, 7, 6),
+            (PakVersion::FrozenIndex, 7, 6),
+        ] {
+            let err = read_flat_count_against_400_bytes(version, count);
+            assert!(
+                matches!(
+                    &err,
+                    PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::BoundsExceeded {
+                            field: WireField::FlatEntryCount,
+                            limit: l,
+                            ..
+                        }
+                    } if *l == limit
+                ),
+                "{version:?}: expected limit {limit}; got: {err:?}"
+            );
+        }
     }
 
     /// `encoded_entry_in_data_record_size` must compute the wire-format
@@ -4567,6 +4601,38 @@ mod tests {
             total,
             "wire_size disagrees with read_from's actual consumption"
         );
+    }
+
+    /// `min_wire_size` is what `read_from` consumes for the smallest
+    /// record, so the entry-count budgets cannot drift from the parser.
+    #[test]
+    fn min_wire_size_matches_bytes_consumed_by_read_from() {
+        for version in [PakVersion::V8A, PakVersion::V8B] {
+            let mut buf = Vec::new();
+            buf.write_u64::<LittleEndian>(0).unwrap();
+            buf.write_u64::<LittleEndian>(0).unwrap();
+            buf.write_u64::<LittleEndian>(0).unwrap();
+            if version == PakVersion::V8A {
+                buf.push(0);
+            } else {
+                buf.write_u32::<LittleEndian>(0).unwrap();
+            }
+            buf.extend_from_slice(&[0u8; 20]);
+            buf.push(0);
+            buf.write_u32::<LittleEndian>(0).unwrap();
+            let mut cursor = Cursor::new(buf);
+            let header = PakEntryHeader::read_from(&mut cursor, version, &[]).unwrap();
+            assert_eq!(
+                cursor.position(),
+                PakEntryHeader::min_wire_size(version),
+                "{version:?}"
+            );
+            assert_eq!(
+                header.wire_size(),
+                PakEntryHeader::min_wire_size(version),
+                "{version:?}"
+            );
+        }
     }
 
     #[test]

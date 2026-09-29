@@ -5593,8 +5593,6 @@ mod tests {
         encrypted_single_block_read_back_claiming(method, compressed, plaintext_len, footprint)
     }
 
-    /// [`encrypted_single_block_read_back`] with the entry's
-    /// `compressed_size` claim chosen by the caller.
     /// A reader over a synthetic v8b pak holding one encrypted entry:
     /// `compressed` zero-padded to the AES footprint and encrypted, one
     /// block of `block_len` bytes, and the given `compressed_size` claim.
@@ -5624,6 +5622,8 @@ mod tests {
             .expect("open synthetic encrypted v8b pak")
     }
 
+    /// [`encrypted_single_block_read_back`] with the entry's
+    /// `compressed_size` claim chosen by the caller.
     #[cfg(feature = "__test_utils")]
     fn encrypted_single_block_read_back_claiming(
         method: &str,
@@ -5672,10 +5672,12 @@ mod tests {
         (plaintext, lz4)
     }
 
-    /// #767: an encrypted entry whose `compressed_size` claims the UNALIGNED
-    /// compressed length (no known writer does; the UnrealPak-produced
-    /// fixtures claim the aligned footprint) still round-trips. The read is aligned up to the AES footprint so the
-    /// ciphertext decrypts, then truncated back to the claim.
+    /// #767: an encrypted compressed entry whose `compressed_size` claims
+    /// the UNALIGNED compressed length still round-trips. UnrealPak's
+    /// encrypted compressed entries claim the aligned footprint (its
+    /// uncompressed ones claim the unaligned length). The read is aligned
+    /// up to the AES footprint so the ciphertext decrypts, then truncated
+    /// back to the claim.
     #[cfg(feature = "__test_utils")]
     #[test]
     fn reads_encrypted_entry_claiming_its_unaligned_compressed_size() {
@@ -5694,7 +5696,7 @@ mod tests {
     /// padding is refused against the claimed extent, not the footprint.
     #[cfg(feature = "__test_utils")]
     #[test]
-    fn an_encrypted_block_ending_in_the_aes_padding_is_refused() {
+    fn reject_encrypted_block_ending_in_aes_padding() {
         let (plaintext, lz4) = unaligned_lz4_fixture();
         let claim = lz4.len() as u64;
         let reader = encrypted_single_block_reader("LZ4", &lz4, plaintext.len(), claim, claim + 1);

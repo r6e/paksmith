@@ -358,12 +358,9 @@ impl PakFooter {
 /// [`CompressionMethod::from_name`] (which preserves the raw name for
 /// later operator-visible diagnostics if it's unrecognized).
 ///
-/// Invalid UTF-8 in a non-empty slot is treated as `InvalidFooter`
-/// rather than silently coerced to "empty / no compression" — a
-/// malformed compression-name slot is structurally a corrupt footer,
-/// and silently rewriting it to `None` would let an entry referencing
-/// the slot be served as uncompressed garbage instead of failing
-/// loudly.
+/// A name (the bytes before the first NUL) that is not valid UTF-8 is
+/// `InvalidFooter`: a malformed compression-name slot is structurally a
+/// corrupt footer.
 fn read_compression_method_table<R: Read>(
     reader: &mut R,
     slot_count: usize,
@@ -645,16 +642,8 @@ mod tests {
         }
     }
 
-    /// Issue #132 (item 2): a 32-byte FName slot with no NUL
-    /// terminator is structurally not a UE-written archive
-    /// — UE writers always zero-pad unused tail bytes. Pre-fix the
-    /// parser took the full 32 bytes verbatim and (if valid UTF-8)
-    /// resolved a 32-character `UnknownByName` compression method.
-    /// Now rejected as `InvalidFooterFault::OtherUnpromoted`.
-    ///
-    /// Test-coverage R1 finding: parametrize over `slot_index ∈ {0,
-    /// last}` so an off-by-one loop bound (e.g. `0..slot_count-1`)
-    /// would not slip past a slot-0-only test.
+    /// A slot with no NUL in its 32 bytes is `InvalidFooter` (#132),
+    /// checked at the first and last slot.
     #[test]
     fn reject_unterminated_compression_slot() {
         // V8A has 4 slots; check both ends of the loop range.
@@ -688,7 +677,7 @@ mod tests {
 
     /// A space is part of a slot's name, as in repak (#753).
     #[test]
-    fn a_space_in_a_compression_slot_is_part_of_the_name() {
+    fn parse_compression_slot_keeps_embedded_space() {
         for name in ["LZ4 turbo", " Zlib"] {
             let mut data = build_v8a_footer(0, 0, 100, None);
             data[161..161 + name.len()].copy_from_slice(name.as_bytes());

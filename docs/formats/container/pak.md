@@ -427,9 +427,9 @@ policy.
     `InvalidFooter` ("compression slot N not NUL-terminated
     within 32 bytes", hardening from issue #132, which closed a hole
     where such a slot resolved to a 32-character name); a slot whose name
-    before the first NUL is not valid UTF-8 is `InvalidFooter` too, deliberately,
-    since silently treating it as empty would serve an entry
-    referencing it as uncompressed. repak does neither: it decodes the
+    before the first NUL is not valid UTF-8 is `InvalidFooter` too,
+    refusing the whole archive rather than reading the slot as empty
+    (which would fail only the entries that reference it). repak does neither: it decodes the
     non-NUL bytes as Latin-1 (`ch as char`, which cannot fail) and an
     unmatched name simply resolves to no method. So a pak with a
     32-character codec FName, 0xFF padding with no NUL, or a CP-1252 name opens in
