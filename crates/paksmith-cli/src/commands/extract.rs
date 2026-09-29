@@ -20,6 +20,12 @@ use crate::output::OutputFormat;
 // `extract::select` (logic layer); the command layer is a thin re-exporter.
 pub(crate) use crate::extract::select::{AudioFormat, DataTableFormat, FormatPrefs};
 
+/// Ceiling on `--jobs`, enforced at parse time. The pool spawns every worker
+/// up front, so a mistyped value in the thousands would otherwise spend
+/// seconds to minutes creating threads before the OS refused one, or run a
+/// pool that large.
+pub(crate) const MAX_JOBS: i64 = 1024;
+
 #[derive(Args)]
 pub(crate) struct ExtractArgs {
     /// Path to the .pak file. Optional when `--game`/`--detect` selects
@@ -68,8 +74,8 @@ pub(crate) struct ExtractArgs {
     #[arg(long, value_enum, default_value_t = DataTableFormat::Csv)]
     pub(crate) locres_format: DataTableFormat,
 
-    /// Worker-thread cap (default: CPU count).
-    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    /// Worker-thread cap (default: CPU count; at most 1024).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_JOBS))]
     pub(crate) jobs: Option<u32>,
 
     /// Optional `.usmap` mappings file. Required for assets whose

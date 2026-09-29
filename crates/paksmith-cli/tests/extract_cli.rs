@@ -361,16 +361,24 @@ fn extract_summary_is_stable_across_jobs() {
     assert_eq!(normalize_outputs(&one), normalize_outputs(&four));
 }
 
+/// An out-of-range `--jobs` is a usage error (exit 2) that names the range
+/// and leaves no output directory behind (#807).
 #[test]
-fn extract_rejects_zero_jobs() {
-    let _ = Command::cargo_bin("paksmith")
-        .unwrap()
-        .args(["extract"])
-        .arg(fixture_pak())
-        .args(["--jobs", "0", "-o", "/tmp/x"])
-        .assert()
-        .failure()
-        .code(2); // clap usage error → exit 2
+fn extract_rejects_out_of_range_jobs_without_creating_the_output() {
+    for jobs in ["0", "1025"] {
+        let base = tempdir().unwrap();
+        let out = base.path().join("out");
+        let _ = Command::cargo_bin("paksmith")
+            .unwrap()
+            .args(["extract"])
+            .arg(fixture_pak())
+            .args(["--jobs", jobs, "-o"])
+            .arg(&out)
+            .assert()
+            .code(2)
+            .stderr(predicates::str::contains("1..=1024"));
+        assert!(!out.exists(), "--jobs {jobs} created the output root");
+    }
 }
 
 #[test]
