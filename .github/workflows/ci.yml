@@ -358,6 +358,7 @@ jobs:
           infra='crates/paksmith-core/src/(testing/|asset/property/test_utils\.rs|test_patch\.rs|test_spans\.rs)'
           cargo llvm-cov report --fail-under-lines 93 --ignore-filename-regex "(($siblings)/|$infra)"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
         with:
           name: coverage-report
           path: |

@@ -7,8 +7,12 @@ on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize]
 
+# Keyed on the head SHA as well as the PR: events can arrive out of
+# order, and a run for a superseded head must never cancel the run for
+# the head that will merge, or this required check is left with no
+# conclusion and the PR sits BLOCKED while green.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: true
 
 permissions:
