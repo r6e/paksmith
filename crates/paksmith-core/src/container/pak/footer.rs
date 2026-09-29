@@ -31,8 +31,8 @@ pub struct PakFooter {
     /// or 5 (V8B / V9 / V10 / V11). Slot index 0 in this vec maps to
     /// per-entry compression byte value 1 (the on-disk convention is
     /// 1-based; byte 0 means "no compression" and skips the table).
-    /// Empty slots — and slots holding unrecognized FName strings — are
-    /// `None`.
+    /// Empty slots are `None`; an unrecognized name is
+    /// `Some(CompressionMethod::UnknownByName(name))`.
     compression_methods: Vec<Option<CompressionMethod>>,
 }
 
@@ -352,17 +352,15 @@ impl PakFooter {
 }
 
 /// Read the v8+ compression-method FName table — `slot_count` × 32-byte
-/// blocks each holding a UTF-8 FName string padded with NULL or space
-/// bytes. Empty slots parse as `None`; non-empty slots parse via
+/// blocks each holding a NUL-terminated UTF-8 FName string. A space is
+/// part of the name, as in repak. Empty slots parse as `None`; non-empty
+/// slots parse via
 /// [`CompressionMethod::from_name`] (which preserves the raw name for
 /// later operator-visible diagnostics if it's unrecognized).
 ///
-/// Invalid UTF-8 in a non-empty slot is treated as `InvalidFooter`
-/// rather than silently coerced to "empty / no compression" — a
-/// malformed compression-name slot is structurally a corrupt footer,
-/// and silently rewriting it to `None` would let an entry referencing
-/// the slot be served as uncompressed garbage instead of failing
-/// loudly.
+/// A name (the bytes before the first NUL) that is not valid UTF-8 is
+/// `InvalidFooter`: a malformed compression-name slot is structurally a
+/// corrupt footer.
 fn read_compression_method_table<R: Read>(
     reader: &mut R,
     slot_count: usize,
@@ -371,21 +369,16 @@ fn read_compression_method_table<R: Read>(
     let mut buf = [0u8; COMPRESSION_SLOT_BYTES];
     for slot_index in 0..slot_count {
         reader.read_exact(&mut buf)?;
-        // FName slots are padded with NULL or space; stop at the
-        // first. Issue #132 (item 2): a 32-byte slot with no
-        // terminator is structurally not a UE-written archive —
-        // UE writers always zero-pad unused tail bytes. Pre-fix
-        // the parser took the full 32 bytes verbatim and (if
-        // valid UTF-8) resolved a 32-character `UnknownByName`,
-        // letting a malicious archive smuggle FName slots that
-        // pass superficial inspection.
+        // Issue #132 (item 2): a 32-byte slot with no NUL is
+        // structurally not a UE-written archive — UE writers always
+        // zero-pad unused tail bytes.
         let end = buf
             .iter()
-            .position(|&b| b == 0 || b == b' ')
+            .position(|&b| b == 0)
             .ok_or_else(|| PaksmithError::InvalidFooter {
                 fault: InvalidFooterFault::OtherUnpromoted {
                     reason: format!(
-                        "compression slot {slot_index} not nul/space-terminated within {} bytes",
+                        "compression slot {slot_index} not NUL-terminated within {} bytes",
                         buf.len()
                     ),
                 },
@@ -649,16 +642,8 @@ mod tests {
         }
     }
 
-    /// Issue #132 (item 2): a 32-byte FName slot with no nul or
-    /// space terminator is structurally not a UE-written archive
-    /// — UE writers always zero-pad unused tail bytes. Pre-fix the
-    /// parser took the full 32 bytes verbatim and (if valid UTF-8)
-    /// resolved a 32-character `UnknownByName` compression method.
-    /// Now rejected as `InvalidFooterFault::OtherUnpromoted`.
-    ///
-    /// Test-coverage R1 finding: parametrize over `slot_index ∈ {0,
-    /// last}` so an off-by-one loop bound (e.g. `0..slot_count-1`)
-    /// would not slip past a slot-0-only test.
+    /// A slot with no NUL in its 32 bytes is `InvalidFooter` (#132),
+    /// checked at the first and last slot.
     #[test]
     fn reject_unterminated_compression_slot() {
         // V8A has 4 slots; check both ends of the loop range.
@@ -679,7 +664,7 @@ mod tests {
                 } => {
                     assert!(
                         reason.contains(&format!("compression slot {slot_index}"))
-                            && reason.contains("not nul/space-terminated"),
+                            && reason.contains("not NUL-terminated"),
                         "expected typed reason for slot {slot_index}; got: {reason}"
                     );
                 }
@@ -688,6 +673,38 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// A space is part of a slot's name, as in repak (#753).
+    #[test]
+    fn parse_compression_slot_keeps_embedded_space() {
+        for name in ["LZ4 turbo", " Zlib"] {
+            let data = build_v8a_footer(0, 0, 100, Some(name));
+            let footer = PakFooter::read_from(&mut Cursor::new(data)).unwrap();
+            assert_eq!(
+                footer.compression_methods()[0],
+                Some(CompressionMethod::UnknownByName(name.to_owned())),
+                "slot {name:?}"
+            );
+        }
+    }
+
+    /// Space padding is not a terminator: a slot that fills its 32 bytes
+    /// without a NUL is refused even when the name before the padding is a
+    /// known codec (#753).
+    #[test]
+    fn reject_a_space_padded_compression_slot_without_a_nul() {
+        let data = build_v8a_footer(0, 0, 100, Some(&format!("{:<32}", "LZ4")));
+        let err = PakFooter::read_from(&mut Cursor::new(data)).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidFooter {
+                    fault: InvalidFooterFault::OtherUnpromoted { reason },
+                } if reason.contains("compression slot 0 not NUL-terminated")
+            ),
+            "got {err:?}"
+        );
     }
 
     /// Issue #132 (item 2) boundary pin: a 32-byte FName slot

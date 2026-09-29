@@ -61,7 +61,7 @@ impl CompressionFieldWidth {
     /// [`PakEntryHeader::wire_size`] to compute the in-data record
     /// length.
     #[must_use]
-    pub fn bytes(self) -> u64 {
+    pub const fn bytes(self) -> u64 {
         match self {
             Self::OneByte => 1,
             Self::FourBytes => 4,
@@ -87,7 +87,7 @@ pub(super) const fn encoded_entry_in_data_record_size(
     method: &CompressionMethod,
     block_count: usize,
 ) -> u64 {
-    let mut size: u64 = 8 + 8 + 8 + 4 + 20 + 1 + 4;
+    let mut size = PakEntryHeader::fixed_wire_bytes(CompressionFieldWidth::FourBytes);
     if !matches!(method, CompressionMethod::None) {
         size += 4 + (block_count as u64) * 16;
     }
@@ -866,11 +866,9 @@ impl PakEntryHeader {
     /// - if compressed: block_count(4) + N × (start(8) + end(8))
     /// - 5 bytes always-present trailer: flags(1) + block_size(4)
     ///
-    /// V8A is 3 bytes shorter — the compression_method field is u8 instead
-    /// of u32. Only [`PakEntryHeader::Inline`] carries a [`PakVersion`]
-    /// (set at parse time); the V8A check fires only on Inline. Encoded
-    /// entries fall through to the V8B+/v3-v7 branch — they are v10+ only
-    /// and were never V8A.
+    /// V8A is 3 bytes shorter (u8 compression field): `Inline` records its
+    /// `compression_field_width`; `Encoded` entries are v10+ and always use
+    /// the u32 width.
     ///
     /// Issue #85 added a second caller in `PakReader::open`'s open-time
     /// per-entry payload-end check, which calls `wire_size` on the
@@ -879,26 +877,36 @@ impl PakEntryHeader {
     /// the same value as `encoded_entry_in_data_record_size` by design
     /// (the v10+ encoded entry's in-data record uses the V8B+ shape).
     pub fn wire_size(&self) -> u64 {
-        let compression_field_bytes: u64 = match self {
+        let width = match self {
             Self::Inline {
                 compression_field_width,
                 ..
-            } => compression_field_width.bytes(),
+            } => *compression_field_width,
             // Encoded entries always use the V8B+ shape's u32
             // compression-method field; there is no V8A sub-variant
             // for encoded entries.
-            Self::Encoded { .. } => 4,
+            Self::Encoded { .. } => CompressionFieldWidth::FourBytes,
         };
         let common = self.common();
-        let mut size: u64 = 8 + 8 + 8 + compression_field_bytes + 20;
+        let mut size = Self::fixed_wire_bytes(width);
         if common.compression_method != CompressionMethod::None {
             size += 4 + (common.compression_blocks.len() as u64) * 16;
         }
-        // Trailer: flags u8 + compression_block_size u32. The block
-        // size is always written (with value 0 for uncompressed entries),
-        // not just when compression_blocks is non-empty.
-        size += 1 + 4;
         size
+    }
+
+    /// Smallest [`Self::wire_size`] for `version`: an uncompressed
+    /// record with no block table (50 bytes for V8A, 53 otherwise).
+    #[must_use]
+    pub(super) fn min_wire_size(version: PakVersion) -> u64 {
+        Self::fixed_wire_bytes(CompressionFieldWidth::for_version(version))
+    }
+
+    /// The fields every header carries: offset, both sizes, the
+    /// compression field, SHA-1, flags and compression_block_size (the
+    /// block size is written even for uncompressed entries).
+    const fn fixed_wire_bytes(width: CompressionFieldWidth) -> u64 {
+        8 + 8 + 8 + width.bytes() + 20 + 1 + 4
     }
 
     /// Byte offset stored in this header. For index headers this is the file
