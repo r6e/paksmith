@@ -254,15 +254,14 @@ shapes) are rejected.
 ### Implementation hardening (recommended for any parser)
 
 paksmith enforces structural caps to prevent attacker-controlled
-allocation amplification. Every cap exposes a
-`#[cfg(feature = "__test_utils")]` accessor for boundary tests.
+allocation amplification.
 
 - **`MAX_TOTAL_HEADER_SIZE = 256 MiB`**
   (`crates/paksmith-core/src/asset/summary.rs:46`). Largest acceptable
   `total_header_size`. Surfaces as
   `AssetParseFault::BoundsExceeded { field: TotalHeaderSize, … }`.
 - **`MAX_PAYLOAD_BYTES = 256 MiB`**
-  (`crates/paksmith-core/src/asset/package.rs:68`). Largest single
+  (`crates/paksmith-core/src/asset/package.rs`). Largest single
   per-export payload. Surfaces as
   `AssetParseFault::BoundsExceeded { field: ExportSerialSize, … }`.
 - **Export sizes must fit the asset**

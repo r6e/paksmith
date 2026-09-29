@@ -2458,19 +2458,19 @@ pub enum AssetParseFault {
         /// The table's entry count.
         entry_count: usize,
     },
-    /// A wire-claimed count or size exceeds a structural cap. Same
+    /// A count, size or total exceeds its limit. Same
     /// shape as [`IndexParseFault::BoundsExceeded`] (issue #133);
     /// separate variant because the field set is asset-specific.
     /// Carries `unit` so operators can disambiguate bytes-bounded
-    /// fields (`TotalHeaderSize`, `NameOffset`, etc.) from
+    /// fields (`TotalHeaderSize`, etc.) from
     /// items-bounded fields (`NameCount`, `ImportCount`, etc.) at
     /// log-grep time.
     BoundsExceeded {
         /// Wire-format field name.
         field: AssetWireField,
-        /// The header-claimed value.
+        /// The offending value.
         value: u64,
-        /// The cap it exceeds.
+        /// The limit it exceeds.
         limit: u64,
         /// Unit the cap is expressed in.
         unit: BoundsUnit,
