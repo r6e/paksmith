@@ -484,16 +484,29 @@ mod tests {
         assert!(props.is_empty());
     }
 
+    /// One `Target: LazyObjectProperty` tag with an 8-byte body, then the
+    /// None terminator.
+    fn lazy_object_property_stream() -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1i32.to_le_bytes()); // Name: Target
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&2i32.to_le_bytes()); // Type: LazyObjectProperty
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&8i32.to_le_bytes()); // Size: 8
+        buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+        buf.push(0u8); // HasPropertyGuid
+        buf.extend_from_slice(&[0u8; 8]); // value payload
+        // None terminator
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf
+    }
+
     #[test]
     fn unknown_type_name_is_charged_to_the_derived_budget() {
         let limit = "LazyObjectProperty".len() as u64;
         let ctx = with_derived_budget(make_ctx(&["None", "Target", "LazyObjectProperty"]), limit);
-        let mut buf = Vec::new();
-        for field in [1i32, 0, 2, 0, 0, 0] {
-            buf.extend_from_slice(&field.to_le_bytes()); // Name, Type, Size 0, ArrayIndex
-        }
-        buf.push(0u8); // HasPropertyGuid
-        buf.extend_from_slice(&[0u8; 8]); // None terminator
+        let buf = lazy_object_property_stream();
         let end = buf.len() as u64;
         let read = || read_properties(&mut Cursor::new(&buf[..]), &ctx, 0, end, "x.uasset");
         assert!(matches!(
@@ -513,18 +526,7 @@ mod tests {
         // dispatcher, so the test moves again to a type that is still
         // genuinely unhandled.)
         let ctx = make_ctx(&["None", "Target", "LazyObjectProperty"]);
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&1i32.to_le_bytes()); // Name: Target
-        buf.extend_from_slice(&0i32.to_le_bytes());
-        buf.extend_from_slice(&2i32.to_le_bytes()); // Type: LazyObjectProperty
-        buf.extend_from_slice(&0i32.to_le_bytes());
-        buf.extend_from_slice(&8i32.to_le_bytes()); // Size: 8
-        buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
-        buf.push(0u8); // HasPropertyGuid
-        buf.extend_from_slice(&[0u8; 8]); // value payload
-        // None terminator
-        buf.extend_from_slice(&0i32.to_le_bytes());
-        buf.extend_from_slice(&0i32.to_le_bytes());
+        let buf = lazy_object_property_stream();
         let export_end = buf.len() as u64;
         let props =
             read_properties(&mut Cursor::new(&buf[..]), &ctx, 0, export_end, "x.uasset").unwrap();

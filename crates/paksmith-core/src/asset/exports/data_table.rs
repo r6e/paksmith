@@ -169,33 +169,31 @@ fn resolve_row_struct(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<String> {
-    Ok(
-        match class_props
-            .iter()
-            .find(|p| p.name() == "RowStruct")
-            .map(|p| &p.value)
-        {
-            Some(PropertyValue::Object { name, .. }) => {
-                ctx.charge_derived(name.to_string(), asset_path)?
-            }
-            Some(_) => {
-                tracing::warn!(
-                    asset = asset_path,
-                    "DataTable RowStruct property is not an ObjectProperty; \
+    match class_props
+        .iter()
+        .find(|p| p.name() == "RowStruct")
+        .map(|p| &p.value)
+    {
+        Some(PropertyValue::Object { name, .. }) => {
+            ctx.charge_derived(name.to_string(), asset_path)
+        }
+        Some(_) => {
+            tracing::warn!(
+                asset = asset_path,
+                "DataTable RowStruct property is not an ObjectProperty; \
                  emitting empty row_struct (rows still parse)"
-                );
-                String::new()
-            }
-            None => {
-                tracing::warn!(
-                    asset = asset_path,
-                    "DataTable has no RowStruct property; emitting empty \
+            );
+            Ok(String::new())
+        }
+        None => {
+            tracing::warn!(
+                asset = asset_path,
+                "DataTable has no RowStruct property; emitting empty \
                  row_struct (rows still parse)"
-                );
-                String::new()
-            }
-        },
-    )
+            );
+            Ok(String::new())
+        }
+    }
 }
 
 /// Registry-compatible shim ([`crate::asset::exports::dispatch::TypedReaderFn`]).

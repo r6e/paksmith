@@ -20,11 +20,12 @@
 //!   export worse off than the generic parse it replaces), with a
 //!   `tracing::warn!`. An `AllocationFailed` instead **propagates** —
 //!   that is an out-of-memory condition the caller must see, not a
-//!   corrupt export (libraries fail fast).
+//!   corrupt export (libraries fail fast). So does a
+//!   `DerivedStringBudgetExceeded`, which is package-wide.
 //! - **Versioned generic**: tagged-property iteration falls back to
 //!   [`PropertyBag::Opaque`](crate::asset::property::PropertyBag) on any
-//!   parse error (warn-logged), so one corrupt versioned export does not
-//!   abort the package.
+//!   parse error other than `DerivedStringBudgetExceeded` (warn-logged),
+//!   so one corrupt versioned export does not abort the package.
 //! - **Unversioned** (`PKG_UnversionedProperties` + `.usmap`): deserialize
 //!   against the schema and **propagate** on error — an unversioned parse
 //!   failure usually signals a wrong/mismatched `.usmap`, which should
@@ -544,6 +545,9 @@ impl Package {
     ///   extends past `uasset.len()` and no `.uexp` was provided
     /// - [`AssetParseFault::SplitAssetSizeMismatch`] when a `.uexp` is
     ///   needed but `uasset.len() != total_header_size`
+    /// - [`AssetParseFault::DerivedStringBudgetExceeded`] when the names
+    ///   and paths copied while decoding the exports pass the package's
+    ///   budget
     ///
     /// See [`Self::read_from_with`] to also supply a profile's
     /// engine-version hint (#656).
@@ -1559,7 +1563,9 @@ mod read_options_tests {
 #[cfg(all(test, feature = "__test_utils"))]
 mod tests {
     use super::*;
-    use crate::asset::property::test_utils::{assert_derived_budget_exceeded, with_derived_budget};
+    use crate::asset::property::test_utils::{
+        assert_derived_budget_exceeded, with_derived_budget, write_fname, write_none_tag,
+    };
     use crate::error::CompanionFileKind;
     use crate::testing::uasset::{
         MinimalPackage, MinimalPackageSpec, build_minimal, build_minimal_ue4_27,
@@ -1580,15 +1586,14 @@ mod tests {
             crate::asset::FName::new("Score"),
             crate::asset::FName::new("IntProperty"),
         ]);
-        // IntProperty tag named `Score_0` (index 3, number 1), value 7,
-        // then the `(0, 0)` terminator.
         let mut payload = Vec::new();
-        for field in [3i32, 1, 4, 0, 4, 0] {
-            payload.extend_from_slice(&field.to_le_bytes());
-        }
+        write_fname(&mut payload, 3, 1); // Name "Score_0"
+        write_fname(&mut payload, 4, 0); // Type "IntProperty"
+        payload.extend_from_slice(&4i32.to_le_bytes()); // Size
+        payload.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
         payload.push(0); // HasPropertyGuid
         payload.extend_from_slice(&7i32.to_le_bytes());
-        payload.extend_from_slice(&[0u8; 8]);
+        write_none_tag(&mut payload);
         let mut export = spec.exports.exports[0];
         export.serial_size = i64::try_from(payload.len()).unwrap();
         spec.exports.exports = vec![export, export];

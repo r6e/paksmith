@@ -1949,15 +1949,22 @@ mod tests {
         assert_eq!(cur.position(), bytes.len() as u64);
     }
 
+    /// A material with the rendering gate off: FPackageIndex, slot name
+    /// "Mat0" (name 0) and bSerializeImported = 0.
+    fn gate_off_material_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // Material FPackageIndex (4)
+        fname(&mut bytes, 0); // MaterialSlotName "Mat0" (8)
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // bSerializeImported = 0 (4)
+        bytes
+    }
+
     #[test]
     fn skeletal_material_gate_off_skips_uvchannel() {
         // rendering below 10 → no FMeshUVChannelInfo read. Pins the rendering
         // `>=` gate: only FPackageIndex + FName + bool32 = 16 bytes consumed.
         let ctx = skel_mat_ctx(&["Mat0"], 8, 3, 9, 100);
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // Material FPackageIndex (4)
-        fname(&mut bytes, 0); // MaterialSlotName "Mat0" (8)
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // bSerializeImported = 0 (4)
+        let bytes = gate_off_material_bytes();
         assert_eq!(bytes.len(), 16);
 
         let mut cur = Cursor::new(bytes.as_slice());
@@ -1973,10 +1980,7 @@ mod tests {
             skel_mat_ctx(&["Mat0"], 8, 3, 9, 100),
             limit,
         );
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // Material FPackageIndex
-        fname(&mut bytes, 0); // MaterialSlotName "Mat0"
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // bSerializeImported = 0
+        let bytes = gate_off_material_bytes();
         let read = || read_skeletal_material(&mut Cursor::new(bytes.as_slice()), &ctx, "T.uasset");
         assert_eq!(read().unwrap().as_deref(), Some("Mat0"));
         crate::asset::property::test_utils::assert_derived_budget_exceeded(read(), limit);

@@ -1389,9 +1389,7 @@ mod tests {
     /// first slot is an `FTopLevelAssetPath` (PackageName FName +
     /// AssetName FName), joined `Package.Asset` per
     /// `FTopLevelAssetPath::ToString`, then the FString sub_path.
-    #[test]
-    fn soft_object_property_ue5_1007_toplevel_asset_path() {
-        let tag = make_tag("SoftObjectProperty", 21);
+    fn hero_toplevel_soft_path() -> (AssetContext, Vec<u8>) {
         let mut ctx = make_ctx(&["None", "/Game/Data/Hero", "Hero"]);
         ctx.version.file_version_ue4 = 522; // UE5 packages carry ue4 == 522
         ctx.version.file_version_ue5 = Some(1007);
@@ -1402,6 +1400,13 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes()); // AssetName number
         buf.extend_from_slice(&1i32.to_le_bytes()); // sub_path FString len (empty)
         buf.push(b'\0');
+        (ctx, buf)
+    }
+
+    #[test]
+    fn soft_object_property_ue5_1007_toplevel_asset_path() {
+        let tag = make_tag("SoftObjectProperty", 21);
+        let (ctx, buf) = hero_toplevel_soft_path();
         let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0)
             .unwrap()
             .unwrap();
@@ -1417,16 +1422,9 @@ mod tests {
     #[test]
     fn soft_object_path_is_charged_to_the_derived_budget() {
         let tag = make_tag("SoftObjectProperty", 21);
-        let mut ctx = make_ctx(&["None", "/Game/Data/Hero", "Hero"]);
-        ctx.version.file_version_ue4 = 522;
-        ctx.version.file_version_ue5 = Some(1007);
+        let (ctx, buf) = hero_toplevel_soft_path();
         let limit = "/Game/Data/Hero.Hero".len() as u64;
         let ctx = with_derived_budget(ctx, limit);
-        let mut buf: Vec<u8> = Vec::new();
-        for field in [1i32, 0, 2, 0, 1] {
-            buf.extend_from_slice(&field.to_le_bytes());
-        }
-        buf.push(b'\0');
         let read = || read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x", 0);
         assert!(matches!(
             read().unwrap(),

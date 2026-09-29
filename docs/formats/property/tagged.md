@@ -205,7 +205,9 @@ See `docs/security/allocation-caps.md` for the broader policy.
     `tracing::warn!` event, and substitutes `PropertyBag::Opaque`
     with the raw export bytes. CUE4Parse propagates the error; the
     paksmith design favors partial parsing because one corrupt
-    export shouldn't fail the whole package.
+    export shouldn't fail the whole package. The exception is
+    `DerivedStringBudgetExceeded`, which is package-wide and fails
+    the read.
 
 ## Paksmith implementation
 

@@ -770,15 +770,21 @@ mod tests {
     }
 
     /// `StringTableEntry (11)`: TableId FName + Key FString. #641.
-    #[test]
-    fn history_string_table_entry_decodes() {
-        let ctx = make_ctx(&["None", "/Game/Text/ST_UI"]);
+    /// Table id = name 1, key "MSG_HELLO".
+    fn string_table_entry_bytes() -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&7u32.to_le_bytes()); // flags (arbitrary)
         buf.push(11u8); // StringTableEntry
         buf.extend_from_slice(&1i32.to_le_bytes()); // FName index 1
         buf.extend_from_slice(&0i32.to_le_bytes()); // FName number
         write_fstring(&mut buf, "MSG_HELLO");
+        buf
+    }
+
+    #[test]
+    fn history_string_table_entry_decodes() {
+        let ctx = make_ctx(&["None", "/Game/Text/ST_UI"]);
+        let buf = string_table_entry_bytes();
         let tag_size = buf.len() as u64;
         let text = read_ftext(&mut Cursor::new(&buf[..]), &ctx, "x", tag_size, 0).unwrap();
         assert_eq!(text.flags, 7);
@@ -795,12 +801,7 @@ mod tests {
     fn string_table_id_is_charged_to_the_derived_budget() {
         let limit = "/Game/Text/ST_UI".len() as u64;
         let ctx = with_derived_budget(make_ctx(&["None", "/Game/Text/ST_UI"]), limit);
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
-        buf.push(11u8); // StringTableEntry
-        buf.extend_from_slice(&1i32.to_le_bytes()); // FName index 1
-        buf.extend_from_slice(&0i32.to_le_bytes()); // FName number
-        write_fstring(&mut buf, "MSG_HELLO");
+        let buf = string_table_entry_bytes();
         let size = buf.len() as u64;
         let read = || read_ftext(&mut Cursor::new(&buf[..]), &ctx, "x", size, 0);
         assert!(matches!(
