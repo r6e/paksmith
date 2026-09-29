@@ -267,8 +267,8 @@ allocation amplification. Every cap exposes a
   `AssetParseFault::BoundsExceeded { field: ExportSerialSize, … }`.
 - **Export sizes must fit the asset**
   (`crates/paksmith-core/src/asset/package.rs`, `check_export_payload_total`).
-  The exports' `SerialSize` values may not sum past the asset's full
-  length, `.uexp` included.
+  The exports' `SerialSize` values may not sum past the bytes they
+  address: the `.uasset`, plus the `.uexp` when exports reach into it.
   Disjoint ranges never do, so a larger total implies rows that point at
   the same bytes, which would decode them once per row. Surfaces as
   `AssetParseFault::BoundsExceeded { field: ExportSerialSizeTotal, … }`.

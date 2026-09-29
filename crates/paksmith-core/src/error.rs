@@ -3793,7 +3793,8 @@ pub enum AssetWireField {
     /// `FObjectExport::SerialSize`.
     ExportSerialSize,
     /// The sum of every export's `SerialSize`, which can only pass the
-    /// stitched `.uasset` + `.uexp` length when export ranges overlap.
+    /// bytes the exports address (the `.uasset`, plus the `.uexp` when
+    /// they reach into it) when export ranges overlap.
     ExportSerialSizeTotal,
     /// An FName index referenced anywhere in the header (import/export
     /// name slot, custom-version name, folder name, etc.).

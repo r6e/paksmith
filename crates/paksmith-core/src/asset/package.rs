@@ -547,8 +547,8 @@ impl Package {
     ///   needed but `uasset.len() != total_header_size`
     /// - [`AssetParseFault::BoundsExceeded`] with
     ///   `field = AssetWireField::ExportSerialSizeTotal` when the exports'
-    ///   sizes sum past the stitched buffer, which implies overlapping
-    ///   ranges
+    ///   sizes sum past the bytes they address (the `.uasset`, plus the
+    ///   `.uexp` when they reach into it), which implies overlapping ranges
     /// - [`AssetParseFault::DerivedStringBudgetExceeded`] when the names
     ///   and paths copied while decoding the exports pass the package's
     ///   budget
@@ -786,7 +786,12 @@ impl Package {
             }
         }
 
-        check_export_payload_total(bytes, &exports, asset_path)?;
+        let export_region = if needs_uexp {
+            bytes
+        } else {
+            &bytes[..uasset.len()]
+        };
+        check_export_payload_total(export_region, &exports, asset_path)?;
 
         // Phase 3b: construct the bulk-data resolver from the stitched
         // buffer + the caller-provided companion loaders. Built before the
@@ -1351,8 +1356,9 @@ fn carve_export_slice<'a>(
 }
 
 /// Validate every export's range, then refuse a table whose sizes sum
-/// past `bytes.len()`, which disjoint ranges never do. This bounds the
-/// export bytes decoded to the stitched buffer's length.
+/// past `bytes.len()`, which disjoint ranges never do. `bytes` is what
+/// the exports address: the `.uasset`, plus the `.uexp` when they reach
+/// into it. This bounds the export bytes decoded to that length.
 ///
 /// # Errors
 ///
@@ -2253,6 +2259,14 @@ mod tests {
         );
         let aliased = eight_export_package(cooked, true);
         let err = Package::read_from(&aliased, None, None, "x.uasset").unwrap_err();
+        assert_export_total_exceeded(&err, 8 * 1024, aliased.len() as u64);
+    }
+
+    #[test]
+    fn an_ignored_uexp_does_not_raise_the_export_total_limit() {
+        let aliased = eight_export_package(MinimalPackageSpec::default().package_flags, true);
+        let ignored_uexp = vec![0u8; 8 * 1024];
+        let err = Package::read_from(&aliased, Some(&ignored_uexp), None, "x.uasset").unwrap_err();
         assert_export_total_exceeded(&err, 8 * 1024, aliased.len() as u64);
     }
 
