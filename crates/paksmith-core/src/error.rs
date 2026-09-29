@@ -4939,6 +4939,14 @@ pub enum LocresParseFault {
         count: usize,
     },
 
+    /// The localized strings copied out of the strings array, summed
+    /// across the file, passed `MAX_LOCRES_RESOLVED_BYTES`.
+    #[error("locres strings resolved from the strings array exceed {limit} bytes")]
+    ResolvedStringsExceeded {
+        /// The per-file cap in bytes.
+        limit: u64,
+    },
+
     /// An `FString` field is malformed (length `i32::MIN`, length
     /// exceeding the remaining bytes, or a missing null terminator).
     #[error("malformed locres FString in {field}: {detail}")]
@@ -6325,6 +6333,12 @@ mod tests {
                     },
                 },
                 "locres deserialization failed: locres string index -1 out of range for the 2-entry strings array",
+            ),
+            (
+                PaksmithError::LocresParse {
+                    fault: F::ResolvedStringsExceeded { limit: 268_435_456 },
+                },
+                "locres deserialization failed: locres strings resolved from the strings array exceed 268435456 bytes",
             ),
             (
                 PaksmithError::LocresParse {

@@ -281,6 +281,15 @@ defensive measures that a robust parser SHOULD enforce regardless
 of which language or runtime it's built in. Failures here are
 parser bugs / DoS vectors, not format-spec violations.
 
+- **Resolved-strings total.** A key entry names its localized string
+  by a 4-byte index into the deduplicated strings array, so every
+  entry can name the same 64 Ki-unit string. A reader that gives each
+  entry its own copy SHOULD bound the total it copies. paksmith caps
+  the bytes resolved from the array across one file at
+  `MAX_LOCRES_RESOLVED_BYTES` = 256 MiB
+  (`crates/paksmith-core/src/localization/locres.rs`) and fails with
+  `LocresParseFault::ResolvedStringsExceeded { limit }`.
+
 - **Unknown version rejection.** When the first 16 bytes match the
   magic `FGuid`, `versionByte` MUST be in `{1, 2, 3}`. Values
   outside this range MUST be rejected — continuing past an unknown
