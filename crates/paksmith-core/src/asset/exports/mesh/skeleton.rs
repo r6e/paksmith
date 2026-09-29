@@ -56,6 +56,8 @@ pub(crate) const MAX_BONES_PER_SKELETON: usize = 1 << 16; // 65_536
 /// - [`AssetParseFault::UnexpectedEof`] on any short count / parent / value
 ///   read; nested FName / FTransform faults from [`read_fname_pair`] /
 ///   [`FTransform::read_from`].
+/// - [`AssetParseFault::DerivedStringBudgetExceeded`] when the copied
+///   bone names pass the package's derived-string budget.
 pub(crate) fn read_reference_skeleton<R: Read + Seek + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
@@ -105,7 +107,7 @@ pub(crate) fn read_reference_skeleton<R: Read + Seek + ?Sized>(
             ));
         }
         bones.push(crate::asset::BoneInfo {
-            name: name.to_string(),
+            name: ctx.charge_derived(name.to_string(), asset_path)?,
             parent_index,
         });
     }
@@ -221,6 +223,7 @@ mod tests {
     use crate::asset::export_table::ExportTable;
     use crate::asset::import_table::ImportTable;
     use crate::asset::name_table::{FName, NameTable};
+    use crate::asset::property::test_utils::{assert_derived_budget_exceeded, with_derived_budget};
     use crate::asset::version::AssetVersion;
 
     /// Build an `AssetContext` with the given name table (in wire order) at
@@ -313,10 +316,8 @@ mod tests {
 
     // ===== Task 4: happy path =====
 
-    #[test]
-    fn reads_two_bone_reference_skeleton_ue4_single_precision() {
-        // Name table maps index 0 -> "Root", 1 -> "Hip".
-        let ctx = test_ctx_ue4(&["Root", "Hip"]);
+    /// Two-bone UE4 reference skeleton over names 0 = "Root", 1 = "Hip".
+    fn two_bone_body_ue4() -> Vec<u8> {
         let mut body: Vec<u8> = Vec::new();
         // FinalRefBoneInfo count = 2
         body.extend_from_slice(&2i32.to_le_bytes());
@@ -336,6 +337,13 @@ mod tests {
         body.extend_from_slice(&0i32.to_le_bytes());
         fname(&mut body, 1);
         body.extend_from_slice(&1i32.to_le_bytes());
+        body
+    }
+
+    #[test]
+    fn reads_two_bone_reference_skeleton_ue4_single_precision() {
+        let ctx = test_ctx_ue4(&["Root", "Hip"]);
+        let body = two_bone_body_ue4();
 
         // Core body (BoneInfo 28 + BonePose 84) = 112 per skeleton.md;
         // FinalNameToIndexMap adds 28 → 140 total, all consumed.
@@ -354,6 +362,16 @@ mod tests {
         assert_eq!(skel.bind_pose[1].scale_3d, UNIT_SCALE);
         // whole body consumed — pins that the name-map is read, not skipped.
         assert_eq!(cur.position(), total);
+    }
+
+    #[test]
+    fn bone_names_are_charged_to_the_derived_budget() {
+        let limit = ("Root".len() + "Hip".len()) as u64;
+        let ctx = with_derived_budget(test_ctx_ue4(&["Root", "Hip"]), limit);
+        let body = two_bone_body_ue4();
+        let read = || read_reference_skeleton(&mut Cursor::new(&body), &ctx, "Test.uasset");
+        assert_eq!(read().unwrap().bones.len(), 2);
+        assert_derived_budget_exceeded(read(), limit);
     }
 
     #[test]

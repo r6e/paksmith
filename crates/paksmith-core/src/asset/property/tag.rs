@@ -283,7 +283,7 @@ impl PropertyTag {
     }
 }
 
-/// Resolve a wire-format `(index, number)` FName pair to a `String`.
+/// Resolve a wire-format `(index, number)` FName pair to its name.
 ///
 /// `number <= 0` → no suffix; `number > 0` → `"Base_N"` where
 /// `N = number − 1` (UE stores the suffix offset by `+1` so that `0`
@@ -301,6 +301,8 @@ impl PropertyTag {
 ///
 /// - [`AssetParseFault::PackageIndexUnderflow`] for `index < 0`.
 /// - [`AssetParseFault::PackageIndexOob`] for `index` past the name table.
+/// - [`AssetParseFault::DerivedStringBudgetExceeded`] when a suffixed
+///   name's copy passes the package's derived-string budget.
 pub fn resolve_fname(
     index: i32,
     number: i32,
@@ -337,8 +339,9 @@ pub fn resolve_fname(
         Ok(fname.clone_arc())
     } else {
         // Suffixed names (`Foo_1`, `Bar_42`) are not in the FName
-        // pool; one allocation per suffix.
-        Ok(Arc::from(format!("{}_{}", fname.as_str(), number - 1)))
+        // pool; each resolution builds and charges its own copy.
+        let suffixed = format!("{}_{}", fname.as_str(), number - 1);
+        ctx.charge_derived(suffixed, asset_path).map(Arc::from)
     }
 }
 
@@ -805,7 +808,8 @@ fn read_tag_extension<R: Read>(reader: &mut R, asset_path: &str) -> crate::Resul
 mod tests {
     use super::*;
     use crate::asset::property::test_utils::{
-        make_ctx, make_ctx_with_version_and_names, write_fname,
+        assert_derived_budget_exceeded, make_ctx, make_ctx_with_version_and_names,
+        with_derived_budget, write_fname,
     };
     use std::io::Cursor;
 
@@ -1363,6 +1367,24 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(tag.name.as_ref(), "Foo_1");
+    }
+
+    #[test]
+    fn suffixed_names_are_charged_to_the_derived_budget() {
+        let ctx = with_derived_budget(make_ctx(&["None", "Foo"]), 5);
+        let resolve = || resolve_fname(1, 2, &ctx, "x", AssetWireField::PropertyTagName);
+        assert_eq!(resolve().unwrap().as_ref(), "Foo_1");
+        assert_derived_budget_exceeded(resolve(), 5);
+    }
+
+    #[test]
+    fn unsuffixed_names_share_the_pool_entry_free_of_charge() {
+        let ctx = with_derived_budget(make_ctx(&["None", "Foo"]), 0);
+        let pooled = ctx.names.get(1).unwrap().clone_arc();
+        for _ in 0..2 {
+            let name = resolve_fname(1, 0, &ctx, "x", AssetWireField::PropertyTagName).unwrap();
+            assert!(Arc::ptr_eq(&name, &pooled));
+        }
     }
 
     #[test]

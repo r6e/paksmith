@@ -2806,6 +2806,7 @@ mod tests {
                 limit: 999,
             }),
             parse(AssetParseFault::PropertyTagCountExceeded { limit: 999 }),
+            parse(AssetParseFault::DerivedStringBudgetExceeded { limit: 999 }),
             parse(AssetParseFault::CollectionElementCountExceeded {
                 collection: CollectionKind::Array,
                 count: 999,

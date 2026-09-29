@@ -23,7 +23,6 @@ use std::sync::{Arc, LazyLock};
 use byteorder::{LE, ReadBytesExt};
 use tracing::warn;
 
-use crate::asset::AssetContext;
 use crate::asset::package_index::PackageIndex;
 use crate::asset::property::bag::MAX_PROPERTY_DEPTH;
 use crate::asset::property::primitives::{
@@ -32,6 +31,7 @@ use crate::asset::property::primitives::{
 use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::property::{MAX_COLLECTION_ELEMENTS, Property, read_fname_pair};
 use crate::asset::read_asset_fstring;
+use crate::asset::{AssetContext, is_derived_budget_trip};
 use crate::error::{
     AssetParseFault, AssetWireField, BoundsUnit, CollectionKind, PaksmithError, try_reserve_asset,
 };
@@ -491,7 +491,10 @@ fn read_unversioned_value(
                     field: AssetWireField::ObjectPropertyIndex,
                 },
             })?;
-            let name = resolve_package_index(kind, ctx, asset_path).unwrap_or_default();
+            let name = match resolve_package_index(kind, ctx, asset_path) {
+                Err(err) if is_derived_budget_trip(&err) => return Err(err),
+                resolved => resolved.unwrap_or_default(),
+            };
             PropertyValue::Object { kind, name }
         }
         MT::SoftObject => {
@@ -815,7 +818,9 @@ mod tests {
 
     use crate::asset::mappings::ClassSchema;
     use crate::asset::property::primitives::{MapEntry, PropertyValue};
-    use crate::asset::property::test_utils::make_ctx;
+    use crate::asset::property::test_utils::{
+        assert_derived_budget_exceeded, make_ctx, make_ctx_with_import, with_derived_budget,
+    };
 
     fn two_prop_header_bytes() -> Vec<u8> {
         // Fragment: skip=0, has_zeros=false, is_last=true, value_num=2
@@ -1153,6 +1158,60 @@ mod tests {
         let mut schemas = HashMap::new();
         let _ = schemas.insert("C".to_string(), schema);
         Usmap::from_parts(schemas, HashMap::new()).expect("from_parts")
+    }
+
+    #[test]
+    fn unversioned_unresolvable_object_ref_decodes_with_an_empty_name() {
+        let usmap = single_prop_usmap(MappedPropertyType::Object);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes()); // 1 serialized property
+        bytes.extend_from_slice(&(-6i32).to_le_bytes()); // Import(5), past the table
+        let ctx = make_ctx(&["None"]);
+        let props = read_unversioned_properties(
+            &mut Cursor::new(bytes.as_slice()),
+            "C",
+            &usmap,
+            &ctx,
+            "t",
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            &props[0].value,
+            PropertyValue::Object { name, .. } if name.is_empty()
+        ));
+    }
+
+    /// A copied object name that passes the budget fails the decode
+    /// rather than falling back to the empty name an unresolvable
+    /// reference gets.
+    #[test]
+    fn unversioned_object_name_budget_trip_propagates() {
+        let usmap = single_prop_usmap(MappedPropertyType::Object);
+        let mut ctx = make_ctx_with_import("Mesh");
+        let mut imports = (*ctx.imports).clone();
+        imports.imports[0].object_name_number = 1;
+        ctx.imports = Arc::new(imports);
+        let limit = "Mesh_0".len() as u64;
+        let ctx = with_derived_budget(ctx, limit);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes()); // 1 serialized property
+        bytes.extend_from_slice(&(-1i32).to_le_bytes()); // Import(0)
+        let read = || {
+            read_unversioned_properties(
+                &mut Cursor::new(bytes.as_slice()),
+                "C",
+                &usmap,
+                &ctx,
+                "t",
+                0,
+            )
+        };
+        assert!(matches!(
+            &read().unwrap()[0].value,
+            PropertyValue::Object { name, .. } if name.as_ref() == "Mesh_0"
+        ));
+        assert_derived_budget_exceeded(read(), limit);
     }
 
     /// Unversioned `Set<Int32>` decode: `i32 num_to_remove` (0) + `i32

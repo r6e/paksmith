@@ -71,6 +71,7 @@ pub(super) fn unexpected_eof(asset_path: &str, field: AssetWireField) -> Paksmit
 /// - [`AssetParseFault::UnexpectedEof`] on a short read of either i32.
 /// - [`AssetParseFault::PackageIndexUnderflow`] for `index < 0`.
 /// - [`AssetParseFault::PackageIndexOob`] for index past the name table.
+/// - [`AssetParseFault::DerivedStringBudgetExceeded`] from [`resolve_fname`].
 pub(super) fn read_fname_pair<R: Read + ?Sized>(
     reader: &mut R,
     ctx: &AssetContext,
@@ -170,6 +171,8 @@ pub const MAX_ROWS_PER_DATATABLE: usize = 1_048_576;
 /// - [`AssetParseFault::PropertyTagCountExceeded`] if the tag count
 ///   hits [`MAX_TAGS_PER_EXPORT`] without a terminator.
 /// - [`AssetParseFault::PropertyTagSizeMismatch`] on cursor mismatch.
+/// - [`AssetParseFault::DerivedStringBudgetExceeded`] when an unknown
+///   tag's copied type name passes the package's derived-string budget.
 /// - Any error from [`read_tag`] or the primitive/text readers.
 pub fn read_properties<R: Read + Seek>(
     reader: &mut R,
@@ -262,12 +265,7 @@ pub fn read_properties<R: Read + Seek>(
                 AssetWireField::PropertyTagSize,
             )?;
             PropertyValue::Unknown {
-                // PropertyValue::Unknown.type_name is `String` (out
-                // of #365's scope — not on the issue's explicit
-                // PropertyValue field list). One alloc here per
-                // Unknown property; cold relative to the per-element
-                // hot path the issue targets.
-                type_name: tag.type_name.to_string(),
+                type_name: ctx.charge_derived(tag.type_name.to_string(), asset_path)?,
                 skipped_bytes: n,
             }
         };
@@ -385,7 +383,9 @@ pub(crate) fn read_object_guid_tail<R: Read + Seek>(
 mod tests {
     use super::*;
     use crate::asset::AssetContext;
-    use crate::asset::property::test_utils::make_ctx;
+    use crate::asset::property::test_utils::{
+        assert_derived_budget_exceeded, make_ctx, with_derived_budget,
+    };
     use std::io::Cursor;
 
     /// UE5 ≥ 1011: the pre-byte is consumed (0x00), and 0x02 also
@@ -485,16 +485,10 @@ mod tests {
         assert!(props.is_empty());
     }
 
-    #[test]
-    fn unknown_type_stored_as_unknown_variant() {
-        // LazyObjectProperty is unhandled by both primitive and
-        // container readers as of Phase 2d Task 3, so it falls through
-        // to the skip path. (Pre-Task 7 this test used ArrayProperty;
-        // Task 7 wired ArrayProperty into the container dispatcher;
-        // Phase 2d Task 3 wires ObjectProperty into the primitive
-        // dispatcher, so the test moves again to a type that is still
-        // genuinely unhandled.)
-        let ctx = make_ctx(&["None", "Target", "LazyObjectProperty"]);
+    /// One `Target: LazyObjectProperty` tag with an 8-byte body, then the
+    /// None terminator. `LazyObjectProperty` has no reader, so it decodes
+    /// as `PropertyValue::Unknown`.
+    fn lazy_object_property_stream() -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes()); // Name: Target
         buf.extend_from_slice(&0i32.to_le_bytes());
@@ -507,6 +501,27 @@ mod tests {
         // None terminator
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&0i32.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn unknown_type_name_is_charged_to_the_derived_budget() {
+        let limit = "LazyObjectProperty".len() as u64;
+        let ctx = with_derived_budget(make_ctx(&["None", "Target", "LazyObjectProperty"]), limit);
+        let buf = lazy_object_property_stream();
+        let end = buf.len() as u64;
+        let read = || read_properties(&mut Cursor::new(&buf[..]), &ctx, 0, end, "x.uasset");
+        assert!(matches!(
+            read().unwrap()[0].value,
+            PropertyValue::Unknown { .. }
+        ));
+        assert_derived_budget_exceeded(read(), limit);
+    }
+
+    #[test]
+    fn unknown_type_stored_as_unknown_variant() {
+        let ctx = make_ctx(&["None", "Target", "LazyObjectProperty"]);
+        let buf = lazy_object_property_stream();
         let export_end = buf.len() as u64;
         let props =
             read_properties(&mut Cursor::new(&buf[..]), &ctx, 0, export_end, "x.uasset").unwrap();

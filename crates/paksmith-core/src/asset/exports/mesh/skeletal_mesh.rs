@@ -261,6 +261,8 @@ pub(super) fn read_mesh_uv_channel_info<R: Read + ?Sized>(
 ///   out-of-range slot-name `FName` (propagated from [`read_fname_pair`]).
 /// - [`crate::PaksmithError::Io`] / [`crate::error::AssetParseFault::UnexpectedEof`]
 ///   on a short read of any field.
+/// - [`crate::error::AssetParseFault::DerivedStringBudgetExceeded`] when
+///   the copied slot name passes the package's derived-string budget.
 pub(super) fn read_skeletal_material<R: Read + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
@@ -276,7 +278,7 @@ pub(super) fn read_skeletal_material<R: Read + ?Sized>(
         .is_some_and(|v| v >= REFACTOR_MESH_EDITOR_MATERIALS)
     {
         let name = read_fname_pair(r, ctx, asset_path, AssetWireField::SkeletalMaterialSlotName)?;
-        Some(name.to_string())
+        Some(ctx.charge_derived(name.to_string(), asset_path)?)
     } else {
         None
     };
@@ -1947,21 +1949,41 @@ mod tests {
         assert_eq!(cur.position(), bytes.len() as u64);
     }
 
+    /// A material with the rendering gate off: FPackageIndex, slot name
+    /// "Mat0" (name 0) and bSerializeImported = 0.
+    fn gate_off_material_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // Material FPackageIndex (4)
+        fname(&mut bytes, 0); // MaterialSlotName "Mat0" (8)
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // bSerializeImported = 0 (4)
+        bytes
+    }
+
     #[test]
     fn skeletal_material_gate_off_skips_uvchannel() {
         // rendering below 10 → no FMeshUVChannelInfo read. Pins the rendering
         // `>=` gate: only FPackageIndex + FName + bool32 = 16 bytes consumed.
         let ctx = skel_mat_ctx(&["Mat0"], 8, 3, 9, 100);
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // Material FPackageIndex (4)
-        fname(&mut bytes, 0); // MaterialSlotName "Mat0" (8)
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // bSerializeImported = 0 (4)
+        let bytes = gate_off_material_bytes();
         assert_eq!(bytes.len(), 16);
 
         let mut cur = Cursor::new(bytes.as_slice());
         let name = read_skeletal_material(&mut cur, &ctx, "T.uasset").expect("decode");
         assert_eq!(name.as_deref(), Some("Mat0"));
         assert_eq!(cur.position(), bytes.len() as u64);
+    }
+
+    #[test]
+    fn skeletal_material_slot_name_is_charged_to_the_derived_budget() {
+        let limit = "Mat0".len() as u64;
+        let ctx = crate::asset::property::test_utils::with_derived_budget(
+            skel_mat_ctx(&["Mat0"], 8, 3, 9, 100),
+            limit,
+        );
+        let bytes = gate_off_material_bytes();
+        let read = || read_skeletal_material(&mut Cursor::new(bytes.as_slice()), &ctx, "T.uasset");
+        assert_eq!(read().unwrap().as_deref(), Some("Mat0"));
+        crate::asset::property::test_utils::assert_derived_budget_exceeded(read(), limit);
     }
 
     #[test]

@@ -179,6 +179,8 @@ pub enum FTextFormatArg {
 ///   `FText` (format pattern / `Text` argument) carries an undecoded
 ///   history type — nested contexts have no size to skip with, same as
 ///   collection elements.
+/// - [`AssetParseFault::DerivedStringBudgetExceeded`] when a string-table
+///   id's copy passes the package's derived-string budget.
 #[allow(
     clippy::too_many_lines,
     reason = "one linear match over ETextHistoryType wire variants; splitting per-variant helpers would scatter the shared start_pos/eof/depth plumbing without shortening any single arm"
@@ -305,7 +307,7 @@ pub fn read_ftext<R: Read + Seek>(
                 super::read_fname_pair(reader, ctx, asset_path, AssetWireField::FTextField)?;
             let key = read_asset_fstring(reader, asset_path)?;
             FTextHistory::StringTableEntry {
-                table_id: table_id.to_string(),
+                table_id: ctx.charge_derived(table_id.to_string(), asset_path)?,
                 key,
             }
         }
@@ -505,7 +507,9 @@ fn read_format_arg<R: Read + Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::property::test_utils::make_ctx;
+    use crate::asset::property::test_utils::{
+        assert_derived_budget_exceeded, make_ctx, with_derived_budget,
+    };
     use std::io::Cursor;
 
     fn empty_ctx() -> AssetContext {
@@ -766,15 +770,21 @@ mod tests {
     }
 
     /// `StringTableEntry (11)`: TableId FName + Key FString. #641.
-    #[test]
-    fn history_string_table_entry_decodes() {
-        let ctx = make_ctx(&["None", "/Game/Text/ST_UI"]);
+    /// Table id = name 1, key "MSG_HELLO".
+    fn string_table_entry_bytes() -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&7u32.to_le_bytes()); // flags (arbitrary)
         buf.push(11u8); // StringTableEntry
         buf.extend_from_slice(&1i32.to_le_bytes()); // FName index 1
         buf.extend_from_slice(&0i32.to_le_bytes()); // FName number
         write_fstring(&mut buf, "MSG_HELLO");
+        buf
+    }
+
+    #[test]
+    fn history_string_table_entry_decodes() {
+        let ctx = make_ctx(&["None", "/Game/Text/ST_UI"]);
+        let buf = string_table_entry_bytes();
         let tag_size = buf.len() as u64;
         let text = read_ftext(&mut Cursor::new(&buf[..]), &ctx, "x", tag_size, 0).unwrap();
         assert_eq!(text.flags, 7);
@@ -785,6 +795,20 @@ mod tests {
                 key: "MSG_HELLO".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn string_table_id_is_charged_to_the_derived_budget() {
+        let limit = "/Game/Text/ST_UI".len() as u64;
+        let ctx = with_derived_budget(make_ctx(&["None", "/Game/Text/ST_UI"]), limit);
+        let buf = string_table_entry_bytes();
+        let size = buf.len() as u64;
+        let read = || read_ftext(&mut Cursor::new(&buf[..]), &ctx, "x", size, 0);
+        assert!(matches!(
+            read().unwrap().history,
+            FTextHistory::StringTableEntry { .. }
+        ));
+        assert_derived_budget_exceeded(read(), limit);
     }
 
     /// `NamedFormat (1)`: nested pattern FText + i32 count + count ×

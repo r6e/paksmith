@@ -123,6 +123,8 @@ struct PlatformData {
 ///   segment.
 /// - [`AssetParseFault::NegativeValue`] / [`AssetParseFault::BoundsExceeded`]
 ///   on a bad format / chunk count, or any `FName` / `FByteBulkData` fault.
+/// - [`AssetParseFault::DerivedStringBudgetExceeded`] from either platform-data
+///   attempt; it ends the read instead of triggering the streaming-flip retry.
 pub(crate) fn read_from(
     payload: &[u8],
     ctx: &AssetContext,
@@ -182,6 +184,7 @@ pub(crate) fn read_from(
     let platform = match read_platform_data(&mut cur, ctx, streaming, cooked, total_len, asset_path)
     {
         Ok(platform) => platform,
+        Err(first) if crate::asset::is_derived_budget_trip(&first) => return Err(first),
         Err(_first) => {
             // Streaming-flip retry. The reader returns a fresh `PlatformData` by
             // value, so the failed attempt's partial state (incl. its `bulk`
@@ -693,8 +696,11 @@ mod tests {
     }
 
     use crate::asset::property::test_utils::{
+        assert_derived_budget_exceeded,
         make_ctx,
         make_ctx_with_version,
+        make_ctx_with_version_and_names,
+        with_derived_budget,
         write_fname,
         write_int_property,
         // `none` ends a top-level export body: the `None` tag + the object-GUID
@@ -1549,6 +1555,30 @@ mod tests {
         assert!(data.streamed.is_none());
         assert_eq!(bulk.len(), 1);
         assert_eq!(bulk[0].size_on_disk, 1000);
+    }
+
+    /// A budget trip in the first platform-data attempt ends the read. The
+    /// bytes after the suffixed format key also parse as a streaming tail, so
+    /// a retry would succeed.
+    #[test]
+    fn streaming_flip_retry_does_not_swallow_a_budget_trip() {
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_flags(&mut bytes, 0x1); // cooked
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // numFormats = 1 | GUID[0..4]
+        write_fname(&mut bytes, 1, 1); // format key "OGG_0" | GUID[4..12]
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // GUID[12..16]
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // streaming NumChunks = 0
+        write_fname(&mut bytes, 0, 0); // AudioFormat = "None"
+        let ctx = || make_ctx_with_version_and_names(516, None, &["None", "OGG"]);
+
+        let (data, _) = read_from(&bytes, &ctx(), "s").expect("the retry parses the tail");
+        assert!(data.streaming);
+        let limit = "OGG_0".len() as u64 - 1;
+        assert_derived_budget_exceeded(
+            read_from(&bytes, &with_derived_budget(ctx(), limit), "s"),
+            limit,
+        );
     }
 
     #[test]

@@ -161,6 +161,15 @@ The wire shape is uniform across all property types; per-type variance lives in 
   (`crates/paksmith-core/src/asset/property/bag.rs`). Maximum
   nesting depth for recursive structs / containers. Surfaces as
   `AssetParseFault::PropertyDepthExceeded { depth, limit }`.
+- **`MAX_DERIVED_STRING_BYTES = 256 MiB`**
+  (`crates/paksmith-core/src/asset/mod.rs`). Per-package budget for
+  strings copied out of the name table while decoding: suffixed FNames
+  (`Name_N`), soft-object paths, unknown-type names, string-table ids,
+  DataTable row names and row structs, and bone and material slot
+  names. An 8-byte FName reference can name a 64 Ki-character entry,
+  so each copy is charged against one running total. Passing it fails
+  the package read with
+  `AssetParseFault::DerivedStringBudgetExceeded { limit }`.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
@@ -196,7 +205,9 @@ See `docs/security/allocation-caps.md` for the broader policy.
     `tracing::warn!` event, and substitutes `PropertyBag::Opaque`
     with the raw export bytes. CUE4Parse propagates the error; the
     paksmith design favors partial parsing because one corrupt
-    export shouldn't fail the whole package.
+    export shouldn't fail the whole package. The exception is
+    `DerivedStringBudgetExceeded`, which is package-wide and fails
+    the read.
 
 ## Paksmith implementation
 
@@ -214,7 +225,7 @@ iteration loop, the two outer caps).
 - `pub struct PropertyTag` — every field as `pub`.
 - `pub fn read_tag<R: Read>(reader, ctx, asset_path) -> Result<Option<PropertyTag>>` —
   returns `Ok(None)` for the "None" terminator.
-- `pub fn resolve_fname(index, number, ctx, asset_path, field) -> Result<String>` —
+- `pub fn resolve_fname(index, number, ctx, asset_path, field) -> Result<Arc<str>>` —
   shared FName resolver used by the tag and value readers.
 - `pub fn read_properties<R: Read + Seek>(reader, ctx, depth, export_end, asset_path) -> Result<Vec<Property>>` —
   the iteration loop.
@@ -226,6 +237,8 @@ iteration loop, the two outer caps).
 - `AssetParseFault::BoundsExceeded { field: PropertyTagSize, unit: Bytes, .. }` — `Size > MAX_PROPERTY_TAG_SIZE`.
 - `AssetParseFault::PropertyTagCountExceeded { limit }` — iteration exceeded `MAX_TAGS_PER_EXPORT`.
 - `AssetParseFault::PropertyDepthExceeded { depth, limit }` — nesting exceeded `MAX_PROPERTY_DEPTH`.
+- `AssetParseFault::DerivedStringBudgetExceeded { limit }` — copied names
+  and paths exceeded `MAX_DERIVED_STRING_BYTES` for the package.
 - `AssetParseFault::PropertyTagSizeMismatch { expected_end, actual_pos }` — cursor
   out of sync after a value read, or tag claims bytes past `export_end`.
 - `AssetParseFault::UnexpectedEof { field: AssetWireField }` for every

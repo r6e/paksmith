@@ -22,6 +22,7 @@
 //! architectural intent.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
@@ -855,21 +856,78 @@ pub struct Texture2DMipMap {
     pub size_z: u32,
 }
 
+/// Budget, in bytes, for the names and paths one package decode may
+/// copy out of its name table.
+///
+/// Most name-derived values share the table's `Arc<str>`, but a
+/// suffixed FName, a soft-object path and a few `String` fields
+/// (DataTable row names and row structs, bone and material slot names,
+/// unknown type names, string-table ids) build a fresh copy per decoded
+/// value. The copied entry can be 64 Ki characters while the reference
+/// to it costs a few wire bytes. A suffixed name copied into a `String`
+/// is charged twice, once when resolved and once when copied. 256 MiB
+/// matches the per-export `MAX_PAYLOAD_BYTES`; passing it fails the whole
+/// package read.
+pub(crate) const MAX_DERIVED_STRING_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Test-only accessor for `MAX_DERIVED_STRING_BYTES` (256 MiB).
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_derived_string_bytes() -> u64 {
+    MAX_DERIVED_STRING_BYTES
+}
+
+/// Whether `err` is an [`AssetContext::charge_derived`] refusal, which
+/// ends the package read instead of degrading one export.
+pub(crate) fn is_derived_budget_trip(err: &crate::PaksmithError) -> bool {
+    matches!(
+        err,
+        crate::PaksmithError::AssetParse {
+            fault: crate::error::AssetParseFault::DerivedStringBudgetExceeded { .. },
+            ..
+        }
+    )
+}
+
+/// Running total of the bytes charged by
+/// [`AssetContext::charge_derived`], shared by every clone of one
+/// context.
+#[derive(Debug)]
+pub(crate) struct DerivedStringBudget {
+    used: AtomicU64,
+    limit: u64,
+}
+
+impl DerivedStringBudget {
+    pub(crate) fn new(limit: u64) -> Self {
+        Self {
+            used: AtomicU64::new(0),
+            limit,
+        }
+    }
+}
+
+impl Default for DerivedStringBudget {
+    fn default() -> Self {
+        Self::new(MAX_DERIVED_STRING_BYTES)
+    }
+}
+
 /// Bundle threading the parsed name/import/export tables, version,
 /// optional `.usmap` schema registry, and the caller's optional
 /// engine-version hint (#656) through downstream property parsers
 /// (Phase 2b+).
 ///
 /// **Thread safety:** `AssetContext: Send + Sync`. All components are
-/// `Arc`-shared immutable data — safe to clone and share across
-/// worker threads. Pinned by the `send_sync_assertions` test in
-/// `lib.rs`.
+/// `Arc`-shared; the bulk resolver's caches and the derived-string
+/// budget use atomics / `OnceLock`, so the context is safe to clone and
+/// share across worker threads.
+/// Pinned by the `send_sync_assertions` test in `lib.rs`.
 ///
 /// `Arc`-wrapped components so `clone()` is a handful of atomic refcount
-/// bumps — important because the GUI's PropertyInspector widget holds a
-/// context across many event-loop ticks and must not block on table
-/// copies. (`version` is `Copy`; `mappings` is `Option<Arc<_>>`.) Built
-/// from a parsed [`Package`] via [`Package::context`].
+/// bumps. (`version` is `Copy`; `mappings` is `Option<Arc<_>>`.) Clones
+/// share one budget for copied names that never resets; each
+/// [`AssetContext::new`] or [`Package::context`] call starts a fresh one.
 ///
 /// Marked `#[non_exhaustive]` because additional version-gate fields
 /// land here without a major bump (`custom_versions` shipped with #355;
@@ -952,6 +1010,10 @@ pub struct AssetContext {
     /// `None` from [`AssetContext::new`]; set on the
     /// `Package::read_from*` path from the caller's profile.
     pub engine_version_hint: Option<engine_hint::UeVersion>,
+    /// Bytes of name-derived strings this decode has copied; see
+    /// [`MAX_DERIVED_STRING_BYTES`]. Clones share it, so every export
+    /// of one `Package::read_from*` call draws on one budget.
+    pub(crate) derived_strings: Arc<DerivedStringBudget>,
 }
 
 impl AssetContext {
@@ -985,7 +1047,34 @@ impl AssetContext {
             // Set from the caller's profile on the
             // `Package::read_from*` path; see the field's own doc.
             engine_version_hint: None,
+            derived_strings: Arc::default(),
         }
+    }
+
+    /// Charge `s`, a string built from name-table entries, to this
+    /// decode's derived-string budget and hand it back.
+    ///
+    /// # Errors
+    ///
+    /// [`AssetParseFault::DerivedStringBudgetExceeded`] once the
+    /// strings charged through this context and its clones pass the
+    /// budget. The counter keeps the refused bytes, so every later
+    /// charge fails too.
+    ///
+    /// [`AssetParseFault::DerivedStringBudgetExceeded`]: crate::error::AssetParseFault::DerivedStringBudgetExceeded
+    pub(crate) fn charge_derived(&self, s: String, asset_path: &str) -> crate::Result<String> {
+        let len = s.len() as u64;
+        let budget = &self.derived_strings;
+        let used = budget.used.fetch_add(len, Ordering::Relaxed);
+        if used.saturating_add(len) > budget.limit {
+            return Err(crate::PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: crate::error::AssetParseFault::DerivedStringBudgetExceeded {
+                    limit: budget.limit,
+                },
+            });
+        }
+        Ok(s)
     }
 
     /// Attach an out-of-band engine-version hint (issue #656).
@@ -1000,6 +1089,52 @@ impl AssetContext {
     pub fn with_engine_version_hint(mut self, hint: Option<engine_hint::UeVersion>) -> Self {
         self.engine_version_hint = hint;
         self
+    }
+}
+
+#[cfg(test)]
+mod derived_string_budget_tests {
+    use super::*;
+    use crate::asset::property::test_utils::{
+        assert_derived_budget_exceeded, make_ctx, with_derived_budget,
+    };
+
+    #[test]
+    fn charges_up_to_the_limit_then_refuses() {
+        let ctx = with_derived_budget(make_ctx(&[]), 5);
+        assert_eq!(ctx.charge_derived("abc".into(), "x").unwrap(), "abc");
+        assert_eq!(ctx.charge_derived("de".into(), "x").unwrap(), "de");
+        assert_derived_budget_exceeded(ctx.charge_derived("f".into(), "x"), 5);
+    }
+
+    #[test]
+    fn a_refused_charge_keeps_the_budget_spent() {
+        let ctx = with_derived_budget(make_ctx(&[]), 4);
+        assert_derived_budget_exceeded(ctx.charge_derived("abcde".into(), "x"), 4);
+        assert_derived_budget_exceeded(ctx.charge_derived(String::new(), "x"), 4);
+    }
+
+    #[test]
+    fn clones_share_one_budget() {
+        let ctx = with_derived_budget(make_ctx(&[]), 4);
+        let clone = ctx.clone();
+        assert_eq!(ctx.charge_derived("ab".into(), "x").unwrap(), "ab");
+        assert_eq!(clone.charge_derived("cd".into(), "x").unwrap(), "cd");
+        assert_derived_budget_exceeded(ctx.charge_derived("e".into(), "x"), 4);
+    }
+
+    #[test]
+    fn asset_context_new_starts_a_full_budget() {
+        let ctx = make_ctx(&[]);
+        assert_eq!(ctx.derived_strings.limit, MAX_DERIVED_STRING_BYTES);
+        assert_eq!(ctx.derived_strings.used.load(Ordering::Relaxed), 0);
+        assert_eq!(MAX_DERIVED_STRING_BYTES, 256 * 1024 * 1024);
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn accessor_reads_the_live_cap() {
+        assert_eq!(max_derived_string_bytes(), MAX_DERIVED_STRING_BYTES);
     }
 }
 

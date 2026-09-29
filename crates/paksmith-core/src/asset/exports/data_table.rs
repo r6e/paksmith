@@ -58,6 +58,8 @@ const MIN_ROW_BYTES: u64 = 16;
 ///   unterminated row body surfaces as `PropertyTagSizeMismatch`).
 /// - [`AssetParseFault::AllocationFailed`] if the row-vec reservation
 ///   is refused.
+/// - [`AssetParseFault::DerivedStringBudgetExceeded`] when the copied
+///   row names or row struct pass the package's derived-string budget.
 pub(crate) fn read_from(
     payload: &[u8],
     ctx: &AssetContext,
@@ -77,7 +79,7 @@ pub(crate) fn read_from(
 
     // Resolve the RowStruct type name for diagnostics BEFORE moving
     // `class_props` into the bag (avoids a clone).
-    let row_struct = resolve_row_struct(&class_props, asset_path);
+    let row_struct = resolve_row_struct(&class_props, ctx, asset_path)?;
     let class_properties = PropertyBag::Tree {
         properties: class_props,
     };
@@ -131,7 +133,7 @@ pub(crate) fn read_from(
         // surfaces as `PropertyTagSizeMismatch` from `read_properties`.
         let properties = read_properties(&mut cur, ctx, 0, total_len, asset_path)?;
         rows.push(DataTableRow {
-            name: name.to_string(),
+            name: ctx.charge_derived(name.to_string(), asset_path)?,
             properties,
         });
     }
@@ -157,20 +159,31 @@ fn reserve_count(num_rows: usize, remaining_bytes: u64) -> usize {
 /// property is absent or isn't an `ObjectProperty` — rows still parse;
 /// they just carry no schema-type label, per the format doc's
 /// graceful-recovery clause.
-fn resolve_row_struct(class_props: &[Property], asset_path: &str) -> String {
+///
+/// # Errors
+///
+/// [`AssetParseFault::DerivedStringBudgetExceeded`] when the copied
+/// class name passes the package's derived-string budget.
+fn resolve_row_struct(
+    class_props: &[Property],
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<String> {
     match class_props
         .iter()
         .find(|p| p.name() == "RowStruct")
         .map(|p| &p.value)
     {
-        Some(PropertyValue::Object { name, .. }) => name.to_string(),
+        Some(PropertyValue::Object { name, .. }) => {
+            ctx.charge_derived(name.to_string(), asset_path)
+        }
         Some(_) => {
             tracing::warn!(
                 asset = asset_path,
                 "DataTable RowStruct property is not an ObjectProperty; \
                  emitting empty row_struct (rows still parse)"
             );
-            String::new()
+            Ok(String::new())
         }
         None => {
             tracing::warn!(
@@ -178,7 +191,7 @@ fn resolve_row_struct(class_props: &[Property], asset_path: &str) -> String {
                 "DataTable has no RowStruct property; emitting empty \
                  row_struct (rows still parse)"
             );
-            String::new()
+            Ok(String::new())
         }
     }
 }
@@ -199,7 +212,9 @@ pub(crate) fn read_typed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::property::test_utils::make_ctx;
+    use crate::asset::property::test_utils::{
+        assert_derived_budget_exceeded, make_ctx, with_derived_budget,
+    };
 
     // --- wire-byte builders (kept explicit so the fixture bytes are
     // independently auditable against the format doc, not circular
@@ -363,6 +378,24 @@ mod tests {
     }
 
     #[test]
+    fn row_names_are_charged_to_the_derived_budget() {
+        let limit = ("RowAlpha".len() + "RowBeta".len()) as u64;
+        let ctx = with_derived_budget(make_ctx(&["None", "RowAlpha", "RowBeta"]), limit);
+        let mut bytes = Vec::new();
+        object_end(&mut bytes);
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // NumRows = 2
+        for row in [1, 2] {
+            fname(&mut bytes, row);
+            none(&mut bytes);
+        }
+        assert_eq!(
+            read_from(&bytes, &ctx, "test.uasset").unwrap().rows.len(),
+            2
+        );
+        assert_derived_budget_exceeded(read_from(&bytes, &ctx, "test.uasset"), limit);
+    }
+
+    #[test]
     fn row_name_out_of_bounds_surfaces_package_index_oob() {
         // NumRows = 1, RowName index = 99 (past the 1-entry name
         // table). The shared FName resolver rejects it — proving the
@@ -394,19 +427,39 @@ mod tests {
         }
     }
 
+    fn row_struct_prop(class: &str) -> Property {
+        prop(
+            "RowStruct",
+            PropertyValue::Object {
+                kind: crate::asset::PackageIndex::Import(0),
+                name: class.into(),
+            },
+        )
+    }
+
     #[test]
     fn row_struct_resolved_from_object_property() {
         let props = vec![
             prop("Other", PropertyValue::Int(1)),
-            prop(
-                "RowStruct",
-                PropertyValue::Object {
-                    kind: crate::asset::PackageIndex::Import(0),
-                    name: "ItemRow".into(),
-                },
-            ),
+            row_struct_prop("ItemRow"),
         ];
-        assert_eq!(resolve_row_struct(&props, "test.uasset"), "ItemRow");
+        let ctx = make_ctx(&["None"]);
+        assert_eq!(
+            resolve_row_struct(&props, &ctx, "test.uasset").unwrap(),
+            "ItemRow"
+        );
+    }
+
+    #[test]
+    fn row_struct_is_charged_to_the_derived_budget() {
+        let props = [row_struct_prop("ItemRow")];
+        let limit = "ItemRow".len() as u64;
+        let ctx = with_derived_budget(make_ctx(&["None"]), limit);
+        assert_eq!(
+            resolve_row_struct(&props, &ctx, "test.uasset").unwrap(),
+            "ItemRow"
+        );
+        assert_derived_budget_exceeded(resolve_row_struct(&props, &ctx, "test.uasset"), limit);
     }
 
     /// Arms the `DataTableRows` OOM seam and confirms the row-vec
@@ -434,15 +487,11 @@ mod tests {
 
     #[test]
     fn row_struct_empty_when_absent_or_non_object() {
+        let ctx = make_ctx(&["None"]);
+        let resolve = |props: &[Property]| resolve_row_struct(props, &ctx, "test.uasset").unwrap();
         // Absent → "".
-        assert_eq!(
-            resolve_row_struct(&[prop("Other", PropertyValue::Int(1))], "test.uasset"),
-            ""
-        );
+        assert_eq!(resolve(&[prop("Other", PropertyValue::Int(1))]), "");
         // Present but not an ObjectProperty → "" (warn-logged).
-        assert_eq!(
-            resolve_row_struct(&[prop("RowStruct", PropertyValue::Int(7))], "test.uasset"),
-            ""
-        );
+        assert_eq!(resolve(&[prop("RowStruct", PropertyValue::Int(7))]), "");
     }
 }
