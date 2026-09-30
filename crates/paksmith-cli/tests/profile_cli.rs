@@ -7,8 +7,8 @@ use tempfile::tempdir;
 
 mod common;
 use common::{
-    assert_envelope_first, paksmith_json, paksmith_table, paksmith_unpinned,
-    seed_registry_cache_json,
+    assert_closed_stdout_exits_clean, assert_envelope_first, paksmith_json, paksmith_table,
+    paksmith_unpinned, seed_registry_cache_json,
 };
 
 /// Deterministic test keypair (seed `[7u8; 32]`) + its verifying key as lowercase
@@ -1801,44 +1801,6 @@ fn profile_auto_format_resolves_to_json_off_tty_and_says_so() {
     assert!(
         !q_stderr.contains("stdout is not a terminal"),
         "--quiet must silence the advisory note: {q_stderr}"
-    );
-}
-
-/// Spawn `paksmith` with `args`, close the read end of stdout BEFORE the child
-/// writes, and assert it exits 0 without panicking.
-///
-/// Dropping the reader first makes the result independent of payload size —
-/// the real defect only shows past the 64 KiB pipe buffer, so a small-fixture
-/// test would pass on the broken code.
-fn assert_closed_stdout_exits_clean(cfg: &std::path::Path, args: &[&str]) {
-    use std::io::Read;
-    use std::process::{Command as StdCommand, Stdio};
-    use std::thread;
-
-    let mut child = StdCommand::new(env!("CARGO_BIN_EXE_paksmith"))
-        .env("PAKSMITH_CONFIG_DIR", cfg)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    drop(child.stdout.take());
-    let mut stderr = child.stderr.take().unwrap();
-    let handle = thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = stderr.read_to_string(&mut buf);
-        buf
-    });
-    let status = child.wait().unwrap();
-    let stderr_text = handle.join().unwrap();
-    assert!(
-        !stderr_text.contains("panicked"),
-        "{args:?} panicked on a closed stdout: {stderr_text}"
-    );
-    assert_eq!(
-        status.code(),
-        Some(0),
-        "{args:?} must exit 0 on BrokenPipe, got {status:?}"
     );
 }
 
