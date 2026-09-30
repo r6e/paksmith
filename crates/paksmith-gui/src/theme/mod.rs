@@ -75,11 +75,11 @@ const INDEFINITE_IS_A_READING: bool = false;
 /// Budget for the startup read.
 ///
 /// Honoured by the portal backend, which races the read against a timer. The
-/// macOS backend resolves synchronously and ignores it; the Windows one also
-/// ignores it and joins a COM thread with no bound of its own, so the budget
-/// is not a cap there and a stalled activation stalls startup (#792). On
-/// Linux iced runs a second 200ms read of its own before the first frame
-/// besides (#789). The window is not shown until the read returns.
+/// macOS backend resolves synchronously and ignores it. The Windows one
+/// ignores it too, so [`budgeted`] enforces it there. On Linux iced runs a
+/// second 200ms read of its own before the first frame besides (#789). The
+/// window is not shown until the read returns or, on Windows, is abandoned
+/// at the budget.
 ///
 /// Also bounds each retry rung, which is a re-read of the same thing.
 const STARTUP_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
@@ -109,8 +109,64 @@ const INTEREST: mundy::Interest = mundy::Interest::ColorScheme;
 #[mutants::skip]
 #[must_use]
 pub fn startup_reading() -> Option<OsReading> {
-    mundy::Preferences::once_blocking(INTEREST, STARTUP_BUDGET)
-        .map(|preferences| reading_from_scheme(preferences.color_scheme))
+    budgeted(|| {
+        mundy::Preferences::once_blocking(INTEREST, STARTUP_BUDGET)
+            .map(|preferences| reading_from_scheme(preferences.color_scheme))
+    })
+}
+
+/// Hold the startup read to [`STARTUP_BUDGET`] where the backend does not.
+///
+/// mundy's Windows backend discards the timeout and joins its COM thread
+/// unbounded (#792), so the read is abandoned at the budget instead.
+// `#[mutants::skip]`: Windows-only, so the Linux mutants runner would score
+// every mutant here missed; the Windows test leg pins it.
+#[cfg(windows)]
+#[mutants::skip]
+fn budgeted(read: fn() -> Option<OsReading>) -> Option<OsReading> {
+    within_budget(STARTUP_BUDGET, read).flatten()
+}
+
+/// Elsewhere the read runs where it is called: the portal bounds itself, and
+/// mundy's macOS backend asserts the main thread.
+#[cfg(not(windows))]
+fn budgeted(read: fn() -> Option<OsReading>) -> Option<OsReading> {
+    read()
+}
+
+/// Run `read` on a thread of its own and wait at most `budget` for it.
+///
+/// A read that misses the budget is abandoned, not cancelled: its thread
+/// runs until the read returns, and the answer is dropped. A read that
+/// panics yields `None` at once.
+// `test`: so every leg exercises the bound directly, not only Windows CI.
+#[cfg(any(windows, test))]
+fn within_budget<T: Send + 'static>(
+    budget: std::time::Duration,
+    read: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (answer, answered) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("paksmith startup read".to_owned())
+        .spawn(move || {
+            // Fails only once the wait below has given up.
+            let _ = answer.send(read());
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "could not start the startup read");
+        return None;
+    }
+    answered
+        .recv_timeout(budget)
+        .inspect_err(|error| match error {
+            std::sync::mpsc::RecvTimeoutError::Timeout => {
+                tracing::warn!(?budget, "startup read abandoned at the budget");
+            }
+            std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                tracing::warn!("startup read failed before answering");
+            }
+        })
+        .ok()
 }
 
 /// The OS appearance, as a stream that opens with the current value and
@@ -790,13 +846,83 @@ mod tests {
 
     #[test]
     fn the_startup_budget_bounds_the_first_frame() {
-        // On the portal, which is the only backend that honours it: too low
-        // and the blocking read never lands, so a Light desktop always opens
-        // Dark; too high and the first frame waits out a hung portal.
+        // On the portal, which races its read against it, and on Windows,
+        // where `budgeted` stops waiting at it: too low and the blocking read
+        // never lands, so a Light desktop always opens Dark; too high and the
+        // first frame waits out a hung portal or COM activation.
         assert!(
             (100..=1000).contains(&STARTUP_BUDGET.as_millis()),
             "the startup read must be able to land without stalling the \
              first frame"
+        );
+    }
+
+    /// A read that never answers in time, the shape of a stalled WinRT
+    /// activation (#792); finite, so a lost bound fails rather than hangs.
+    fn stalled_read() -> OsReading {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        OsReading::Light
+    }
+
+    /// A read that does not answer costs the budget and no more.
+    #[test]
+    fn a_read_that_does_not_answer_is_abandoned_at_the_budget() {
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let reading = within_budget(Duration::from_millis(50), stalled_read);
+        let waited = start.elapsed();
+        assert_eq!(reading, None, "a read past the budget must be abandoned");
+        assert!(
+            (Duration::from_millis(50)..Duration::from_secs(10)).contains(&waited),
+            "waited {waited:?}: the budget must be waited out, and no more"
+        );
+    }
+
+    #[test]
+    fn a_read_that_answers_within_the_budget_is_taken() {
+        use std::time::Duration;
+
+        let reading = within_budget(Duration::from_secs(10), || {
+            std::thread::sleep(Duration::from_millis(20));
+            OsReading::Dark
+        });
+        assert_eq!(reading, Some(OsReading::Dark));
+    }
+
+    /// The wiring, on the platform whose backend ignores the budget.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_startup_read_is_held_to_the_budget() {
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let stalled = budgeted(|| Some(stalled_read()));
+        assert_eq!(stalled, None, "a stalled read must be abandoned");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the first frame must not wait out a stalled read"
+        );
+        assert_eq!(budgeted(|| Some(OsReading::Dark)), Some(OsReading::Dark));
+    }
+
+    /// Off Windows the read stays on the calling thread, which on macOS is
+    /// the main thread mundy asserts, so the split may not become a uniform
+    /// off-thread wrapper.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_startup_read_stays_on_the_calling_thread_off_windows() {
+        use std::cell::Cell;
+
+        thread_local!(static READ_HERE: Cell<bool> = const { Cell::new(false) });
+        let reading = budgeted(|| {
+            READ_HERE.with(|here| here.set(true));
+            Some(OsReading::Dark)
+        });
+        assert_eq!(reading, Some(OsReading::Dark));
+        assert!(
+            READ_HERE.with(Cell::get),
+            "the read must run on the caller's thread, not a spawned one"
         );
     }
 
