@@ -890,3 +890,56 @@ fn extract_survives_a_closed_stderr() {
         "exit must follow the summary, not a panic"
     );
 }
+
+/// Under `--log-json` the locres-degrade warning names a hostile entry with
+/// its controls escaped, and no raw ESC or C1 CSI reaches stderr (#843). The
+/// archive is a runtime copy of a committed fixture with its one entry renamed,
+/// in place and at the same length, to a `.locres` path carrying both.
+#[test]
+fn log_json_escapes_a_hostile_locres_entry_name() {
+    const FROM: &[u8] = b"Content/Example.uasset";
+    const HOSTILE: &[u8] = b"C/\x1b[2J\xc2\x9b2Jxxxxx.locres";
+    assert_eq!(FROM.len(), HOSTILE.len());
+    let work = tempdir().unwrap();
+    let mut bytes = fs::read(fixture_pak().with_file_name("real_v3_minimal.pak")).unwrap();
+    let at: Vec<usize> = bytes
+        .windows(FROM.len())
+        .enumerate()
+        .filter_map(|(i, w)| (w == FROM).then_some(i))
+        .collect();
+    assert_eq!(at.len(), 1, "the fixture must name the entry exactly once");
+    bytes[at[0]..at[0] + FROM.len()].copy_from_slice(HOSTILE);
+    let pak = work.path().join("hostile.pak");
+    fs::write(&pak, bytes).unwrap();
+
+    let cfg = tempdir().unwrap();
+    let out = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env_remove("RUST_LOG")
+        .args(["--log-json", "extract"])
+        .arg(&pak)
+        .arg("-o")
+        .arg(work.path().join("out"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains(['\u{1b}', '\u{9b}']),
+        "a raw control reached stderr: {stderr:?}"
+    );
+    let records: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).expect("every --log-json line is JSON"))
+        .collect();
+    let warning = records
+        .iter()
+        .find(|r| r["fields"]["message"] == "locres parse failed, copying raw")
+        .unwrap_or_else(|| panic!("no degrade warning in {records:?}"));
+    let entry = warning["fields"]["entry"].as_str().unwrap();
+    assert!(
+        entry.contains(r"\u{1b}") && entry.contains(r"\u{9b}"),
+        "the entry must be named with its controls escaped: {entry:?}"
+    );
+}
