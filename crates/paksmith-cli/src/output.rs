@@ -105,11 +105,11 @@ pub(crate) fn serde_json_to_io(e: serde_json::Error) -> io::Error {
 /// `serde_json_to_io` instead yields `Io(BrokenPipe)`, which `main.rs`
 /// maps to a clean 0.
 ///
-/// The bug that motivates the doc is payload-size dependent: a document
-/// smaller than the 64 KiB pipe buffer lands before the reader exits and
-/// appears to work, so a small-fixture test passes while the field case
-/// panics. Reach for this helper for any new JSON surface that owns
-/// stdout for the whole command.
+/// In the field the bug is payload-size dependent: a document smaller than
+/// the 64 KiB pipe buffer lands before the reader exits and appears to work.
+/// A test only sees the panic when the reader is closed before the write.
+/// Reach for this helper for any new JSON surface that owns stdout for the
+/// whole command.
 ///
 /// It is NOT the only writer of the `to_writer_pretty` + `serde_json_to_io`
 /// pair, and deliberately so, for two different reasons.

@@ -457,50 +457,13 @@ fn aes_key_on_unencrypted_pak_succeeds() {
         .success();
 }
 
-// ── BrokenPipe test (unix only) ────────────────────────────────────────────
+// ── BrokenPipe test ────────────────────────────────────────────────────────
 
-#[cfg(unix)]
 #[test]
 fn list_with_closed_stdout_exits_cleanly() {
-    use std::io::Read;
-    use std::process::{Command as StdCommand, Stdio};
-    use std::thread;
-
-    let bin = env!("CARGO_BIN_EXE_paksmith");
-
-    let mut child = StdCommand::new(bin)
-        .args(["list", &fixture_path("minimal_v6.pak"), "--format", "json"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-
-    // Close the read end of stdout immediately. The child's writes to its
-    // stdout will fail with EPIPE on the first byte.
-    drop(child.stdout.take());
-
-    // Drain stderr concurrently so the child doesn't block on a full stderr
-    // pipe while we wait.
-    let mut stderr = child.stderr.take().unwrap();
-    let stderr_handle = thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = stderr.read_to_string(&mut buf);
-        buf
-    });
-
-    let status = child.wait().unwrap();
-    let stderr_text = stderr_handle.join().unwrap();
-
-    assert!(
-        !stderr_text.contains("panicked"),
-        "paksmith panicked when stdout was closed: {stderr_text}"
-    );
-    // Exit 0 = our BrokenPipe handler caught it. 141 = killed by SIGPIPE
-    // (default Rust behavior we explicitly want to avoid). Any other code
-    // means we leaked an error.
-    assert_eq!(
-        status.code(),
-        Some(0),
-        "expected exit 0 on BrokenPipe, got {status:?} (stderr: {stderr_text})"
+    let cfg = tempfile::tempdir().unwrap();
+    common::assert_closed_stdout_exits_clean(
+        cfg.path(),
+        &["list", &fixture_path("minimal_v6.pak"), "--format", "json"],
     );
 }

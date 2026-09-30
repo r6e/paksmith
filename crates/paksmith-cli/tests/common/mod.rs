@@ -147,6 +147,59 @@ pub fn seed_registry_cache_json(config_dir: &std::path::Path, profiles: &str) {
     .unwrap();
 }
 
+/// Spawn `paksmith` with `args` on a stdout pipe whose read end is already
+/// closed, and assert it exits 0 without panicking.
+///
+/// The reader is closed before `spawn`, so the child's first stdout write
+/// fails whichever process runs first and whatever the payload size: a small
+/// fixture still reaches the BrokenPipe path that a `println!` would turn
+/// into exit 101.
+pub fn assert_closed_stdout_exits_clean(config_dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .env("PAKSMITH_CONFIG_DIR", config_dir)
+        .args(args)
+        .stdout(closed_pipe_writer())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "{args:?} panicked on a closed stdout: {stderr}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{args:?} must exit 0 on BrokenPipe, got {:?} (stderr: {stderr})",
+        out.status
+    );
+}
+
+/// A pipe writer with no reader left anywhere. Without `pipe2` (macOS), std
+/// marks the pipe close-on-exec in a second step, so a process another test
+/// thread spawns in between can inherit the reader; a one-byte write that
+/// fails with BrokenPipe proves no copy survived.
+fn closed_pipe_writer() -> std::io::PipeWriter {
+    use std::io::Write;
+    loop {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        drop(reader);
+        match writer.write(b"x") {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return writer,
+            Ok(_) => {}
+            Err(e) => panic!("probing a closed pipe: {e}"),
+        }
+    }
+}
+
+/// The helper's own failure polarity: a non-zero exit that is not a
+/// BrokenPipe must panic, or an emptied helper would pass every caller.
+#[test]
+#[should_panic(expected = "must exit 0 on BrokenPipe")]
+fn closed_stdout_helper_rejects_a_failing_exit() {
+    let cfg = tempfile::tempdir().unwrap();
+    assert_closed_stdout_exits_clean(cfg.path(), &["list", "no-such-archive.pak"]);
+}
+
 /// The value-collision polarity of [`assert_envelope_first`]'s three pins: a
 /// document whose VALUE equals the key name, while that key is itself
 /// ABSENT, must panic at the key lookup. (With the real key also present,

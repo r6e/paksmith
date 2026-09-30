@@ -461,13 +461,20 @@ fn inspect_path_summary_snapshot() {
     insta::assert_json_snapshot!(v);
 }
 
-// Pipe-close coverage (analogue of `list_with_closed_stdout_exits_cleanly`)
-// is intentionally omitted. The minimal `real_v8b_uasset.pak` fixture
-// produces a small JSON Package (~1 KiB pretty-printed) that fits inside
-// a single pipe buffer (typ. 64 KiB on Linux, 16 KiB on macOS). Without a
-// workload large enough to force multiple `serde_json::to_writer_pretty`
-// writes, the kernel buffers the whole payload before the reader closes,
-// so EPIPE never fires — the test would be a no-op that passes for the
-// wrong reason. `inspect` currently has no equivalent of `list --filter '*'`
-// for forcing repeated writes; revisit when a larger inspect fixture
-// lands or when streaming-serialization concerns surface.
+#[test]
+fn inspect_with_closed_stdout_exits_cleanly() {
+    let cfg = tempfile::tempdir().unwrap();
+    let pak = fixture_path("real_v8b_uasset.pak");
+    for fmt in ["json", "table"] {
+        common::assert_closed_stdout_exits_clean(
+            cfg.path(),
+            &[
+                "--format",
+                fmt,
+                "inspect",
+                pak.to_str().unwrap(),
+                "Game/Maps/Demo.uasset",
+            ],
+        );
+    }
+}
