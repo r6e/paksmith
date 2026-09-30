@@ -868,7 +868,7 @@ fn extract_announces_an_auto_resolution_to_json() {
 fn extract_survives_a_closed_stderr() {
     let out = tempdir().unwrap();
     let cfg = tempdir().unwrap();
-    let pak = fixture_pak().with_file_name("minimal_v6.pak");
+    let pak = fixture_path("minimal_v6.pak");
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
         .env("PAKSMITH_CONFIG_DIR", cfg.path())
         .env_remove("RUST_LOG")
@@ -899,7 +899,7 @@ fn log_json_escapes_a_hostile_locres_entry_name() {
     const HOSTILE: &[u8] = b"C/\x1b[2J\xc2\x9b2Jxxxxx.locres";
     assert_eq!(FROM.len(), HOSTILE.len());
     let work = tempdir().unwrap();
-    let mut bytes = fs::read(fixture_pak().with_file_name("real_v3_minimal.pak")).unwrap();
+    let mut bytes = fs::read(fixture_path("real_v3_minimal.pak")).unwrap();
     let at: Vec<usize> = bytes
         .windows(FROM.len())
         .enumerate()

@@ -47,6 +47,9 @@ impl OutputFormat {
         }
     }
 
+    /// Whether resolution was an `Auto` that became JSON, the one case the
+    /// note announces. Split out so the decision is unit-pinned, including
+    /// the TTY leg no integration test can reach.
     fn auto_resolved_to_json(self, resolved: ResolvedFormat) -> bool {
         matches!(self, Self::Auto) && matches!(resolved, ResolvedFormat::Json)
     }
@@ -60,7 +63,9 @@ pub(crate) enum ResolvedFormat {
 
 /// Emit an advisory `note:` line to stderr unless `--quiet` or `--log-json`
 /// (a bare line would corrupt the JSON stream). Every advisory note must
-/// route through this single guarded site.
+/// route through this single guarded site. The write is best-effort: unlike
+/// `eprintln!`, a closed stderr does not panic, so the command still exits
+/// with its own code.
 pub(crate) fn note(quiet: bool, msg: &str) {
     if !quiet && !log_json() {
         let _ = writeln!(io::stderr(), "note: {msg}");
