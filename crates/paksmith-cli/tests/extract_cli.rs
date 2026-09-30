@@ -868,8 +868,6 @@ fn extract_announces_an_auto_resolution_to_json() {
 fn extract_survives_a_closed_stderr() {
     let out = tempdir().unwrap();
     let cfg = tempdir().unwrap();
-    let (reader, writer) = std::io::pipe().unwrap();
-    drop(reader);
     let pak = fixture_pak().with_file_name("minimal_v6.pak");
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
         .env("PAKSMITH_CONFIG_DIR", cfg.path())
@@ -878,7 +876,7 @@ fn extract_survives_a_closed_stderr() {
         .arg(&pak)
         .arg("-o")
         .arg(out.path())
-        .stderr(writer)
+        .stderr(common::closed_pipe_writer())
         .output()
         .unwrap();
     let stdout = String::from_utf8(run.stdout).unwrap();
