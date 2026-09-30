@@ -399,7 +399,7 @@ fn build_entries_table(entries: &[EntryRowData], style: bool) -> Table {
     };
 
     let mut table = Table::new();
-    table.load_preset(UTF8_FULL_CONDENSED);
+    table.load_style(UTF8_FULL_CONDENSED);
     table.set_header(vec![
         header("Path"),
         header("Size"),
@@ -504,7 +504,7 @@ mod grouped_render_tests {
 
     use super::*;
 
-    fn one_entry(path: &str) -> Vec<EntryRowData> {
+    pub(super) fn one_entry(path: &str) -> Vec<EntryRowData> {
         vec![EntryRowData::from_metadata(EntryMetadata::new(
             path.into(),
             10,
@@ -543,7 +543,9 @@ mod grouped_render_tests {
     /// The grouped frame: one `pak:` header per group, each table
     /// newline-terminated, ONE blank line between groups, and the whole
     /// render ends with a newline. (The integration suites only
-    /// exercise JSON; this is the sole pin on the table frame.)
+    /// exercise JSON; this is the sole pin on the grouped layout, and
+    /// `unstyled_table_renders_condensed_utf8_frame` pins the table's own
+    /// box frame.)
     #[test]
     fn grouped_frame_headers_separator_and_trailing_newline() {
         let groups = vec![
@@ -691,6 +693,39 @@ mod table_style_tests {
         assert!(
             !styled.contains('\u{7}') && !styled.contains('\u{9b}'),
             "hostile BEL/CSI must not survive styled rendering: {styled:?}"
+        );
+    }
+
+    /// Pins the exact frame: `UTF8_FULL_CONDENSED` (no row separators,
+    /// `┆` column dividers). The tests above only probe substrings, so a
+    /// dropped or swapped preset would otherwise pass unnoticed.
+    #[test]
+    fn unstyled_table_renders_condensed_utf8_frame() {
+        let expected = [
+            "┌──────────────────┬──────┬────────────┬───────────┐",
+            "│ Path             ┆ Size ┆ Compressed ┆ Encrypted │",
+            "╞══════════════════╪══════╪════════════╪═══════════╡",
+            "│ Game/enc.uasset  ┆ 20 B ┆ no         ┆ yes       │",
+            "│ Game/comp.uasset ┆ 20 B ┆ yes        ┆ no        │",
+            "│ Game/plain.txt   ┆ 20 B ┆ no         ┆ no        │",
+            "└──────────────────┴──────┴────────────┴───────────┘",
+        ]
+        .join("\n");
+        assert_eq!(build_entries_table(&entries(), false).to_string(), expected);
+    }
+
+    /// `set_width` stands in for a narrow terminal. The table keeps
+    /// comfy-table's default `Disabled` arrangement, which ignores it, so a
+    /// long path is neither wrapped nor cut short with a truncation indicator.
+    #[test]
+    fn long_path_is_not_wrapped_or_truncated_at_narrow_width() {
+        let long = format!("Game/{}.uasset", "a".repeat(200));
+        let mut table = build_entries_table(&grouped_render_tests::one_entry(&long), false);
+        let _ = table.set_width(40);
+        let rendered = table.to_string();
+        assert!(
+            rendered.contains(&long),
+            "path must render whole: {rendered}"
         );
     }
 
