@@ -178,7 +178,7 @@ pub fn assert_closed_stdout_exits_clean(config_dir: &std::path::Path, args: &[&s
 /// marks the pipe close-on-exec in a second step, so a process another test
 /// thread spawns in between can inherit the reader; a one-byte write that
 /// fails with BrokenPipe proves no copy survived.
-fn closed_pipe_writer() -> std::io::PipeWriter {
+pub fn closed_pipe_writer() -> std::io::PipeWriter {
     use std::io::Write;
     loop {
         let (reader, mut writer) = std::io::pipe().unwrap();

@@ -38,6 +38,7 @@ tempfile.workspace = true
 wiremock.workspace = true
 ed25519-dalek.workspace = true
 tokio.workspace = true
+tracing-test.workspace = true
 
 [lints]
 workspace = true

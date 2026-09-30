@@ -406,7 +406,7 @@ impl ExtractJob<'_> {
             Ok(b) => b,
             Err(e) => return failed(entry_path, e),
         };
-        match locres_output(&bytes, self.cfg.prefs.locres) {
+        match locres_output(entry_path, &bytes, self.cfg.prefs.locres) {
             Some((ext, out)) => match write_output(self.cfg, entry_path, Some(ext), &out) {
                 Ok(output) => EntryOutcome::Converted {
                     entry: entry_path.to_string(),
@@ -458,14 +458,19 @@ impl ExtractJob<'_> {
 }
 
 /// Pure conversion step for a `.locres` entry: parse + export per the
-/// preference. `None` = unparsable (caller degrades to a raw copy).
+/// preference. `None` = unparsable (caller degrades to a raw copy), with a
+/// warning naming `entry_path`.
 /// Factored out of [`ExtractJob::extract_locres`] so the parse/convert/
 /// degrade logic is unit-testable without a pak reader.
-fn locres_output(bytes: &[u8], pref: select::DataTableFormat) -> Option<(&'static str, Vec<u8>)> {
+fn locres_output(
+    entry_path: &str,
+    bytes: &[u8],
+    pref: select::DataTableFormat,
+) -> Option<(&'static str, Vec<u8>)> {
     let resource = match paksmith_core::LocresResource::parse(bytes) {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(error = %e, "locres parse failed, copying raw");
+            tracing::warn!(entry = ?entry_path, error = %e, "locres parse failed, copying raw");
             return None;
         }
     };
@@ -478,7 +483,7 @@ fn locres_output(bytes: &[u8], pref: select::DataTableFormat) -> Option<(&'stati
     match result {
         Ok(pair) => Some(pair),
         Err(e) => {
-            tracing::warn!(error = %e, "locres export failed, copying raw");
+            tracing::warn!(entry = ?entry_path, error = %e, "locres export failed, copying raw");
             None
         }
     }
@@ -658,23 +663,47 @@ mod write_output_tests {
     }
 
     /// `locres_output` (#646): CSV/JSON per pref on the committed
-    /// fixture; unparsable bytes → None (degrade to raw copy).
+    /// fixture; unparsable bytes → None (degrade to a raw copy) with a
+    /// warning naming the entry, its control characters escaped (#843).
+    ///
+    /// The only in-process caller of the degrade arm, so its `warn!`
+    /// callsite first registers after `traced_test`'s global subscriber is
+    /// installed and no untraced sibling can cache it as disabled.
+    #[tracing_test::traced_test]
     #[test]
     fn locres_output_converts_or_degrades() {
         let fixture = include_bytes!("../../../../tests/fixtures/data/sample_v2.locres");
-        let (ext, csv) = locres_output(fixture, DataTableFormat::Csv).expect("fixture parses");
+        let entry = "Game/L10N/de.locres";
+        let (ext, csv) =
+            locres_output(entry, fixture, DataTableFormat::Csv).expect("fixture parses");
         assert_eq!(ext, "csv");
         assert_eq!(
             String::from_utf8(csv).unwrap(),
             "namespace,key,localized\nGame,key1,Hello\nGame,key2,World\n"
         );
-        let (ext, json) = locres_output(fixture, DataTableFormat::Json).expect("fixture parses");
+        let (ext, json) =
+            locres_output(entry, fixture, DataTableFormat::Json).expect("fixture parses");
         assert_eq!(ext, "json");
         let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(v["namespaces"][0]["entries"][0]["localized"], "Hello");
 
-        // Unparsable (truncated) → None.
-        assert!(locres_output(&fixture[..20], DataTableFormat::Csv).is_none());
+        // Unparsable (truncated) → None, and the warning names a hostile
+        // entry with its controls escaped rather than sent to the terminal.
+        let hostile = "Game/L10N/\u{1b}[2J\u{9b}2Jde.locres";
+        assert!(locres_output(hostile, &fixture[..20], DataTableFormat::Csv).is_none());
+        logs_assert(|lines| {
+            let warning = lines
+                .iter()
+                .find(|l| l.contains("locres parse failed, copying raw"))
+                .ok_or_else(|| format!("no degrade warning in {lines:?}"))?;
+            if warning.contains(r#"entry="Game/L10N/\u{1b}[2J\u{9b}2Jde.locres""#)
+                && !warning.contains(['\u{1b}', '\u{9b}'])
+            {
+                Ok(())
+            } else {
+                Err(format!("warning must name the escaped entry: {warning:?}"))
+            }
+        });
     }
 
     #[test]

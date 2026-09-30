@@ -940,7 +940,7 @@ mod tests {
     /// internal state but never surface to operators.
     ///
     /// Uses `tracing-test`'s `#[traced_test]` attribute to install
-    /// a per-test capture subscriber. `logs_contain(...)` matches
+    /// the process-global capture subscriber. `logs_contain(...)` matches
     /// against captured stderr-formatted output. Asserts against
     /// the literal token + the structured `dup_count` and `samples`
     /// field names so the operator-grep contract is wire-pinned.

@@ -189,7 +189,7 @@ pub(crate) fn run(
         summary.sources = crate::profile_paks::display_all(&sources);
     }
 
-    let resolved = format.resolve();
+    let resolved = format.resolve_with_notice(quiet);
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
     summary.render(resolved, &mut out)?;

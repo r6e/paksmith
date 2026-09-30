@@ -99,13 +99,7 @@ pub(crate) fn emit(
         return Ok(print_json(found)?);
     }
 
-    let resolved = format.resolve();
-
-    // Advisory note on stderr when `--format auto` resolves (no `--path`,
-    // which always forces JSON) — the shared, --quiet-aware list/search note.
-    crate::output::note_auto_resolved_to_json(format, resolved, quiet);
-
-    match resolved {
+    match format.resolve_with_notice(quiet) {
         ResolvedFormat::Table => render_table(pkg, export_idx),
         // JSON: wrapped full package (direct, order-preserved) or wrapped
         // export subtree.  `OutputFormat::Auto` resolves here based on the

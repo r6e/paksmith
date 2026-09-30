@@ -74,12 +74,12 @@ wiremock.workspace = true
 tempfile.workspace = true
 # Issue #111: capture-and-assert `tracing::warn!`/`error!` events for
 # operator-facing telemetry that monitoring tools grep for. The
-# `#[traced_test]` macro installs a per-test capture subscriber so
+# `#[traced_test]` macro installs one process-global capture subscriber so
 # `logs_contain("token")` works without exposing a `cfg(test)`
 # accessor on production types (which would be API-leakage) and
 # without hand-rolling a `Subscriber` impl (which is non-trivial
 # due to the trait's many methods).
-tracing-test = "0.2"
+tracing-test.workspace = true
 
 [features]
 # Test-only accessors gated behind this feature so they're not part

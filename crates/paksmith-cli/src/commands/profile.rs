@@ -377,12 +377,7 @@ pub(crate) fn run(
     format: OutputFormat,
     quiet: bool,
 ) -> paksmith_core::Result<u8> {
-    let fmt = format.resolve();
-    // `profile` resolves `--format auto` exactly as `list`/`search`/`inspect`
-    // do — JSON when stdout is not a TTY — so the advisory warning about that
-    // surprise must fire here too, or piping `profile list` silently changes
-    // shape.
-    crate::output::note_auto_resolved_to_json(format, fmt, quiet);
+    let fmt = format.resolve_with_notice(quiet);
     match cmd {
         ProfileCmd::Add(a) => add(a, fmt),
         ProfileCmd::List => list(fmt),

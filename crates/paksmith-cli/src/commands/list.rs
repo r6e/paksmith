@@ -32,8 +32,7 @@ pub(crate) fn run(
         pattern.as_ref().is_none_or(|pat| pat.matches(e.path()))
     })?;
 
-    let resolved = format.resolve();
-    crate::output::note_auto_resolved_to_json(format, resolved, quiet);
+    let resolved = format.resolve_with_notice(quiet);
     crate::output::print_entry_groups(&groups, args.path.is_some(), resolved)?;
     Ok(())
 }
