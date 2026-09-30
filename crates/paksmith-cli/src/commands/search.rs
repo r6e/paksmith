@@ -61,8 +61,7 @@ pub(crate) fn run(
         predicates.matches(e)
     })?;
 
-    let resolved = format.resolve();
-    crate::output::note_auto_resolved_to_json(format, resolved, quiet);
+    let resolved = format.resolve_with_notice(quiet);
     crate::output::print_entry_groups(&groups, args.pak.is_some(), resolved)?;
     Ok(())
 }

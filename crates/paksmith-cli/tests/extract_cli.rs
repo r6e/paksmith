@@ -811,3 +811,82 @@ fn extract_encrypted_entry_without_key_fails() {
         "at least one entry must fail without an AES key"
     );
 }
+
+/// Run `extract` on the fixture into a fresh output root, with `global` flags
+/// ahead of the subcommand, and return the successful run's stdout and stderr.
+fn extract_piped(global: &[&str]) -> (String, String) {
+    let out = tempdir().unwrap();
+    let cfg = tempdir().unwrap();
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .args(global)
+        .arg("extract")
+        .arg(fixture_pak())
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+    let output = assert.get_output();
+    (
+        String::from_utf8(output.stdout.clone()).unwrap(),
+        String::from_utf8(output.stderr.clone()).unwrap(),
+    )
+}
+
+/// A piped run with no `--format` announces that it resolved to JSON, as
+/// list, search, inspect and profile do; an explicit format or `--quiet`
+/// does not (#214).
+#[test]
+fn extract_announces_an_auto_resolution_to_json() {
+    let (stdout, stderr) = extract_piped(&[]);
+    let _: serde_json::Value =
+        serde_json::from_str(&stdout).expect("piped auto-format extract emits the JSON summary");
+    assert!(
+        stderr.contains("stdout is not a terminal"),
+        "auto-resolution to JSON must be announced on stderr: {stderr}"
+    );
+
+    let (_, stderr) = extract_piped(&["--format", "json"]);
+    assert!(
+        !stderr.contains("stdout is not a terminal"),
+        "an explicit --format json must not be announced: {stderr}"
+    );
+
+    let (_, stderr) = extract_piped(&["--quiet"]);
+    assert!(
+        !stderr.contains("stdout is not a terminal"),
+        "--quiet must silence the advisory note: {stderr}"
+    );
+}
+
+/// The auto-JSON note is best-effort: with stderr's reader already gone, a
+/// piped extract still writes its summary and exits with the summary's code
+/// instead of panicking on the note's failed write. The fixture holds one
+/// undecodable asset, so a completed run exits 1; a panic exits 101.
+#[test]
+fn extract_survives_a_closed_stderr() {
+    let out = tempdir().unwrap();
+    let cfg = tempdir().unwrap();
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let pak = fixture_pak().with_file_name("minimal_v6.pak");
+    let run = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env_remove("RUST_LOG")
+        .arg("extract")
+        .arg(&pak)
+        .arg("-o")
+        .arg(out.path())
+        .stderr(writer)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(run.stdout).unwrap();
+    let _: serde_json::Value =
+        serde_json::from_str(&stdout).expect("the JSON summary is still written");
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "exit must follow the summary, not a panic"
+    );
+}

@@ -1768,8 +1768,8 @@ fn profile_show_json_reports_the_registry_layer() {
 #[test]
 fn profile_auto_format_resolves_to_json_off_tty_and_says_so() {
     // The ONLY test exercising `--format auto` on this family: every other
-    // one now passes an explicit format, so deleting the `format.resolve()` /
-    // `note_auto_resolved_to_json` wiring in `run()` was invisible.
+    // one now passes an explicit format, so a `profile` run that stopped
+    // noting an auto-resolution to JSON would go unnoticed without it.
     let cfg = tempdir().unwrap();
     seed_one(cfg.path());
 

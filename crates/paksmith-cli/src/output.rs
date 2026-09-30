@@ -14,15 +14,26 @@ pub(crate) enum OutputFormat {
 }
 
 impl OutputFormat {
-    pub(crate) fn resolve(self) -> ResolvedFormat {
-        self.resolve_with_tty(std::io::stdout().is_terminal())
+    /// Resolve against the real stdout, noting on stderr when `Auto` became
+    /// JSON because stdout isn't a TTY, so users piping into head/jq aren't
+    /// surprised. The only way to resolve outside this module, so no command
+    /// can skip the note; `--quiet` (#652) and `--log-json` suppress it.
+    pub(crate) fn resolve_with_notice(self, quiet: bool) -> ResolvedFormat {
+        let resolved = self.resolve_with_tty(std::io::stdout().is_terminal());
+        if self.auto_resolved_to_json(resolved) {
+            note(
+                quiet,
+                "stdout is not a terminal — emitting JSON. Pass --format table to force table output.",
+            );
+        }
+        resolved
     }
 
     /// Pure resolution logic, taking the TTY signal as an explicit
     /// argument so the Auto branch is testable without touching
-    /// stdout. `resolve()` is the call site that wires in the real
+    /// stdout. [`Self::resolve_with_notice`] wires in the real
     /// `is_terminal()` probe.
-    pub(crate) fn resolve_with_tty(self, is_tty: bool) -> ResolvedFormat {
+    fn resolve_with_tty(self, is_tty: bool) -> ResolvedFormat {
         match self {
             Self::Json => ResolvedFormat::Json,
             Self::Table => ResolvedFormat::Table,
@@ -34,6 +45,10 @@ impl OutputFormat {
                 }
             }
         }
+    }
+
+    fn auto_resolved_to_json(self, resolved: ResolvedFormat) -> bool {
+        matches!(self, Self::Auto) && matches!(resolved, ResolvedFormat::Json)
     }
 }
 
@@ -48,7 +63,7 @@ pub(crate) enum ResolvedFormat {
 /// route through this single guarded site.
 pub(crate) fn note(quiet: bool, msg: &str) {
     if !quiet && !log_json() {
-        eprintln!("note: {msg}");
+        let _ = writeln!(io::stderr(), "note: {msg}");
     }
 }
 
@@ -62,22 +77,6 @@ pub(crate) fn set_log_json(active: bool) {
 /// Whether `--log-json` is active.
 pub(crate) fn log_json() -> bool {
     LOG_JSON.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Emit a one-line stderr note when `--format auto` silently resolved to JSON
-/// (stdout isn't a TTY), so users piping into head/jq aren't surprised.
-/// `--quiet` (#652) suppresses it — it is advisory chatter, not an error.
-pub(crate) fn note_auto_resolved_to_json(
-    format: OutputFormat,
-    resolved: ResolvedFormat,
-    quiet: bool,
-) {
-    if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
-        note(
-            quiet,
-            "stdout is not a terminal — emitting JSON. Pass --format table to force table output.",
-        );
-    }
 }
 
 /// Coerce `serde_json::Error` to `io::Error` preserving the wrapped
@@ -784,6 +783,26 @@ mod resolve_tests {
             OutputFormat::Auto.resolve_with_tty(false),
             ResolvedFormat::Json
         ));
+    }
+
+    /// The TTY leg of the auto-JSON note: `assert_cmd` always pipes stdout,
+    /// so no integration test reaches `Auto` on a terminal.
+    #[test]
+    fn only_auto_off_a_tty_is_announced() {
+        for (format, is_tty, announced) in [
+            (OutputFormat::Auto, false, true),
+            (OutputFormat::Auto, true, false),
+            (OutputFormat::Json, false, false),
+            (OutputFormat::Json, true, false),
+            (OutputFormat::Table, false, false),
+            (OutputFormat::Table, true, false),
+        ] {
+            assert_eq!(
+                format.auto_resolved_to_json(format.resolve_with_tty(is_tty)),
+                announced,
+                "{format:?} with tty={is_tty}"
+            );
+        }
     }
 }
 
