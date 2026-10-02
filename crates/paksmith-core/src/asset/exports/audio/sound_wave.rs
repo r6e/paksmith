@@ -948,7 +948,7 @@ mod tests {
 
         let (asset, bulk) = read_typed(&bytes, &ctx, "sound.uasset").expect("parse");
         assert!(matches!(asset, Asset::SoundWave(_)));
-        assert!(bulk.is_empty());
+        assert_eq!(bulk, [] as [FByteBulkData; 0]);
     }
 
     #[test]
@@ -1190,7 +1190,7 @@ mod tests {
         let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
         assert!(data.streaming && data.cooked);
         assert_eq!(data.compressed_data_guid, FGuid::from_bytes(guid));
-        assert!(data.compressed_format_keys.is_empty()); // XOR: streaming → no format keys
+        assert_eq!(data.compressed_format_keys, [] as [Arc<str>; 0]); // XOR: streaming → no format keys
         let streamed = data.streamed.expect("streamed");
         assert_eq!(streamed.audio_format.as_ref(), "OGG");
         assert_eq!(streamed.chunks.len(), 2);
@@ -1222,7 +1222,7 @@ mod tests {
         assert!(data.streaming && !data.cooked);
         assert_eq!(data.compressed_data_guid, FGuid::from_bytes(guid));
         assert!(data.streamed.is_none());
-        assert!(bulk.is_empty());
+        assert_eq!(bulk, [] as [FByteBulkData; 0]);
     }
 
     #[test]
@@ -1362,7 +1362,7 @@ mod tests {
 
         let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
         assert!(!data.cooked && !data.streaming);
-        assert!(data.compressed_format_keys.is_empty()); // raw PCM → no codec keys
+        assert_eq!(data.compressed_format_keys, [] as [Arc<str>; 0]); // raw PCM → no codec keys
         assert!(data.streamed.is_none());
         assert_eq!(data.compressed_data_guid, FGuid::from_bytes(guid));
         assert_eq!(bulk.len(), 1); // the single RawData record
@@ -1616,7 +1616,7 @@ mod tests {
             "retry must flip the stored streaming to true"
         );
         assert!(data.cooked);
-        assert!(data.compressed_format_keys.is_empty()); // streaming → no format keys
+        assert_eq!(data.compressed_format_keys, [] as [Arc<str>; 0]); // streaming → no format keys
         let streamed = data.streamed.expect("streamed populated by the retry");
         assert_eq!(streamed.audio_format.as_ref(), "None");
         assert_eq!(streamed.chunks.len(), 1);
@@ -1654,7 +1654,7 @@ mod tests {
         let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
         assert!(!data.streaming); // recovered as non-streaming
         assert!(data.streamed.is_none());
-        assert!(data.compressed_format_keys.is_empty());
+        assert_eq!(data.compressed_format_keys, [] as [Arc<str>; 0]);
         assert!(
             bulk.is_empty(),
             "the first attempt's chunk record must not leak into the retry's bulk: {bulk:?}"
@@ -1691,7 +1691,7 @@ mod tests {
         assert!(!data.cooked);
         assert_eq!(data.compressed_data_guid, FGuid::from_bytes(guid));
         assert!(data.streamed.is_none()); // streaming && !cooked → GUID only, no chunks
-        assert!(bulk.is_empty());
+        assert_eq!(bulk, [] as [FByteBulkData; 0]);
     }
 
     #[test]

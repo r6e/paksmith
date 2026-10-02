@@ -929,7 +929,7 @@ mod tests {
         b.extend_from_slice(&0u32.to_le_bytes()); // key count 0
         let r = LocresResource::parse(&b).expect("empty namespace parses");
         assert_eq!(r.namespaces[0].namespace, "");
-        assert!(r.namespaces[0].entries.is_empty());
+        assert_eq!(r.namespaces[0].entries, [] as [LocresEntry; 0]);
     }
 
     /// An FString of EXACTLY the cap length is accepted — pins the `>`

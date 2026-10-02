@@ -779,7 +779,10 @@ mod tests {
     fn formats_for_payloads_empty_when_no_handler() {
         // Empty registry → no payload has a handler → empty list.
         let reg = HandlerRegistry::new();
-        assert!(formats_for_payloads(&reg, &[generic_sentinel()]).is_empty());
+        assert_eq!(
+            formats_for_payloads(&reg, &[generic_sentinel()]),
+            [] as [ExportFormat; 0]
+        );
     }
 
     #[test]
@@ -886,6 +889,9 @@ mod tests {
                 supports_value: false,
             }),
         );
-        assert!(formats_for_payloads(&reg, &[generic_sentinel()]).is_empty());
+        assert_eq!(
+            formats_for_payloads(&reg, &[generic_sentinel()]),
+            [] as [ExportFormat; 0]
+        );
     }
 }

@@ -704,7 +704,7 @@ mod tests {
         let _ = t.open_or_activate("audio.uasset");
         t.set_content("audio.uasset", ready_non_texture_content());
         // texture_available is false (set_content resets mips to empty).
-        assert!(t.open[0].texture.mips.is_empty());
+        assert_eq!(t.open[0].texture.mips, [] as [(u32, u32); 0]);
         // Populate audio.info to make audio_available true.
         t.open[0].audio.info = Some(sample_audio_info());
         t.pick_view_after_load("audio.uasset");

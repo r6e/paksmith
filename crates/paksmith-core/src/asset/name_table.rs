@@ -274,7 +274,7 @@ mod tests {
         let table = NameTable::default();
         let mut buf = Vec::new();
         table.write_to(&mut buf).unwrap();
-        assert!(buf.is_empty());
+        assert_eq!(buf, [] as [u8; 0]);
         let mut cursor = Cursor::new(&buf[..]);
         let parsed = NameTable::read_from(&mut cursor, 0, 0, "x.uasset").unwrap();
         assert_eq!(parsed, table);

@@ -36,7 +36,7 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         let pkg = result.unwrap();
         // `Package` exposes direct pub fields (`package.rs:60-78`); no accessor.
-        assert!(!pkg.exports.exports.is_empty());
+        assert_ne!(pkg.exports.exports, [] as [paksmith_core::ObjectExport; 0]);
     }
 
     /// State 3: split asset header, .uexp not provided → MissingCompanionFile.

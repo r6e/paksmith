@@ -1461,11 +1461,11 @@ mod tests {
         assert_eq!(vt.num_mips, 0);
         assert_eq!(vt.layer_types, vec!["PF_DXT1".to_string()]);
         // Pre-UE5: all UE5.0+ arrays empty.
-        assert!(vt.tile_data_offset_per_layer.is_empty());
-        assert!(vt.chunk_index_per_mip.is_empty());
-        assert!(vt.tile_offset_data.is_empty());
-        assert!(vt.layer_fallback_colors.is_empty());
-        assert!(vt.chunks.is_empty()); // Chunks count = 0
+        assert_eq!(vt.tile_data_offset_per_layer, [] as [u32; 0]);
+        assert_eq!(vt.chunk_index_per_mip, [] as [u32; 0]);
+        assert_eq!(vt.tile_offset_data, [] as [TileOffsetData; 0]);
+        assert_eq!(vt.layer_fallback_colors, [] as [[f32; 4]; 0]);
+        assert_eq!(vt.chunks, [] as [VirtualTextureDataChunk; 0]); // Chunks count = 0
     }
 
     #[test]

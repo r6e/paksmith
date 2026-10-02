@@ -838,7 +838,7 @@ mod tests {
         assert_eq!(hdr.fragments[0].value_num, 2);
         assert!(!hdr.fragments[0].has_zeros);
         assert!(hdr.fragments[0].is_last);
-        assert!(hdr.zero_mask.is_empty());
+        assert_eq!(hdr.zero_mask, [] as [u8; 0]);
     }
 
     #[test]
@@ -1104,7 +1104,7 @@ mod tests {
         // cleanly at depth 0 and returns the (empty) prefix.
         let props = read_unversioned_properties(&mut cur, "Ref", &usmap, &ctx, "test", 0)
             .expect("partial-tree stop returns Ok, not Err");
-        assert!(props.is_empty());
+        assert_eq!(props, [] as [Property; 0]);
     }
 
     /// A fault NOT on the `is_partial_tree_stop` allowlist (here a
@@ -1549,7 +1549,7 @@ mod tests {
         let mut cur = Cursor::new(bytes.as_slice());
         let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0)
             .expect("partial-tree stop returns Ok");
-        assert!(props.is_empty());
+        assert_eq!(props, [] as [Property; 0]);
     }
 
     /// Each recursive `read_unversioned_value(depth + 1)` in the

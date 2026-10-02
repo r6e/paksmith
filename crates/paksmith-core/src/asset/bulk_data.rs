@@ -3374,7 +3374,7 @@ mod tests {
         // with an empty payload. Kills the `< -> <=` mutant which
         // would reject zero.
         let result = decompress_zlib(&[], 0, "test.uasset").expect("zero len ok");
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [u8; 0]);
     }
 
     #[cfg(feature = "__test_utils")]
@@ -3596,7 +3596,7 @@ mod tests {
         // no streams; with ElementCount = 0 it decodes to empty.
         let framed = frame_zlib(&[], 4096, (TEST_V1_TAG, 4096), None);
         let out = decompress_zlib(&framed, 0, "test.uasset").expect("framed zero");
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
     }
 
     #[cfg(feature = "__test_utils")]

@@ -944,7 +944,7 @@ mod tests {
         let (bone_indices, bone_weights) =
             read_skin_weight_vertex_buffer(&mut cur, &new_ctx(), "T").unwrap();
         // AV-stripped → no influence blob → empty result, lookup header consumed.
-        assert!(bone_indices.is_empty());
+        assert_eq!(bone_indices, [] as [[u16; 8]; 0]);
         assert!(bone_weights.is_empty());
         assert_eq!(cur.position(), buf.len() as u64);
     }

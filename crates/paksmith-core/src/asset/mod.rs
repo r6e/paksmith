@@ -1196,8 +1196,8 @@ mod tests {
         let Asset::SkeletalMesh(d) = asset else {
             unreachable!()
         };
-        assert!(d.skeleton.bones.is_empty());
-        assert!(d.lods.is_empty());
+        assert_eq!(d.skeleton.bones, [] as [BoneInfo; 0]);
+        assert_eq!(d.lods, [] as [SkeletalMeshLod; 0]);
         assert!(!d.cooked);
     }
 
@@ -1248,8 +1248,8 @@ mod tests {
     #[test]
     fn skeletal_mesh_lod_default_bone_arrays_are_empty() {
         let lod = SkeletalMeshLod::default();
-        assert!(lod.active_bone_indices.is_empty());
-        assert!(lod.required_bones.is_empty());
+        assert_eq!(lod.active_bone_indices, [] as [u16; 0]);
+        assert_eq!(lod.required_bones, [] as [u16; 0]);
     }
 
     #[test]
@@ -1273,7 +1273,7 @@ mod tests {
     #[test]
     fn skel_mesh_section_default_is_zeroed() {
         let section = SkelMeshSection::default();
-        assert!(section.bone_map.is_empty());
+        assert_eq!(section.bone_map, [] as [u16; 0]);
         assert!(!section.recompute_tangent);
         assert_eq!(section.recompute_tangents_vertex_mask_channel, 0);
         assert!(!section.cast_shadow);
