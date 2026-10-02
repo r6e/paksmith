@@ -300,7 +300,7 @@ mod tests {
         let mut cur = Cursor::new(bytes.as_slice());
         let rd = read_render_data(&mut cur, &ctx, "T").unwrap();
         assert_eq!(cur.position(), bytes.len() as u64);
-        assert!(rd.lods.is_empty());
+        assert_eq!(rd.lods, [] as [crate::asset::StaticMeshLod; 0]);
         assert_eq!(rd.screen_sizes.len(), 8);
     }
 

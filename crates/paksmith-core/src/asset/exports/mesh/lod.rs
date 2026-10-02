@@ -909,6 +909,7 @@ mod tests {
     use super::test_support::{inlined_lod_ue4_23, inlined_lod_ue5_0, ue5_release_ctx};
     use super::*;
     use crate::asset::property::test_utils::make_ctx_with_version;
+    use crate::asset::structs::vector::FVector;
 
     /// UE 5.5 (object 1013, #643): a serialized `bHasRayTracingGeometry`
     /// bool precedes the buffers and is skipped; at 1012 nothing extra
@@ -1058,7 +1059,7 @@ mod tests {
         let mut cur = Cursor::new(bytes.as_slice());
         let lod = read_lod(&mut cur, &ctx, "T").unwrap();
         assert_eq!(cur.position(), bytes.len() as u64);
-        assert!(lod.positions.is_empty());
+        assert_eq!(lod.positions, [] as [FVector; 0]);
     }
 
     #[test]
@@ -1196,7 +1197,7 @@ mod tests {
             bytes.len() as u64,
             "consumed all 6 auxiliary index buffers + the sampler"
         );
-        assert!(lod.positions.is_empty());
+        assert_eq!(lod.positions, [] as [FVector; 0]);
     }
 
     #[cfg(feature = "__test_utils")]
@@ -1216,7 +1217,7 @@ mod tests {
             bytes.len() as u64,
             "consumed only the LOD header (buffers stripped)"
         );
-        assert!(lod.positions.is_empty());
+        assert_eq!(lod.positions, [] as [FVector; 0]);
         assert_eq!(lod.sections.len(), 1);
     }
 

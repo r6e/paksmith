@@ -194,7 +194,7 @@ mod tests {
         assert!(!data.cooked);
         assert_eq!(data.body_setup, PackageIndex::Null);
         assert_eq!(data.nav_collision, PackageIndex::Null);
-        assert!(data.sockets.is_empty());
+        assert_eq!(data.sockets, [] as [PackageIndex; 0]);
         assert!(data.render_data.is_none(), "no render data when not cooked");
         assert!(bulk.is_empty(), "inlined geometry carries no bulk records");
         assert_eq!(data.properties.len(), 0, "empty property tree");

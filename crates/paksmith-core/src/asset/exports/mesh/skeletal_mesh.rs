@@ -2360,7 +2360,7 @@ mod tests {
         assert_eq!(data.skeleton.bones[0].name, "Root");
         assert_eq!(data.materials, vec!["Mat0".to_string()]);
         assert!(data.cooked, "bCooked must be true");
-        assert!(data.lods.is_empty());
+        assert_eq!(data.lods, [] as [SkeletalMeshLod; 0]);
     }
 
     // ===== PR2 R1: bCooked gate (SplitModelAndRenderData + IsEditorDataStripped) =====
@@ -2588,7 +2588,7 @@ mod tests {
         assert!((data.bounds.box_extent.z - 6.0).abs() < f64::EPSILON);
         assert!((data.bounds.sphere_radius - 7.0).abs() < f64::EPSILON);
         assert!(data.cooked);
-        assert!(data.lods.is_empty());
+        assert_eq!(data.lods, [] as [SkeletalMeshLod; 0]);
     }
 
     // ===== Task 5 + 6: read_skel_mesh_section_render (cooked SerializeRenderItem) =====
@@ -2771,7 +2771,7 @@ mod tests {
 
         let mut cur = Cursor::new(bytes.as_slice());
         let s = read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").expect("decode");
-        assert!(s.bone_map.is_empty());
+        assert_eq!(s.bone_map, [] as [u16; 0]);
         assert_eq!(
             cur.position(),
             bytes.len() as u64,
@@ -3543,6 +3543,8 @@ mod tests {
 
     #[test]
     fn read_static_lod_model_inlined_lod() {
+        use crate::asset::structs::vector::FVector;
+
         let ctx = lod_ctx();
         let mut bytes = Vec::new();
         // 1. FStripDataFlags: global=0x00 (NOT AV-stripped), class=0x05 (a
@@ -3591,8 +3593,8 @@ mod tests {
         // bone_map = stable dedup-union of the sections' bone_maps.
         assert_eq!(lod.bone_map, vec![10u16, 11]);
         // PR5 fields stay empty.
-        assert!(lod.positions.is_empty());
-        assert!(lod.indices.is_empty());
+        assert_eq!(lod.positions, [] as [FVector; 0]);
+        assert_eq!(lod.indices, [] as [u32; 0]);
         // Cursor stops at blob-start (right after BuffersSize), NOT at EOF.
         assert_eq!(
             cur.position(),
@@ -6224,7 +6226,7 @@ mod tests {
 
         let (asset, bulk) = read_typed(&payload, &ctx, "Mesh.uasset")
             .expect("AV-stripped inlined LOD must not attempt to read a missing blob");
-        assert!(bulk.is_empty());
+        assert_eq!(bulk, [] as [FByteBulkData; 0]);
         let Asset::SkeletalMesh(data) = asset else {
             panic!("expected Asset::SkeletalMesh, got {asset:?}");
         };

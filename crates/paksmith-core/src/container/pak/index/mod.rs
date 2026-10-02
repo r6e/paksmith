@@ -782,7 +782,7 @@ mod tests {
         assert_eq!(e.header().uncompressed_size(), 1024);
         assert_eq!(e.header().compression_method(), &CompressionMethod::None);
         assert!(!e.header().is_encrypted());
-        assert!(e.header().compression_blocks().is_empty());
+        assert_eq!(e.header().compression_blocks(), []);
         assert_eq!(e.header().compression_block_size(), 0);
     }
 
@@ -1444,7 +1444,7 @@ mod tests {
         assert_eq!(header.compression_method(), &CompressionMethod::None);
         assert_eq!(header.sha1(), Some(Sha1Digest::from([0xABu8; 20])));
         assert!(!header.is_encrypted());
-        assert!(header.compression_blocks().is_empty());
+        assert_eq!(header.compression_blocks(), []);
         assert_eq!(header.compression_block_size(), 0);
     }
 
@@ -1697,7 +1697,7 @@ mod tests {
         assert_eq!(header.offset(), 0x100);
         assert_eq!(header.uncompressed_size(), 0x4000);
         assert_eq!(header.compressed_size(), 0x4000);
-        assert!(header.compression_blocks().is_empty());
+        assert_eq!(header.compression_blocks(), []);
         assert!(!header.is_encrypted());
         assert_eq!(
             header.sha1(),
@@ -2229,7 +2229,7 @@ mod tests {
         let mut cursor = Cursor::new(bytes);
         let header = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap();
         assert_eq!(header.compression_method(), &CompressionMethod::None);
-        assert!(header.compression_blocks().is_empty());
+        assert_eq!(header.compression_blocks(), []);
         assert_eq!(header.uncompressed_size(), 0);
     }
 

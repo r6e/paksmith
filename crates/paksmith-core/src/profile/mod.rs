@@ -814,7 +814,7 @@ engine_version = "4.27"
 [profiles.old.keys]
 "#;
         let back: ProfileStore = toml::from_str(text).unwrap();
-        assert!(back.profiles["old"].pak_paths.is_empty());
+        assert_eq!(back.profiles["old"].pak_paths, [] as [String; 0]);
         // And an empty list serializes WITHOUT the key —
         // skip_serializing_if keeps old-shape documents byte-stable.
         let out = toml::to_string_pretty(&back).unwrap();

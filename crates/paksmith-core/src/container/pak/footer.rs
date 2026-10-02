@@ -750,7 +750,7 @@ mod tests {
 
         assert_eq!(footer.version(), PakVersion::EncryptionKeyGuid);
         assert!(footer.encryption_key_guid().is_some());
-        assert!(footer.compression_methods().is_empty());
+        assert_eq!(footer.compression_methods(), []);
     }
 
     #[test]
