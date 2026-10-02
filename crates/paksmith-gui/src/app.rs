@@ -65,8 +65,9 @@ pub struct App {
     /// Wrapped in [`Zeroizing`] so the AES key material is cleared on drop
     /// (e.g. when the archive is swapped or the app exits).
     pub hex_input: Zeroizing<String>,
-    /// System accent color: read once at startup on macOS, the built-in
-    /// default elsewhere (see [`theme::accent`]).
+    /// System accent color, read once in `main` and seeded through
+    /// [`boot_app`]; [`theme::accent::DEFAULT_ACCENT`] applies under
+    /// `App::default` and wherever the platform has no read.
     pub accent: iced::Color,
     /// Keyboard cursor within the visible-row list.
     ///
@@ -174,17 +175,17 @@ impl Default for App {
             a: Box::new(pane_grid::Configuration::Pane(PaneKind::Sidebar)),
             b: Box::new(pane_grid::Configuration::Pane(PaneKind::Detail)),
         });
-        // Unknown by default: mundy's macOS backend asserts the main thread
-        // and would panic under `App::default`, which tests construct off it.
-        // The live path seeds it through `boot_app`. The accent read below
-        // carries the same contract but does not assert it (#793).
+        // Appearance stays at its default because mundy's macOS backend
+        // panics off the main thread, where tests construct `App::default`.
+        // The accent stays at the default too, because `main` is its one read
+        // site, so tests see a fixed value. `boot_app` seeds both.
         Self {
             mode: theme::startup_mode(None),
             archive: None,
             error: None,
             keyflow: KeyFlow::Idle,
             hex_input: Zeroizing::new(String::new()),
-            accent: theme::accent::system_accent(),
+            accent: theme::accent::DEFAULT_ACCENT,
             selected_row: None,
             panes,
             filter: String::new(),
@@ -231,14 +232,15 @@ impl Default for App {
 /// (CI/test) environment, so a mutant deleting the `audio` field init is
 /// indistinguishable from the real path there and would survive. The
 /// device-free, load-bearing parts — the log-buffer sharing and the
-/// appearance seed — are extracted to [`base_app`] so they stay
+/// appearance and accent seeds — are extracted to [`base_app`] so they stay
 /// mutation-tested.
 #[mutants::skip]
 pub fn boot_app(
     log_buffer: crate::state::log_buffer::LogBuffer,
     os_reading: Option<theme::OsReading>,
+    accent: iced::Color,
 ) -> App {
-    let mut app = base_app(log_buffer, os_reading);
+    let mut app = base_app(log_buffer, os_reading, accent);
     // Open the real output device here (not in `App::default`/`base_app`):
     // `default()` is used throughout the tests and must stay free of any
     // audio-hardware side effect, so device acquisition lives on the live boot
@@ -249,19 +251,22 @@ pub fn boot_app(
 }
 
 /// The device-free core of [`boot_app`]: wire the caller's shared `LogBuffer`
-/// into a fresh `App` and seed the appearance. Extracted (not
-/// `#[mutants::skip]`) so both load-bearing parts stay mutation-tested even
+/// into a fresh `App` and seed the appearance and accent. Extracted (not
+/// `#[mutants::skip]`) so the load-bearing parts stay mutation-tested even
 /// though `boot_app` itself is device glue — drop the buffer sharing and the
-/// console is permanently empty; drop the seed and the first frame is painted
-/// in the wrong theme, before the window exists to correct.
+/// console is permanently empty; drop the appearance seed and the first frame
+/// is painted in the wrong theme, before the window exists to correct; drop
+/// the accent seed and the OS accent is never shown.
 fn base_app(
     log_buffer: crate::state::log_buffer::LogBuffer,
     os_reading: Option<theme::OsReading>,
+    accent: iced::Color,
 ) -> App {
     App {
         log_buffer,
         mode: theme::startup_mode(os_reading),
         last_os_reading: os_reading,
+        accent,
         ..App::default()
     }
 }
@@ -6874,7 +6879,7 @@ mod tests {
         let buffer = crate::state::log_buffer::LogBuffer::default();
         // No live read here: this runs off the main thread, where mundy's
         // macOS backend refuses.
-        let app = super::boot_app(buffer.clone(), None);
+        let app = super::boot_app(buffer.clone(), None, theme::accent::DEFAULT_ACCENT);
         buffer.push(tracing::Level::INFO, "t".into(), "x".into());
         assert_eq!(app.log_buffer.snapshot().len(), 1);
     }
@@ -6895,7 +6900,7 @@ mod tests {
             // is the whole reason the two are split. One `boot_app` call
             // below covers the pass-through `main` depends on.
             let buffer = crate::state::log_buffer::LogBuffer::default();
-            let app = super::base_app(buffer, reading);
+            let app = super::base_app(buffer, reading, theme::accent::DEFAULT_ACCENT);
             assert_eq!(app.mode, mode, "startup mode for {reading:?}");
             assert_eq!(
                 app.last_os_reading, reading,
@@ -6905,8 +6910,35 @@ mod tests {
         }
         // And `boot_app` passes the reading through to it.
         let buffer = crate::state::log_buffer::LogBuffer::default();
-        let booted = super::boot_app(buffer, Some(theme::OsReading::Light));
+        let booted = super::boot_app(
+            buffer,
+            Some(theme::OsReading::Light),
+            theme::accent::DEFAULT_ACCENT,
+        );
         assert_eq!(booted.mode, theme::Mode::Light, "boot_app seeds from it");
+    }
+
+    /// Only macOS has a live accent read for `App::default` to reach for.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_default_app_holds_the_fixed_accent_not_a_live_read() {
+        assert_eq!(super::App::default().accent, theme::accent::DEFAULT_ACCENT);
+    }
+
+    #[test]
+    fn boot_seeds_the_accent_read_in_main() {
+        // Off the default, so a dropped seed, which leaves `App::default`'s
+        // value in place, cannot pass.
+        let seeded = iced::Color::from_rgb(0.9, 0.2, 0.4);
+        assert_ne!(seeded, theme::accent::DEFAULT_ACCENT);
+        let buffer = crate::state::log_buffer::LogBuffer::default();
+        assert_eq!(super::base_app(buffer, None, seeded).accent, seeded);
+        let buffer = crate::state::log_buffer::LogBuffer::default();
+        assert_eq!(
+            super::boot_app(buffer, None, seeded).accent,
+            seeded,
+            "boot_app passes the seed through"
+        );
     }
 
     #[test]

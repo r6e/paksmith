@@ -7,12 +7,6 @@
 //! smart pointer. Windows and Linux reads are deferred as follow-up work;
 //! both platforms fall back to `DEFAULT_ACCENT`.
 
-// Dead-code: `DEFAULT_ACCENT` and `system_accent` are public API for later tasks
-// that haven't consumed them yet (same as tokens.rs). `platform_accent` is
-// private and similarly unconsumed outside tests; suppressed at file scope
-// because the `pub` items need it too.
-#![allow(dead_code)]
-
 // The macOS arm calls objc2 bindings. Since objc2-app-kit 0.3.2 the relevant
 // class methods are safe; no unsafe block is required. Workspace-wide
 // unsafe_code = "deny" is satisfied — no unsafe here.
@@ -22,12 +16,10 @@ mod macos_impl {
     use objc2_app_kit::{NSColor, NSColorSpace};
 
     pub(super) fn accent() -> Option<Color> {
-        // Thread contract: these `NSColor`/`NSColorSpace` reads are intended
-        // to run on the main thread at app startup — `system_accent()` is
-        // called from `App::default`, which Iced invokes on the main thread.
-        // objc2 does not statically enforce main-thread confinement for these
-        // marker-less `NSColor` class methods; callers MUST ensure this is not
-        // invoked from a background `Task` or worker thread.
+        // Sound on any thread: the SDK headers mark `NSColor` and
+        // `NSColorSpace` `NS_SWIFT_SENDABLE`, and objc2-app-kit binds both
+        // `Send + Sync` with safe class methods. The tests below run it on
+        // libtest's worker threads.
         //
         // `NSColorSpace::sRGBColorSpace()` and `NSColor::controlAccentColor()`
         // are class methods that succeed when AppKit is loaded (the two methods

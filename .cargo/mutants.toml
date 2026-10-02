@@ -179,8 +179,8 @@ exclude_re = [
     # return nondeterministically (headless CI has no display/accent), so
     # `accent -> None` / `-> Some(default)` can't be asserted; the fallback
     # (`DEFAULT_ACCENT`) and the validity of any returned colour ARE unit-tested
-    # (`accent_is_a_valid_opaque_color`). Remove if a deterministic accent stub
-    # is threaded in for tests.
+    # (`accent_is_a_valid_opaque_color`). Remove if the platform read itself
+    # becomes injectable.
     'accent -> Option<Color>',
     #
     # (c) Env/IO resolution wrappers shared with the CLI. `now_unix` (a trivial
