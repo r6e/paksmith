@@ -386,8 +386,8 @@ mod tests {
         assert_eq!(body.len(), 12);
         let mut cur = Cursor::new(body);
         let skel = read_reference_skeleton(&mut cur, &ctx, "Test.uasset").expect("decode");
-        assert!(skel.bones.is_empty());
-        assert!(skel.bind_pose.is_empty());
+        assert_eq!(skel.bones, [] as [crate::asset::BoneInfo; 0]);
+        assert_eq!(skel.bind_pose, [] as [FTransform; 0]);
         // all 12 bytes consumed — name-map was read, not skipped.
         assert_eq!(cur.position(), 12);
     }

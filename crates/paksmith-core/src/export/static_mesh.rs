@@ -664,7 +664,7 @@ mod tests {
     fn uv_accessors_empty_when_no_channels() {
         let mut doc = GltfDoc::new();
         let accs = push_uvs(&mut doc, &lod_one_triangle());
-        assert!(accs.is_empty());
+        assert_eq!(accs, [] as [Index<gltf::json::Accessor>; 0]);
     }
 
     #[test]

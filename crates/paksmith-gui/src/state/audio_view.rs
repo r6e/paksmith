@@ -575,8 +575,8 @@ mod tests {
 
     #[test]
     fn compute_waveform_empty_or_zero_columns_is_empty() {
-        assert!(compute_waveform(&[], 1, 4).is_empty());
-        assert!(compute_waveform(&[1, 2, 3], 1, 0).is_empty());
+        assert_eq!(compute_waveform(&[], 1, 4), [] as [(f32, f32); 0]);
+        assert_eq!(compute_waveform(&[1, 2, 3], 1, 0), [] as [(f32, f32); 0]);
     }
 
     #[test]
@@ -798,6 +798,6 @@ mod tests {
 
     #[test]
     fn audio_state_default_waveform_is_empty() {
-        assert!(AudioState::default().waveform.is_empty());
+        assert_eq!(AudioState::default().waveform, [] as [(f32, f32); 0]);
     }
 }

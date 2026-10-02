@@ -482,7 +482,7 @@ mod tests {
         let ctx = make_ctx(&["None"]);
         let buf: Vec<u8> = Vec::new();
         let props = read_properties(&mut Cursor::new(&buf[..]), &ctx, 0, 0, "x.uasset").unwrap();
-        assert!(props.is_empty());
+        assert_eq!(props, [] as [Property; 0]);
     }
 
     /// One `Target: LazyObjectProperty` tag with an 8-byte body, then the

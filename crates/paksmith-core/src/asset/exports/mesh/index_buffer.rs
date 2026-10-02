@@ -340,7 +340,7 @@ mod tests {
     fn index_buffer_empty() {
         let ctx = make_ctx_with_version(514, None);
         let idx = read_index_buffer(&mut Cursor::new(buf(false, &[])), &ctx, "T").unwrap();
-        assert!(idx.is_empty());
+        assert_eq!(idx, [] as [u32; 0]);
     }
 
     // ===== read_multisize_index_container (FMultisizeIndexContainer) =====

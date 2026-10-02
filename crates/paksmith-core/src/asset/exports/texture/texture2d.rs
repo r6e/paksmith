@@ -1999,8 +1999,8 @@ mod tests {
         assert_eq!(vt.tile_size, 128);
         assert_eq!(vt.tile_border_size, 4);
         assert_eq!(vt.layer_types, vec!["PF_DXT1".to_string()]);
-        assert!(vt.tile_offset_in_chunk.is_empty()); // 0-count legacy array
-        assert!(vt.layer_fallback_colors.is_empty()); // pre-UE5
+        assert_eq!(vt.tile_offset_in_chunk, [] as [u32; 0]); // 0-count legacy array
+        assert_eq!(vt.layer_fallback_colors, [] as [[f32; 4]; 0]); // pre-UE5
         // The standard fields still decode around the blob.
         assert_eq!(data.size_x, 64);
         assert_eq!(data.mips.len(), 1);
@@ -2058,7 +2058,7 @@ mod tests {
         let (bytes, ctx) = texture_522_with_trailing_flag(1, &[]); // 0 mips, bIsVirtual=1
         let (data, records) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
         assert!(data.is_virtual());
-        assert!(data.mips.is_empty());
+        assert_eq!(data.mips, [] as [Texture2DMipMap; 0]);
         assert!(
             records.is_empty(),
             "no mip records on a 0-mip virtual texture"

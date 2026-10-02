@@ -80,7 +80,7 @@ fn read_from_pak_split_asset_round_trip() {
     let pkg = Package::read_from_pak(&pak, "Game/Maps/Demo.uasset", None)
         .expect("split asset parse failed");
     // Package exposes direct pub fields; no .exports() accessor method.
-    assert!(!pkg.exports.exports.is_empty());
+    assert_ne!(pkg.exports.exports, [] as [paksmith_core::ObjectExport; 0]);
 }
 
 #[test]

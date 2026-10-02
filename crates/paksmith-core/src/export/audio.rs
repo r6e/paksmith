@@ -570,7 +570,7 @@ mod tests {
         let out = OggHandler
             .export(&Asset::SoundWave(streaming("OGG", vec![])), &[])
             .expect("zero chunks → empty output");
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
     }
 
     #[test]

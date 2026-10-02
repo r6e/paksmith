@@ -260,7 +260,7 @@ mod tests {
         bytes.extend_from_slice(&0i32.to_le_bytes()); // NumRows = 0
         let ctx = make_ctx(&["None"]);
         let data = read_from(&bytes, &ctx, "test.uasset").expect("parse");
-        assert!(data.rows.is_empty());
+        assert_eq!(data.rows, [] as [DataTableRow; 0]);
         assert_eq!(data.row_struct, ""); // no RowStruct property
     }
 
@@ -370,7 +370,7 @@ mod tests {
         let data = read_from(&bytes, &ctx, "test.uasset").expect("parse");
         assert_eq!(data.rows.len(), 2);
         assert_eq!(data.rows[0].name, "RowAlpha");
-        assert!(data.rows[0].properties.is_empty());
+        assert_eq!(data.rows[0].properties, [] as [Property; 0]);
         assert_eq!(data.rows[1].name, "RowBeta");
         assert_eq!(data.rows[1].properties.len(), 1);
         assert_eq!(data.rows[1].properties[0].name(), "Damage");

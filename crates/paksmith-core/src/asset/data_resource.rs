@@ -386,20 +386,17 @@ mod tests {
     #[test]
     fn empty_and_absent_tables_yield_empty() {
         let bytes = table_bytes(1, &[]);
-        assert!(
-            parse_data_resource_table(&bytes, 4, "t")
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            parse_data_resource_table(&bytes, 4, "t").unwrap(),
+            [] as [FObjectDataResource; 0]
         );
-        assert!(
-            parse_data_resource_table(&bytes, 0, "t")
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            parse_data_resource_table(&bytes, 0, "t").unwrap(),
+            [] as [FObjectDataResource; 0]
         );
-        assert!(
-            parse_data_resource_table(&bytes, -1, "t")
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            parse_data_resource_table(&bytes, -1, "t").unwrap(),
+            [] as [FObjectDataResource; 0]
         );
     }
 
