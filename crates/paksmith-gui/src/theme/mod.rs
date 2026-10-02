@@ -76,10 +76,12 @@ const INDEFINITE_IS_A_READING: bool = false;
 ///
 /// Honoured by the portal backend, which races the read against a timer. The
 /// macOS backend resolves synchronously and ignores it. The Windows one
-/// ignores it too, so [`budgeted`] enforces it there. On Linux iced runs a
-/// second 200ms read of its own before the first frame besides (#789). The
-/// window is not shown until the read returns or, on Windows, is abandoned
-/// at the budget.
+/// ignores it too, so [`budgeted`] enforces it there. On Linux iced takes no
+/// appearance read of its own, since its `linux-theme-detection` feature is
+/// compiled out (#789), though winit's Wayland client-side decorations still
+/// read the portal's colour scheme once, and its titlebar button layout,
+/// while the window is created. The window is not shown
+/// until the read returns or, on Windows, is abandoned at the budget.
 ///
 /// Also bounds each retry rung, which is a re-read of the same thing.
 const STARTUP_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
@@ -172,13 +174,10 @@ fn within_budget<T: Send + 'static>(
 /// The OS appearance, as a stream that opens with the current value and
 /// then yields each change.
 ///
-/// Taken from mundy directly rather than through `iced::system`, although
-/// iced links mundy on Linux: iced overwrites its reading at window
-/// creation with the window's own theme — which X11 never reports and
-/// Wayland reports only for a client-side-decoration override — and off
-/// Linux it never links mundy at all — and what iced would fall back to
-/// does not serve: on macOS winit stops reporting theme changes once iced
-/// sets the window's appearance.
+/// Taken from mundy directly rather than through `iced::system`, whose
+/// reading is winit's window theme: X11 never reports one, Wayland only
+/// for a client-side-decoration override, and on macOS winit stops
+/// reporting changes once iced sets the window's appearance.
 pub fn appearance_stream() -> impl iced::futures::Stream<Item = Appearance> {
     // Eager, not deferred: see [`readings`] for the thread that requires it.
     composed(readings, readings)
@@ -1169,5 +1168,51 @@ mod tests {
                 Decision::Hold
             );
         }
+    }
+
+    /// The dependency names `Cargo.lock` records for `package`.
+    fn locked_dependencies<'a>(lock: &'a str, package: &str) -> Vec<&'a str> {
+        let name_line = format!("name = \"{package}\"");
+        let entries: Vec<&str> = lock
+            .split("[[package]]")
+            .filter(|entry| entry.lines().any(|line| line.trim() == name_line))
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "{package} must resolve to exactly one locked version"
+        );
+        entries[0]
+            .lines()
+            .skip_while(|line| !line.starts_with("dependencies = ["))
+            .skip(1)
+            .take_while(|line| line.trim() != "]")
+            .map(|line| {
+                let name = line.trim().trim_end_matches(',').trim_matches('"');
+                name.split_once(' ').map_or(name, |(name, _)| name)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn iced_takes_no_appearance_reading_of_its_own() {
+        // Its `linux-theme-detection` would run a second portal stream and a
+        // second blocking read, serial with `startup_reading` (#789). The
+        // lockfile spans every target, so this pins Linux from any host, and
+        // catches a dependency re-enabling iced's defaults by unification.
+        let lock = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock"),
+        )
+        .expect("the workspace lockfile is readable");
+        let ours = locked_dependencies(&lock, "paksmith-gui");
+        let iced_winit = locked_dependencies(&lock, "iced_winit");
+        assert!(
+            ours.contains(&"mundy") && iced_winit.contains(&"winit"),
+            "the lockfile parse must see both dependency lists"
+        );
+        assert!(
+            !iced_winit.contains(&"mundy"),
+            "iced must be taken without `linux-theme-detection`"
+        );
     }
 }

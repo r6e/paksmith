@@ -10,11 +10,26 @@ description = "GUI for exploring and extracting Unreal Engine game assets"
 # Phase 6: Iced GUI framework. MIT/Apache-2.0. The `tokio` feature makes Iced's
 # `Task::perform` executor tokio-backed, which `paksmith-core`'s reqwest-based
 # registry fetch (inside the async `resolve_pak_key`) requires at runtime — the
-# default `thread-pool` executor would panic with no tokio reactor.
-iced = { version = "0.14", features = ["tokio", "image-without-codecs", "canvas"] }
+# `thread-pool` executor, which `tokio` takes precedence over, would panic with
+# no tokio reactor.
+# `default-features = false` drops `linux-theme-detection` alone (#789): its
+# mundy stream and blocking startup read duplicate `theme`'s own, and iced
+# overwrites that reading at window creation anyway.
+iced = { version = "0.14", default-features = false, features = [
+    # iced 0.14.0's `default`, less `linux-theme-detection`; re-diff on every bump.
+    "wgpu",
+    "tiny-skia",
+    "crisp",
+    "web-colors",
+    "thread-pool",
+    "x11",
+    "wayland",
+    "tokio",
+    "image-without-codecs",
+    "canvas",
+] }
 # The OS appearance. Apache-2.0. Direct rather than reached through iced —
-# see `theme::appearance_stream` for why iced's reading cannot serve, and
-# #789 for what its own detection still costs us.
+# see `theme::appearance_stream` for why iced's reading cannot serve.
 # `default-features = false` because the crate
 # defaults to every preference it knows and `color-scheme` is the only one
 # read; `async-io` re-enables the zbus backend that default would have given
