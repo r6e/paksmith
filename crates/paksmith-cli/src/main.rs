@@ -6,7 +6,6 @@ mod inspect;
 mod output;
 mod path_util;
 mod profile_paks;
-mod read_options;
 mod search;
 
 use std::io;

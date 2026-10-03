@@ -13,7 +13,7 @@ use indicatif::ProgressBar;
 use rayon::prelude::*;
 
 use paksmith_core::asset::Package;
-use paksmith_core::asset::mappings::Usmap;
+use paksmith_core::asset::ParseInputs;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::export::HandlerRegistry;
 use paksmith_core::{StagedReplace, StagedReplaceError};
@@ -252,14 +252,9 @@ pub(crate) struct ExtractJob<'a> {
     pub(crate) registry: &'a HandlerRegistry,
     pub(crate) cfg: &'a ExtractConfig,
     /// Effective `.usmap` mappings (explicit `--mappings` or the
-    /// selected profile's source — #651), shared across all workers
-    /// (see `Package::read_from_reader` for the `&Arc` rationale).
-    pub(crate) mappings: Option<Arc<Usmap>>,
-    /// The selected profile's declared engine version (#656), applied
-    /// to every entry this job parses. `None` when no profile was
-    /// selected or it declares none — then every gate keeps its
-    /// object-version proxy.
-    pub(crate) engine_version: Option<paksmith_core::asset::UeVersion>,
+    /// selected profile's source — #651) and the profile's engine
+    /// version (#656), shared across all workers.
+    pub(crate) inputs: &'a ParseInputs,
 }
 
 impl ExtractJob<'_> {
@@ -277,14 +272,7 @@ impl ExtractJob<'_> {
     }
 
     fn extract_asset(&self, entry_path: &str) -> EntryOutcome {
-        // The projection into `build` is the residual untested hop:
-        // deleting `self.engine_version` here fails to compile, but
-        // substituting `None` would not. Same structural limit as
-        // `open_and_collect`'s `engine_version = ctx.engine_version`
-        // — `PakOpenContext` has no public constructor, so neither
-        // read can be lifted into a unit-testable position without a
-        // core-side change.
-        let opts = crate::read_options::build(self.mappings.as_ref(), self.engine_version);
+        let opts = self.inputs.read_options();
         let pkg = match Package::read_from_reader_with(&self.reader, entry_path, &opts) {
             Ok(p) => p,
             Err(e) => return failed(entry_path, e),

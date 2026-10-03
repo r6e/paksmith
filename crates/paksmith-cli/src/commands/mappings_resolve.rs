@@ -11,8 +11,8 @@
 //!    `UnversionedWithoutMappings` failures the profile was configured
 //!    to fix).
 //!
-//! All loading routes through [`Usmap::from_path`] and inherits its
-//! defensive caps.
+//! All loading routes through [`Usmap::from_path`], the profile source
+//! by way of [`MappingsSource::load`], and inherits its defensive caps.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -36,8 +36,7 @@ fn load_from_profile(
     source: &MappingsSource,
     selector: &'static str,
 ) -> paksmith_core::Result<Usmap> {
-    let MappingsSource::Path(path) = source;
-    Usmap::from_path(path).map_err(|e| PaksmithError::InvalidArgument {
+    source.load().map_err(|e| PaksmithError::InvalidArgument {
         arg: selector,
         reason: format!("profile mappings file failed to load: {e}"),
     })
@@ -73,46 +72,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_bad_path_attributes_to_mappings_flag() {
-        let err =
-            resolve_usmap(Some(Path::new("/nonexistent/x.usmap")), None, "--game").unwrap_err();
-        assert!(
-            matches!(
-                err,
-                PaksmithError::InvalidArgument {
-                    arg: "--mappings",
-                    ..
-                }
-            ),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn profile_bad_path_attributes_to_selector() {
-        let src = MappingsSource::Path("/nonexistent/x.usmap".into());
-        let err = resolve_usmap(None, Some(&src), "--game").unwrap_err();
-        assert!(
-            matches!(err, PaksmithError::InvalidArgument { arg: "--game", ref reason }
-                if reason.contains("profile mappings")),
-            "got {err:?}"
-        );
-        // The selector is threaded, not hardcoded: a --detect-selected
-        // profile blames --detect.
-        let err = resolve_usmap(None, Some(&src), "--detect").unwrap_err();
-        assert!(
-            matches!(
-                err,
-                PaksmithError::InvalidArgument {
-                    arg: "--detect",
-                    ..
-                }
-            ),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
     fn explicit_wins_over_profile() {
         // The profile path is broken; an (also broken) explicit path must
         // be the one reported — proof the explicit branch was taken.
@@ -128,6 +87,37 @@ mod tests {
                 if reason.contains("explicit.usmap")),
             "got {err:?}"
         );
+    }
+
+    /// The whole reason string, byte for byte: the prefix plus the
+    /// loader's own message, for either selector.
+    #[test]
+    fn profile_load_failure_reason_is_the_prefix_plus_the_loader_error() {
+        let path = Path::new("/nonexistent/x.usmap");
+        let src = MappingsSource::Path(path.into());
+        let loader = Usmap::from_path(path).unwrap_err().to_string();
+        for selector in ["--game", "--detect"] {
+            let err = resolve_usmap(None, Some(&src), selector).unwrap_err();
+            let PaksmithError::InvalidArgument { arg, reason } = err else {
+                panic!("expected InvalidArgument, got {err:?}");
+            };
+            assert_eq!(arg, selector);
+            assert_eq!(
+                reason,
+                format!("profile mappings file failed to load: {loader}")
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_load_failure_reason_is_the_loader_error() {
+        let path = Path::new("/nonexistent/x.usmap");
+        let err = resolve_usmap(Some(path), None, "--game").unwrap_err();
+        let PaksmithError::InvalidArgument { arg, reason } = err else {
+            panic!("expected InvalidArgument, got {err:?}");
+        };
+        assert_eq!(arg, "--mappings");
+        assert_eq!(reason, Usmap::from_path(path).unwrap_err().to_string());
     }
 
     #[test]
