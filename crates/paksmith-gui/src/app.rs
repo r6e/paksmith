@@ -287,8 +287,10 @@ pub enum Message {
     KeyInputChanged(String),
     /// The user pressed "Use key" in the key-prompt panel.
     KeySubmitted,
-    /// The user pressed "Choose install dir…": `None` triggers the dir picker;
-    /// `Some(path)` is the resolved directory after the picker closes.
+    /// The user pressed "Choose install dir…": open the dir picker.
+    KeyDirRequested,
+    /// The dir picker closed: `Some(path)` when a directory was chosen, `None`
+    /// when it was cancelled.
     KeyDirChosen(Option<PathBuf>),
     /// The user selected (or cleared) a game profile in the toolbar dropdown.
     ///
@@ -802,9 +804,9 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 }
             }
         }
-        Message::KeyDirChosen(None) => {
-            // Trigger the native dir-picker; the chosen path loops back as
-            // `KeyDirChosen(Some(...))`.
+        Message::KeyDirChosen(None) => Task::none(),
+        Message::KeyDirRequested => {
+            // The chosen path, or `None` on cancel, comes back as `KeyDirChosen`.
             Task::perform(
                 async {
                     rfd::AsyncFileDialog::new()
@@ -3806,6 +3808,14 @@ mod tests {
         let mut app = app_with_paths(&["file.txt"]);
         let _ = update(&mut app, Message::CopyPathRequested(999));
         assert!(app.toasts.is_empty(), "no toast when the row has no path");
+    }
+
+    /// Cancelling the install-dir picker ends there, rather than reopening it.
+    #[test]
+    fn a_cancelled_install_dir_pick_does_not_reopen_the_picker() {
+        let mut app = App::default();
+        assert_eq!(update(&mut app, Message::KeyDirRequested).units(), 1);
+        assert_eq!(update(&mut app, Message::KeyDirChosen(None)).units(), 0);
     }
 
     /// The retry resolves with the selector of the attempt that left the

@@ -101,7 +101,7 @@ pub fn view<'a>(
     let choose_dir_btn = button(text("Choose install dir\u{2026}").size(SZ_MD))
         .style(iced::widget::button::secondary)
         .padding([SPACE_SM, SPACE_MD])
-        .on_press(Message::KeyDirChosen(None)); // triggers the rfd picker in update()
+        .on_press(Message::KeyDirRequested);
 
     // The game-profile selector lives in the toolbar (game picker dropdown).
     // Selecting a profile there and then pressing Open is the canonical path.
