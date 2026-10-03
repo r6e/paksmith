@@ -60,7 +60,7 @@ pub use import_table::{ImportTable, ObjectImport};
 pub use mappings::Usmap;
 pub use name_table::{FName, NameTable};
 pub use package::Package;
-pub use package::ReadOptions;
+pub use package::{ParseInputs, ReadOptions};
 pub use package_index::{PackageIndex, PackageIndexError};
 pub use property::PropertyBag;
 pub use summary::PackageSummary;

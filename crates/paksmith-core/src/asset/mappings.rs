@@ -1556,6 +1556,14 @@ fn position_usize(cur: &Cursor<&[u8]>) -> usize {
     pos
 }
 
+/// The checked-in `.usmap` fixture whose `Hero` schema holds `Health` and
+/// `Speed`, for tests outside the `__test_utils` gate.
+#[cfg(test)]
+pub(crate) fn hero_usmap_fixture() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/external_minimal_v0.usmap")
+}
+
 // Tests are gated on `__test_utils` (rather than plain `#[cfg(test)]`)
 // because they reuse `testing::usmap::build_minimal_usmap_bytes` — the
 // canonical source for the minimal `.usmap` byte fixture, shared with

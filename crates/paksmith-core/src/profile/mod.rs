@@ -147,6 +147,21 @@ pub enum MappingsSource {
     Path(std::path::PathBuf),
 }
 
+impl MappingsSource {
+    /// Load this source into a parsed `.usmap` registry, under every
+    /// [`crate::asset::Usmap::from_path`] cap. Blocking filesystem I/O.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::asset::Usmap::from_path`]'s errors, unwrapped, so each
+    /// caller attributes the failure in its own terms.
+    pub fn load(&self) -> crate::Result<crate::asset::Usmap> {
+        match self {
+            Self::Path(path) => crate::asset::Usmap::from_path(path),
+        }
+    }
+}
+
 /// One game's stored keys + light metadata. The profile's id is the
 /// [`ProfileStore`] map key, not a field here.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

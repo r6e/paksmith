@@ -458,10 +458,13 @@ fn companion_loader<R: crate::container::ContainerReader + ?Sized + 'static>(
 /// resolver — see `engine_hint::resolve_engine_gate`'s scope note.)
 ///
 /// Convention for the NEXT profile-borne parse input: add a field
-/// here and thread it through the CLI's `read_options::build`, which
-/// both delivery paths already call. Adding it at the call sites
-/// instead is what left the #656 wiring untested — the bare entry
-/// points cannot force that audit the way a signature change would.
+/// here and to [`ParseInputs`] (whose [`ParseInputs::read_options`]
+/// builds a struct literal, so it fails to compile there until the
+/// field's source is decided), and thread it through the CLI's
+/// `read_options::build`, which both delivery paths already call.
+/// Adding it at the call sites instead is what left the #656 wiring
+/// untested — the bare entry points cannot force that audit the way a
+/// signature change would.
 ///
 /// `#[non_exhaustive]`: construct with [`ReadOptions::new`] and the
 /// builder setters (a struct literal is blocked outside this crate).
@@ -1569,9 +1572,99 @@ fn read_payloads(
     Ok((payloads, bulk_records))
 }
 
+/// The owned form of a read's optional inputs, held for an archive's
+/// lifetime: the shared `.usmap` registry and the profile's engine-version
+/// hint. Built by [`crate::profile::resolve::PakOpenContext::parse_inputs`]
+/// or [`crate::profile::resolve::PakOpenContext::load_parse_inputs`], or
+/// `Default` for the bare read; each read borrows it through
+/// [`Self::read_options`]. A struct literal is blocked outside this crate;
+/// a caller without a context sets the `pub` fields on a
+/// `ParseInputs::default()`.
+#[derive(Clone, Default)]
+#[non_exhaustive]
+pub struct ParseInputs {
+    /// `.usmap` schema registry for unversioned-property packages.
+    pub mappings: Option<Arc<Usmap>>,
+    /// Engine version declared by the game profile.
+    pub engine_version_hint: Option<crate::asset::UeVersion>,
+}
+
+impl ParseInputs {
+    /// Borrow these inputs for one package read.
+    #[must_use]
+    pub fn read_options(&self) -> ReadOptions<'_> {
+        ReadOptions {
+            mappings: self.mappings.as_ref(),
+            engine_version_hint: self.engine_version_hint,
+        }
+    }
+}
+
+/// Summarises the registry: `Usmap`'s derived `Debug` prints every schema.
+impl std::fmt::Debug for ParseInputs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            mappings,
+            engine_version_hint,
+        } = self;
+        let mappings = mappings.as_ref().map(|usmap| {
+            format!(
+                "<Usmap: {} schemas, {} enums>",
+                usmap.schemas.len(),
+                usmap.enums.len()
+            )
+        });
+        f.debug_struct("ParseInputs")
+            .field("mappings", &mappings)
+            .field("engine_version_hint", engine_version_hint)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod read_options_tests {
-    use super::ReadOptions;
+    use super::{ParseInputs, ReadOptions};
+    use crate::asset::UeVersion;
+
+    fn hint(s: &str) -> Option<UeVersion> {
+        let parsed = UeVersion::parse_lenient(s);
+        assert!(parsed.is_some(), "fixture version {s:?} must parse");
+        parsed
+    }
+
+    /// `Usmap`'s derived Debug dumps every schema, too much for a GUI
+    /// message's debug output.
+    #[test]
+    fn parse_inputs_debug_summarises_the_usmap_without_dumping_it() {
+        let usmap = std::sync::Arc::new(
+            crate::asset::Usmap::from_path(crate::asset::mappings::hero_usmap_fixture()).unwrap(),
+        );
+        assert!(format!("{usmap:?}").contains("Health"), "fixture changed");
+        let inputs = ParseInputs {
+            mappings: Some(usmap),
+            engine_version_hint: hint("5.3"),
+        };
+        let shown = format!("{inputs:?}");
+        assert!(shown.contains("ParseInputs"), "{shown}");
+        assert!(shown.contains("<Usmap: 1 schemas, 0 enums>"), "{shown}");
+        assert!(!shown.contains("Health"), "{shown}");
+        assert!(shown.contains("engine_version_hint"), "{shown}");
+    }
+
+    #[test]
+    fn parse_inputs_read_options_composes_mappings_and_hint() {
+        let usmap = std::sync::Arc::new(crate::asset::Usmap::default());
+        let inputs = ParseInputs {
+            mappings: Some(usmap.clone()),
+            engine_version_hint: hint("5.3"),
+        };
+        let opts = inputs.read_options();
+        assert!(
+            opts.mappings
+                .is_some_and(|m| std::sync::Arc::ptr_eq(m, &usmap))
+        );
+        assert_eq!(opts.engine_version_hint, hint("5.3"));
+    }
 
     /// The builders are the documented construction path but live
     /// outside the `__test_utils`-gated module below, which the
@@ -1586,8 +1679,7 @@ mod read_options_tests {
     /// is how a vacuous assertion survived on this side once already.
     #[test]
     fn builders_set_each_field_and_compose() {
-        let hint = crate::asset::UeVersion::parse_lenient("5.3");
-        assert!(hint.is_some());
+        let hint = hint("5.3");
         assert!(ReadOptions::new().engine_version_hint.is_none());
         assert!(ReadOptions::new().mappings.is_none());
 
