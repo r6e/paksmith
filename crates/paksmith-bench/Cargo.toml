@@ -18,7 +18,7 @@ name = "paksmith-bench"
 # tracked packages. Pinned to 0.0.0 to make this obvious; the root
 # `workspace.package.version` would have it inheriting the user-facing
 # version, which is misleading for a non-user-facing crate.
-version = "0.0.0"
+version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -58,7 +58,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # [dev-dependencies] (not [dependencies]) so `cargo build --release`
 # of any consumer that pulls in paksmith-bench never activates
 # `__test_utils` via feature unification.
-paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
+paksmith-core = { path = "../paksmith-core", version = "0.2.0", features = ["__test_utils"] }
 
 # Bench fixture synthesis for parameterized .uasset bytes lives in
 # paksmith-fixture-gen's library surface (`uasset::synthesize_*`,
@@ -70,7 +70,7 @@ paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__tes
 # `version = "0.0.0"` matches paksmith-fixture-gen's declared version
 # and satisfies cargo-deny's `wildcards = "deny"` rule — bare path
 # dependencies (no version constraint) trip the wildcard check.
-paksmith-fixture-gen = { path = "../paksmith-fixture-gen", version = "0.0.0" }
+paksmith-fixture-gen = { path = "../paksmith-fixture-gen", version = "0.0.1" }
 
 # Direct repak access for pak-fixture writers (multi-entry / large
 # paks generated on demand under `target/bench-fixtures/`). Pinned
