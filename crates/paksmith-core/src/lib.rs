@@ -35,6 +35,9 @@
 //! CSV/JSON (data table), fed by `FByteBulkData` resolution. Game
 //! profile management remains planned (Phase 5) per
 //! `docs/plans/ROADMAP.md`.
+//!
+//! **Output files**: [`StagedReplace`] replaces a file by renaming an
+//! exclusively created sibling temp over it.
 
 // Lint-enforces the unwrap/expect half of CLAUDE.md's no-panic
 // guarantee; `cfg(test)` code is exempt via `not(test)`.
@@ -47,6 +50,7 @@ pub mod error;
 pub mod export;
 pub mod localization;
 pub mod profile;
+pub mod staged_replace;
 
 mod seams;
 
@@ -86,6 +90,7 @@ pub(crate) mod test_spans;
 pub use container::pak::{AesKey, AesKeyHexError};
 pub use digest::Sha1Digest;
 pub use error::PaksmithError;
+pub use staged_replace::{StagedReplace, StagedReplaceError};
 
 /// Convenience alias for `Result<T, PaksmithError>`.
 pub type Result<T> = std::result::Result<T, PaksmithError>;
@@ -309,6 +314,8 @@ mod send_sync_assertions {
         assert_send_sync::<crate::error::LocresParseFault>();
         assert_send_sync::<crate::error::LocresAllocationContext>();
         assert_send_sync::<CompanionFileKind>();
+        assert_send_sync::<StagedReplace>();
+        assert_send_sync::<StagedReplaceError>();
 
         // Phase 3 export pipeline. These types must all be Send + Sync —
         // HandlerRegistry holds Box<dyn FormatHandler + Send + Sync>;

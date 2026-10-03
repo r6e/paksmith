@@ -16,6 +16,7 @@ use paksmith_core::asset::Package;
 use paksmith_core::asset::mappings::Usmap;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::export::HandlerRegistry;
+use paksmith_core::{StagedReplace, StagedReplaceError};
 
 use self::classify::{EntryClass, classify};
 use self::select::{FormatPrefs, select_export};
@@ -130,11 +131,6 @@ fn resolve_root(output_dir: &Path, dry_run: bool) -> std::io::Result<Option<Path
     Ok(Some(output_dir.canonicalize()?))
 }
 
-/// Distinguishes the in-flight temp of one `--overwrite` write from every
-/// other, so two workers racing for the same `--flat` destination never
-/// collide on the temp itself.
-static OVERWRITE_TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 /// Bounds the path the guard walks and resolves. An entry path is untrusted
 /// index data with no depth or length limit of its own, and both the `lstat`
 /// climb and the `realpath` after it cost a syscall per component over a
@@ -200,61 +196,6 @@ fn has_parent_dir_below(absolute: &Path, found: &Path) -> bool {
         tail.components()
             .any(|c| c == std::path::Component::ParentDir)
     })
-}
-
-const TEMP_PREFIX: &str = ".paksmith-";
-const TEMP_SUFFIX: &str = ".part";
-
-/// Drawn once per process. `RandomState` seeds itself from the OS, so this
-/// needs no dependency.
-static OVERWRITE_TEMP_KEY: std::sync::LazyLock<std::collections::hash_map::RandomState> =
-    std::sync::LazyLock::new(std::collections::hash_map::RandomState::new);
-
-/// Keyed, so one observed temp name does not predict later ones.
-fn mix_temp_seq(key: &std::collections::hash_map::RandomState, seq: u64) -> u64 {
-    std::hash::BuildHasher::hash_one(key, seq)
-}
-
-/// A sibling name of constant width, so a destination within `NAME_MAX` never
-/// has a temp that is not. Unguessable, because it lives in the namespace
-/// archive entry names map into: a crafted entry must not land on another
-/// worker's in-flight temp.
-fn overwrite_temp_path(dest: &Path) -> PathBuf {
-    let seq = OVERWRITE_TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let name = format!(
-        "{TEMP_PREFIX}{:016x}{TEMP_SUFFIX}",
-        mix_temp_seq(&OVERWRITE_TEMP_KEY, seq)
-    );
-    dest.with_file_name(name)
-}
-
-/// The access bits an existing regular-file destination should pass on, or
-/// `None` when there is nothing to carry.
-///
-/// Reads with `symlink_metadata`, so a leaf link cannot source this from its
-/// target.
-///
-/// Masked to the access bits: `Permissions` round-trips the whole `st_mode`,
-/// and the payload write does not strip everything the mask does — sticky
-/// always survives, and setuid survives a zero-byte entry.
-#[cfg(unix)]
-fn destination_mode(dest: &Path) -> Option<fs::Permissions> {
-    use std::os::unix::fs::PermissionsExt;
-    let meta = fs::symlink_metadata(dest).ok()?;
-    if !meta.file_type().is_file() {
-        return None;
-    }
-    Some(fs::Permissions::from_mode(
-        meta.permissions().mode() & 0o777,
-    ))
-}
-
-/// Nothing to carry on Windows: its one permission bit is read-only, and
-/// std's `rename` never sets `FILE_RENAME_IGNORE_READONLY_ATTRIBUTE`, so a
-/// read-only destination survives by the replace failing.
-#[cfg(not(unix))]
-fn destination_mode(_dest: &Path) -> Option<fs::Permissions> {
-    None
 }
 
 /// Reject `path` unless the deepest existing ancestor of its PARENT resolves
@@ -541,7 +482,7 @@ fn write_output(
             return Err(format!("output is a directory: {display}"));
         }
         Err(e) if cfg.overwrite && e.kind() == ErrorKind::AlreadyExists => {
-            replace_via_temp(&path, &overwrite_temp_path(&path), &display, bytes)?;
+            replace_via_temp(&path, &display, bytes)?;
         }
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
             return Err(format!("output exists (use --overwrite): {display}"));
@@ -551,88 +492,33 @@ fn write_output(
     Ok(display)
 }
 
-/// Write `bytes` to a sibling temp and rename it over `path`. `rename` replaces
-/// the destination ENTRY, so it neither follows a planted symlink nor
-/// truncates what one points at, and as one replace it keeps `--flat`'s
-/// last-writer-wins. At most the access bits carry over; the rest of the old
-/// inode's metadata, owner and special bits included, does not.
-fn replace_via_temp(path: &Path, tmp: &Path, display: &str, bytes: &[u8]) -> Result<(), String> {
-    // Derived once, above the open: the temp is safe because its creation mode
-    // is a subset of what is settled on it.
-    let dest_mode = destination_mode(path);
-    let mut opts = OpenOptions::new();
-    // Exclusive: a taken temp name is not ours, so this fails rather than
-    // clobbering it.
-    let _ = opts.write(true).create_new(true);
-    // Born with the destination's bits, not narrowed to them afterwards: an fd
-    // opened on a wider temp keeps its read rights across a later chmod.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        if let Some(perms) = &dest_mode {
-            let _ = opts.mode(perms.mode());
+/// Write `bytes` over `path` through core's [`StagedReplace`]. As one rename,
+/// it keeps `--flat`'s last-writer-wins.
+fn replace_via_temp(path: &Path, display: &str, bytes: &[u8]) -> Result<(), String> {
+    let mut staged = StagedReplace::create(path).map_err(|e| replace_failure(display, e))?;
+    staged
+        .file_mut()
+        .write_all(bytes)
+        .map_err(|e| format!("write {display}: {e}"))?;
+    staged.commit().map_err(|e| replace_failure(display, e))
+}
+
+/// This command's wording for each step of a staged replace.
+fn replace_failure(display: &str, e: StagedReplaceError) -> String {
+    match e {
+        StagedReplaceError::CreateTemp(e) => format!("create temp beside {display}: {e}"),
+        StagedReplaceError::PreservePermissions(e) => {
+            format!("preserve permissions of {display}: {e}")
         }
+        StagedReplaceError::Replace(e) => format!("replace {display}: {e}"),
+        other => format!("overwrite {display}: {other}"),
     }
-    let mut file = opts
-        .open(tmp)
-        .map_err(|e| format!("create temp beside {display}: {e}"))?;
-    let result = settle_mode(&file, dest_mode.as_ref())
-        .map_err(|e| format!("preserve permissions of {display}: {e}"))
-        .and_then(|()| {
-            file.write_all(bytes)
-                .map_err(|e| format!("write {display}: {e}"))
-        })
-        .and_then(|()| {
-            // Closed before the rename so the handle cannot outlive the temp's
-            // name.
-            drop(file);
-            fs::rename(tmp, path).map_err(|e| format!("replace {display}: {e}"))
-        });
-    if result.is_err() {
-        let _ = fs::remove_file(tmp);
-    }
-    result
-}
-
-/// Restores what `open`'s umask stripped from the temp's creation mode.
-/// Skipped where nothing was stripped: a filesystem that fixes the bits itself
-/// (FAT's `fmask`) already matches, and may refuse a chmod to anyone but the
-/// mount's owner.
-#[cfg(unix)]
-fn settle_mode(file: &fs::File, mode: Option<&fs::Permissions>) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let Some(mode) = mode else {
-        return Ok(());
-    };
-    if file.metadata()?.permissions().mode() & 0o777 == mode.mode() {
-        return Ok(());
-    }
-    file.set_permissions(mode.clone())
-}
-
-/// Nothing is carried on Windows; see `destination_mode`.
-#[cfg(not(unix))]
-fn settle_mode(_file: &fs::File, _mode: Option<&fs::Permissions>) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
 mod write_output_tests {
     use super::*;
     use crate::extract::select::{AudioFormat, DataTableFormat};
-
-    fn is_overwrite_temp(name: &std::ffi::OsStr) -> bool {
-        let name = name.to_string_lossy();
-        name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX)
-    }
-
-    fn temp_leftovers(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
-        std::fs::read_dir(dir)
-            .unwrap()
-            .filter_map(|e| e.ok().map(|e| e.file_name()))
-            .filter(|n| is_overwrite_temp(n))
-            .collect()
-    }
 
     /// Builds through the real constructor, so every test resolves its root
     /// exactly as production does.
@@ -1722,67 +1608,6 @@ mod write_output_tests {
         assert_eq!(std::fs::read(&inside).unwrap(), b"ORIGINAL");
     }
 
-    /// The temp must never be WIDER than the destination while it holds the
-    /// payload: an fd another user opens in that window keeps its read rights
-    /// across a later chmod, so narrowing after creation leaks the content of
-    /// a restricted file. Watches the temp from a second thread rather than
-    /// inspecting the final mode, which cannot distinguish the two orderings.
-    #[cfg(unix)]
-    #[test]
-    fn the_overwrite_temp_is_never_wider_than_the_destination() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let root = tempfile::tempdir().unwrap();
-        let dest = root.path().join("secret.bin");
-        std::fs::write(&dest, b"ORIGINAL").unwrap();
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        // Built before the watcher exists, and the writes below are collected
-        // rather than unwrapped inside the scope: `thread::scope` joins every
-        // thread before it propagates a panic, so a failing write with `done`
-        // still false would spin the watcher forever and hang the whole test
-        // binary instead of failing it.
-        let c = cfg(root.path(), false, false, true);
-        let done = AtomicBool::new(false);
-        let (widest, results) = std::thread::scope(|scope| {
-            let watcher = scope.spawn(|| {
-                let mut widest = 0u32;
-                while !done.load(Ordering::Relaxed) {
-                    if let Ok(entries) = std::fs::read_dir(root.path()) {
-                        for e in entries.flatten() {
-                            if is_overwrite_temp(&e.file_name())
-                                && let Ok(m) = e.metadata()
-                            {
-                                widest |= m.permissions().mode() & 0o777;
-                            }
-                        }
-                    }
-                }
-                widest
-            });
-
-            let results: Vec<_> = (0..200)
-                .map(|_| write_output(&c, "secret.bin", None, b"NEW"))
-                .collect();
-            done.store(true, Ordering::Relaxed);
-            (watcher.join().unwrap(), results)
-        });
-        for reported in results {
-            let _reported = reported.unwrap();
-        }
-
-        assert_eq!(
-            widest & !0o600,
-            0,
-            "a temp was observed with bits {widest:o}, outside the 0o600 destination's"
-        );
-        assert_eq!(
-            std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-
     /// Replacing the destination hands it a fresh inode, so its access bits
     /// have to be carried across explicitly.
     #[cfg(unix)]
@@ -1808,74 +1633,6 @@ mod write_output_tests {
             "--overwrite did not carry the destination's mode"
         );
         assert_eq!(std::fs::read(&dest).unwrap(), b"NEW");
-    }
-
-    /// Carrying the mode must carry ACCESS bits only: `Permissions` round-trips
-    /// the whole `st_mode` on Unix.
-    ///
-    /// Planted STICKY rather than setuid so the assertion observes the mask and
-    /// not the kernel. An unprivileged write strips setuid, and the write here
-    /// follows the chmod, so a setuid fixture with a non-empty payload comes
-    /// back clean whether the mask is applied or not. Nothing strips sticky.
-    #[cfg(unix)]
-    #[test]
-    fn overwrite_does_not_carry_mode_bits_outside_the_access_range() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        let dest = root.path().join("planted.bin");
-        std::fs::write(&dest, b"ORIGINAL").unwrap();
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o1755)).unwrap();
-
-        let c = cfg(root.path(), false, false, true);
-        let _reported = write_output(&c, "planted.bin", None, b"PAYLOAD").unwrap();
-
-        let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
-        assert_eq!(mode & 0o7000, 0, "setuid/setgid/sticky survived: {mode:o}");
-        assert_eq!(mode & 0o777, 0o755, "access bits should still carry");
-    }
-
-    /// The mode must not be read THROUGH a leaf link. The target carries an
-    /// owner-EXECUTE bit, which file creation cannot produce under any umask
-    /// (`0o666 & !umask` never sets `0o100`), so its absence shows the mode
-    /// was not harvested from the target.
-    #[cfg(unix)]
-    #[test]
-    fn overwrite_does_not_source_the_mode_through_a_leaf_link() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        let other = tempfile::tempdir().unwrap();
-        let target = other.path().join("privileged");
-        std::fs::write(&target, b"T").unwrap();
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o4707)).unwrap();
-        std::os::unix::fs::symlink(&target, root.path().join("via.bin")).unwrap();
-
-        let c = cfg(root.path(), false, false, true);
-        let _reported = write_output(&c, "via.bin", None, b"PAYLOAD").unwrap();
-
-        let mode = std::fs::metadata(root.path().join("via.bin"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(
-            mode & 0o111,
-            0,
-            "execute bits can only have come from the link target: {mode:o}"
-        );
-        assert_eq!(
-            mode & 0o7000,
-            0,
-            "harvested setuid through a link: {mode:o}"
-        );
-        assert_eq!(
-            std::fs::read(&target).unwrap(),
-            b"T",
-            "the link target's content must be untouched"
-        );
-        assert_eq!(
-            std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
-            0o4707,
-            "the link target's mode must be untouched"
-        );
     }
 
     /// `--flat --overwrite` is documented to resolve collisions
@@ -1921,37 +1678,44 @@ mod write_output_tests {
             landed.iter().all(|b| *b == landed[0]),
             "the file interleaves two writers' payloads"
         );
-        let leftovers = temp_leftovers(root.path());
-        assert!(
-            leftovers.is_empty(),
-            "temp files left behind: {leftovers:?}"
-        );
+        let names: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["same.bin"]);
     }
 
-    /// A failed replace must not leave its temp behind: a destination that is
-    /// a directory makes `rename` fail with the temp already written.
+    /// A failed rename is reported as the replace it was. A directory
+    /// destination fails it here; `write_output` refuses one up front.
     #[test]
-    fn a_failed_overwrite_leaves_no_temp_behind() {
+    fn a_failed_rename_is_reported_as_a_replace() {
         let root = tempfile::tempdir().unwrap();
         let dest = root.path().join("blocked.bin");
         std::fs::create_dir(&dest).unwrap();
 
-        let err = replace_via_temp(
-            &dest,
-            &overwrite_temp_path(&dest),
-            "blocked.bin",
-            b"PAYLOAD",
-        )
-        .unwrap_err();
+        let err = replace_via_temp(&dest, "blocked.bin", b"PAYLOAD").unwrap_err();
 
         assert!(
-            err.starts_with("replace "),
+            err.starts_with("replace blocked.bin: "),
             "expected a rename failure: {err}"
         );
-        let leftovers = temp_leftovers(root.path());
-        assert!(
-            leftovers.is_empty(),
-            "temp survived a failure: {leftovers:?}"
+    }
+
+    #[test]
+    fn each_replace_step_keeps_its_wording() {
+        let boom = || std::io::Error::other("boom");
+        assert_eq!(
+            [
+                StagedReplaceError::CreateTemp(boom()),
+                StagedReplaceError::PreservePermissions(boom()),
+                StagedReplaceError::Replace(boom()),
+            ]
+            .map(|e| replace_failure("out/x.bin", e)),
+            [
+                "create temp beside out/x.bin: boom",
+                "preserve permissions of out/x.bin: boom",
+                "replace out/x.bin: boom",
+            ]
         );
     }
 
@@ -2005,133 +1769,6 @@ mod write_output_tests {
         assert!(
             err.starts_with("create "),
             "expected a create failure: {err}"
-        );
-    }
-
-    /// The temp's `create_new` is what stops a link planted at the temp's name
-    /// from turning the replace into a write through that link. The name's
-    /// secrecy is a separate layer, so this plants the link at a known name.
-    #[cfg(unix)]
-    #[test]
-    fn a_link_at_the_temp_name_is_not_written_through() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let victim = outside.path().join("victim");
-        std::fs::write(&victim, b"VICTIM").unwrap();
-        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let dest = root.path().join("x.bin");
-        std::fs::write(&dest, b"ORIGINAL").unwrap();
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let tmp = root.path().join(".paksmith-planted.part");
-        std::os::unix::fs::symlink(&victim, &tmp).unwrap();
-
-        assert!(replace_via_temp(&dest, &tmp, "x.bin", b"PAYLOAD").is_err());
-
-        assert_eq!(std::fs::read(&victim).unwrap(), b"VICTIM");
-        assert_eq!(
-            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
-            0o644
-        );
-        assert!(
-            std::fs::symlink_metadata(&tmp)
-                .unwrap()
-                .file_type()
-                .is_symlink(),
-            "a name the replace did not create was removed"
-        );
-        assert_eq!(std::fs::read(&dest).unwrap(), b"ORIGINAL");
-    }
-
-    /// An unkeyed hash is as predictable as the counter.
-    #[test]
-    fn the_temp_name_depends_on_the_key() {
-        let (a, b) = (
-            std::collections::hash_map::RandomState::new(),
-            std::collections::hash_map::RandomState::new(),
-        );
-        assert_ne!(
-            mix_temp_seq(&a, 7),
-            mix_temp_seq(&b, 7),
-            "the temp name does not depend on the key"
-        );
-    }
-
-    /// A constant difference or a constant xor against the counter both mean
-    /// one observed name yields the rest.
-    #[test]
-    fn the_temp_name_is_not_a_fixed_relation_to_the_counter() {
-        let key = std::collections::hash_map::RandomState::new();
-        let seqs: Vec<u64> = (0..16).collect();
-        let mixed: Vec<u64> = seqs.iter().map(|&s| mix_temp_seq(&key, s)).collect();
-
-        let diffs: std::collections::HashSet<u64> = seqs
-            .iter()
-            .zip(&mixed)
-            .map(|(s, m)| m.wrapping_sub(*s))
-            .collect();
-        let xors: std::collections::HashSet<u64> =
-            seqs.iter().zip(&mixed).map(|(s, m)| m ^ s).collect();
-
-        assert!(
-            diffs.len() > 1,
-            "name sits a constant distance from the counter: {mixed:?}"
-        );
-        assert!(
-            xors.len() > 1,
-            "name is a constant xor of the counter: {mixed:?}"
-        );
-    }
-
-    /// The PRODUCTION name goes through the keyed hash: a raw counter emits
-    /// small integers, while a keyed hash leaves the high half zero with
-    /// probability 2^-32 per name.
-    #[test]
-    fn the_emitted_temp_name_is_not_the_raw_counter() {
-        let dest = std::path::Path::new("/out/x.bin");
-        let with_high_bits = (0..16)
-            .map(|_| overwrite_temp_path(dest))
-            .map(|p| {
-                let name = p.file_name().unwrap().to_string_lossy().into_owned();
-                let hex = &name[TEMP_PREFIX.len()..name.len() - TEMP_SUFFIX.len()];
-                u64::from_str_radix(hex, 16).unwrap()
-            })
-            .filter(|v| v >> 32 != 0)
-            .count();
-        assert!(
-            with_high_bits > 0,
-            "every temp name is a small integer: the counter is emitted raw"
-        );
-    }
-
-    /// Constant width, so a destination that fits within `NAME_MAX` can never
-    /// have a temp that does not.
-    #[test]
-    fn the_overwrite_temp_name_width_does_not_follow_the_destination() {
-        let short = overwrite_temp_path(std::path::Path::new("/out/a"));
-        let long = overwrite_temp_path(&std::path::PathBuf::from(format!(
-            "/out/{}",
-            "x".repeat(200)
-        )));
-        assert_eq!(
-            short.file_name().unwrap().len(),
-            long.file_name().unwrap().len(),
-            "temp width follows the destination: {short:?} vs {long:?}"
-        );
-    }
-
-    /// Every in-flight temp needs its own name. Two workers racing for one
-    /// `--flat` destination would otherwise pick the same temp, and the second
-    /// `create_new` would fail rather than the write succeeding.
-    #[test]
-    fn each_overwrite_temp_name_is_distinct() {
-        let dest = std::path::Path::new("/out/x.bin");
-        let names: std::collections::HashSet<_> =
-            (0..64).map(|_| overwrite_temp_path(dest)).collect();
-        assert_eq!(names.len(), 64, "temp names repeated");
-        assert!(
-            names.iter().all(|p| p.parent() == dest.parent()),
-            "the temp must be a sibling so the rename stays on one filesystem"
         );
     }
 
