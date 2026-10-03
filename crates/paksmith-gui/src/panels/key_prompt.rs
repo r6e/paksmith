@@ -32,7 +32,7 @@ pub fn view<'a>(
     hex_input: &'a str,
     accent: iced::Color,
 ) -> Element<'a, Message> {
-    let KeyFlow::Locked { path, error } = flow else {
+    let KeyFlow::Locked { path, error, .. } = flow else {
         // Not in Locked state — render nothing (caller guards this).
         return container(text("")).into();
     };
@@ -101,7 +101,7 @@ pub fn view<'a>(
     let choose_dir_btn = button(text("Choose install dir\u{2026}").size(SZ_MD))
         .style(iced::widget::button::secondary)
         .padding([SPACE_SM, SPACE_MD])
-        .on_press(Message::KeyDirChosen(None)); // triggers the rfd picker in update()
+        .on_press(Message::KeyDirRequested);
 
     // The game-profile selector lives in the toolbar (game picker dropdown).
     // Selecting a profile there and then pressing Open is the canonical path.

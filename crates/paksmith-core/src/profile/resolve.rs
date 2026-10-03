@@ -110,8 +110,9 @@ pub(crate) fn now_unix() -> crate::Result<u64> {
 ///
 /// Marked `#[non_exhaustive]` (like [`DetectMatch`]) so future fields —
 /// e.g. more profile-carried open state — are not breaking changes;
-/// external consumers construct it only via [`resolve_pak_context`].
-/// `engine_version` is the first field added under that allowance.
+/// external consumers construct it only via [`resolve_pak_context`]
+/// (or, in tests, `for_test`). `engine_version` is the first field added
+/// under that allowance.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct PakOpenContext {
@@ -165,14 +166,29 @@ impl PakOpenContext {
             .transpose()?;
         Ok(self.parse_inputs(usmap.map(Arc::new)))
     }
+
+    /// A context with the given fields, for frontend tests that cannot reach
+    /// [`resolve_pak_context`] without reading the user's profile store.
+    #[cfg(feature = "__test_utils")]
+    #[must_use]
+    pub fn for_test(
+        key: Option<AesKey>,
+        mappings: Option<MappingsSource>,
+        engine_version: Option<crate::asset::UeVersion>,
+    ) -> Self {
+        Self {
+            key,
+            mappings,
+            engine_version,
+        }
+    }
 }
 
 /// Resolve the AES key for a pak: `--aes-key` (wins) > `--game` (explicit id) >
 /// `--detect` (auto-detect from an install dir). `None` when no selector is set.
 ///
 /// Thin delegate over [`resolve_pak_context`] that keeps the pre-#651
-/// key-only signature for callers that consume neither parse input
-/// (the GUI open flow can migrate to the context form as a follow-up).
+/// key-only signature for callers that consume neither parse input.
 ///
 /// # Errors
 ///
@@ -810,7 +826,7 @@ fn unshadowed_registry<'a>(
             // `--aes-key`/`--game`/`--detect`, so `--detect … profile <cmd>`
             // is inert; the
             // `profile detect` subcommand; the GUI's install-dir open flow,
-            // which reaches the same branch through `resolve_pak_key`;
+            // which reaches the same branch through `resolve_pak_context`;
             // pak_paths expansion; and parse-input resolution) plus the
             // GUI's profile list, whose loader runs no detection and warns
             // whenever it loads over such a cache. It does NOT fire from
