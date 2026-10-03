@@ -447,6 +447,26 @@ mod tests {
         );
     }
 
+    /// A name already taken at the temp's path is refused, never truncated,
+    /// and left in place.
+    #[test]
+    fn a_taken_temp_name_is_refused_not_truncated() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("x.bin");
+        fs::write(&dest, b"ORIGINAL").unwrap();
+        let temp = root.path().join(".paksmith-taken.part");
+        fs::write(&temp, b"TAKEN").unwrap();
+
+        let err = StagedReplace::create_at(&dest, temp.clone()).unwrap_err();
+
+        assert!(
+            matches!(&err, StagedReplaceError::CreateTemp(e) if e.kind() == io::ErrorKind::AlreadyExists),
+            "{err}"
+        );
+        assert_eq!(fs::read(&temp).unwrap(), b"TAKEN");
+        assert_eq!(fs::read(&dest).unwrap(), b"ORIGINAL");
+    }
+
     /// The temp's `create_new` is what stops a link planted at the temp's name
     /// from turning the replace into a write through that link. The name's
     /// secrecy is a separate layer, so this plants the link at a known name.
