@@ -4,3 +4,42 @@ pub mod audio;
 pub mod export;
 pub mod open;
 pub mod texture;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use paksmith_core::asset::{ParseInputs, Usmap};
+    use paksmith_core::container::ContainerReader;
+
+    pub(crate) fn fixture(name: &str) -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
+    }
+
+    /// A versioned uasset that parses without inputs.
+    pub(crate) const DEMO_ENTRY: &str = "Game/Maps/Demo.uasset";
+
+    pub(crate) fn demo_reader() -> Arc<dyn ContainerReader> {
+        paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap()
+    }
+
+    /// The unversioned fixture's one entry, whose `Hero` class only decodes
+    /// with [`hero_inputs`].
+    pub(crate) const HERO_ENTRY: &str = "Game/Heroes/Hero.uasset";
+
+    pub(crate) fn hero_reader() -> Arc<dyn ContainerReader> {
+        paksmith_core::container::open(&fixture("real_v8b_unversioned.pak"), None).unwrap()
+    }
+
+    /// Inputs carrying the `.usmap` with the `Hero { Health, Speed }` schema.
+    pub(crate) fn hero_inputs() -> ParseInputs {
+        let mut inputs = ParseInputs::default();
+        inputs.mappings = Some(Arc::new(
+            Usmap::from_path(fixture("external_minimal_v0.usmap")).unwrap(),
+        ));
+        inputs
+    }
+}

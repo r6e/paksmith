@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use paksmith_core::asset::Package;
+use paksmith_core::asset::{Package, ParseInputs};
 use paksmith_core::container::ContainerReader;
 
 /// Maximum bytes retained from a streamed entry read for the Hex and Info views.
@@ -152,7 +152,11 @@ pub fn should_attempt_parse(path: &str) -> bool {
     clippy::unused_async,
     reason = "async required by iced Task::perform interface"
 )]
-pub async fn load(reader: Arc<dyn ContainerReader>, path: String) -> AssetLoad {
+pub async fn load(
+    reader: Arc<dyn ContainerReader>,
+    inputs: ParseInputs,
+    path: String,
+) -> AssetLoad {
     let mut w = CappedWriter::new(HEX_BYTES_CAP);
     let read_result = reader.read_entry_to(&path, &mut w);
     let truncated = w.overflowed();
@@ -162,16 +166,7 @@ pub async fn load(reader: Arc<dyn ContainerReader>, path: String) -> AssetLoad {
     let parsed = if let Some(e) = read_err {
         Err(e) // F2: surface the real read error
     } else if should_attempt_parse(&path) {
-        // Bare entry point ⇒ NEITHER parse input: the GUI does not
-        // load `.usmap` yet, and it does not carry a profile's engine
-        // version either — both are issue #706 (see the seam note in
-        // `task/open.rs`). Unversioned assets that require a mapping
-        // return `UnversionedWithoutMappings`, surfaced here as a
-        // stringified parse error → Properties view shows the reason.
-        // A UE 5.2-vs-5.3-ambiguous texture likewise keeps the
-        // unhinted default here while CLI inspect/extract can resolve
-        // it (#656).
-        Package::read_from_reader(&reader, &path, None)
+        Package::read_from_reader_with(&reader, &path, &inputs.read_options())
             .map(std::sync::Arc::new)
             .map_err(|e| e.to_string())
     } else {
@@ -187,20 +182,9 @@ pub async fn load(reader: Arc<dyn ContainerReader>, path: String) -> AssetLoad {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
-    use std::path::PathBuf;
-
     use super::*;
-
-    fn fixture(name: &str) -> PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("tests/fixtures")
-            .join(name)
-    }
+    use crate::task::test_support::{HERO_ENTRY, demo_reader, hero_inputs, hero_reader};
+    use std::io::Write as _;
 
     #[test]
     fn should_attempt_parse_only_for_uasset_umap() {
@@ -362,8 +346,13 @@ mod tests {
 
     #[tokio::test]
     async fn load_parses_uasset_fixture() {
-        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
-        let out = load(reader, "Game/Maps/Demo.uasset".to_string()).await;
+        let reader = demo_reader();
+        let out = load(
+            reader,
+            ParseInputs::default(),
+            "Game/Maps/Demo.uasset".to_string(),
+        )
+        .await;
         assert!(!out.bytes.is_empty(), "raw bytes must be present");
         assert!(!out.truncated, "small fixture must not be truncated");
         assert!(
@@ -374,13 +363,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_parses_an_unversioned_asset_only_with_the_archive_mappings() {
+        let reader = hero_reader();
+
+        let with = load(reader.clone(), hero_inputs(), HERO_ENTRY.to_string()).await;
+        let without = load(reader, ParseInputs::default(), HERO_ENTRY.to_string()).await;
+
+        assert!(with.parsed.is_ok(), "{:?}", with.parsed.err());
+        let err = without.parsed.unwrap_err();
+        assert!(err.contains("no .usmap mappings"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn load_carries_the_archive_engine_version_hint() {
+        let reader = demo_reader();
+        let hint = paksmith_core::asset::UeVersion::parse_lenient("5.3");
+        assert!(hint.is_some());
+        let mut inputs = ParseInputs::default();
+        inputs.engine_version_hint = hint;
+
+        let out = load(reader, inputs, "Game/Maps/Demo.uasset".to_string()).await;
+
+        assert_eq!(out.parsed.unwrap().context().engine_version_hint, hint);
+    }
+
+    #[tokio::test]
     async fn load_missing_entry_surfaces_read_error() {
         // F2: a missing entry must surface the real I/O error in `parsed`, NOT the
         // "not a UAsset" string.  A non-.uasset extension is used deliberately:
         // for a missing .uasset the old code also attempted a parse and returned a
         // core error, so that path wouldn't distinguish old from new behaviour.
-        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
-        let out = load(reader, "Game/Does/Not/Exist.bin".to_string()).await;
+        let reader = demo_reader();
+        let out = load(
+            reader,
+            ParseInputs::default(),
+            "Game/Does/Not/Exist.bin".to_string(),
+        )
+        .await;
         assert!(out.bytes.is_empty(), "missing entry yields no bytes");
         assert!(out.parsed.is_err(), "missing entry must be a parse error");
         let err_msg = out.parsed.unwrap_err();

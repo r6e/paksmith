@@ -985,11 +985,11 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     choices: vec![crate::state::export::ExportChoice::Raw],
                 });
                 if let Some(archive) = &app.archive {
-                    let reader = archive.reader.clone();
+                    let (reader, inputs) = archive.reader_and_inputs();
                     let generation = app.archive_generation;
                     let task_path = path.clone();
                     Task::perform(
-                        crate::task::export::available(reader, task_path),
+                        crate::task::export::available(reader, inputs, task_path),
                         move |formats| Message::ExportFormatsReady {
                             path,
                             formats,
@@ -1039,10 +1039,10 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // now so a mid-dialog archive swap can't redirect the export.
             dismiss_row_menus(app);
             if let Some(archive) = &app.archive {
-                let reader = archive.reader.clone();
+                let (reader, inputs) = archive.reader_and_inputs();
                 let generation = app.archive_generation;
                 Task::perform(
-                    crate::task::export::run(reader, path, choice),
+                    crate::task::export::run(reader, inputs, path, choice),
                     move |outcome| Message::ExportCompleted {
                         outcome,
                         generation,
@@ -1186,10 +1186,10 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             if was_open {
                 Task::none()
             } else if let Some(archive) = &app.archive {
-                let reader = archive.reader.clone();
+                let (reader, inputs) = archive.reader_and_inputs();
                 let generation = app.archive_generation;
                 Task::perform(
-                    crate::task::asset::load(reader, path.clone()),
+                    crate::task::asset::load(reader, inputs, path.clone()),
                     move |load| Message::AssetLoaded {
                         path: path.clone(),
                         load: Box::new(load),
@@ -3847,6 +3847,7 @@ mod tests {
             tree_scroll: crate::state::row_window::ScrollPos::default(),
             entries,
             reader,
+            parse_inputs: paksmith_core::asset::ParseInputs::default(),
         };
         App {
             archive: Some(archive),
@@ -5287,8 +5288,8 @@ mod tests {
         ));
 
         // Simulate the async result.
-        let reader = app.archive.as_ref().unwrap().reader.clone();
-        let load = crate::task::asset::load(reader, "Game/Maps/Demo.uasset".into()).await;
+        let (reader, inputs) = app.archive.as_ref().unwrap().reader_and_inputs();
+        let load = crate::task::asset::load(reader, inputs, "Game/Maps/Demo.uasset".into()).await;
         let current_gen = app.archive_generation;
         let _ = update(
             &mut app,
@@ -5549,8 +5550,8 @@ mod tests {
 
         // Open the tab (Loading state) then simulate the async load completing.
         let _ = update(&mut app, Message::OpenAsset("Game/Maps/Demo.uasset".into()));
-        let reader = app.archive.as_ref().unwrap().reader.clone();
-        let load = crate::task::asset::load(reader, "Game/Maps/Demo.uasset".into()).await;
+        let (reader, inputs) = app.archive.as_ref().unwrap().reader_and_inputs();
+        let load = crate::task::asset::load(reader, inputs, "Game/Maps/Demo.uasset".into()).await;
         let current_gen = app.archive_generation;
         let _ = update(
             &mut app,
