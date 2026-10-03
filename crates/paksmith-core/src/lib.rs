@@ -313,6 +313,7 @@ mod send_sync_assertions {
         assert_send_sync::<MappingsAllocationContext>();
         assert_send_sync::<crate::error::LocresParseFault>();
         assert_send_sync::<crate::error::LocresAllocationContext>();
+        assert_send_sync::<crate::asset::ParseInputs>();
         assert_send_sync::<CompanionFileKind>();
         assert_send_sync::<StagedReplace>();
         assert_send_sync::<StagedReplaceError>();

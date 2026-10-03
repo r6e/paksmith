@@ -3,7 +3,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
+use crate::asset::{ParseInputs, Usmap};
 use crate::container::pak::PakReader;
 use crate::error::ProfileFault;
 use crate::profile::MappingsSource;
@@ -101,9 +103,10 @@ pub(crate) fn now_unix() -> crate::Result<u64> {
 /// reach `Package::read_from*_with` through
 /// [`crate::asset::ReadOptions`], not the container layer — so a
 /// caller that only opens (`list`/`search`) can ignore them. The
-/// engine version travels as-is; `mappings` is a SOURCE (a path or
-/// registry reference) that the caller first loads into an
-/// `Arc<Usmap>`.
+/// engine version travels as-is; `mappings` is a SOURCE:
+/// [`Self::load_parse_inputs`] loads it, or a caller loads its own usmap
+/// (an override, or this source via [`MappingsSource::load`]) and
+/// passes it to [`Self::parse_inputs`].
 ///
 /// Marked `#[non_exhaustive]` (like [`DetectMatch`]) so future fields —
 /// e.g. more profile-carried open state — are not breaking changes;
@@ -133,6 +136,35 @@ pub struct PakOpenContext {
     /// input that survives the local/registry split. Feeds
     /// [`crate::asset::AssetContext::engine_version_hint`].
     pub engine_version: Option<crate::asset::UeVersion>,
+}
+
+impl PakOpenContext {
+    /// Pair `mappings`, which the caller resolved itself, with this
+    /// context's engine version. Never reads [`Self::mappings`], so a
+    /// caller's own override (the CLI's `--mappings`) keeps precedence.
+    #[must_use]
+    pub fn parse_inputs(&self, mappings: Option<Arc<Usmap>>) -> ParseInputs {
+        ParseInputs {
+            mappings,
+            engine_version_hint: self.engine_version,
+        }
+    }
+
+    /// Load [`Self::mappings`], if any, and pair it with this context's
+    /// engine version. Blocking I/O: load once and hold the result for the
+    /// archive's lifetime.
+    ///
+    /// # Errors
+    ///
+    /// [`MappingsSource::load`]'s errors, unwrapped.
+    pub fn load_parse_inputs(&self) -> crate::Result<ParseInputs> {
+        let usmap = self
+            .mappings
+            .as_ref()
+            .map(MappingsSource::load)
+            .transpose()?;
+        Ok(self.parse_inputs(usmap.map(Arc::new)))
+    }
 }
 
 /// Resolve the AES key for a pak: `--aes-key` (wins) > `--game` (explicit id) >
@@ -210,7 +242,7 @@ pub async fn resolve_pak_context(
         }
         unique_detect_id(detect_matches(dir)?, dir)?
     } else {
-        return Ok(ProfileParseInputs::default().into_context(None));
+        return Ok(ProfileParseSources::default().into_context(None));
     };
     let id = id.as_str();
 
@@ -223,7 +255,7 @@ pub async fn resolve_pak_context(
         // from a resolved profile to its parse inputs lives in exactly
         // one place (a duplicated arm here is what let the registry
         // `--detect` path silently drop the engine version).
-        let inputs = ProfileParseInputs::from_resolved(&ResolvedProfile::Local(profile), id);
+        let inputs = ProfileParseSources::from_resolved(&ResolvedProfile::Local(profile), id);
         return Ok(inputs.into_context(resolve_within(&profile.keys, id, pak_guid)?));
     }
 
@@ -260,7 +292,7 @@ pub async fn resolve_pak_context(
     match resolve_profile_layered(&store, cache.as_ref(), id) {
         Some(p) => {
             let key = resolve_within(p.keys(), id, pak_guid)?;
-            Ok(ProfileParseInputs::from_resolved(&p, id).into_context(key))
+            Ok(ProfileParseSources::from_resolved(&p, id).into_context(key))
         }
         None => Err(PaksmithError::Profile {
             fault: ProfileFault::ProfileNotFound { id: id.to_string() },
@@ -434,11 +466,11 @@ fn explicit_key_context(
                     "profile store unreadable; --aes-key set, continuing \
                      without profile parse inputs"
                 );
-                ProfileParseInputs::default()
+                ProfileParseSources::default()
             }
         }
     } else {
-        ProfileParseInputs::default()
+        ProfileParseSources::default()
     };
     Ok(PakOpenContext {
         key: Some(key.clone()),
@@ -458,9 +490,9 @@ fn named_profile_inputs_in(
     store: &ProfileStore,
     cache: Option<&RegistryCache>,
     id: &str,
-) -> crate::Result<ProfileParseInputs> {
+) -> crate::Result<ProfileParseSources> {
     resolve_profile_layered(store, cache, id)
-        .map(|p| ProfileParseInputs::from_resolved(&p, id))
+        .map(|p| ProfileParseSources::from_resolved(&p, id))
         .ok_or_else(|| PaksmithError::Profile {
             fault: ProfileFault::ProfileNotFound { id: id.to_string() },
         })
@@ -469,17 +501,17 @@ fn named_profile_inputs_in(
 /// The parse-affecting state a selected profile contributes (#651
 /// mappings, #656 engine version).
 ///
-/// [`ProfileParseInputs::from_resolved`] is the SINGLE place that maps
+/// [`ProfileParseSources::from_resolved`] is the SINGLE place that maps
 /// a resolved profile to these, so the `--aes-key` and keyed paths
 /// cannot drift and the next profile-borne parse input is a field here
 /// rather than another arm to remember in two files.
 #[derive(Clone, Debug, Default)]
-struct ProfileParseInputs {
+struct ProfileParseSources {
     mappings: Option<MappingsSource>,
     engine_version: Option<crate::asset::UeVersion>,
 }
 
-impl ProfileParseInputs {
+impl ProfileParseSources {
     /// Map a resolved profile to its parse inputs.
     ///
     /// Registry profiles carry no mappings (`RegistryProfile` has no
@@ -543,7 +575,7 @@ fn detect_profile_inputs_in(
     store: &ProfileStore,
     cache: Option<&RegistryCache>,
     dir: &Path,
-) -> ProfileParseInputs {
+) -> ProfileParseSources {
     match unique_detect_id(detect_in(store, cache, dir), dir) {
         // LAYERED, not local-only: `detect_in` matches cached registry
         // profiles too, and a registry profile carries `engine_version`
@@ -557,7 +589,7 @@ fn detect_profile_inputs_in(
                 "--detect found no unique profile; --aes-key set, continuing \
                  without profile parse inputs"
             );
-            ProfileParseInputs::default()
+            ProfileParseSources::default()
         }
     }
 }
@@ -573,7 +605,7 @@ fn profile_inputs_in(
     store: &ProfileStore,
     cache: Option<&RegistryCache>,
     id: &str,
-) -> ProfileParseInputs {
+) -> ProfileParseSources {
     named_profile_inputs_in(store, cache, id).unwrap_or_default()
 }
 
@@ -818,6 +850,80 @@ mod tests {
     use super::*;
     use crate::GameProfile;
     use crate::profile::detection::DetectRules;
+
+    fn context(mappings: Option<MappingsSource>, engine: &str) -> PakOpenContext {
+        let engine_version = crate::asset::UeVersion::parse_lenient(engine);
+        assert!(
+            engine_version.is_some(),
+            "fixture version {engine:?} must parse"
+        );
+        PakOpenContext {
+            key: None,
+            mappings,
+            engine_version,
+        }
+    }
+
+    /// The caller's usmap is used as given and the source is never read, so
+    /// the CLI's explicit `--mappings` keeps its precedence.
+    #[test]
+    fn parse_inputs_uses_the_callers_usmap_not_the_source() {
+        let ctx = context(
+            Some(MappingsSource::Path(
+                crate::asset::mappings::hero_usmap_fixture(),
+            )),
+            "5.3",
+        );
+        let usmap = std::sync::Arc::new(crate::asset::Usmap::default());
+
+        let inputs = ctx.parse_inputs(Some(usmap.clone()));
+        assert!(
+            inputs
+                .mappings
+                .is_some_and(|m| std::sync::Arc::ptr_eq(&m, &usmap))
+        );
+        assert_eq!(inputs.engine_version_hint, ctx.engine_version);
+        assert!(ctx.parse_inputs(None).mappings.is_none());
+    }
+
+    #[test]
+    fn load_parse_inputs_loads_the_source_and_keeps_the_hint() {
+        let ctx = context(
+            Some(MappingsSource::Path(
+                crate::asset::mappings::hero_usmap_fixture(),
+            )),
+            "5.3",
+        );
+        let inputs = ctx.load_parse_inputs().unwrap();
+        assert!(
+            inputs
+                .mappings
+                .is_some_and(|m| m.schemas.contains_key("Hero"))
+        );
+        assert_eq!(inputs.engine_version_hint, ctx.engine_version);
+    }
+
+    #[test]
+    fn load_parse_inputs_without_a_source_keeps_the_hint() {
+        let ctx = context(None, "4.27");
+        let inputs = ctx.load_parse_inputs().unwrap();
+        assert!(inputs.mappings.is_none());
+        assert_eq!(inputs.engine_version_hint, ctx.engine_version);
+    }
+
+    #[test]
+    fn load_parse_inputs_surfaces_the_loader_error_unwrapped() {
+        let path = std::path::PathBuf::from("/nonexistent/x.usmap");
+        let err = context(Some(MappingsSource::Path(path.clone())), "5.3")
+            .load_parse_inputs()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            crate::asset::Usmap::from_path(&path)
+                .unwrap_err()
+                .to_string()
+        );
+    }
 
     #[tracing_test::traced_test]
     #[test]
