@@ -93,6 +93,20 @@ pub struct LoadedArchive {
     /// share it across the `Task::perform` boundary (`ContainerReader`
     /// is `Send + Sync` by supertrait).
     pub reader: Arc<dyn ContainerReader>,
+    /// The mappings and engine-version hint every parse of this archive
+    /// uses, fixed when it opens.
+    pub parse_inputs: paksmith_core::asset::ParseInputs,
+}
+
+impl LoadedArchive {
+    /// The reader and this archive's parse inputs, cloned together for a
+    /// parse task.
+    #[must_use]
+    pub fn reader_and_inputs(
+        &self,
+    ) -> (Arc<dyn ContainerReader>, paksmith_core::asset::ParseInputs) {
+        (Arc::clone(&self.reader), self.parse_inputs.clone())
+    }
 }
 
 // `dyn ContainerReader` does not implement `Debug` (nor did the concrete
@@ -108,6 +122,7 @@ impl std::fmt::Debug for LoadedArchive {
             .field("tree_scroll", &self.tree_scroll)
             .field("entries", &self.entries)
             .field("reader", &"<ContainerReader>")
+            .field("parse_inputs", &self.parse_inputs)
             .finish()
     }
 }
@@ -160,16 +175,33 @@ impl OpenError {
 mod tests {
     #[tokio::test]
     async fn open_plain_fixture_populates_tree() {
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("tests/fixtures/real_v8b_multi.pak"); // plain (unencrypted) multi-entry fixture
+        let fixture = crate::task::test_support::fixture("real_v8b_multi.pak"); // plain (unencrypted) multi-entry fixture
         let loaded = crate::task::open::run(fixture, None).await.unwrap();
         assert!(loaded.entry_count > 0);
         assert!(!loaded.tree.is_empty());
         assert!(loaded.tree.len() <= loaded.entry_count); // tree dedups duplicate paths
+    }
+
+    #[tokio::test]
+    async fn reader_and_inputs_hands_out_the_archives_own() {
+        let pak = crate::task::test_support::fixture("real_v8b_uasset.pak");
+        let mut loaded = crate::task::open::run(pak, None).await.unwrap();
+        loaded.parse_inputs = crate::task::test_support::hero_inputs();
+        loaded.parse_inputs.engine_version_hint =
+            paksmith_core::asset::UeVersion::parse_lenient("5.3");
+        assert!(loaded.parse_inputs.engine_version_hint.is_some());
+
+        let (reader, inputs) = loaded.reader_and_inputs();
+
+        assert!(std::sync::Arc::ptr_eq(&reader, &loaded.reader));
+        let (Some(handed), Some(held)) = (&inputs.mappings, &loaded.parse_inputs.mappings) else {
+            panic!("the archive's mappings must be handed out");
+        };
+        assert!(std::sync::Arc::ptr_eq(handed, held));
+        assert_eq!(
+            inputs.engine_version_hint,
+            loaded.parse_inputs.engine_version_hint
+        );
     }
 
     // ── B7: LoadedArchive Debug impl ──────────────────────────────────────────
@@ -179,12 +211,7 @@ mod tests {
         // Kills `replace <impl std::fmt::Debug for LoadedArchive>::fmt -> std::fmt::Result
         // with Ok(Default::default())`: a no-op fmt would produce an empty string,
         // not containing "LoadedArchive" or "<ContainerReader>".
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("tests/fixtures/real_v8b_uasset.pak");
+        let fixture = crate::task::test_support::fixture("real_v8b_uasset.pak");
         let loaded = crate::task::open::run(fixture, None).await.unwrap();
         let debug_str = format!("{loaded:?}");
         assert!(
@@ -194,6 +221,10 @@ mod tests {
         assert!(
             debug_str.contains("<ContainerReader>"),
             "Debug must contain the reader sentinel; got: {debug_str}"
+        );
+        assert!(
+            debug_str.contains("parse_inputs: ParseInputs"),
+            "Debug must show the parse inputs; got: {debug_str}"
         );
     }
 }
