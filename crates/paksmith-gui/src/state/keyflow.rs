@@ -7,17 +7,31 @@
 
 use std::path::{Path, PathBuf};
 
+/// The profile selector an open attempt resolves with: a profile id, as the
+/// toolbar supplies, or an install dir to detect one from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileSelector {
+    /// The profile id, as `--game` takes it.
+    pub game: Option<String>,
+    /// The install dir to detect a profile from, as `--detect` takes it.
+    pub detect: Option<PathBuf>,
+}
+
 /// State machine for the key-entry flow.
 ///
 /// All transitions are pure (no I/O). Async open tasks are coordinated
-/// by `app.rs`; this type only tracks what the UI needs to render.
+/// by `app.rs`; this type tracks what the key prompt renders and the profile
+/// selector a key retry resolves with.
 #[derive(Debug, Clone, Default)]
 pub enum KeyFlow {
     /// No open in progress and no lock state active.
     #[default]
     Idle,
     /// An open attempt is in flight; key resolution is pending.
-    Resolving,
+    Resolving {
+        /// The selector the attempt resolves with.
+        selector: ProfileSelector,
+    },
     /// The archive at `path` is encrypted but no key could be resolved.
     /// `error` carries a human-readable message when a manual key attempt
     /// failed (bad hex parse or wrong key from core).
@@ -26,6 +40,12 @@ pub enum KeyFlow {
         path: PathBuf,
         /// Error from the most recent failed key attempt, if any.
         error: Option<String>,
+        /// The selector of the attempt that left the archive locked, which a
+        /// key retry resolves with.
+        selector: ProfileSelector,
+        /// The selector of an attempt still in flight from the prompt, which
+        /// replaces `selector` only if that attempt locks the archive too.
+        pending: Option<ProfileSelector>,
     },
     /// The archive was unlocked successfully.
     Unlocked,
@@ -36,15 +56,49 @@ impl KeyFlow {
     ///
     /// Called when an open attempt starts so the UI can show a spinner or
     /// suppress interaction during resolution.
-    pub fn begin(&mut self) {
-        *self = Self::Resolving;
+    pub fn begin(&mut self, selector: ProfileSelector) {
+        *self = Self::Resolving { selector };
     }
 
-    /// Transition to `Locked { path, error: None }`.
+    /// Transition to `Locked { path, error: None }`, committing the selector
+    /// of the attempt that locked it: the open in flight, or an attempt from
+    /// the same archive's prompt.
     ///
     /// Called when the async open returns `OpenError::Locked`.
     pub fn lock(&mut self, path: PathBuf) {
-        *self = Self::Locked { path, error: None };
+        let selector = match std::mem::take(self) {
+            Self::Resolving { selector } => selector,
+            Self::Locked {
+                path: locked,
+                selector,
+                pending,
+                ..
+            } if locked == path => pending.unwrap_or(selector),
+            _ => ProfileSelector::default(),
+        };
+        *self = Self::Locked {
+            path,
+            error: None,
+            selector,
+            pending: None,
+        };
+    }
+
+    /// Note the selector of an attempt started from the prompt. No-op if not
+    /// `Locked`.
+    pub fn try_selector(&mut self, selector: ProfileSelector) {
+        if let Self::Locked { pending, .. } = self {
+            *pending = Some(selector);
+        }
+    }
+
+    /// The selector a key retry resolves with: the locking attempt's in
+    /// `Locked` state, none otherwise.
+    pub fn retry_selector(&self) -> ProfileSelector {
+        match self {
+            Self::Locked { selector, .. } => selector.clone(),
+            _ => ProfileSelector::default(),
+        }
     }
 
     /// Attach an error message to the `Locked` state (e.g. bad-hex or wrong
@@ -100,11 +154,71 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn game(id: &str) -> ProfileSelector {
+        ProfileSelector {
+            game: Some(id.into()),
+            detect: None,
+        }
+    }
+
+    fn detect(dir: &str) -> ProfileSelector {
+        ProfileSelector {
+            game: None,
+            detect: Some(PathBuf::from(dir)),
+        }
+    }
+
+    #[test]
+    fn a_lock_commits_the_selector_of_the_open_in_flight() {
+        let mut flow = KeyFlow::default();
+        flow.begin(game("hero"));
+        flow.lock(PathBuf::from("/a.pak"));
+        assert_eq!(flow.retry_selector(), game("hero"));
+    }
+
+    #[test]
+    fn a_prompt_attempt_that_locks_again_becomes_the_retry_selector() {
+        let mut flow = KeyFlow::default();
+        flow.begin(game("hero"));
+        flow.lock(PathBuf::from("/a.pak"));
+        flow.try_selector(detect("/game"));
+        flow.lock(PathBuf::from("/a.pak"));
+        assert_eq!(flow.retry_selector(), detect("/game"));
+    }
+
+    /// A prompt attempt that has not locked the archive leaves the retry
+    /// selector alone.
+    #[test]
+    fn an_unresolved_prompt_attempt_leaves_the_retry_selector() {
+        let mut flow = KeyFlow::default();
+        flow.begin(game("hero"));
+        flow.lock(PathBuf::from("/a.pak"));
+        flow.try_selector(detect("/game"));
+        assert_eq!(flow.retry_selector(), game("hero"));
+    }
+
+    #[test]
+    fn locking_another_archive_drops_the_selector() {
+        let mut flow = KeyFlow::default();
+        flow.begin(game("hero"));
+        flow.lock(PathBuf::from("/a.pak"));
+        flow.lock(PathBuf::from("/b.pak"));
+        assert_eq!(flow.retry_selector(), ProfileSelector::default());
+    }
+
+    #[test]
+    fn a_prompt_attempt_needs_a_locked_archive() {
+        let mut flow = KeyFlow::default();
+        flow.try_selector(detect("/game"));
+        flow.lock(PathBuf::from("/a.pak"));
+        assert_eq!(flow.retry_selector(), ProfileSelector::default());
+    }
+
     #[test]
     fn locks_then_unlocks() {
         let mut f = KeyFlow::Idle;
-        f.begin();
-        assert!(matches!(f, KeyFlow::Resolving));
+        f.begin(ProfileSelector::default());
+        assert!(matches!(f, KeyFlow::Resolving { .. }));
         f.lock(PathBuf::from("a.pak"));
         assert!(f.is_locked().is_some());
         f.unlock();
@@ -132,8 +246,8 @@ mod tests {
     #[test]
     fn reset_returns_to_idle() {
         let mut f = KeyFlow::Idle;
-        f.begin();
-        assert!(matches!(f, KeyFlow::Resolving));
+        f.begin(ProfileSelector::default());
+        assert!(matches!(f, KeyFlow::Resolving { .. }));
         f.reset();
         assert!(matches!(f, KeyFlow::Idle), "reset must return to Idle");
         assert!(f.is_locked().is_none());

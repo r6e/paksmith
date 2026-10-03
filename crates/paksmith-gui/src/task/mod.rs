@@ -26,20 +26,24 @@ pub(crate) mod test_support {
         paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap()
     }
 
-    /// The unversioned fixture's one entry, whose `Hero` class only decodes
-    /// with [`hero_inputs`].
+    /// The unversioned fixture pak and its one entry, whose `Hero` class
+    /// only decodes with [`hero_inputs`].
+    pub(crate) const UNVERSIONED_PAK: &str = "real_v8b_unversioned.pak";
     pub(crate) const HERO_ENTRY: &str = "Game/Heroes/Hero.uasset";
 
     pub(crate) fn hero_reader() -> Arc<dyn ContainerReader> {
-        paksmith_core::container::open(&fixture("real_v8b_unversioned.pak"), None).unwrap()
+        paksmith_core::container::open(&fixture(UNVERSIONED_PAK), None).unwrap()
     }
 
-    /// Inputs carrying the `.usmap` with the `Hero { Health, Speed }` schema.
+    /// The `.usmap` carrying the `Hero { Health, Speed }` schema.
+    pub(crate) fn hero_usmap() -> PathBuf {
+        fixture("external_minimal_v0.usmap")
+    }
+
+    /// Inputs carrying [`hero_usmap`].
     pub(crate) fn hero_inputs() -> ParseInputs {
         let mut inputs = ParseInputs::default();
-        inputs.mappings = Some(Arc::new(
-            Usmap::from_path(fixture("external_minimal_v0.usmap")).unwrap(),
-        ));
+        inputs.mappings = Some(Arc::new(Usmap::from_path(hero_usmap()).unwrap()));
         inputs
     }
 }

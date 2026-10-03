@@ -32,7 +32,7 @@ pub fn view<'a>(
     hex_input: &'a str,
     accent: iced::Color,
 ) -> Element<'a, Message> {
-    let KeyFlow::Locked { path, error } = flow else {
+    let KeyFlow::Locked { path, error, .. } = flow else {
         // Not in Locked state — render nothing (caller guards this).
         return container(text("")).into();
     };

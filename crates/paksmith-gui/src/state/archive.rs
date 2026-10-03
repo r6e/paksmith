@@ -152,7 +152,8 @@ pub enum OpenError {
     Core {
         /// Path the open was attempted on.
         path: PathBuf,
-        /// Core's rendered error.
+        /// The rendered failure: core's error, prefixed where the GUI names
+        /// the step that failed.
         message: String,
     },
 }

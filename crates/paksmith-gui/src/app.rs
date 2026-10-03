@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use crate::audio_output::AudioOutput;
 use crate::panels::{content, key_prompt, sidebar, status_bar, toolbar};
 use crate::state::archive::{LoadedArchive, OpenError};
-use crate::state::keyflow::KeyFlow;
+use crate::state::keyflow::{KeyFlow, ProfileSelector};
 use crate::state::profiles::{ProfileChoice, available};
 use crate::theme;
 use crate::theme::tokens::{DIVIDER_GRAB_PX, TEXT_MUTED_ALPHA, TEXT_XL};
@@ -94,8 +94,11 @@ pub struct App {
     pub(crate) profile_loader: fn() -> Vec<ProfileChoice>,
     /// The currently selected game profile, if any.
     ///
-    /// When `Some`, `task::open::run` passes the profile id to key resolution
-    /// so encrypted paks for that game auto-unlock without a prompt.
+    /// When `Some`, opening an archive from the file dialog passes the profile
+    /// id to resolution, so encrypted paks for that game auto-unlock without a
+    /// prompt and the profile's mappings and engine version apply to every
+    /// parse. It takes effect at open time; a key retry resolves with the
+    /// selector of the attempt that left the archive locked.
     pub active_game: Option<ProfileChoice>,
     /// Open asset tabs in the content host.
     pub tabs: crate::state::tabs::Tabs,
@@ -601,6 +604,12 @@ fn pane_layout(app: &App) -> PaneLayout {
     }
 }
 
+/// The toolbar's selected profile id, which the file-dialog open passes to
+/// resolution.
+fn active_game_id(app: &App) -> Option<String> {
+    app.active_game.as_ref().map(|c| c.id.clone())
+}
+
 /// Processes a `Message` and updates the application state.
 #[allow(clippy::needless_pass_by_value)] // iced's UpdateFn trait requires Message by value
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
@@ -643,8 +652,11 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::OpenPathChosen(Some(path)) => {
             // Advance the flow to Resolving so the UI can respond.
-            app.keyflow.begin();
-            let game = app.active_game.as_ref().map(|c| c.id.clone());
+            let game = active_game_id(app);
+            app.keyflow.begin(ProfileSelector {
+                game: game.clone(),
+                detect: None,
+            });
             Task::perform(crate::task::open::run(path, game), |r| {
                 Message::ArchiveOpened(Box::new(r))
             })
@@ -727,7 +739,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                         // `view` would never render (the `Some(archive)` branch wins).
                         // Surface the failure as a non-blocking toast instead.
                         //
-                        // The open attempt began with `keyflow.begin()` (→ Resolving);
+                        // The open attempt began with `keyflow.begin(..)` (→ Resolving);
                         // it has now terminated, so leave Resolving — otherwise the
                         // state machine keeps claiming an open is in flight. The
                         // previously-loaded archive remains displayed, so restore the
@@ -744,7 +756,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                         push_open_failure_card(app, path, &message)
                     } else {
                         // No archive: the empty-state banner (with retry CTA) is the
-                        // right home. The open began with `keyflow.begin()` (→
+                        // right home. The open began with `keyflow.begin(..)` (→
                         // `Resolving`); reset to `Idle` so `view` falls through to the
                         // banner instead of showing the "Opening…" spinner forever
                         // (the `Resolving` branch precedes the `app.error` branch).
@@ -780,7 +792,8 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 Ok(key) => {
                     // Good hex — try to re-open with the supplied key.
                     if let Some(path) = app.keyflow.is_locked().map(PathBuf::from) {
-                        Task::perform(crate::task::open::run_with_key(path, key), |r| {
+                        let selector = app.keyflow.retry_selector();
+                        Task::perform(crate::task::open::run_with_key(path, key, selector), |r| {
                             Message::ArchiveOpened(Box::new(r))
                         })
                     } else {
@@ -805,6 +818,10 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         Message::KeyDirChosen(Some(dir)) => {
             // Re-resolve with --detect pointing at the install directory.
             if let Some(path) = app.keyflow.is_locked().map(PathBuf::from) {
+                app.keyflow.try_selector(ProfileSelector {
+                    game: None,
+                    detect: Some(dir.clone()),
+                });
                 Task::perform(crate::task::open::run_with_detect(path, dir), |r| {
                     Message::ArchiveOpened(Box::new(r))
                 })
@@ -2777,7 +2794,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
-    } else if matches!(app.keyflow, KeyFlow::Resolving) {
+    } else if matches!(app.keyflow, KeyFlow::Resolving { .. }) {
         // ── resolving state: neutral "Opening…" message ────────────────────────
         // Shown while the async open task is in flight.  Prevents the "Open a
         // .pak file to begin" CTA from appearing while a file is already loading.
@@ -3004,7 +3021,7 @@ mod tests {
     #[test]
     fn open_error_while_archive_loaded_pushes_persistent_toast_not_banner() {
         // An archive is already open and an open of another file is in flight
-        // (keyflow.begin() → Resolving). The failed open would set `app.error`,
+        // (keyflow.begin(..) → Resolving). The failed open would set `app.error`,
         // but `view` shows the archive (the Some(archive) branch wins), so the
         // banner never renders — the error is swallowed. It must become a toast.
         //
@@ -3015,7 +3032,7 @@ mod tests {
         // other half, that no expiry was actually scheduled. Neither implies the
         // other — see that test.
         let mut app = app_with_paths(&["Game/A.uasset"]);
-        app.keyflow.begin();
+        app.keyflow.begin(ProfileSelector::default());
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "boom")))),
@@ -3052,7 +3069,7 @@ mod tests {
     /// Put an archive up with a persistent open-failure card showing.
     fn app_with_persistent_failure() -> App {
         let mut app = app_with_paths(&["Game/A.uasset"]);
-        app.keyflow.begin();
+        app.keyflow.begin(ProfileSelector::default());
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "boom")))),
@@ -3108,7 +3125,7 @@ mod tests {
         // outcome.
         // Ok:
         let mut app = app_with_persistent_failure();
-        app.keyflow.begin();
+        app.keyflow.begin(ProfileSelector::default());
         let mut loaded = app_with_paths(&["Game/B.uasset"])
             .archive
             .expect("the helper builds a loaded archive");
@@ -3121,7 +3138,7 @@ mod tests {
 
         // Locked is a completed attempt too — it resolved to "needs a key".
         let mut app = app_with_persistent_failure();
-        app.keyflow.begin();
+        app.keyflow.begin(ProfileSelector::default());
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
@@ -3140,7 +3157,7 @@ mod tests {
         // This drives exactly the race that scoping exists for — two opens in
         // flight, the failure lands (card up), then the older open's Ok.
         let mut app = app_with_persistent_failure();
-        app.keyflow.begin();
+        app.keyflow.begin(ProfileSelector::default());
         let loaded = app_with_paths(&["Game/B.uasset"])
             .archive
             .expect("the helper builds a loaded archive");
@@ -3197,7 +3214,7 @@ mod tests {
             .expect("helper loads an archive")
             .path
             .clone();
-        app.keyflow.begin();
+        app.keyflow.begin(ProfileSelector::default());
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(core_err(
@@ -3353,7 +3370,7 @@ mod tests {
         // assertion below evidence of REPLACEMENT rather than of a first push
         // that silently never happened.
         let mut app = app_with_persistent_failure();
-        app.keyflow.begin();
+        app.keyflow.begin(ProfileSelector::default());
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "second")))),
@@ -3380,15 +3397,15 @@ mod tests {
 
     #[test]
     fn open_error_no_archive_after_resolving_shows_banner_not_spinner() {
-        // Realistic flow: OpenPathChosen runs `keyflow.begin()` → Resolving before
+        // Realistic flow: OpenPathChosen runs `keyflow.begin(..)` → Resolving before
         // the async open completes. A Core error with no archive must leave
         // Resolving (else `view`'s Resolving branch — which precedes the error
         // branch — shows "Opening…" forever and swallows the banner).
         let mut app = App::default();
-        app.keyflow.begin();
+        app.keyflow.begin(ProfileSelector::default());
         assert!(matches!(
             app.keyflow,
-            crate::state::keyflow::KeyFlow::Resolving
+            crate::state::keyflow::KeyFlow::Resolving { .. }
         ));
         let _ = update(
             &mut app,
@@ -3469,7 +3486,7 @@ mod tests {
         assert_eq!(app.toasts.items().len(), 1, "card up, archive still None");
 
         // A third open tears the prompt down and fails into the banner arm.
-        app.keyflow.begin();
+        app.keyflow.begin(ProfileSelector::default());
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(core_err("third.pak", "nope")))),
@@ -3500,7 +3517,7 @@ mod tests {
         );
         assert_eq!(app.toasts.items().len(), 1, "card up for the file");
 
-        app.keyflow.begin();
+        app.keyflow.begin(ProfileSelector::default());
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "newer message")))),
@@ -3789,6 +3806,53 @@ mod tests {
         let mut app = app_with_paths(&["file.txt"]);
         let _ = update(&mut app, Message::CopyPathRequested(999));
         assert!(app.toasts.is_empty(), "no toast when the row has no path");
+    }
+
+    /// The retry resolves with the selector of the attempt that left the
+    /// archive locked: not the toolbar's later value, not a failed detect.
+    #[test]
+    fn a_key_retry_resolves_with_the_attempt_that_locked_the_archive() {
+        let path = PathBuf::from("/a.pak");
+        let dir = PathBuf::from("/game");
+        let mut app = App {
+            active_game: Some(ProfileChoice {
+                id: "hero".into(),
+                name: "Hero".into(),
+            }),
+            ..App::default()
+        };
+        let locked = |path: &PathBuf| {
+            Message::ArchiveOpened(Box::new(Err(OpenError::Locked { path: path.clone() })))
+        };
+        let toolbar = ProfileSelector {
+            game: Some("hero".into()),
+            detect: None,
+        };
+
+        let _ = update(&mut app, Message::OpenPathChosen(Some(path.clone())));
+        let _ = update(&mut app, locked(&path));
+        app.active_game = None;
+        assert_eq!(app.keyflow.retry_selector(), toolbar);
+
+        let _ = update(&mut app, Message::KeyDirChosen(Some(dir.clone())));
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Core {
+                path: path.clone(),
+                message: "no profile matches".into(),
+            }))),
+        );
+        assert_eq!(app.keyflow.retry_selector(), toolbar);
+
+        let _ = update(&mut app, Message::KeyDirChosen(Some(dir.clone())));
+        let _ = update(&mut app, locked(&path));
+        assert_eq!(
+            app.keyflow.retry_selector(),
+            ProfileSelector {
+                game: None,
+                detect: Some(dir),
+            }
+        );
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
