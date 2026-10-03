@@ -86,6 +86,9 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
 - `digest.rs` — `Sha1Digest` newtype with byte-equality semantics; explicitly
   not constant-time (suitable for local file integrity, not network
   attestation).
+- `staged_replace.rs` — `StagedReplace`: replaces a file through an
+  exclusively created sibling temp and a rename, carrying the destination's
+  Unix access bits.
 - `testing/` — `__test_utils`-feature-gated test infrastructure: `v10` (v10+
   fixture builder), `oom` (RAII-guarded thread-local OOM injection seams used
   by integration tests in `tests/oom_pak.rs` and `tests/oom_asset.rs`).
