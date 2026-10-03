@@ -136,6 +136,9 @@ pub enum OpenError {
     Locked {
         /// Path to the encrypted archive.
         path: PathBuf,
+        /// The profile selector the attempt resolved with, which a key retry
+        /// reuses.
+        selector: crate::state::keyflow::ProfileSelector,
     },
     /// Any other core error (I/O, index corruption, decryption failure, …).
     ///

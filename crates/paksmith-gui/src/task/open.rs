@@ -21,12 +21,13 @@ use crate::state::tree::Tree;
 ///
 /// # Errors
 ///
-/// Returns [`OpenError::Locked`] when the archive is encrypted but no key
-/// could be resolved. Returns [`OpenError::Core`] for all other failures
-/// (I/O, index corruption, decryption failure, a profile whose mappings
-/// cannot load, etc.).
+/// Returns [`OpenError::Locked`] when the archive is encrypted and no profile
+/// applies, or the profile holds no keys at all. Returns [`OpenError::Core`]
+/// when the profile's keys include none for this pak, when its mappings
+/// cannot load, and for all other failures (I/O, index corruption, a key that
+/// fails to decrypt, etc.).
 pub async fn run(path: PathBuf, game: Option<String>) -> Result<LoadedArchive, OpenError> {
-    resolve_and_open(path, None, game, None).await
+    resolve_and_open(path, None, ProfileSelector { game, detect: None }).await
 }
 
 /// Open `path` with an explicitly supplied `key`, as the key-prompt panel does
@@ -36,15 +37,15 @@ pub async fn run(path: PathBuf, game: Option<String>) -> Result<LoadedArchive, O
 ///
 /// # Errors
 ///
-/// Returns [`OpenError::Core`] when the key is wrong or the archive cannot
-/// be opened for any other reason. A wrong key produces a `Decryption` error
-/// from core; a correct key produces a loaded archive.
+/// Returns [`OpenError::Core`] when the key is wrong (core's `Decryption`),
+/// when `selector` names a profile that no longer resolves or whose mappings
+/// cannot load, or when the archive cannot be opened for any other reason.
 pub async fn run_with_key(
     path: PathBuf,
     key: AesKey,
     selector: ProfileSelector,
 ) -> Result<LoadedArchive, OpenError> {
-    resolve_and_open(path, Some(key), selector.game, selector.detect).await
+    resolve_and_open(path, Some(key), selector).await
 }
 
 /// Open `path`, using a game-install `detect_dir` for profile auto-detection.
@@ -65,37 +66,45 @@ pub async fn run_with_detect(
     // `game = None` is intentional: the detect-dir flow auto-discovers the
     // game from the directory, so the toolbar-selected profile is deliberately
     // not forwarded.
-    resolve_and_open(path, None, None, Some(detect_dir)).await
+    let selector = ProfileSelector {
+        game: None,
+        detect: Some(detect_dir),
+    };
+    resolve_and_open(path, None, selector).await
 }
 
 async fn resolve_and_open(
     path: PathBuf,
     key: Option<AesKey>,
-    game: Option<String>,
-    detect: Option<PathBuf>,
+    selector: ProfileSelector,
 ) -> Result<LoadedArchive, OpenError> {
     let ctx = paksmith_core::profile::resolve::resolve_pak_context(
         &path,
         key.as_ref(),
-        game.as_deref(),
-        detect.as_deref(),
+        selector.game.as_deref(),
+        selector.detect.as_deref(),
     )
     .await
     .map_err(|e| OpenError::core(&path, &e))?;
-    open_with_context(path, &ctx)
+    open_with_context(path, &ctx, selector)
 }
 
 /// Load the context's parse inputs, then open the archive with its key.
 ///
 /// The mappings load first, as in the CLI, so a selected profile whose
 /// mappings cannot load fails the open before any key prompt, rather than the
-/// archive opening without them.
-fn open_with_context(path: PathBuf, ctx: &PakOpenContext) -> Result<LoadedArchive, OpenError> {
+/// archive opening without them. A locked result carries `selector`, the one
+/// the context was resolved with, for the key retry.
+fn open_with_context(
+    path: PathBuf,
+    ctx: &PakOpenContext,
+    selector: ProfileSelector,
+) -> Result<LoadedArchive, OpenError> {
     let parse_inputs = ctx.load_parse_inputs().map_err(|e| OpenError::Core {
         path: path.clone(),
         message: format!("profile mappings file failed to load: {e}"),
     })?;
-    build_loaded(path, ctx.key.as_ref(), parse_inputs)
+    build_loaded(path, ctx.key.as_ref(), parse_inputs, selector)
 }
 
 /// Open the reader with the already-resolved key and build the [`LoadedArchive`],
@@ -111,6 +120,7 @@ fn build_loaded(
     path: PathBuf,
     resolved_key: Option<&AesKey>,
     parse_inputs: ParseInputs,
+    selector: ProfileSelector,
 ) -> Result<LoadedArchive, OpenError> {
     // #654: the container-agnostic factory — the GUI never names a
     // concrete reader type.
@@ -118,7 +128,7 @@ fn build_loaded(
         Ok(r) => r,
         Err(PaksmithError::Decryption { .. }) if resolved_key.is_none() => {
             // Encrypted archive, no key available → prompt the user.
-            return Err(OpenError::Locked { path });
+            return Err(OpenError::Locked { path, selector });
         }
         Err(e) => return Err(OpenError::core(&path, &e)),
     };
@@ -320,7 +330,8 @@ mod tests {
         let path = fixture("real_v8b_encrypted_index.pak");
         let err = run(path.clone(), None).await.unwrap_err();
         assert!(
-            matches!(err, OpenError::Locked { path: ref p } if p == &path),
+            matches!(err, OpenError::Locked { path: ref p, ref selector }
+                if p == &path && *selector == ProfileSelector::default()),
             "expected Locked, got {err:?}"
         );
     }
@@ -367,8 +378,12 @@ mod tests {
         use crate::task::test_support::{HERO_ENTRY, UNVERSIONED_PAK, hero_usmap};
         let usmap = hero_usmap();
 
-        let loaded =
-            open_with_context(fixture(UNVERSIONED_PAK), &context(Some(&usmap), None)).unwrap();
+        let loaded = open_with_context(
+            fixture(UNVERSIONED_PAK),
+            &context(Some(&usmap), None),
+            ProfileSelector::default(),
+        )
+        .unwrap();
 
         let (reader, inputs) = loaded.reader_and_inputs();
         let load = crate::task::asset::load(reader, inputs, HERO_ENTRY.to_string()).await;
@@ -378,7 +393,12 @@ mod tests {
     #[test]
     fn open_with_context_carries_the_engine_version_hint() {
         let ctx = context(None, Some("5.3"));
-        let loaded = open_with_context(fixture("real_v8b_uasset.pak"), &ctx).unwrap();
+        let loaded = open_with_context(
+            fixture("real_v8b_uasset.pak"),
+            &ctx,
+            ProfileSelector::default(),
+        )
+        .unwrap();
         assert_eq!(loaded.parse_inputs.engine_version_hint, ctx.engine_version);
         assert!(loaded.parse_inputs.mappings.is_none());
     }
@@ -392,7 +412,12 @@ mod tests {
         let usmap = std::path::Path::new("/nonexistent/broken.usmap");
         let pak = fixture("real_v8b_encrypted_index.pak");
 
-        let err = open_with_context(pak.clone(), &context(Some(usmap), None)).unwrap_err();
+        let err = open_with_context(
+            pak.clone(),
+            &context(Some(usmap), None),
+            ProfileSelector::default(),
+        )
+        .unwrap_err();
 
         let loader = paksmith_core::asset::Usmap::from_path(usmap).unwrap_err();
         assert!(
@@ -416,6 +441,28 @@ mod tests {
 
         assert!(
             matches!(&err, OpenError::Core { message, .. } if message.contains("not a directory")),
+            "{err:?}"
+        );
+    }
+
+    /// A locked result carries the selector its attempt resolved with, so the
+    /// key retry pairs with this attempt and not with another in flight.
+    #[test]
+    fn a_locked_open_carries_the_attempts_selector() {
+        let selector = ProfileSelector {
+            game: None,
+            detect: Some(PathBuf::from("/game")),
+        };
+
+        let err = open_with_context(
+            fixture("real_v8b_encrypted_index.pak"),
+            &context(None, None),
+            selector.clone(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(&err, OpenError::Locked { selector: carried, .. } if *carried == selector),
             "{err:?}"
         );
     }
