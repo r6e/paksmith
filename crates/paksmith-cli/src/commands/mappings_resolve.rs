@@ -130,6 +130,37 @@ mod tests {
         );
     }
 
+    /// The whole reason string, byte for byte: the prefix plus the
+    /// loader's own message, for either selector.
+    #[test]
+    fn profile_load_failure_reason_is_the_prefix_plus_the_loader_error() {
+        let path = Path::new("/nonexistent/x.usmap");
+        let src = MappingsSource::Path(path.into());
+        let loader = Usmap::from_path(path).unwrap_err().to_string();
+        for selector in ["--game", "--detect"] {
+            let err = resolve_usmap(None, Some(&src), selector).unwrap_err();
+            let PaksmithError::InvalidArgument { arg, reason } = err else {
+                panic!("expected InvalidArgument, got {err:?}");
+            };
+            assert_eq!(arg, selector);
+            assert_eq!(
+                reason,
+                format!("profile mappings file failed to load: {loader}")
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_load_failure_reason_is_the_loader_error() {
+        let path = Path::new("/nonexistent/x.usmap");
+        let err = resolve_usmap(Some(path), None, "--game").unwrap_err();
+        let PaksmithError::InvalidArgument { arg, reason } = err else {
+            panic!("expected InvalidArgument, got {err:?}");
+        };
+        assert_eq!(arg, "--mappings");
+        assert_eq!(reason, Usmap::from_path(path).unwrap_err().to_string());
+    }
+
     #[test]
     fn neither_source_is_none() {
         assert!(resolve_usmap(None, None, "--game").unwrap().is_none());
