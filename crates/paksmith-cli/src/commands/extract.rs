@@ -166,8 +166,7 @@ pub(crate) fn run(
             reader: Arc::clone(reader),
             registry: &registry,
             cfg: &cfg,
-            mappings: opened.usmap.clone(),
-            engine_version: opened.engine_version,
+            inputs: &opened.inputs,
         };
         let outcomes = match &pool {
             Some(p) => p.install(|| job.run_with_progress(entries, &progress)),
@@ -199,14 +198,11 @@ pub(crate) fn run(
 }
 
 /// Phase 1's yield: every source archive open, its filtered entry
-/// list, and the two once-resolved profile inputs — the usmap and the
+/// list, and the once-resolved parse inputs — the usmap and the
 /// engine-version hint (#656). Parallel vectors, index-aligned with
 /// the sorted `sources` order `winning_entries` decides by.
 struct OpenedSources {
-    usmap: Option<std::sync::Arc<paksmith_core::asset::Usmap>>,
-    /// The selected profile's engine version (#656) — profile-derived
-    /// like `usmap`, so resolved once from the first source.
-    engine_version: Option<paksmith_core::asset::UeVersion>,
+    inputs: paksmith_core::asset::ParseInputs,
     readers: Vec<std::sync::Arc<dyn paksmith_core::container::ContainerReader>>,
     entry_lists: Vec<Vec<String>>,
 }
@@ -230,21 +226,17 @@ fn open_and_collect(
     detect: Option<&std::path::Path>,
     pattern: Option<&glob::Pattern>,
 ) -> paksmith_core::Result<OpenedSources> {
-    let mut usmap = None;
-    let mut engine_version = None;
+    let mut inputs = paksmith_core::asset::ParseInputs::default();
     let mut readers = Vec::with_capacity(sources.len());
     let mut entry_lists = Vec::with_capacity(sources.len());
     for (i, pak) in sources.iter().enumerate() {
         let ctx = crate::commands::key_resolve::resolve_pak_context(pak, aes_key, game, detect)?;
         if i == 0 {
-            usmap = crate::commands::mappings_resolve::resolve_usmap(
+            inputs = ctx.parse_inputs(crate::commands::mappings_resolve::resolve_usmap(
                 mappings_arg,
                 ctx.mappings.as_ref(),
                 crate::commands::mappings_resolve::mappings_selector(game),
-            )?;
-            // Profile-derived like the usmap, so it is resolved once
-            // from the first source rather than per archive (#656).
-            engine_version = ctx.engine_version;
+            )?);
         }
         let reader = paksmith_core::container::open(pak, ctx.key.as_ref())?;
         let entries: Vec<String> = reader
@@ -258,8 +250,7 @@ fn open_and_collect(
         entry_lists.push(entries);
     }
     Ok(OpenedSources {
-        usmap,
-        engine_version,
+        inputs,
         readers,
         entry_lists,
     })
