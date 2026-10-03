@@ -81,12 +81,18 @@ impl Drop for TempGuard {
 impl StagedReplace {
     /// Creates the staging temp beside `dest`, which need not exist.
     ///
+    /// `dest` is used as given, not made absolute, which could push it past
+    /// the platform's path limit. A relative `dest` therefore resolves against
+    /// the working directory at create, commit and drop alike, and the caller
+    /// must not change it in between.
+    ///
     /// # Errors
     ///
     /// [`StagedReplaceError::CreateTemp`] when `dest` has no file name or the
     /// exclusive create fails; nothing was created.
-    /// [`StagedReplaceError::PreservePermissions`] when the bits the umask
-    /// stripped cannot be restored.
+    /// [`StagedReplaceError::PreservePermissions`], on Unix, when the
+    /// destination's metadata cannot be read for any reason but its absence,
+    /// or the bits the umask stripped cannot be restored.
     pub fn create(dest: &Path) -> Result<Self, StagedReplaceError> {
         if dest.file_name().is_none() {
             return Err(StagedReplaceError::CreateTemp(io::Error::new(
@@ -104,7 +110,7 @@ impl StagedReplace {
         // Read once, above the open: the temp is safe because its creation
         // mode is a subset of what is settled on it.
         #[cfg(unix)]
-        let mode = destination_mode(dest);
+        let mode = destination_mode(dest).map_err(StagedReplaceError::PreservePermissions)?;
         // Born with the destination's bits, not narrowed to them afterwards:
         // an fd opened on a wider temp keeps its read rights across a chmod.
         #[cfg(unix)]
@@ -162,7 +168,8 @@ pub enum StagedReplaceError {
     /// The temp could not be created beside the destination.
     #[error("create temp file: {0}")]
     CreateTemp(io::Error),
-    /// The destination's access bits could not be restored on the temp.
+    /// The destination's access bits could not be read, or could not be
+    /// restored on the temp.
     #[error("preserve permissions: {0}")]
     PreservePermissions(io::Error),
     /// The temp could not be renamed over the destination.
@@ -183,16 +190,23 @@ impl From<StagedReplaceError> for io::Error {
 }
 
 /// The access bits an existing regular-file destination passes on, or `None`
-/// when there is nothing to carry.
+/// when there is no such destination. Any other failure to read it is an
+/// error, so the temp is never created at the umask's default beside a file
+/// whose bits were not seen.
 ///
 /// Reads with `symlink_metadata`, so a leaf link cannot source this from its
 /// target.
 #[cfg(unix)]
-fn destination_mode(dest: &Path) -> Option<u32> {
-    let meta = fs::symlink_metadata(dest).ok()?;
-    meta.file_type()
+fn destination_mode(dest: &Path) -> io::Result<Option<u32>> {
+    let meta = match fs::symlink_metadata(dest) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(meta
+        .file_type()
         .is_file()
-        .then(|| access_bits(meta.permissions().mode()))
+        .then(|| access_bits(meta.permissions().mode())))
 }
 
 /// Restores what `open`'s umask stripped from the temp's creation mode.
@@ -272,15 +286,36 @@ mod tests {
 
         let mut staged = StagedReplace::create(&dest).unwrap();
         staged.file_mut().write_all(b"PAYLOAD").unwrap();
-        let staged_temps = fs::read_dir(root.path())
-            .unwrap()
-            .filter(|e| is_temp(&e.as_ref().unwrap().file_name()))
+        let staged_temps = names(root.path())
+            .iter()
+            .filter(|n| is_temp(OsStr::new(n)))
             .count();
         drop(staged);
 
         assert_eq!(staged_temps, 1, "the filter must see the live temp");
         assert_eq!(names(root.path()), ["x.bin"]);
         assert_eq!(fs::read(&dest).unwrap(), b"ORIGINAL");
+    }
+
+    /// A destination whose metadata cannot be read fails as a permissions
+    /// error, not as one with nothing to carry.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_destination_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let sealed = root.path().join("sealed");
+        fs::create_dir(&sealed).unwrap();
+        fs::write(sealed.join("x.bin"), b"ORIGINAL").unwrap();
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let result = StagedReplace::create(&sealed.join("x.bin"));
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let err = result.err();
+        assert!(
+            matches!(&err, Some(StagedReplaceError::PreservePermissions(e)) if e.kind() == io::ErrorKind::PermissionDenied),
+            "{err:?}"
+        );
     }
 
     /// A directory destination makes the rename fail with the temp written.
@@ -472,7 +507,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_temp_is_never_wider_than_the_destination() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        use std::sync::atomic::AtomicBool;
 
         let root = tempfile::tempdir().unwrap();
         let dest = root.path().join("secret.bin");
@@ -483,7 +518,7 @@ mod tests {
         // every thread before propagating a panic, so a failing replace with
         // `done` still false would spin the watcher and hang the binary.
         let done = AtomicBool::new(false);
-        let seen = AtomicUsize::new(0);
+        let seen = AtomicBool::new(false);
         let (widest, results) = std::thread::scope(|scope| {
             let watcher = scope.spawn(|| {
                 let mut widest = 0u32;
@@ -494,7 +529,7 @@ mod tests {
                                 && let Ok(m) = e.metadata()
                             {
                                 widest |= m.permissions().mode() & 0o777;
-                                let _ = seen.fetch_add(1, Ordering::Relaxed);
+                                seen.store(true, Ordering::Relaxed);
                             }
                         }
                     }
@@ -503,9 +538,7 @@ mod tests {
             });
             // Until the watcher has seen a temp, within a bound.
             let mut results = Vec::new();
-            while results.len() < 200
-                || (seen.load(Ordering::Relaxed) == 0 && results.len() < 20_000)
-            {
+            while results.len() < 200 || (!seen.load(Ordering::Relaxed) && results.len() < 20_000) {
                 results.push(replace(&dest, b"NEW"));
             }
             done.store(true, Ordering::Relaxed);
@@ -515,7 +548,7 @@ mod tests {
             result.unwrap();
         }
 
-        assert!(seen.into_inner() > 0, "the watcher never saw a temp");
+        assert!(seen.into_inner(), "the watcher never saw a temp");
         assert_eq!(
             widest & !0o600,
             0,

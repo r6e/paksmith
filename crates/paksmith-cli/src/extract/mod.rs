@@ -492,10 +492,8 @@ fn write_output(
     Ok(display)
 }
 
-/// Write `bytes` over `path` through core's [`StagedReplace`]. The rename
-/// replaces the destination entry, so it neither follows a planted symlink nor
-/// truncates what one points at, and as one replace it keeps `--flat`'s
-/// last-writer-wins.
+/// Write `bytes` over `path` through core's [`StagedReplace`]. As one rename,
+/// it keeps `--flat`'s last-writer-wins.
 fn replace_via_temp(path: &Path, display: &str, bytes: &[u8]) -> Result<(), String> {
     let mut staged = StagedReplace::create(path).map_err(|e| replace_failure(display, e))?;
     staged
@@ -1703,8 +1701,6 @@ mod write_output_tests {
         );
     }
 
-    /// No filesystem in CI can provoke the permission step, so its wording is
-    /// pinned here.
     #[test]
     fn each_replace_step_keeps_its_wording() {
         let boom = || std::io::Error::other("boom");
