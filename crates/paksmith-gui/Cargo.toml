@@ -91,6 +91,7 @@ tokio = { workspace = true, features = ["test-util"] }
 # Packages via paksmith_core::testing::uasset. Normal `cargo build` is
 # unaffected; this feature is only active during test compilation.
 paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

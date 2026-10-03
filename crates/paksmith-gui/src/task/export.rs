@@ -7,8 +7,8 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
+use paksmith_core::StagedReplace;
 use paksmith_core::asset::Package;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::export::{ExportFormat, HandlerRegistry, available_formats, export_payload};
@@ -63,67 +63,22 @@ pub async fn run(
     }
 }
 
-/// Monotonic counter making each in-flight export temp name process-unique.
-static EXPORT_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// A process-unique sibling temp path for an in-progress export
-/// (`<dest>.<pid>.<seq>.part`), renamed onto `dest` only after the write fully
-/// succeeds. Unique — not a fixed `<dest>.part` — so a concurrent export, or a
-/// pre-existing `<dest>.part` the user happens to own, is never collided with or
-/// clobbered. Same directory as `dest` so the finalizing rename stays on one
-/// filesystem (atomic, no cross-device copy).
-fn export_temp_path(dest: &Path) -> PathBuf {
-    let seq = EXPORT_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let mut s = dest.as_os_str().to_os_string();
-    s.push(format!(".{}.{}.part", std::process::id(), seq));
-    PathBuf::from(s)
-}
-
-/// Open `tmp` for writing, failing closed if anything already occupies that
-/// path: `create_new` (O_EXCL on Unix, `CREATE_NEW` on Windows) refuses to
-/// truncate a pre-existing file or follow a pre-planted symlink. A later failure
-/// may safely remove `tmp` precisely because this exclusive create proves the
-/// temp is ours.
-fn create_temp_exclusive(tmp: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(tmp)
-}
-
-/// Dialog-free export work: write the chosen export of `src_path` to `dest`.
-///
-/// Writes to a process-unique sibling temp first and renames it into place only
-/// on full success, so a failed export never clobbers an existing file the user
-/// chose to overwrite and leaves no partial behind. `std::fs::rename` replaces an
-/// existing destination *file* atomically on Linux/macOS and on Windows (via
-/// `MoveFileExW` / `SetFileInformationByHandle`); per its docs only a *directory*
-/// `to` would error there, which a save-dialog file path never is.
+/// Dialog-free export work: write the chosen export of `src_path` to `dest`
+/// through core's [`StagedReplace`], so a failed export never clobbers a file
+/// the user chose to overwrite.
 fn write_export(
     reader: &Arc<dyn ContainerReader>,
     src_path: &str,
     choice: &ExportChoice,
     dest: &Path,
 ) -> Result<(), paksmith_core::PaksmithError> {
-    let tmp = export_temp_path(dest);
-    // Exclusive create: if the temp path is already taken it isn't ours, so this
-    // returns the error without removing anything.
-    let file = create_temp_exclusive(&tmp)?;
-    // The temp is now ours. Consuming `file` in `write_payload_to` closes it at
-    // that call's return — before the rename below, which Windows requires (it
-    // cannot rename a file that still has an open handle). Any failure from here
-    // cleans up the temp we created.
-    let result = write_payload_to(reader, src_path, choice, file)
-        .and_then(|()| std::fs::rename(&tmp, dest).map_err(Into::into));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    let mut staged = StagedReplace::create(dest).map_err(std::io::Error::from)?;
+    write_payload_to(reader, src_path, choice, staged.file_mut())?;
+    staged.commit().map_err(std::io::Error::from)?;
+    Ok(())
 }
 
-/// The actual per-choice write into the owned temp `file` (Raw streams uncapped
-/// via `read_entry_to`; Typed parses + dispatches the handler). Takes `file` by
-/// value so it is closed when this returns, before the caller renames it.
+/// The per-choice write into the staged temp `file`.
 ///
 /// Raw streams the decompressed entry straight to the file — **no size cap, no
 /// parse** (it must not reuse `task::asset::load`, which caps at `HEX_BYTES_CAP`
@@ -132,11 +87,11 @@ fn write_payload_to(
     reader: &Arc<dyn ContainerReader>,
     src_path: &str,
     choice: &ExportChoice,
-    mut file: std::fs::File,
+    file: &mut std::fs::File,
 ) -> Result<(), paksmith_core::PaksmithError> {
     match choice {
         ExportChoice::Raw => {
-            let _ = reader.read_entry_to(src_path, &mut file)?;
+            let _ = reader.read_entry_to(src_path, file)?;
             Ok(())
         }
         ExportChoice::Typed {
@@ -161,76 +116,57 @@ fn write_payload_to(
 mod tests {
     use super::*;
 
-    fn fixture(name: &str) -> PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    const DEMO_ENTRY: &str = "Game/Maps/Demo.uasset";
+
+    fn demo_reader() -> Arc<dyn ContainerReader> {
+        let pak = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .parent()
             .unwrap()
-            .join("tests/fixtures")
-            .join(name)
+            .join("tests/fixtures/real_v8b_uasset.pak");
+        paksmith_core::container::open(&pak, None).unwrap()
     }
 
-    /// Unique temp path per test (no tempfile dep); caller removes it.
-    fn tmp_dest(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "paksmith_export_{}_{}.out",
-            tag,
-            std::process::id()
-        ))
-    }
-
-    /// Count leftover export temp siblings (`<dest filename>*.part`) next to
-    /// `dest` — must be zero after any completed `write_export`.
-    fn temp_siblings(dest: &Path) -> usize {
-        let dir = dest.parent().unwrap();
-        let prefix = dest.file_name().unwrap().to_string_lossy().into_owned();
-        std::fs::read_dir(dir)
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
-            .filter_map(Result::ok)
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                name.starts_with(&prefix)
-                    && std::path::Path::new(&name)
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("part"))
-            })
-            .count()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]
     fn write_export_raw_writes_the_full_uncapped_entry() {
-        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
-        let path = "Game/Maps/Demo.uasset";
-        let dest = tmp_dest("raw");
-        write_export(&reader, path, &ExportChoice::Raw, &dest).expect("raw export");
+        let reader = demo_reader();
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("raw.out");
+        write_export(&reader, DEMO_ENTRY, &ExportChoice::Raw, &dest).expect("raw export");
 
         let written = std::fs::read(&dest).unwrap();
-        let mut expected = Vec::new();
-        let _ = reader.read_entry_to(path, &mut expected).unwrap();
-        let _ = std::fs::remove_file(&dest);
-
         assert!(!written.is_empty(), "raw export must produce bytes");
         assert_eq!(
-            written, expected,
+            written,
+            reader.read_entry(DEMO_ENTRY).unwrap(),
             "raw export must be the full entry, uncapped"
         );
     }
 
     #[tokio::test]
     async fn write_export_typed_writes_handler_output() {
-        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
-        let path = "Game/Maps/Demo.uasset".to_string();
+        let reader = demo_reader();
         // Discover a real format for this entry (also exercises `available`).
-        let formats = available(reader.clone(), path.clone()).await;
+        let formats = available(reader.clone(), DEMO_ENTRY.to_string()).await;
         let fmt = formats
             .first()
             .copied()
             .expect("Demo.uasset must offer at least one typed format");
-        let dest = tmp_dest("typed");
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("typed.out");
         write_export(
             &reader,
-            &path,
+            DEMO_ENTRY,
             &ExportChoice::Typed {
                 payload_idx: fmt.payload_idx,
                 extension: fmt.extension,
@@ -239,16 +175,16 @@ mod tests {
         )
         .expect("typed export");
         let written = std::fs::read(&dest).unwrap();
-        let _ = std::fs::remove_file(&dest);
         assert!(!written.is_empty(), "typed export must produce bytes");
     }
 
     #[test]
     fn write_export_failure_leaves_destination_untouched() {
         // A failing export (non-existent source entry) must NOT clobber an
-        // existing destination and must leave no `.part` temp behind.
-        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
-        let dest = tmp_dest("atomic");
+        // existing destination and must leave nothing else behind.
+        let reader = demo_reader();
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("atomic.out");
         std::fs::write(&dest, b"ORIGINAL").unwrap();
         let err = write_export(
             &reader,
@@ -262,75 +198,62 @@ mod tests {
             b"ORIGINAL",
             "dest must be untouched on failure"
         );
-        assert_eq!(
-            temp_siblings(&dest),
-            0,
-            "no .part temp may remain after failure"
-        );
-        let _ = std::fs::remove_file(&dest);
+        assert_eq!(names(root.path()), ["atomic.out"]);
     }
 
+    /// Replaces the destination and nothing beside it, a user's own
+    /// `<dest>.part` included.
     #[test]
     fn write_export_overwrites_existing_destination() {
-        // Exporting over an existing file must replace it — including on Windows,
-        // where `std::fs::rename` replaces an existing *file* destination
-        // (MoveFileExW / SetFileInformationByHandle). Empirically refutes the
-        // claim that rename errors when the destination exists.
-        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
-        let path = "Game/Maps/Demo.uasset";
-        let dest = tmp_dest("overwrite");
+        let reader = demo_reader();
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("overwrite.out");
         std::fs::write(&dest, b"STALE CONTENT").unwrap();
-        write_export(&reader, path, &ExportChoice::Raw, &dest).expect("overwrite export");
+        let user_part = root.path().join("overwrite.out.part");
+        std::fs::write(&user_part, b"USER FILE").unwrap();
 
-        let written = std::fs::read(&dest).unwrap();
-        let _ = std::fs::remove_file(&dest);
-        assert_ne!(
-            written.as_slice(),
-            b"STALE CONTENT",
-            "an existing destination must be replaced, not preserved"
+        write_export(&reader, DEMO_ENTRY, &ExportChoice::Raw, &dest).expect("overwrite export");
+
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            reader.read_entry(DEMO_ENTRY).unwrap(),
+            "an existing destination must be replaced"
         );
-        assert!(!written.is_empty(), "overwrite export must produce bytes");
+        assert_eq!(std::fs::read(&user_part).unwrap(), b"USER FILE");
+        assert_eq!(names(root.path()), ["overwrite.out", "overwrite.out.part"]);
     }
 
+    /// Replacing hands the destination a fresh inode, so a restricted file
+    /// must not come back at the umask's default. Owner-execute never comes
+    /// from creation, so this holds under any umask.
+    #[cfg(unix)]
     #[test]
-    fn write_export_leaves_unrelated_part_file_untouched() {
-        // A pre-existing `<dest>.part` the user owns must never be truncated or
-        // deleted: the temp name is process-unique, not a fixed `<dest>.part`.
-        let reader = paksmith_core::container::open(&fixture("real_v8b_uasset.pak"), None).unwrap();
-        let path = "Game/Maps/Demo.uasset";
-        let dest = tmp_dest("unrelated");
-        let mut legacy_part = dest.as_os_str().to_os_string();
-        legacy_part.push(".part");
-        let legacy_part = PathBuf::from(legacy_part);
-        std::fs::write(&legacy_part, b"USER FILE").unwrap();
+    fn write_export_keeps_the_destination_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let reader = demo_reader();
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("secret.out");
+        std::fs::write(&dest, b"ORIGINAL").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o700)).unwrap();
 
-        write_export(&reader, path, &ExportChoice::Raw, &dest).expect("export ok");
+        write_export(&reader, DEMO_ENTRY, &ExportChoice::Raw, &dest).expect("export ok");
 
-        let preserved = std::fs::read(&legacy_part);
-        let _ = std::fs::remove_file(&dest);
-        let _ = std::fs::remove_file(&legacy_part);
         assert_eq!(
-            preserved.unwrap().as_slice(),
-            b"USER FILE",
-            "a pre-existing <dest>.part must be left untouched"
+            std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+            0o700
         );
     }
 
+    /// A destination name the platform accepts must not fail on its temp's.
     #[test]
-    fn create_temp_exclusive_refuses_an_existing_path() {
-        // O_EXCL: opening must fail closed if anything already occupies the temp
-        // path, so a pre-existing file is never truncated (nor a symlink
-        // followed). Pins `create_new` against a silent downgrade to `create`.
-        let tmp = tmp_dest("excl");
-        std::fs::write(&tmp, b"PRE-EXISTING").unwrap();
-        let kind = create_temp_exclusive(&tmp).err().map(|e| e.kind());
-        let after = std::fs::read(&tmp).unwrap();
-        let _ = std::fs::remove_file(&tmp);
-        assert_eq!(
-            kind,
-            Some(std::io::ErrorKind::AlreadyExists),
-            "exclusive create over an existing path must fail with AlreadyExists"
-        );
-        assert_eq!(after, b"PRE-EXISTING", "exclusive create must not truncate");
+    fn write_export_accepts_a_destination_name_near_the_length_limit() {
+        let reader = demo_reader();
+        let root = tempfile::tempdir().unwrap();
+        let name = "x".repeat(250);
+        let dest = root.path().join(&name);
+
+        write_export(&reader, DEMO_ENTRY, &ExportChoice::Raw, &dest).expect("export ok");
+
+        assert_eq!(names(root.path()), [name]);
     }
 }
