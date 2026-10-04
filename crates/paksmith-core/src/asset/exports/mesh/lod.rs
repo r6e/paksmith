@@ -470,7 +470,8 @@ fn serialize_buffers_legacy(
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    //! Shared byte builders + context builders for the LOD / render-data tests.
+    //! Shared byte builders + context builders for the mesh tests: LOD and
+    //! render-data records, and cooked static-mesh export bodies.
 
     use std::sync::Arc;
 
@@ -484,6 +485,7 @@ pub(crate) mod test_support {
     use crate::asset::import_table::ImportTable;
     use crate::asset::name_table::{FName, NameTable};
     use crate::asset::version::AssetVersion;
+    use crate::asset::wire::write_bool32;
 
     /// A complete inlined `FStaticMeshLODResources` (UE 4.23, object version
     /// `517` — the first new-cooked version; `< 4.25`, so no ray-tracing block
@@ -497,7 +499,7 @@ pub(crate) mod test_support {
     pub(crate) fn inlined_lod_ue4_23() -> Vec<u8> {
         let mut b = Vec::new();
         push_lod_header_ue4_23(&mut b, true);
-        push_serialize_buffers_blob_ue4_23(&mut b);
+        push_serialize_buffers_blob_ue4_23(&mut b, [0, 1, 2]);
         // FStaticMeshBuffersSize trailer (3 × u32).
         b.extend_from_slice(&[0u8; 12]);
         b
@@ -540,14 +542,14 @@ pub(crate) mod test_support {
     }
 
     /// The `FStaticMeshLODResources::SerializeBuffers` geometry blob (UE4.23):
-    /// 3 verts `(0,0,0)/(1,0,0)/(0,1,0)`, a `[0,1,2]` triangle, no per-vertex
-    /// color. Shared by [`inlined_lod_ue4_23`] (where it follows `bInlined`
+    /// 3 verts `(0,0,0)/(1,0,0)/(0,1,0)`, one triangle of `indices`, no
+    /// per-vertex color. Shared by [`inlined_lod_ue4_23`] (where it follows `bInlined`
     /// in-stream) and the non-inlined LOD tests (where it is the resolved
     /// `.ubulk` payload). The inner strip flags strip editor data plus the
     /// reversed and adjacency buffers, so only `IndexBuffer` and
     /// `DepthOnlyIndexBuffer` follow the four geometry buffers; two empty
     /// area-weighted samplers close it.
-    pub(crate) fn push_serialize_buffers_blob_ue4_23(b: &mut Vec<u8>) {
+    pub(crate) fn push_serialize_buffers_blob_ue4_23(b: &mut Vec<u8>, indices: [u16; 3]) {
         // Inner strip: editor stripped (bit0) + CDSF ReversedIndexBuffer (4) |
         // AdjacencyData (1) = 5.
         b.push(1);
@@ -590,11 +592,11 @@ pub(crate) mod test_support {
         b.push(0);
         b.extend_from_slice(&4i32.to_le_bytes());
         b.extend_from_slice(&0i32.to_le_bytes());
-        // IndexBuffer: 16-bit, byteCount 6, [0,1,2].
+        // IndexBuffer: 16-bit, byteCount 6, `indices`.
         b.extend_from_slice(&0i32.to_le_bytes()); // is32bit = 0
         b.extend_from_slice(&1i32.to_le_bytes()); // elementSize
         b.extend_from_slice(&6i32.to_le_bytes()); // byteCount
-        for i in [0u16, 1, 2] {
+        for i in indices {
             b.extend_from_slice(&i.to_le_bytes());
         }
         // DepthOnlyIndexBuffer: empty (reversed / wireframe / adjacency stripped).
@@ -613,9 +615,9 @@ pub(crate) mod test_support {
     /// `.ubulk` payload of a non-inlined LOD.
     #[cfg(feature = "__test_utils")]
     #[must_use]
-    pub(crate) fn serialize_buffers_blob_ue4_23() -> Vec<u8> {
+    pub(crate) fn serialize_buffers_blob_ue4_23(indices: [u16; 3]) -> Vec<u8> {
         let mut b = Vec::new();
-        push_serialize_buffers_blob_ue4_23(&mut b);
+        push_serialize_buffers_blob_ue4_23(&mut b, indices);
         b
     }
 
@@ -644,7 +646,7 @@ pub(crate) mod test_support {
         // SerializeBuffersLegacy body = the SerializeBuffers blob without its leading
         // 2-byte inner FStripDataFlags (legacy uses the outer strip above).
         let mut blob = Vec::new();
-        push_serialize_buffers_blob_ue4_23(&mut blob);
+        push_serialize_buffers_blob_ue4_23(&mut blob, [0, 1, 2]);
         b.extend_from_slice(&blob[2..]);
         b
     }
@@ -736,31 +738,42 @@ pub(crate) mod test_support {
 
     /// Write a 20-byte `FByteBulkData` header for a separate-file (streamed)
     /// record: the given `flags` word (e.g. [`SEPARATE_FILE_NO_FIXUP`]),
-    /// `element_count` and `size_on_disk`, `offset_in_file = 0`.
+    /// `element_count`, `size_on_disk` and `offset_in_file`.
     #[cfg(feature = "__test_utils")]
     fn push_separate_file_bulk_header(
         b: &mut Vec<u8>,
         flags: u32,
         element_count: i32,
         size_on_disk: usize,
+        offset_in_file: usize,
     ) {
         b.extend_from_slice(&flags.to_le_bytes());
         b.extend_from_slice(&element_count.to_le_bytes());
         b.extend_from_slice(&u32::try_from(size_on_disk).unwrap().to_le_bytes());
-        b.extend_from_slice(&0i64.to_le_bytes()); // offset_in_file
+        b.extend_from_slice(&i64::try_from(offset_in_file).unwrap().to_le_bytes());
     }
 
     /// A non-inlined UE4.23 `FStaticMeshLODResources`: the leading header with
     /// `bInlined = 0`, a separate-file `FByteBulkData` header (whose payload — the
     /// `SerializeBuffers` blob — is resolved out-of-band from a companion
     /// `.ubulk`), the in-stream availability-info trailer, and the shared
-    /// `FStaticMeshBuffersSize`. `bulk_size_on_disk` is the `.ubulk` payload length.
+    /// `FStaticMeshBuffersSize`. The payload is the `bulk_size_on_disk` bytes at
+    /// `offset_in_file` in the `.ubulk`.
     #[cfg(feature = "__test_utils")]
     #[must_use]
-    pub(crate) fn non_inlined_lod_ue4_23(bulk_size_on_disk: usize) -> Vec<u8> {
+    pub(crate) fn non_inlined_lod_ue4_23(
+        bulk_size_on_disk: usize,
+        offset_in_file: usize,
+    ) -> Vec<u8> {
         let mut b = Vec::new();
         push_lod_header_ue4_23(&mut b, false); // bInlined = 0
-        push_separate_file_bulk_header(&mut b, SEPARATE_FILE_NO_FIXUP, 3, bulk_size_on_disk);
+        push_separate_file_bulk_header(
+            &mut b,
+            SEPARATE_FILE_NO_FIXUP,
+            3,
+            bulk_size_on_disk,
+            offset_in_file,
+        );
         // Availability-info trailer (UE4 path, per CUE4Parse
         // FStaticMeshLODResources.cs): DepthOnlyNumTriangles + Packed (8), the
         // buffer-count/stride stats (4*4 + 2*4 + 2*4 + 5*2*4 = 72), and — since UE4
@@ -768,6 +781,56 @@ pub(crate) mod test_support {
         b.extend_from_slice(&[0u8; 8 + 72 + 8]);
         // FStaticMeshBuffersSize (3 × u32), shared with the inlined path.
         b.extend_from_slice(&[0u8; 12]);
+        b
+    }
+
+    /// The `UStaticMesh.Deserialize` fields through `Sockets`: strip flags,
+    /// `bCooked`, a null `BodySetup` and `NavCollision`, `LightingGuid`, and an
+    /// empty `Sockets` array. Stops before the `bCooked`-gated render data.
+    pub(crate) fn static_mesh_deserialize_tail(buf: &mut Vec<u8>, cooked: bool) {
+        buf.push(0x00); // GlobalStripFlags
+        buf.push(0x00); // ClassStripFlags
+        write_bool32(buf, cooked).unwrap();
+        buf.extend_from_slice(&0i32.to_le_bytes()); // BodySetup = Null
+        buf.extend_from_slice(&0i32.to_le_bytes()); // NavCollision = Null
+        buf.extend_from_slice(&[0u8; 16]); // LightingGuid
+        buf.extend_from_slice(&0i32.to_le_bytes()); // Sockets count = 0
+    }
+
+    /// The render-data fields that follow the LOD array: numInlinedLODs, the
+    /// distance-field strip + `lod_count` `bValid` bools (all `false`), a 28-byte
+    /// UE4 Bounds, bLODsShareStaticLighting, and 8 `FPerPlatformFloat`s
+    /// (`bCooked` + value `0.5`).
+    pub(crate) fn render_data_tail(buf: &mut Vec<u8>, lod_count: usize) {
+        buf.push(0x00); // numInlinedLODs
+        buf.push(0x00); // distance-field GlobalStripFlags (not stripped)
+        buf.push(0x00); // distance-field ClassStripFlags
+        for _ in 0..lod_count {
+            write_bool32(buf, false).unwrap(); // per-LOD bValid = 0
+        }
+        buf.extend_from_slice(&[0u8; 28]); // Bounds
+        write_bool32(buf, true).unwrap(); // bLODsShareStaticLighting
+        for _ in 0..8 {
+            write_bool32(buf, true).unwrap();
+            buf.extend_from_slice(&0.5f32.to_le_bytes());
+        }
+    }
+
+    /// A cooked UE4.23 `UStaticMesh` export body: the `None` property
+    /// terminator, the `Deserialize` tail, then render data with `lods`.
+    #[cfg(feature = "__test_utils")]
+    #[must_use]
+    pub(crate) fn cooked_static_mesh_ue4_23(lods: &[Vec<u8>]) -> Vec<u8> {
+        use crate::asset::property::test_utils::write_object_end;
+
+        let mut b = Vec::new();
+        write_object_end(&mut b);
+        static_mesh_deserialize_tail(&mut b, true);
+        b.extend_from_slice(&i32::try_from(lods.len()).unwrap().to_le_bytes());
+        for lod in lods {
+            b.extend_from_slice(lod);
+        }
+        render_data_tail(&mut b, lods.len());
         b
     }
 
@@ -780,7 +843,7 @@ pub(crate) mod test_support {
     pub(crate) fn non_inlined_lod_ue5_0_empty() -> Vec<u8> {
         let mut b = Vec::new();
         push_lod_header_ue5_0(&mut b, false); // bInlined = 0
-        push_separate_file_bulk_header(&mut b, SEPARATE_FILE_NO_FIXUP, 0, 0); // element_count 0 → no geometry
+        push_separate_file_bulk_header(&mut b, SEPARATE_FILE_NO_FIXUP, 0, 0, 0); // element_count 0 → no geometry
         // Availability-info trailer WITHOUT the adjacency stats (UE5 removed them).
         b.extend_from_slice(&[0u8; 8 + 72]);
         b.extend_from_slice(&[0u8; 12]); // FStaticMeshBuffersSize
@@ -796,7 +859,7 @@ pub(crate) mod test_support {
     pub(crate) fn non_inlined_lod_ue4_23_compressed() -> Vec<u8> {
         let mut b = Vec::new();
         push_lod_header_ue4_23(&mut b, false);
-        push_separate_file_bulk_header(&mut b, SEPARATE_FILE_LZO, 3, 16);
+        push_separate_file_bulk_header(&mut b, SEPARATE_FILE_LZO, 3, 16, 0);
         b
     }
 
@@ -1089,7 +1152,7 @@ mod tests {
         // SerializeBuffers blob from the companion `.ubulk` and decodes the same
         // geometry an inlined LOD would, then consumes the in-stream
         // availability-info trailer + FStaticMeshBuffersSize.
-        let blob = serialize_buffers_blob_ue4_23();
+        let blob = serialize_buffers_blob_ue4_23([0, 1, 2]);
         let resolver = Arc::new(BulkDataResolver::new_for_test_with_ubulk(
             Vec::<u8>::new(), // stitched uasset — unused for the separate-file tier
             0,                // total_header_size
@@ -1099,7 +1162,7 @@ mod tests {
         let mut ctx = make_ctx_with_version(517, None);
         ctx.bulk_resolver = Some(resolver);
 
-        let bytes = non_inlined_lod_ue4_23(blob.len());
+        let bytes = non_inlined_lod_ue4_23(blob.len(), 0);
         let mut cur = Cursor::new(bytes.as_slice());
         let lod = read_lod(&mut cur, &ctx, "T").unwrap();
         assert_eq!(

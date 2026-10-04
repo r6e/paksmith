@@ -243,31 +243,14 @@ fn read_per_platform_float(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::
 
 #[cfg(test)]
 mod tests {
-    use super::super::lod::test_support::{inlined_lod_ue4_23, inlined_lod_ue5_0, ue5_release_ctx};
+    use super::super::lod::test_support::{
+        inlined_lod_ue4_23, inlined_lod_ue5_0, render_data_tail, ue5_release_ctx,
+    };
     use super::*;
     use crate::asset::custom_version::REMOVING_TESSELLATION;
     use crate::asset::property::test_utils::make_ctx_with_version;
     use crate::asset::wire::write_bool32;
     use crate::error::PaksmithError;
-
-    /// The render-data fields that follow the LOD array: numInlinedLODs, the
-    /// distance-field strip + `lod_count` `bValid` bools (all `false`), a 28-byte
-    /// UE4 Bounds, bLODsShareStaticLighting, and 8 `FPerPlatformFloat`s
-    /// (`bCooked` + value `0.5`).
-    fn render_data_tail(buf: &mut Vec<u8>, lod_count: usize) {
-        buf.push(0x00); // numInlinedLODs
-        buf.push(0x00); // distance-field GlobalStripFlags (not stripped)
-        buf.push(0x00); // distance-field ClassStripFlags
-        for _ in 0..lod_count {
-            write_bool32(buf, false).unwrap(); // per-LOD bValid = 0
-        }
-        buf.extend_from_slice(&[0u8; 28]); // Bounds
-        write_bool32(buf, true).unwrap(); // bLODsShareStaticLighting
-        for _ in 0..8 {
-            write_bool32(buf, true).unwrap();
-            buf.extend_from_slice(&0.5f32.to_le_bytes());
-        }
-    }
 
     #[test]
     fn one_lod_render_data_decodes_and_consumes_exactly() {

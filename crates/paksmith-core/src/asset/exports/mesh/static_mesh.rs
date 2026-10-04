@@ -140,56 +140,25 @@ pub(crate) fn read_typed(
 
 #[cfg(test)]
 mod tests {
-    use super::super::lod::test_support::{inlined_lod_ue5_0, ue5_release_ctx};
+    use super::super::lod::test_support::{
+        inlined_lod_ue5_0, render_data_tail, static_mesh_deserialize_tail, ue5_release_ctx,
+    };
     use super::*;
     use crate::asset::custom_version::REMOVING_TESSELLATION;
     use crate::asset::package_index::PackageIndex;
     use crate::asset::property::primitives::PropertyValue;
     use crate::asset::property::test_utils::{
-        make_ctx, make_ctx_with_version, write_int_property, write_none_tag,
+        make_ctx, make_ctx_with_version, write_int_property, write_none_tag, write_object_end,
     };
     use crate::asset::wire::write_bool32;
     use crate::error::{AssetParseFault, PaksmithError};
-
-    /// The object-GUID tail (bSerializeGuid = 0, no FGuid) + the
-    /// `UStaticMesh.Deserialize` fields through `Sockets`: strip flags, `bCooked`,
-    /// `BodySetup`, `NavCollision`, `LightingGuid`, and an empty `Sockets` array.
-    /// Stops before the `bCooked`-gated render data.
-    fn deserialize_tail(buf: &mut Vec<u8>, cooked: bool, body_setup_raw: i32) {
-        write_bool32(buf, false).unwrap(); // bSerializeGuid = 0 (no object FGuid)
-        buf.push(0x00); // GlobalStripFlags
-        buf.push(0x00); // ClassStripFlags
-        write_bool32(buf, cooked).unwrap();
-        buf.extend_from_slice(&body_setup_raw.to_le_bytes()); // BodySetup FPackageIndex
-        buf.extend_from_slice(&0i32.to_le_bytes()); // NavCollision = Null
-        buf.extend_from_slice(&[0u8; 16]); // LightingGuid
-        buf.extend_from_slice(&0i32.to_le_bytes()); // Sockets count = 0
-    }
-
-    /// A minimal `FStaticMeshRenderData` with **zero LODs** (the per-LOD
-    /// geometry is exercised in `render_data` / `lod` tests). Order: LOD count,
-    /// numInlinedLODs, distance-field strip (no per-LOD bool — 0 LODs), Bounds
-    /// (28-byte UE4 `FBoxSphereBounds`), bLODsShareStaticLighting, 8 ×
-    /// `FPerPlatformFloat`.
-    fn empty_render_data(buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&0i32.to_le_bytes()); // LOD count = 0
-        buf.push(0x00); // numInlinedLODs = 0
-        buf.push(0x00); // distance-field GlobalStripFlags
-        buf.push(0x00); // distance-field ClassStripFlags
-        buf.extend_from_slice(&[0u8; 28]); // Bounds (origin/extent f32x3 + radius f32)
-        write_bool32(buf, true).unwrap(); // bLODsShareStaticLighting
-        for _ in 0..8 {
-            write_bool32(buf, true).unwrap(); // FPerPlatformFloat bCooked
-            buf.extend_from_slice(&0.5f32.to_le_bytes()); // FPerPlatformFloat Value
-        }
-    }
 
     #[test]
     fn parses_empty_props_then_deserialize_fields() {
         let ctx = make_ctx(&["None"]);
         let mut payload = Vec::new();
-        write_none_tag(&mut payload); // empty tagged-property segment
-        deserialize_tail(&mut payload, false, 0); // not cooked, BodySetup = Null
+        write_object_end(&mut payload); // empty tagged-property segment
+        static_mesh_deserialize_tail(&mut payload, false); // not cooked
         let (data, bulk) = read_from(&payload, &ctx, "Mesh.uasset").expect("parse");
         assert!(!data.cooked);
         assert_eq!(data.body_setup, PackageIndex::Null);
@@ -206,8 +175,8 @@ mod tests {
         let ctx = make_ctx(&["None", "LightMapResolution", "IntProperty"]);
         let mut payload = Vec::new();
         write_int_property(&mut payload, 1, 2, 64); // LightMapResolution = 64
-        write_none_tag(&mut payload);
-        deserialize_tail(&mut payload, false, 0);
+        write_object_end(&mut payload);
+        static_mesh_deserialize_tail(&mut payload, false);
         let (data, _) = read_from(&payload, &ctx, "Mesh.uasset").expect("parse");
         // The property survived; the binary segment after it still parsed.
         let props = data.properties.as_tree().expect("tree");
@@ -248,9 +217,10 @@ mod tests {
         // StaticMaterials) are deliberately NOT consumed — they must not error.
         let ctx = make_ctx_with_version(522, None); // UE4.27
         let mut payload = Vec::new();
-        write_none_tag(&mut payload);
-        deserialize_tail(&mut payload, true, 0); // cooked
-        empty_render_data(&mut payload);
+        write_object_end(&mut payload);
+        static_mesh_deserialize_tail(&mut payload, true); // cooked
+        payload.extend_from_slice(&0i32.to_le_bytes()); // LOD count = 0
+        render_data_tail(&mut payload, 0);
         payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // trailing tail garbage
         let (data, _) = read_from(&payload, &ctx, "Mesh.uasset").expect("parse");
         assert!(data.cooked);
@@ -271,8 +241,8 @@ mod tests {
         // untouched.
         let ctx = ue5_release_ctx(REMOVING_TESSELLATION);
         let mut payload = Vec::new();
-        write_none_tag(&mut payload);
-        deserialize_tail(&mut payload, true, 0); // cooked
+        write_object_end(&mut payload);
+        static_mesh_deserialize_tail(&mut payload, true); // cooked
         payload.extend_from_slice(&1i32.to_le_bytes()); // LOD count = 1
         payload.extend_from_slice(&inlined_lod_ue5_0());
         payload.push(0x00); // numInlinedLODs
@@ -290,8 +260,8 @@ mod tests {
     fn read_typed_wraps_in_static_mesh_variant() {
         let ctx = make_ctx(&["None"]);
         let mut payload = Vec::new();
-        write_none_tag(&mut payload);
-        deserialize_tail(&mut payload, false, 0);
+        write_object_end(&mut payload);
+        static_mesh_deserialize_tail(&mut payload, false);
         let (asset, _) = read_typed(&payload, &ctx, "Mesh.uasset").expect("parse");
         assert!(matches!(asset, Asset::StaticMesh(_)));
     }
