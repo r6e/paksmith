@@ -204,14 +204,6 @@ exclude_re = [
     'replace available -> Vec<ProfileChoice> with vec!\[\]',
     '(delete ! in resolve_pak_(key|context)|delete match arm [01] in resolve_pak_(key|context)|replace && with \|\| in resolve_pak_(key|context))',
     #
-    # (d) The open-pipeline Locked-detection guard on the detect-dir path
-    # (`run_with_detect`). The no-key->Locked and wrong-key->Core paths are
-    # unit-tested via the encrypted fixture; the detect-dir branch additionally
-    # needs an env-configured profile store + a matching install dir, which a
-    # GUI unit test can't construct. Remove when the open pipeline takes an
-    # injectable store.
-    'replace match guard resolved_key.is_none\(\) with (true|false) in run_with_detect',
-    #
     # (e) `readable_text_on`'s luminance threshold `lum > 0.5` (picks black vs
     # white button text by accent brightness). `>` vs `>=` differ ONLY at exactly
     # `lum == 0.5` — a measure-zero float coincidence no real accent colour hits,

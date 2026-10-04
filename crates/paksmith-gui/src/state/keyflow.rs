@@ -7,10 +7,21 @@
 
 use std::path::{Path, PathBuf};
 
+/// The profile selector an open attempt resolves with: a profile id, as the
+/// toolbar supplies, or an install dir to detect one from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileSelector {
+    /// The profile id, as `--game` takes it.
+    pub game: Option<String>,
+    /// The install dir to detect a profile from, as `--detect` takes it.
+    pub detect: Option<PathBuf>,
+}
+
 /// State machine for the key-entry flow.
 ///
 /// All transitions are pure (no I/O). Async open tasks are coordinated
-/// by `app.rs`; this type only tracks what the UI needs to render.
+/// by `app.rs`; this type tracks what the key prompt renders and the profile
+/// selector a key retry resolves with.
 #[derive(Debug, Clone, Default)]
 pub enum KeyFlow {
     /// No open in progress and no lock state active.
@@ -26,6 +37,9 @@ pub enum KeyFlow {
         path: PathBuf,
         /// Error from the most recent failed key attempt, if any.
         error: Option<String>,
+        /// The selector of the attempt that left the archive locked, which a
+        /// key retry resolves with.
+        selector: ProfileSelector,
     },
     /// The archive was unlocked successfully.
     Unlocked,
@@ -40,11 +54,25 @@ impl KeyFlow {
         *self = Self::Resolving;
     }
 
-    /// Transition to `Locked { path, error: None }`.
+    /// Transition to `Locked { path, error: None }` with the selector of the
+    /// attempt that locked it, which its `OpenError::Locked` carries.
     ///
     /// Called when the async open returns `OpenError::Locked`.
-    pub fn lock(&mut self, path: PathBuf) {
-        *self = Self::Locked { path, error: None };
+    pub fn lock(&mut self, path: PathBuf, selector: ProfileSelector) {
+        *self = Self::Locked {
+            path,
+            error: None,
+            selector,
+        };
+    }
+
+    /// The selector a key retry resolves with: the locking attempt's in
+    /// `Locked` state, none otherwise.
+    pub fn retry_selector(&self) -> ProfileSelector {
+        match self {
+            Self::Locked { selector, .. } => selector.clone(),
+            _ => ProfileSelector::default(),
+        }
     }
 
     /// Attach an error message to the `Locked` state (e.g. bad-hex or wrong
@@ -100,12 +128,45 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn game(id: &str) -> ProfileSelector {
+        ProfileSelector {
+            game: Some(id.into()),
+            detect: None,
+        }
+    }
+
+    fn detect(dir: &str) -> ProfileSelector {
+        ProfileSelector {
+            game: None,
+            detect: Some(PathBuf::from(dir)),
+        }
+    }
+
+    #[test]
+    fn a_lock_commits_the_attempts_selector() {
+        let mut flow = KeyFlow::default();
+        flow.begin();
+        flow.lock(PathBuf::from("/a.pak"), game("hero"));
+        assert_eq!(flow.retry_selector(), game("hero"));
+        flow.lock(PathBuf::from("/a.pak"), detect("/game"));
+        assert_eq!(flow.retry_selector(), detect("/game"));
+    }
+
+    #[test]
+    fn a_retry_selector_needs_a_locked_archive() {
+        let mut flow = KeyFlow::default();
+        assert_eq!(flow.retry_selector(), ProfileSelector::default());
+        flow.lock(PathBuf::from("/a.pak"), game("hero"));
+        flow.unlock();
+        assert_eq!(flow.retry_selector(), ProfileSelector::default());
+    }
+
     #[test]
     fn locks_then_unlocks() {
         let mut f = KeyFlow::Idle;
         f.begin();
         assert!(matches!(f, KeyFlow::Resolving));
-        f.lock(PathBuf::from("a.pak"));
+        f.lock(PathBuf::from("a.pak"), ProfileSelector::default());
         assert!(f.is_locked().is_some());
         f.unlock();
         assert!(matches!(f, KeyFlow::Unlocked));
@@ -116,14 +177,14 @@ mod tests {
     fn lock_carries_path() {
         let mut f = KeyFlow::Idle;
         let path = PathBuf::from("/tmp/game.pak");
-        f.lock(path.clone());
+        f.lock(path.clone(), ProfileSelector::default());
         assert_eq!(f.is_locked(), Some(path.as_path()));
     }
 
     #[test]
     fn error_field_settable_and_readable() {
         let mut f = KeyFlow::Idle;
-        f.lock(PathBuf::from("x.pak"));
+        f.lock(PathBuf::from("x.pak"), ProfileSelector::default());
         assert!(f.error().is_none());
         f.set_error("bad hex".to_string());
         assert_eq!(f.error(), Some("bad hex"));
@@ -142,7 +203,7 @@ mod tests {
     #[test]
     fn unlock_clears_is_locked() {
         let mut f = KeyFlow::Idle;
-        f.lock(PathBuf::from("enc.pak"));
+        f.lock(PathBuf::from("enc.pak"), ProfileSelector::default());
         assert!(f.is_locked().is_some());
         f.unlock();
         assert!(f.is_locked().is_none());
@@ -159,7 +220,7 @@ mod tests {
     #[test]
     fn clear_error_removes_error_message() {
         let mut f = KeyFlow::Idle;
-        f.lock(PathBuf::from("enc.pak"));
+        f.lock(PathBuf::from("enc.pak"), ProfileSelector::default());
         f.set_error("bad key".to_string());
         assert_eq!(f.error(), Some("bad key"));
         f.clear_error();

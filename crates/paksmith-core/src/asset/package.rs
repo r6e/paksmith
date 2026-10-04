@@ -460,7 +460,7 @@ fn companion_loader<R: crate::container::ContainerReader + ?Sized + 'static>(
 /// Convention for the NEXT profile-borne parse input: add a field
 /// here and to [`ParseInputs`], whose [`ParseInputs::read_options`]
 /// builds a struct literal, so it fails to compile there until the
-/// field's source is decided. The CLI builds its reads through it.
+/// field's source is decided. Both frontends build their reads through it.
 /// Adding it at the call sites instead is what left the #656 wiring
 /// untested — the bare entry points cannot force that audit the way a
 /// signature change would.

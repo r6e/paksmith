@@ -94,8 +94,11 @@ pub struct App {
     pub(crate) profile_loader: fn() -> Vec<ProfileChoice>,
     /// The currently selected game profile, if any.
     ///
-    /// When `Some`, `task::open::run` passes the profile id to key resolution
-    /// so encrypted paks for that game auto-unlock without a prompt.
+    /// When `Some`, opening an archive from the file dialog passes the profile
+    /// id to resolution, so encrypted paks for that game auto-unlock without a
+    /// prompt and the profile's mappings and engine version apply to every
+    /// parse. It takes effect at open time; a key retry resolves with the
+    /// selector of the attempt that left the archive locked.
     pub active_game: Option<ProfileChoice>,
     /// Open asset tabs in the content host.
     pub tabs: crate::state::tabs::Tabs,
@@ -284,8 +287,10 @@ pub enum Message {
     KeyInputChanged(String),
     /// The user pressed "Use key" in the key-prompt panel.
     KeySubmitted,
-    /// The user pressed "Choose install dir…": `None` triggers the dir picker;
-    /// `Some(path)` is the resolved directory after the picker closes.
+    /// The user pressed "Choose install dir…": open the dir picker.
+    KeyDirRequested,
+    /// The dir picker closed: `Some(path)` when a directory was chosen, `None`
+    /// when it was cancelled.
     KeyDirChosen(Option<PathBuf>),
     /// The user selected (or cleared) a game profile in the toolbar dropdown.
     ///
@@ -684,13 +689,13 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     app.archive = Some(loaded);
                     Task::none()
                 }
-                Err(OpenError::Locked { path }) => {
+                Err(OpenError::Locked { path, selector }) => {
                     // A completed attempt on this file too — it resolved to
                     // "needs a key", which supersedes an earlier failure card
                     // about the same file. Before `lock` takes the path.
                     app.toasts.dismiss_persistent_for(&path);
                     // Enter the key-entry flow: show the inline key-prompt panel.
-                    app.keyflow.lock(path);
+                    app.keyflow.lock(path, selector);
                     app.hex_input.clear();
                     // The old archive is kept while the key prompt shows, so clear the
                     // stale context-menu index too.
@@ -780,7 +785,8 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 Ok(key) => {
                     // Good hex — try to re-open with the supplied key.
                     if let Some(path) = app.keyflow.is_locked().map(PathBuf::from) {
-                        Task::perform(crate::task::open::run_with_key(path, key), |r| {
+                        let selector = app.keyflow.retry_selector();
+                        Task::perform(crate::task::open::run_with_key(path, key, selector), |r| {
                             Message::ArchiveOpened(Box::new(r))
                         })
                     } else {
@@ -789,9 +795,9 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 }
             }
         }
-        Message::KeyDirChosen(None) => {
-            // Trigger the native dir-picker; the chosen path loops back as
-            // `KeyDirChosen(Some(...))`.
+        Message::KeyDirChosen(None) => Task::none(),
+        Message::KeyDirRequested => {
+            // The chosen path, or `None` on cancel, comes back as `KeyDirChosen`.
             Task::perform(
                 async {
                     rfd::AsyncFileDialog::new()
@@ -2951,6 +2957,7 @@ mod tests {
     use iced::keyboard::key::Named;
 
     use crate::state::export::{ExportChoice, ExportMenu};
+    use crate::state::keyflow::ProfileSelector;
     use crate::task::export::ExportOutcome;
 
     #[test]
@@ -3126,6 +3133,7 @@ mod tests {
             &mut app,
             Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
                 path: PathBuf::from(FAILED_PATH),
+                selector: crate::state::keyflow::ProfileSelector::default(),
             }))),
         );
         assert!(
@@ -3161,6 +3169,7 @@ mod tests {
             &mut app,
             Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
                 path: PathBuf::from("other-locked.pak"),
+                selector: crate::state::keyflow::ProfileSelector::default(),
             }))),
         );
         assert_eq!(
@@ -3301,8 +3310,10 @@ mod tests {
         assert_eq!(app.toasts.items().len(), 1, "About panel claims the Escape");
 
         let mut app = app_with_persistent_failure();
-        app.keyflow
-            .lock(std::path::PathBuf::from("/tmp/locked.pak"));
+        app.keyflow.lock(
+            std::path::PathBuf::from("/tmp/locked.pak"),
+            ProfileSelector::default(),
+        );
         let _ = update(&mut app, Message::TreeKey(named_key(Named::Escape)));
         assert_eq!(app.toasts.items().len(), 1, "key prompt claims the Escape");
     }
@@ -3410,7 +3421,8 @@ mod tests {
         // `run_with_detect` always report the locked path, so the legit
         // wrong-key flow always matches this gate.
         let mut app = App::default();
-        app.keyflow.lock(PathBuf::from("locked.pak"));
+        app.keyflow
+            .lock(PathBuf::from("locked.pak"), ProfileSelector::default());
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(core_err("locked.pak", "bad key")))),
@@ -3461,7 +3473,8 @@ mod tests {
         // third open whose failure lands in the banner arm, and the card must
         // still have its keyboard exit.
         let mut app = App::default();
-        app.keyflow.lock(PathBuf::from("locked.pak"));
+        app.keyflow
+            .lock(PathBuf::from("locked.pak"), ProfileSelector::default());
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "version 42")))),
@@ -3493,7 +3506,8 @@ mod tests {
         // The banner is a completed attempt like every other arm: an older
         // card about the SAME file is superseded by the newer report.
         let mut app = App::default();
-        app.keyflow.lock(PathBuf::from("locked.pak"));
+        app.keyflow
+            .lock(PathBuf::from("locked.pak"), ProfileSelector::default());
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "old message")))),
@@ -3520,7 +3534,8 @@ mod tests {
         // keystroke (`KeyInputChanged` clears the prompt error). It gets the
         // persistent card instead, and the prompt survives untouched.
         let mut app = App::default();
-        app.keyflow.lock(PathBuf::from("locked.pak"));
+        app.keyflow
+            .lock(PathBuf::from("locked.pak"), ProfileSelector::default());
         let _ = update(
             &mut app,
             Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "version 42")))),
@@ -3665,6 +3680,7 @@ mod tests {
             ("Locked", || {
                 Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
                     path: PathBuf::from("x.pak"),
+                    selector: crate::state::keyflow::ProfileSelector::default(),
                 })))
             }),
             ("Ok", || {
@@ -3744,6 +3760,7 @@ mod tests {
             &mut app,
             Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
                 path: PathBuf::from("locked.pak"),
+                selector: crate::state::keyflow::ProfileSelector::default(),
             }))),
         );
         assert_eq!(
@@ -3789,6 +3806,64 @@ mod tests {
         let mut app = app_with_paths(&["file.txt"]);
         let _ = update(&mut app, Message::CopyPathRequested(999));
         assert!(app.toasts.is_empty(), "no toast when the row has no path");
+    }
+
+    /// Cancelling the install-dir picker ends there, rather than reopening it.
+    #[test]
+    fn a_cancelled_install_dir_pick_does_not_reopen_the_picker() {
+        let mut app = App::default();
+        assert_eq!(update(&mut app, Message::KeyDirRequested).units(), 1);
+        assert_eq!(update(&mut app, Message::KeyDirChosen(None)).units(), 0);
+    }
+
+    /// The retry resolves with the selector its locked result carries, even
+    /// with other attempts in flight: a second open, or a second install dir
+    /// that has already failed.
+    #[test]
+    fn a_key_retry_resolves_with_the_selector_its_locked_result_carries() {
+        let game = ProfileSelector {
+            game: Some("p".into()),
+            detect: None,
+        };
+        let d1 = ProfileSelector {
+            game: None,
+            detect: Some(PathBuf::from("/d1")),
+        };
+        let locked = |selector: &ProfileSelector| {
+            Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
+                path: PathBuf::from("/a.pak"),
+                selector: selector.clone(),
+            })))
+        };
+        let mut app = App::default();
+
+        let _ = update(
+            &mut app,
+            Message::OpenPathChosen(Some(PathBuf::from("/a.pak"))),
+        );
+        app.active_game = Some(ProfileChoice {
+            id: "q".into(),
+            name: "Q".into(),
+        });
+        let _ = update(
+            &mut app,
+            Message::OpenPathChosen(Some(PathBuf::from("/b.pak"))),
+        );
+        let _ = update(&mut app, locked(&game));
+        assert_eq!(app.keyflow.retry_selector(), game);
+
+        let _ = update(&mut app, Message::KeyDirChosen(Some(PathBuf::from("/d1"))));
+        let _ = update(&mut app, Message::KeyDirChosen(Some(PathBuf::from("/d2"))));
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(OpenError::Core {
+                path: PathBuf::from("/a.pak"),
+                message: "no profile matches".into(),
+            }))),
+        );
+        assert_eq!(app.keyflow.retry_selector(), game);
+        let _ = update(&mut app, locked(&d1));
+        assert_eq!(app.keyflow.retry_selector(), d1);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -4672,7 +4747,10 @@ mod tests {
         let _ = super::update(&mut app, super::Message::DismissAbout);
         assert_eq!(pane_layout(&app), base, "dismissing restores the layout");
 
-        app.keyflow.lock(std::path::PathBuf::from("locked.pak"));
+        app.keyflow.lock(
+            std::path::PathBuf::from("locked.pak"),
+            ProfileSelector::default(),
+        );
         assert_ne!(
             pane_layout(&app),
             base,
@@ -5950,6 +6028,7 @@ mod tests {
             &mut app,
             Message::ArchiveOpened(Box::new(Err(crate::state::archive::OpenError::Locked {
                 path: std::path::PathBuf::from("x.pak"),
+                selector: crate::state::keyflow::ProfileSelector::default(),
             }))),
         );
         assert_eq!(
@@ -7727,6 +7806,7 @@ mod tests {
             &mut app,
             Message::ArchiveOpened(Box::new(Err(OpenError::Locked {
                 path: PathBuf::from("locked.pak"),
+                selector: crate::state::keyflow::ProfileSelector::default(),
             }))),
         );
 
