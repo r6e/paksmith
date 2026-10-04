@@ -2374,6 +2374,67 @@ mod tests {
         bytes
     }
 
+    /// A package whose exports are `StaticMesh`es with `bodies` as their
+    /// payloads, at object version 517 (UE 4.23) for the 2-bool LOD layout.
+    fn static_mesh_package(bodies: Vec<Vec<u8>>) -> Vec<u8> {
+        let mut spec = MinimalPackageSpec {
+            file_version_ue4: 517,
+            ..MinimalPackageSpec::default()
+        };
+        spec.imports.imports[0].object_name = u32::try_from(spec.names.names.len()).unwrap();
+        spec.names
+            .names
+            .push(crate::asset::FName::new("StaticMesh"));
+        let template = spec.exports.exports[0];
+        spec.exports.exports = bodies
+            .iter()
+            .map(|body| ObjectExport {
+                serial_size: i64::try_from(body.len()).unwrap(),
+                ..template
+            })
+            .collect();
+        spec.payloads = bodies;
+        build_minimal(spec).bytes
+    }
+
+    /// Streamed static-mesh LODs decode through a full package read: the
+    /// eager mesh path resolves each LOD's geometry from its own region of
+    /// the `.ubulk`.
+    #[test]
+    fn streamed_static_mesh_lods_decode_through_a_package_read() {
+        use crate::asset::exports::mesh::lod::test_support::{
+            cooked_static_mesh_ue4_23, non_inlined_lod_ue4_23, serialize_buffers_blob_ue4_23,
+        };
+        let triangles = [[0, 1, 2], [2, 1, 0]];
+        let blobs = triangles.map(serialize_buffers_blob_ue4_23);
+        let len = blobs[0].len();
+        let bytes = static_mesh_package(vec![
+            cooked_static_mesh_ue4_23(&[non_inlined_lod_ue4_23(len, 0)]),
+            cooked_static_mesh_ue4_23(&[non_inlined_lod_ue4_23(len, len)]),
+        ]);
+        let ubulk = blobs.concat();
+
+        let pkg = Package::read_from_inner(
+            &bytes,
+            None,
+            &ReadOptions::new(),
+            "m.uasset",
+            move || Ok(ubulk.clone()),
+            missing_companion_loader(CompanionFileKind::Uptnl, "m.uasset".into()),
+        )
+        .unwrap();
+
+        assert_eq!(pkg.payloads.len(), 2);
+        for (payload, triangle) in pkg.payloads.iter().zip(triangles) {
+            let crate::asset::Asset::StaticMesh(mesh) = payload else {
+                panic!("expected a static mesh, got {payload:?}");
+            };
+            let lods = &mesh.render_data.as_ref().unwrap().lods;
+            assert_eq!(lods[0].positions.len(), 3);
+            assert_eq!(lods[0].indices, triangle.map(u32::from));
+        }
+    }
+
     #[test]
     fn read_from_refuses_export_rows_that_alias_one_payload() {
         let cooked = MinimalPackageSpec::default().package_flags;
