@@ -34,10 +34,9 @@ references there for the per-record mechanics.
 `.uptnl`), gated by the full per-record + per-export + per-package
 defense chain (see [`bulk-data.md`](bulk-data.md)). The Phase 2e
 "detection-only `tracing::warn!`" surface is gone; the resolver is
-constructed lazily inside `Package::read_from_pak` and only fires
-the `.ubulk` / `.uptnl` loader closures when downstream consumers
-call `Package::resolve_bulk_for_export` (3e/3g/3h typed exports
-drive this). Per-format export (texture mips / vertex bytes /
+constructed inside `Package::read_from_pak` and runs the `.ubulk` /
+`.uptnl` loader closures only on demand (see
+[Paksmith implementation](#paksmith-implementation)). Per-format export (texture mips / vertex bytes /
 audio chunks) lands in the format-handler sub-phases.
 
 ## Versions
@@ -206,9 +205,11 @@ gone.
 **Public surface:**
 - `Package::read_from_pak(pak_path, virtual_path, mappings)` —
   builds the resolver with lazy companion-file loaders. The `.ubulk`
-  / `.uptnl` entries are NOT eagerly read at pak-open; the closures
-  fire only when downstream consumers call
-  `Package::resolve_bulk_for_export`.
+  / `.uptnl` entries are NOT eagerly read at pak-open; each loader
+  runs on the first resolve that needs it (a mesh reader's streamed
+  LOD, or `Package::resolve_bulk_for_export`) and at most once per
+  package. A companion that fails to load reports that failure again
+  instead of loading again.
 - `Package::resolve_bulk_for_export(export_idx)` — first-call lazy
   resolution + per-call `OnceLock`-cached return. Drives the
   `BulkDataResolver::resolve` chain over the records previously

@@ -237,7 +237,7 @@ const FLAG_FORCE_SINGLE_ELEMENT: u32 = 0x0000_0004;
     reason = "documented bit catalog; not all accessors live yet"
 )]
 const FLAG_SINGLE_USE: u32 = 0x0000_0008;
-const FLAG_COMPRESSED_LZO: u32 = 0x0000_0010;
+pub(crate) const FLAG_COMPRESSED_LZO: u32 = 0x0000_0010;
 #[allow(
     dead_code,
     reason = "documented bit catalog; not all accessors live yet"
@@ -253,14 +253,14 @@ const FLAG_FORCE_INLINE_PAYLOAD: u32 = 0x0000_0040;
     reason = "documented bit catalog; not all accessors live yet"
 )]
 const FLAG_FORCE_STREAM_PAYLOAD: u32 = 0x0000_0080;
-const FLAG_PAYLOAD_IN_SEPARATE_FILE: u32 = 0x0000_0100;
+pub(crate) const FLAG_PAYLOAD_IN_SEPARATE_FILE: u32 = 0x0000_0100;
 const FLAG_SERIALIZE_COMPRESSED_BITWINDOW: u32 = 0x0000_0200;
 #[allow(
     dead_code,
     reason = "documented bit catalog; not all accessors live yet"
 )]
 const FLAG_FORCE_NOT_INLINE: u32 = 0x0000_0400;
-const FLAG_OPTIONAL_PAYLOAD: u32 = 0x0000_0800;
+pub(crate) const FLAG_OPTIONAL_PAYLOAD: u32 = 0x0000_0800;
 #[allow(
     dead_code,
     reason = "documented bit catalog; not all accessors live yet"
@@ -269,7 +269,7 @@ const FLAG_MEMORY_MAPPED: u32 = 0x0000_1000;
 const FLAG_SIZE_64_BIT: u32 = 0x0000_2000;
 const FLAG_DUPLICATE_NON_OPTIONAL: u32 = 0x0000_4000;
 const FLAG_BAD_DATA_VERSION: u32 = 0x0000_8000;
-const FLAG_NO_OFFSET_FIXUP: u32 = 0x0001_0000;
+pub(crate) const FLAG_NO_OFFSET_FIXUP: u32 = 0x0001_0000;
 #[allow(
     dead_code,
     reason = "documented bit catalog; not all accessors live yet"
@@ -1012,6 +1012,23 @@ pub(crate) fn make_zero_record() -> FByteBulkData {
     FByteBulkData::read_from(&mut cur, "test.uasset").expect("zero record parses")
 }
 
+/// Wrap `load` so each call bumps the returned counter, for tests that pin
+/// how many times a companion loader runs.
+#[cfg(all(test, feature = "__test_utils"))]
+pub(crate) fn counting_loader(
+    load: impl Fn() -> crate::Result<Vec<u8>> + Send + Sync + 'static,
+) -> (
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    impl Fn() -> crate::Result<Vec<u8>> + Send + Sync + 'static,
+) {
+    let loads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tally = std::sync::Arc::clone(&loads);
+    (loads, move || {
+        let _ = tally.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        load()
+    })
+}
+
 /// Resolves `FByteBulkData` records into materialized payload bytes
 /// across all four storage tiers (Inline / UexpResident / Streaming /
 /// OptionalStreaming).
@@ -1031,7 +1048,8 @@ pub(crate) fn make_zero_record() -> FByteBulkData {
 ///    via `checked_add`; fires `BulkDataOffsetFixupOverflow` on
 ///    overflow OR negative result.
 /// 3. Tier dispatch: `payload_in_separate_file` →
-///    `Streaming`/`OptionalStreaming` via lazy companion loaders;
+///    `Streaming`/`OptionalStreaming` via lazy companion loaders,
+///    each run at most once;
 ///    `payload_at_end_of_file` → `Inline`/`UexpResident` based on
 ///    `resolved_offset` vs `total_header_size`. Neither bit set
 ///    fires `BulkDataNoTierFlag`.
@@ -1053,8 +1071,10 @@ pub(crate) fn make_zero_record() -> FByteBulkData {
 ///
 /// # Threading
 ///
-/// `Send + Sync` — `Arc<[u8]>`, `AtomicU64`, `OnceLock<Vec<u8>>`,
-/// and `Box<dyn Fn() + Send + Sync + 'static>` all satisfy.
+/// `Send + Sync` — `Arc<[u8]>`, `AtomicU64`,
+/// `OnceLock<crate::Result<Vec<u8>>>`, and
+/// `Box<dyn Fn() + Send + Sync + 'static>` all satisfy. Concurrent
+/// first resolves of one companion wait for its one load.
 /// Required for Phase 5 (async runtime) and Phase 7 (GUI Iced
 /// commands moving `Package` across thread boundaries).
 pub struct BulkDataResolver {
@@ -1073,17 +1093,16 @@ pub struct BulkDataResolver {
     /// `summary.bulk_data_start_offset` — added to `OffsetInFile`
     /// unless `BULKDATA_NoOffsetFixUp` (bit 16) is set.
     bulk_data_start_offset: i64,
-    /// Lazy `.ubulk` loader; called on first `Streaming`-tier
-    /// resolution. Result cached in `ubulk_cache` so multiple
-    /// records on the same companion pay the I/O cost once.
+    /// Lazy `.ubulk` loader; called at most once, on the first
+    /// `Streaming`-tier resolution.
     ubulk_loader: Box<dyn Fn() -> crate::Result<Vec<u8>> + Send + Sync + 'static>,
-    /// `OnceLock` cache for the `.ubulk` body.
-    ubulk_cache: std::sync::OnceLock<Vec<u8>>,
+    /// The `.ubulk` load outcome; see `load_companion`.
+    ubulk_cache: std::sync::OnceLock<crate::Result<Vec<u8>>>,
     /// Lazy `.uptnl` loader; mirrors `ubulk_loader` for the
     /// `BULKDATA_OptionalPayload` tier.
     uptnl_loader: Box<dyn Fn() -> crate::Result<Vec<u8>> + Send + Sync + 'static>,
-    /// `OnceLock` cache for the `.uptnl` body.
-    uptnl_cache: std::sync::OnceLock<Vec<u8>>,
+    /// The `.uptnl` load outcome; see `load_companion`.
+    uptnl_cache: std::sync::OnceLock<crate::Result<Vec<u8>>>,
     /// Cumulative resolved bytes across all `resolve()` calls.
     /// Enforces `MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE` (16 GiB).
     /// Incremented BEFORE allocation against the wire-claimed size
@@ -1109,8 +1128,8 @@ impl std::fmt::Debug for BulkDataResolver {
                     .bytes_resolved
                     .load(std::sync::atomic::Ordering::Relaxed),
             )
-            .field("ubulk_cached", &self.ubulk_cache.get().is_some())
-            .field("uptnl_cached", &self.uptnl_cache.get().is_some())
+            .field("ubulk_loaded", &self.ubulk_cache.get().map(Result::is_ok))
+            .field("uptnl_loaded", &self.uptnl_cache.get().map(Result::is_ok))
             .finish_non_exhaustive()
     }
 }
@@ -1126,6 +1145,10 @@ impl BulkDataResolver {
     /// The `'static` bound on the closures (plus `Send + Sync`) is
     /// load-bearing — `BulkDataResolver: Send + Sync` is required
     /// for Phase 5 async / Phase 7 GUI.
+    ///
+    /// Each loader runs at most once, inside `OnceLock::get_or_init`,
+    /// so it must not resolve through this resolver: `OnceLock`
+    /// deadlocks or panics on re-entrant initialization.
     pub(crate) fn new<U, T>(
         stitched: std::sync::Arc<[u8]>,
         total_header_size: u64,
@@ -1213,9 +1236,11 @@ impl BulkDataResolver {
     ///
     /// # Errors
     ///
-    /// Per the defense chain documented on the struct: any of the
-    /// 10 `AssetParseFault` bulk-data variants depending on which
-    /// invariant the record violated.
+    /// Per the defense chain documented on the struct: the
+    /// `AssetParseFault` bulk-data variant for the invariant the
+    /// record violated, or the companion loader's error. A companion
+    /// that failed to load reports that failure again instead of
+    /// loading again.
     #[allow(
         clippy::too_many_lines,
         reason = "sequential dispatch + cap chain + side-effect-free budget reservation; splitting hurts the line-by-line auditability of the cap chain that the security panel reviewed"
@@ -1302,11 +1327,23 @@ impl BulkDataResolver {
         }
         let (tier, source_bytes): (BulkDataTier, &[u8]) = if record.flags.payload_in_separate_file()
         {
-            if record.flags.optional_payload() {
-                (BulkDataTier::OptionalStreaming, self.uptnl(asset_path)?)
+            let (tier, cache, loader, kind) = if record.flags.optional_payload() {
+                (
+                    BulkDataTier::OptionalStreaming,
+                    &self.uptnl_cache,
+                    &*self.uptnl_loader,
+                    CompanionFileKind::Uptnl,
+                )
             } else {
-                (BulkDataTier::Streaming, self.ubulk(asset_path)?)
-            }
+                (
+                    BulkDataTier::Streaming,
+                    &self.ubulk_cache,
+                    &*self.ubulk_loader,
+                    CompanionFileKind::Ubulk,
+                )
+            };
+            let bytes = load_companion(cache, loader, kind, MAX_UBULK_FILE_SIZE, asset_path)?;
+            (tier, bytes)
         } else if record.flags.payload_at_end_of_file() {
             let tier = if resolved_offset < self.total_header_size {
                 BulkDataTier::Inline
@@ -1426,61 +1463,12 @@ impl BulkDataResolver {
         self.bytes_resolved
             .store(n, std::sync::atomic::Ordering::Relaxed);
     }
-
-    fn ubulk(&self, asset_path: &str) -> crate::Result<&[u8]> {
-        if let Some(bytes) = self.ubulk_cache.get() {
-            return Ok(bytes.as_slice());
-        }
-        let loaded = (self.ubulk_loader)()?;
-        check_companion_size(
-            loaded.len() as u64,
-            MAX_UBULK_FILE_SIZE,
-            CompanionFileKind::Ubulk,
-        )
-        .map_err(|fault| crate::PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault,
-        })?;
-        // `get_or_init` is stable (1.70+); `get_or_try_init`'s
-        // `once_cell_try` feature is unstable as of MSRV 1.88. The
-        // closure here is infallible — we've already loaded + cap-
-        // checked above. Race: another thread may have set the cache
-        // between our `get()` check and now; in that case our `loaded`
-        // is dropped and the cached value is returned (one wasted I/O,
-        // semantically correct).
-        let bytes_vec = self.ubulk_cache.get_or_init(|| loaded);
-        Ok(bytes_vec.as_slice())
-    }
-
-    fn uptnl(&self, asset_path: &str) -> crate::Result<&[u8]> {
-        if let Some(bytes) = self.uptnl_cache.get() {
-            return Ok(bytes.as_slice());
-        }
-        let loaded = (self.uptnl_loader)()?;
-        check_companion_size(
-            loaded.len() as u64,
-            MAX_UBULK_FILE_SIZE,
-            CompanionFileKind::Uptnl,
-        )
-        .map_err(|fault| crate::PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault,
-        })?;
-        let bytes_vec = self.uptnl_cache.get_or_init(|| loaded);
-        Ok(bytes_vec.as_slice())
-    }
 }
 
 /// Enforce the companion-file size cap. Returns the bare
 /// `AssetParseFault` so callers wrap with their `asset_path` on
 /// hand — matches the [`BulkDataFlags::validate`] pattern and
 /// avoids the empty-`asset_path` sentinel anti-pattern.
-///
-/// Extracted from `ubulk()` / `uptnl()` for direct testability —
-/// the 16-GiB boundary is impractical to test via the lazy-load
-/// path (can't allocate `MAX_UBULK_FILE_SIZE + 1` bytes in a test),
-/// but the helper takes the cap as a parameter so tests can pin
-/// the strict-greater-than semantics with small values.
 fn check_companion_size(
     actual: u64,
     cap: u64,
@@ -1494,6 +1482,34 @@ fn check_companion_size(
         });
     }
     Ok(())
+}
+
+/// Load a companion through `cache`, running `loader` and the size
+/// check at most once. The outcome, failure included, stays in
+/// `cache`, and every call gets the bytes or a
+/// [`crate::PaksmithError::replay`] of the failure (#839). A
+/// size-check failure names the first caller's `asset_path`; one
+/// resolver serves one package, so every caller passes the same path.
+fn load_companion<'a>(
+    cache: &'a std::sync::OnceLock<crate::Result<Vec<u8>>>,
+    loader: &dyn Fn() -> crate::Result<Vec<u8>>,
+    kind: CompanionFileKind,
+    cap: u64,
+    asset_path: &str,
+) -> crate::Result<&'a [u8]> {
+    cache
+        .get_or_init(|| {
+            let bytes = loader()?;
+            check_companion_size(bytes.len() as u64, cap, kind).map_err(|fault| {
+                crate::PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault,
+                }
+            })?;
+            Ok(bytes)
+        })
+        .as_deref()
+        .map_err(crate::PaksmithError::replay)
 }
 
 /// Build a closure that always fires `MissingCompanionFile { kind }`
@@ -4111,24 +4127,136 @@ mod tests {
         }
     }
 
+    /// A record of `size_on_disk` bytes at `offset_in_file` in the `.uptnl`
+    /// (`optional`) or the `.ubulk`.
+    #[cfg(feature = "__test_utils")]
+    fn companion_record(optional: bool, size_on_disk: u64, offset_in_file: i64) -> FByteBulkData {
+        let tier = if optional { FLAG_OPTIONAL_PAYLOAD } else { 0 };
+        record_with(
+            FLAG_PAYLOAD_IN_SEPARATE_FILE | FLAG_NO_OFFSET_FIXUP | tier,
+            size_on_disk,
+            offset_in_file,
+        )
+    }
+
+    /// A resolver whose `.uptnl` (`optional`) or `.ubulk` loader is `load`;
+    /// the other companion is missing.
+    #[cfg(feature = "__test_utils")]
+    fn companion_resolver(
+        optional: bool,
+        load: impl Fn() -> crate::Result<Vec<u8>> + Send + Sync + 'static,
+    ) -> BulkDataResolver {
+        let missing = |kind| missing_companion_loader(kind, "test".to_string());
+        let stitched = std::sync::Arc::from(Vec::new());
+        if optional {
+            BulkDataResolver::new(stitched, 0, 0, missing(CompanionFileKind::Ubulk), load)
+        } else {
+            BulkDataResolver::new(stitched, 0, 0, load, missing(CompanionFileKind::Uptnl))
+        }
+    }
+
     #[cfg(feature = "__test_utils")]
     #[test]
-    fn resolve_ubulk_loader_caches_after_first_call() {
-        // Loader closure invoked once even when two records resolve
-        // against the same .ubulk.
-        let ubulk = vec![0xCC; 64];
-        let record_a = record_with(FLAG_PAYLOAD_IN_SEPARATE_FILE, 16, 0);
-        let record_b = record_with(FLAG_PAYLOAD_IN_SEPARATE_FILE, 16, 32);
-        let resolver = BulkDataResolver::new_for_test_with_ubulk(vec![0u8; 100], 100, 0, ubulk);
-        let _data_a = resolver.resolve(&record_a, "test.uasset").expect("a");
-        let _data_b = resolver.resolve(&record_b, "test.uasset").expect("b");
-        // OnceLock pinned by virtue of the second resolve succeeding;
-        // a non-cached loader would have re-invoked the closure (which
-        // is fine since the test closure is idempotent) but the cache
-        // is what's actually being pinned. The non-trivial assertion
-        // is that `ubulk_cache` is `Some(_)` after the calls — the
-        // resolver hides that, but a regression would surface as
-        // "second resolve fails because closure errored second time"
-        // if the loader were stateful (e.g. real `PakReader`).
+    fn a_failed_companion_load_is_not_retried() {
+        for optional in [false, true] {
+            let (loads, loader) =
+                counting_loader(|| Err(std::io::Error::from_raw_os_error(2).into()));
+            let resolver = companion_resolver(optional, loader);
+            let record = companion_record(optional, 16, 0);
+
+            let first = resolver.resolve(&record, "a.uasset").unwrap_err();
+            let again = resolver.resolve(&record, "a.uasset").unwrap_err();
+
+            assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let (crate::PaksmithError::Io(first), crate::PaksmithError::Io(again)) = (first, again)
+            else {
+                panic!("expected two Io errors (optional = {optional})");
+            };
+            assert_eq!(first.raw_os_error(), Some(2));
+            assert_eq!(again.raw_os_error(), Some(2));
+            assert_eq!(again.to_string(), first.to_string());
+            let field = if optional {
+                "uptnl_loaded"
+            } else {
+                "ubulk_loaded"
+            };
+            assert!(format!("{resolver:?}").contains(&format!("{field}: Some(false)")));
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn an_oversized_companion_is_size_checked_once() {
+        let (loads, loader) = counting_loader(|| Ok(vec![0; 5]));
+        let cache = std::sync::OnceLock::new();
+
+        for _ in 0..2 {
+            let err = load_companion(&cache, &loader, CompanionFileKind::Ubulk, 4, "a.uasset")
+                .unwrap_err();
+            let crate::PaksmithError::AssetParse { fault, asset_path } = err else {
+                panic!("expected AssetParse, got {err:?}");
+            };
+            assert_eq!(
+                fault,
+                crate::error::AssetParseFault::BulkDataCompanionTooLarge {
+                    kind: CompanionFileKind::Ubulk,
+                    size: 5,
+                    cap: 4,
+                }
+            );
+            assert_eq!(asset_path, "a.uasset");
+        }
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            matches!(cache.get(), Some(Err(_))),
+            "the oversized bytes must not be kept"
+        );
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn a_loaded_companion_is_loaded_once() {
+        let ubulk: Vec<u8> = (0..64).collect();
+        let (loads, loader) = counting_loader(move || Ok(ubulk.clone()));
+        let resolver = companion_resolver(false, loader);
+
+        let a = resolver
+            .resolve(&companion_record(false, 16, 0), "a.uasset")
+            .unwrap();
+        let b = resolver
+            .resolve(&companion_record(false, 16, 32), "a.uasset")
+            .unwrap();
+
+        assert_eq!(a.bytes, (0..16).collect::<Vec<u8>>());
+        assert_eq!(b.bytes, (32..48).collect::<Vec<u8>>());
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let debug = format!("{resolver:?}");
+        assert!(debug.contains("ubulk_loaded: Some(true)"), "{debug}");
+        assert!(debug.contains("uptnl_loaded: None"), "{debug}");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn concurrent_first_resolves_share_one_load() {
+        const CALLERS: usize = 8;
+        let (loads, loader) = counting_loader(|| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            Ok(vec![0; 16])
+        });
+        let resolver = companion_resolver(false, loader);
+        let record = companion_record(false, 16, 0);
+        let start = std::sync::Barrier::new(CALLERS);
+
+        std::thread::scope(|s| {
+            for _ in 0..CALLERS {
+                let _ = s.spawn(|| {
+                    let _ = start.wait();
+                    let payload = resolver.resolve(&record, "a.uasset").unwrap();
+                    assert_eq!(payload.bytes, [0; 16]);
+                });
+            }
+        });
+
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

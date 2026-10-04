@@ -536,6 +536,10 @@ cooked-asset scope, with no in-scope oracle; BitWindow is a
 deprecated, inert flag with no codec to decode). See
 [LZO and BitWindow](#lzo-and-bitwindow-fail-closed) above.
 
+The resolver loads each `.ubulk` / `.uptnl` companion at most once per
+package; a companion that fails to load reports that failure again on
+later resolves instead of loading again.
+
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 + the per-task
 plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
 

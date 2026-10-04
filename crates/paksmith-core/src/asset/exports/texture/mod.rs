@@ -1045,9 +1045,9 @@ mod tests {
     }
 
     /// A streaming-tier (`FLAG_PAYLOAD_IN_SEPARATE_FILE = 0x100`) bulk record
-    /// whose `.ubulk` companion the stub loaders can't find, so
-    /// `resolve_bulk_for_export` fails with `MissingCompanionFile`. Mirrors the
-    /// seam in `package.rs::resolve_bulk_for_export_propagates_per_record_error`.
+    /// whose `.ubulk` companion `Package::read_from`'s stub loaders can't find,
+    /// so `resolve_bulk_for_export` fails with `MissingCompanionFile { kind:
+    /// Ubulk }`.
     fn failing_streaming_bulk_record() -> crate::asset::bulk_data::FByteBulkData {
         crate::asset::bulk_data::FByteBulkData {
             flags: crate::asset::bulk_data::BulkDataFlags::from(0x0000_0100u32),
@@ -1065,7 +1065,7 @@ mod tests {
     /// all-in-one inject-and-assert helper (or any second assert-only helper)
     /// could be `cargo-mutants`-replaced with `()` and survive. The inline assert
     /// observes the injection and kills that mutant (see the test-helper-mutation
-    /// note in MEMORY); failures aren't cached, see the sibling
+    /// note in MEMORY); the per-export slot keeps no failure, see the sibling
     /// `resolve_bulk_for_export_propagates_per_record_error`.
     fn inject_failing_bulk(pkg: &mut Package, export_idx: usize) {
         pkg.insert_bulk_records_for_test(export_idx, vec![failing_streaming_bulk_record()])
@@ -1089,8 +1089,16 @@ mod tests {
         // injected record must make resolution fail, else this ordering test is
         // vacuous (the assert below would pass even under resolve-first order).
         assert!(
-            pkg.resolve_bulk_for_export(info.export_idx).is_err(),
-            "precondition: the injected streaming record must make bulk resolution fail"
+            matches!(
+                pkg.resolve_bulk_for_export(info.export_idx),
+                Err(PaksmithError::AssetParse {
+                    fault: AssetParseFault::MissingCompanionFile {
+                        kind: crate::error::CompanionFileKind::Ubulk,
+                    },
+                    ..
+                })
+            ),
+            "precondition: read_from's stub .ubulk loader must make bulk resolution fail"
         );
 
         let err = decode_texture_mip(&pkg, info.export_idx, info.mips.len() + 99)

@@ -478,6 +478,8 @@ pub(crate) mod test_support {
     use half::f16;
 
     use crate::asset::AssetContext;
+    #[cfg(feature = "__test_utils")]
+    use crate::asset::bulk_data;
     use crate::asset::custom_version::{
         CustomVersion, CustomVersionContainer, UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
     };
@@ -724,17 +726,22 @@ pub(crate) mod test_support {
         b
     }
 
-    /// `PAYLOAD_IN_SEPARATE_FILE | NO_OFFSET_FIXUP` — the flag word for an
-    /// uncompressed streamed `FByteBulkData` record, mirroring the constants
-    /// pinned by `bulk_data.rs` (`FLAG_PAYLOAD_IN_SEPARATE_FILE` `0x0100` |
-    /// `FLAG_NO_OFFSET_FIXUP` `0x1_0000`).
+    /// The flag word for an uncompressed streamed `FByteBulkData` record.
     #[cfg(feature = "__test_utils")]
-    const SEPARATE_FILE_NO_FIXUP: u32 = 0x0001_0100;
+    pub(crate) const SEPARATE_FILE_NO_FIXUP: u32 =
+        bulk_data::FLAG_PAYLOAD_IN_SEPARATE_FILE | bulk_data::FLAG_NO_OFFSET_FIXUP;
 
-    /// [`SEPARATE_FILE_NO_FIXUP`] with `COMPRESSED_LZO` (`0x10`) set — a streamed
-    /// record the resolver rejects (`UnsupportedBulkCompression`).
+    /// [`SEPARATE_FILE_NO_FIXUP`] for a record resolved from the `.uptnl`
+    /// instead of the `.ubulk`.
     #[cfg(feature = "__test_utils")]
-    const SEPARATE_FILE_LZO: u32 = SEPARATE_FILE_NO_FIXUP | 0x10;
+    pub(crate) const OPTIONAL_SEPARATE_FILE_NO_FIXUP: u32 =
+        SEPARATE_FILE_NO_FIXUP | bulk_data::FLAG_OPTIONAL_PAYLOAD;
+
+    /// [`SEPARATE_FILE_NO_FIXUP`] with LZO compression — a streamed record the
+    /// resolver rejects (`UnsupportedBulkCompression`).
+    #[cfg(feature = "__test_utils")]
+    pub(crate) const SEPARATE_FILE_LZO: u32 =
+        SEPARATE_FILE_NO_FIXUP | bulk_data::FLAG_COMPRESSED_LZO;
 
     /// Write a 20-byte `FByteBulkData` header for a separate-file (streamed)
     /// record: the given `flags` word (e.g. [`SEPARATE_FILE_NO_FIXUP`]),
@@ -755,25 +762,22 @@ pub(crate) mod test_support {
 
     /// A non-inlined UE4.23 `FStaticMeshLODResources`: the leading header with
     /// `bInlined = 0`, a separate-file `FByteBulkData` header (whose payload — the
-    /// `SerializeBuffers` blob — is resolved out-of-band from a companion
-    /// `.ubulk`), the in-stream availability-info trailer, and the shared
-    /// `FStaticMeshBuffersSize`. The payload is the `bulk_size_on_disk` bytes at
-    /// `offset_in_file` in the `.ubulk`.
+    /// `SerializeBuffers` blob — is resolved out-of-band from a companion file),
+    /// the in-stream availability-info trailer, and the shared
+    /// `FStaticMeshBuffersSize`. `flags` picks the companion
+    /// ([`SEPARATE_FILE_NO_FIXUP`] for the `.ubulk`,
+    /// [`OPTIONAL_SEPARATE_FILE_NO_FIXUP`] for the `.uptnl`); the payload is the
+    /// `bulk_size_on_disk` bytes at `offset_in_file` in it.
     #[cfg(feature = "__test_utils")]
     #[must_use]
     pub(crate) fn non_inlined_lod_ue4_23(
+        flags: u32,
         bulk_size_on_disk: usize,
         offset_in_file: usize,
     ) -> Vec<u8> {
         let mut b = Vec::new();
         push_lod_header_ue4_23(&mut b, false); // bInlined = 0
-        push_separate_file_bulk_header(
-            &mut b,
-            SEPARATE_FILE_NO_FIXUP,
-            3,
-            bulk_size_on_disk,
-            offset_in_file,
-        );
+        push_separate_file_bulk_header(&mut b, flags, 3, bulk_size_on_disk, offset_in_file);
         // Availability-info trailer (UE4 path, per CUE4Parse
         // FStaticMeshLODResources.cs): DepthOnlyNumTriangles + Packed (8), the
         // buffer-count/stride stats (4*4 + 2*4 + 2*4 + 5*2*4 = 72), and — since UE4
@@ -847,19 +851,6 @@ pub(crate) mod test_support {
         // Availability-info trailer WITHOUT the adjacency stats (UE5 removed them).
         b.extend_from_slice(&[0u8; 8 + 72]);
         b.extend_from_slice(&[0u8; 12]); // FStaticMeshBuffersSize
-        b
-    }
-
-    /// A non-inlined UE4.23 LOD whose `FByteBulkData` header sets a compression
-    /// flag (LZO) with `element_count > 0` — the resolver rejects it
-    /// (`UnsupportedBulkCompression`) when the geometry is fetched. No trailer (the
-    /// reader errors before reaching it).
-    #[cfg(feature = "__test_utils")]
-    #[must_use]
-    pub(crate) fn non_inlined_lod_ue4_23_compressed() -> Vec<u8> {
-        let mut b = Vec::new();
-        push_lod_header_ue4_23(&mut b, false);
-        push_separate_file_bulk_header(&mut b, SEPARATE_FILE_LZO, 3, 16, 0);
         b
     }
 
@@ -1145,7 +1136,9 @@ mod tests {
     fn non_inlined_lod_resolves_geometry_from_ubulk() {
         use std::sync::Arc;
 
-        use super::test_support::{non_inlined_lod_ue4_23, serialize_buffers_blob_ue4_23};
+        use super::test_support::{
+            SEPARATE_FILE_NO_FIXUP, non_inlined_lod_ue4_23, serialize_buffers_blob_ue4_23,
+        };
         use crate::asset::bulk_data::BulkDataResolver;
 
         // With a bulk resolver on the context, a non-inlined LOD fetches its
@@ -1162,7 +1155,7 @@ mod tests {
         let mut ctx = make_ctx_with_version(517, None);
         ctx.bulk_resolver = Some(resolver);
 
-        let bytes = non_inlined_lod_ue4_23(blob.len(), 0);
+        let bytes = non_inlined_lod_ue4_23(SEPARATE_FILE_NO_FIXUP, blob.len(), 0);
         let mut cur = Cursor::new(bytes.as_slice());
         let lod = read_lod(&mut cur, &ctx, "T").unwrap();
         assert_eq!(
@@ -1214,7 +1207,7 @@ mod tests {
     fn non_inlined_lod_compressed_bulk_is_rejected() {
         use std::sync::Arc;
 
-        use super::test_support::non_inlined_lod_ue4_23_compressed;
+        use super::test_support::{SEPARATE_FILE_LZO, non_inlined_lod_ue4_23};
         use crate::asset::bulk_data::BulkDataResolver;
 
         // A compressed (LZO) streamed payload is rejected by the resolver; the
@@ -1229,7 +1222,7 @@ mod tests {
         let mut ctx = make_ctx_with_version(517, None);
         ctx.bulk_resolver = Some(resolver);
 
-        let bytes = non_inlined_lod_ue4_23_compressed();
+        let bytes = non_inlined_lod_ue4_23(SEPARATE_FILE_LZO, 16, 0);
         let mut cur = Cursor::new(bytes.as_slice());
         let err = read_lod(&mut cur, &ctx, "T").unwrap_err();
         assert!(matches!(

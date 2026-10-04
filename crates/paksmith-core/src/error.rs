@@ -1105,6 +1105,75 @@ impl PaksmithError {
         }
         self
     }
+
+    /// An owned copy of this error, for reporting a remembered failure
+    /// again (#839). The variant, fields and `Display` are unchanged,
+    /// except that an `Io` error keeps its `ErrorKind`, message and OS
+    /// error code but not an inner error, which `io::Error` cannot
+    /// clone.
+    #[must_use]
+    pub(crate) fn replay(&self) -> Self {
+        // Closed match, not `_ =>`, so a new variant forces a decision.
+        match self {
+            Self::Decryption { path } => Self::Decryption { path: path.clone() },
+            Self::UnsupportedVersion { version } => Self::UnsupportedVersion { version: *version },
+            Self::Decompression {
+                path,
+                offset,
+                fault,
+            } => Self::Decompression {
+                path: path.clone(),
+                offset: *offset,
+                fault: fault.clone(),
+            },
+            Self::AssetParse { fault, asset_path } => Self::AssetParse {
+                fault: fault.clone(),
+                asset_path: asset_path.clone(),
+            },
+            Self::MappingsParse { fault } => Self::MappingsParse {
+                fault: fault.clone(),
+            },
+            Self::LocresParse { fault } => Self::LocresParse {
+                fault: fault.clone(),
+            },
+            Self::InvalidFooter { fault } => Self::InvalidFooter {
+                fault: fault.clone(),
+            },
+            Self::InvalidIndex { fault } => Self::InvalidIndex {
+                fault: fault.clone(),
+            },
+            Self::EntryNotFound { path } => Self::EntryNotFound { path: path.clone() },
+            Self::InvalidArgument { arg, reason } => Self::InvalidArgument {
+                arg,
+                reason: reason.clone(),
+            },
+            Self::HashMismatch {
+                target,
+                expected,
+                actual,
+            } => Self::HashMismatch {
+                target: target.clone(),
+                expected: expected.clone(),
+                actual: actual.clone(),
+            },
+            Self::IntegrityStripped { target } => Self::IntegrityStripped {
+                target: target.clone(),
+            },
+            Self::Io(e) => Self::Io(e.raw_os_error().map_or_else(
+                || io::Error::new(e.kind(), e.to_string()),
+                io::Error::from_raw_os_error,
+            )),
+            Self::Internal { context } => Self::Internal {
+                context: context.clone(),
+            },
+            Self::UnsupportedFeature { context } => Self::UnsupportedFeature {
+                context: context.clone(),
+            },
+            Self::Profile { fault } => Self::Profile {
+                fault: fault.clone(),
+            },
+        }
+    }
 }
 
 impl IndexParseFault {
@@ -1157,7 +1226,7 @@ impl IndexParseFault {
 }
 
 /// Structured category + payload for [`PaksmithError::Profile`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProfileFault {
     /// No config directory could be resolved (no `PAKSMITH_CONFIG_DIR`, and
@@ -5530,6 +5599,92 @@ pub(crate) fn mappings_alloc_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_keeps_variant_and_display() {
+        let alloc_failure = Vec::<u8>::new().try_reserve(usize::MAX).unwrap_err();
+        let errors = [
+            PaksmithError::Decryption {
+                path: Some("a.pak".into()),
+            },
+            PaksmithError::UnsupportedVersion { version: 99 },
+            PaksmithError::Decompression {
+                path: "a.ubulk".into(),
+                offset: 7,
+                fault: DecompressionFault::SizeUnderrun {
+                    actual: 1,
+                    expected: 2,
+                },
+            },
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::MissingCompanionFile {
+                    kind: CompanionFileKind::Ubulk,
+                },
+                asset_path: "a.uasset".into(),
+            },
+            PaksmithError::MappingsParse {
+                fault: MappingsParseFault::InvalidMagic { found: 0x1234 },
+            },
+            PaksmithError::LocresParse {
+                fault: LocresParseFault::UnsupportedVersion { found: 9 },
+            },
+            PaksmithError::InvalidFooter {
+                fault: InvalidFooterFault::OtherUnpromoted {
+                    reason: "bad magic".into(),
+                },
+            },
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::EntryPayloadBytes,
+                    requested: usize::MAX,
+                    source: alloc_failure,
+                    path: Some("a/b.uasset".into()),
+                },
+            },
+            PaksmithError::EntryNotFound {
+                path: "a/b.uasset".into(),
+            },
+            PaksmithError::InvalidArgument {
+                arg: "key",
+                reason: "not hex".into(),
+            },
+            PaksmithError::HashMismatch {
+                target: HashTarget::Index,
+                expected: "aa".into(),
+                actual: "bb".into(),
+            },
+            PaksmithError::IntegrityStripped {
+                target: HashTarget::Fdi,
+            },
+            PaksmithError::Io(io::Error::from_raw_os_error(2)),
+            PaksmithError::Io(io::Error::new(io::ErrorKind::InvalidData, "bad block")),
+            PaksmithError::Io(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            PaksmithError::Internal {
+                context: "contract".into(),
+            },
+            PaksmithError::UnsupportedFeature {
+                context: "tiles".into(),
+            },
+            PaksmithError::Profile {
+                fault: ProfileFault::NoKeyForGuid {
+                    id: "game".into(),
+                    guid: "00".into(),
+                },
+            },
+        ];
+        for err in &errors {
+            let replayed = err.replay();
+            assert_eq!(
+                std::mem::discriminant(&replayed),
+                std::mem::discriminant(err)
+            );
+            assert_eq!(replayed.to_string(), err.to_string());
+            if let (PaksmithError::Io(original), PaksmithError::Io(copy)) = (err, &replayed) {
+                assert_eq!(copy.kind(), original.kind());
+                assert_eq!(copy.raw_os_error(), original.raw_os_error());
+            }
+        }
+    }
 
     /// `with_index_path` MUST preserve any path the inner fault
     /// already carries. The FDI walk is one of potentially several
