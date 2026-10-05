@@ -132,20 +132,6 @@ pub struct ByteSignatureRule {
     pub hex: String,
 }
 
-/// Clamp an untrusted string to a short prefix for a log field OR an error
-/// message. `registry::validate_caps` uses it for the latter, which reaches
-/// stderr, the GUI and JSON rather than a `tracing` field.
-///
-/// The local store is not cap-validated, so a hand-edited value can be
-/// arbitrarily long; `MAX_STR` bounds only the registry path.
-pub(crate) fn truncate_for_log(s: &str) -> String {
-    const LOG_FIELD_MAX: usize = 64;
-    match s.char_indices().nth(LOG_FIELD_MAX) {
-        Some((i, _)) => format!("{}…", &s[..i]),
-        None => s.to_string(),
-    }
-}
-
 /// Decode an even-length, unprefixed, case-insensitive hex string to bytes.
 ///
 /// `None` for odd length, any non-hex byte, or the empty string. The registry
@@ -292,7 +278,7 @@ pub fn rules_match(dir: &Path, rules: &DetectRules) -> bool {
         let Some(needle) = decode_hex(&rule.hex) else {
             // Plain field bindings, NOT the `%` sigil: `%` is
             // `tracing::field::display()`, which the default subscriber writes
-            // RAW, while a plain `String` field reaches `record_str`. Whether
+            // RAW, while a plain string field reaches `record_str`. Whether
             // that ESCAPES is the subscriber's choice, not `record_str`'s — see
             // `profile::resolve`'s warn for the full statement. These values are
             // untrusted (a hand-edited store), and a
@@ -300,8 +286,8 @@ pub fn rules_match(dir: &Path, rules: &DetectRules) -> bool {
             // This is not hypothetical: `%` was applied here once for style
             // consistency and measured as a live injection sink.
             tracing::warn!(
-                path = truncate_for_log(&rule.path),
-                hex = truncate_for_log(&rule.hex),
+                path = &*crate::untrusted::clamp(&rule.path),
+                hex = &*crate::untrusted::clamp(&rule.hex),
                 "detect byte signature is not an even-length unprefixed hex string; \
                  this rule can never match"
             );
@@ -424,9 +410,9 @@ mod tests {
     }
 
     /// The warn escapes and BOUNDS its untrusted fields. Pins the property
-    /// #658 established: dropping `truncate_for_log`, or
-    /// re-applying the `%` sigil, both survive every other test in this file
-    /// and both reintroduce a raw-control-byte sink at the default log level.
+    /// #658 established: dropping `untrusted::clamp` un-bounds the fields, and
+    /// re-applying the `%` sigil writes them raw; both survive every other
+    /// test in this file.
     ///
     /// Every assertion keys on a marker unique to this test. `KEPT` markers
     /// prove the event reached the buffer, so the negatives cannot pass
@@ -437,9 +423,9 @@ mod tests {
     /// substring-matches the whole formatted line, so this pins WHICH VALUE was
     /// clamped, not which field name it landed under — swapping the two field
     /// names survives, and closing that needs a field-level capture API. It
-    /// fails a `LOG_FIELD_MAX` widened to 400, while a 64->65 off-by-one is
-    /// caught by `truncate_for_log_bounds_untrusted_values`, so the two remain
-    /// a pair.
+    /// fails a `MAX_UNTRUSTED_CHARS` widened to 400, while a 64->65
+    /// off-by-one is caught by `untrusted`'s `clamp_bounds_untrusted_values`,
+    /// whose literal 65 pins the value, so the two remain a pair.
     #[tracing_test::traced_test]
     #[test]
     fn warn_bounds_and_escapes_untrusted_hex() {
@@ -458,7 +444,7 @@ mod tests {
         // whenever this event is missing from the buffer.
         assert!(logs_contain("PATHKEPT"), "`path` must reach the log");
         assert!(logs_contain("HEXKEPT"), "`hex` must reach the log");
-        // Clamped, per field. Also kills a WIDENED `LOG_FIELD_MAX`, which the
+        // Clamped, per field. Also kills a WIDENED `MAX_UNTRUSTED_CHARS`, which the
         // ellipsis form could not see.
         assert!(!logs_contain("PATHCUT"), "`path` must be clamped at 64");
         assert!(!logs_contain("HEXCUT"), "`hex` must be clamped at 64");
@@ -469,23 +455,6 @@ mod tests {
             !logs_contain(&esc.to_string()),
             "no raw ESC may reach the log record"
         );
-    }
-
-    /// `truncate_for_log` bounds an untrusted value and keeps char boundaries.
-    /// The local store is not cap-validated, so this is the only bound on a
-    /// hand-edited `hex` reaching a log field.
-    #[test]
-    fn truncate_for_log_bounds_untrusted_values() {
-        assert_eq!(truncate_for_log("dead"), "dead");
-        let long = "a".repeat(500);
-        let out = truncate_for_log(&long);
-        assert_eq!(out.chars().count(), 65, "64 chars plus the ellipsis");
-        assert!(out.ends_with('…'));
-        // Multi-byte input must not split a char.
-        let wide = "é".repeat(500);
-        let out = truncate_for_log(&wide);
-        assert!(out.starts_with('é') && out.ends_with('…'));
-        assert_eq!(out.chars().count(), 65);
     }
 
     /// An empty `substring` is vacuously true — `file_contains` returns before

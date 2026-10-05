@@ -47,4 +47,5 @@ Core is the load-bearing crate. CLI and GUI are thin presentation-layer frontend
 - `error.rs` — `PaksmithError` + typed fault sub-enums with wire-stable `Display` impls
 - `digest.rs` — `Sha1Digest` (byte-equality, NOT constant-time)
 - `staged_replace.rs` — `StagedReplace`: sibling-temp + rename file replacement
+- `untrusted.rs` — `clamp` for untrusted text in log fields and fault messages
 - `testing/` — `__test_utils`-feature-gated test infrastructure (`v10` fixtures, `oom` injection seams)

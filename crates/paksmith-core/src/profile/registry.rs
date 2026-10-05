@@ -137,7 +137,7 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
                 return Err(format!(
                     "byte signature in `{}` is not an even-length unprefixed hex string: `{}`",
                     p.id,
-                    crate::profile::detection::truncate_for_log(&bad.hex)
+                    crate::untrusted::clamp(&bad.hex)
                 ));
             }
         }
