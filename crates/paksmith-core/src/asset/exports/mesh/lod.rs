@@ -151,7 +151,8 @@ pub(crate) fn read_lod(
 /// compression, a companion that is missing or fails to load, a region outside
 /// its source, or a source this decode has charged past its length).
 /// `read_payloads` degrades either to the generic property bag, never an
-/// empty-geometry typed mesh.
+/// empty-geometry typed mesh, except an allocation failure, which ends the
+/// package read.
 ///
 /// Wire order (oracle `FStaticMeshLODResources.cs`, `!bInlined` branch, UE4.23–4.27
 /// / UE5.0–5.3 generic path): the `FByteBulkData` header, then — when

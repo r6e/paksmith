@@ -5621,13 +5621,19 @@ pub(crate) fn mappings_alloc_failed(
     }
 }
 
+/// A real refused reservation, for tests that build an allocation fault.
+#[cfg(test)]
+pub(crate) fn refused_reservation() -> TryReserveError {
+    Vec::<u8>::new().try_reserve(usize::MAX).unwrap_err()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn replay_keeps_variant_and_display() {
-        let alloc_failure = Vec::<u8>::new().try_reserve(usize::MAX).unwrap_err();
+        let alloc_failure = refused_reservation();
         let errors = [
             PaksmithError::Decryption {
                 path: Some("a.pak".into()),

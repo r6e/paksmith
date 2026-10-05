@@ -592,9 +592,17 @@ pub trait ContainerReader: Send + Sync {
     /// failed" solely on this identity: `Package::read_from_reader`
     /// treats `EntryNotFound` on the `.uexp` companion as "monolithic
     /// asset, keep going" and maps it on `.ubulk`/`.uptnl` to the typed
-    /// `MissingCompanionFile` fault, while any other error aborts the
-    /// parse outright. An implementor that leaks `Io(NotFound)` instead
-    /// would turn every monolithic asset into a hard parse failure.
+    /// `MissingCompanionFile` fault. Any other `.uexp` error aborts the
+    /// parse outright; any other `.ubulk`/`.uptnl` error is reported by
+    /// the resolve that needs the companion. An implementor that leaks
+    /// `Io(NotFound)` instead would turn every monolithic asset into a
+    /// hard parse failure.
+    ///
+    /// A failed reservation should surface as
+    /// [`crate::error::IndexParseFault::AllocationFailed`], a
+    /// `DecompressionFault::*ReserveFailed` (`PakReader` uses these two), or
+    /// an `Io` error of kind `OutOfMemory`, so a package read ends instead
+    /// of degrading the export that needed the entry.
     fn read_entry(&self, path: &str) -> crate::Result<Vec<u8>>;
 
     /// The container format this reader handles.

@@ -1072,7 +1072,8 @@ pub(crate) fn counting_loader(
 ///    violations and codec stream errors fire
 ///    `BulkDataCompressionDecodeFailed`; unsupported v2 formats fire
 ///    `UnsupportedBulkCompression`; a decompressed claim over
-///    `MAX_BULK_DATA_SIZE` fires `BulkDataSizeExceeded`.
+///    `MAX_BULK_DATA_SIZE` fires `BulkDataSizeExceeded`; a failure to
+///    grow the output buffer surfaces as `Io` of kind `OutOfMemory`.
 ///
 /// # Threading
 ///
@@ -1243,9 +1244,10 @@ impl BulkDataResolver {
     ///
     /// Per the defense chain documented on the struct: the
     /// `AssetParseFault` bulk-data variant for the invariant the
-    /// record violated, or the companion loader's error. A companion
-    /// that failed to load reports that failure again instead of
-    /// loading again.
+    /// record violated, `Io` of kind `OutOfMemory` when inflating a zlib
+    /// payload cannot grow its buffer, or the companion loader's error. A
+    /// companion that failed to load reports that failure again instead
+    /// of loading again.
     pub fn resolve(&self, record: &FByteBulkData, asset_path: &str) -> crate::Result<BulkData> {
         self.resolve_inner(record, asset_path, None)
     }
@@ -1942,9 +1944,9 @@ pub(crate) fn decompress_zlib(
         let before = out.len();
         #[allow(clippy::cast_sign_loss, reason = "validated >= 0 above")]
         let mut limited = ZlibDecoder::new(stream).take(chunk_unc as u64 + 1);
-        let _ = limited
-            .read_to_end(&mut out)
-            .map_err(|e| fail(format!("chunk {index}: {e}")))?;
+        let _ = limited.read_to_end(&mut out).map_err(|e| {
+            crate::asset::keep_out_of_memory(e, |e| fail(format!("chunk {index}: {e}")))
+        })?;
         let produced = out.len() - before;
         #[allow(clippy::cast_sign_loss, reason = "validated >= 0 above")]
         if produced as u64 != chunk_unc as u64 {

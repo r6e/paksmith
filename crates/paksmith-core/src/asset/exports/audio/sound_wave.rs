@@ -184,7 +184,7 @@ pub(crate) fn read_from(
     let platform = match read_platform_data(&mut cur, ctx, streaming, cooked, total_len, asset_path)
     {
         Ok(platform) => platform,
-        Err(first) if crate::asset::is_derived_budget_trip(&first) => return Err(first),
+        Err(first) if crate::asset::ends_package_read(&first) => return Err(first),
         Err(_first) => {
             // Streaming-flip retry. The reader returns a fresh `PlatformData` by
             // value, so the failed attempt's partial state (incl. its `bulk`

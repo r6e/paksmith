@@ -1366,9 +1366,10 @@ fn read_lod_post_loop_tail(
 /// `FStaticLODModel` fault, the bulk resolver's error for an external LOD
 /// payload, or [`crate::PaksmithError::UnsupportedFeature`] for a legacy /
 /// non-cooked / pre-UE4.24 mesh (see *Scope* above) or an external LOD
-/// without a resolver — all of which
-/// the package walker degrades to a generic property bag (see
-/// `Package::read_payloads`).
+/// without a resolver — all of which the package walker degrades to a
+/// generic property bag (see `Package::read_payloads`), except an
+/// allocation failure or `DerivedStringBudgetExceeded`, which ends the
+/// package read.
 #[allow(
     clippy::too_many_lines,
     reason = "a flat in-order segment-2 wire sequence (strip flags → bounds → \

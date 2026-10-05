@@ -66,7 +66,8 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
   read. Parse errors mid-iteration fall back to `PropertyBag::Opaque`
   with a `tracing::warn!` event so one corrupt export doesn't lose the
   whole package; a package-wide `DerivedStringBudgetExceeded` (the
-  256 MiB cap on names copied out of the name table) fails the read.
+  256 MiB cap on names copied out of the name table) fails the read,
+  and so does an allocation failure at any layer.
 - `export/` — `FormatHandler` implementations that turn typed assets
   into standard files: `PngHandler` (textures, with BCn/ASTC/ETC mip
   decode), `GltfStaticMeshHandler` / `GltfSkeletalMeshHandler` (glTF
