@@ -1189,8 +1189,9 @@ mod tests {
         logs_assert(lines_escaped("no schema found for class", "CLS"));
     }
 
-    /// The partial-tree-stop warning names the class and the property;
-    /// long names reach it clamped and escaped.
+    /// The partial-tree-stop warning's `class_name` and `property` fields
+    /// carry long names clamped and escaped; `error = %e` repeats the
+    /// property name clamped but with its ESC unescaped (#708).
     #[tracing_test::traced_test]
     #[test]
     fn partial_tree_stop_warning_bounds_long_class_and_property_names() {

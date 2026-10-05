@@ -55,7 +55,9 @@ pub(crate) mod test_support {
 
     /// A `logs_assert` check: at least one line carries `message`, and
     /// each such line holds the [`hostile_name`] for `tag` with its ESC
-    /// escaped, as a `&str` field renders it. A `%` field writes it raw.
+    /// escaped, as a `&str` field renders it and a `%` field does not.
+    /// The check is presence-only: a raw copy in another field of the
+    /// same line passes.
     pub(crate) fn lines_escaped<'a>(
         message: &'a str,
         tag: &'a str,
@@ -66,7 +68,7 @@ pub(crate) mod test_support {
                 .into_iter()
                 .find(|l| !l.contains(&escaped))
             {
-                Some(line) => Err(format!("`{tag}` ESC not escaped in {line:?}")),
+                Some(line) => Err(format!("`{tag}` lacks its escaped ESC in {line:?}")),
                 None => Ok(()),
             }
         }
