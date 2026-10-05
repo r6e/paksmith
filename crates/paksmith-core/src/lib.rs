@@ -53,6 +53,7 @@ pub mod profile;
 pub mod staged_replace;
 
 mod seams;
+mod untrusted;
 
 /// Test-utility surface shared between in-source tests and the
 /// integration suite under `tests/`. Gated behind the `__test_utils`
