@@ -1451,15 +1451,9 @@ fn read_payloads(
             crate::asset::exports::dispatch::class_dispatch().get(&*class_name)
         {
             // Typed reader registered for this class (3d+ populate the
-            // dispatch table). On success, push the typed Asset and
-            // move on. On FAILURE, do NOT abort the whole package —
-            // fall through to the generic tagged-property path below,
-            // exactly as if no typed reader were registered. A typed
-            // reader must never leave an export worse off than the
-            // generic parse would: one corrupt typed export degrades
-            // to `Generic` rather than failing every sibling export's
-            // parse. (Before this, `read_typed(...)?` propagated and a
-            // single malformed DataTable/Texture2D aborted the package.)
+            // dispatch table). On success, push the typed Asset and move
+            // on; the arms below decide which failures end the read and
+            // which fall through to the generic parse.
             //
             // The typed reader's `bulk_records` are surfaced here keyed by
             // `export_idx` and handed back to `read_from_inner`, which holds
@@ -1480,10 +1474,9 @@ fn read_payloads(
                 // `DataTableRowCountExceeded` fire before allocating, so a
                 // malicious oversized-count export still degrades below.
                 Err(err) if ends_package_read(&err) => return Err(err),
-                // Malformed data: one corrupt export must not lose its
-                // siblings (the package-resilience contract) — warn and
-                // fall through to the generic parse below, exactly as if
-                // no typed reader were registered.
+                // Anything else (malformed data, an unsupported variant,
+                // an unresolvable companion): warn and fall through to the
+                // generic parse below.
                 Err(err) => {
                     tracing::warn!(
                         asset = asset_path,
@@ -1507,10 +1500,11 @@ fn read_payloads(
 
         // Phase 2b: attempt tagged-property iteration over the
         // export's bytes. On success, store as `PropertyBag::Tree`;
-        // on parse error, fall back to `PropertyBag::Opaque` with
-        // the original bytes (one corrupt export shouldn't lose every
-        // other export's data). The fallback is logged at warn level
-        // so operators see the version-skew signal.
+        // on a parse error that `ends_package_read` does not match,
+        // fall back to `PropertyBag::Opaque` with the original bytes (one
+        // corrupt export shouldn't lose every other export's data).
+        // The fallback is logged at warn level so operators see the
+        // version-skew signal.
         //
         // `Opaque` needs `Vec<u8>` ownership for storage in the
         // `Package` struct. The cold error path uses
@@ -1859,10 +1853,10 @@ mod tests {
         assert!(parsed.data_resources.is_empty());
     }
 
-    /// Pins the typed-dispatch fall-through: a typed reader that errors
-    /// on one export must NOT abort the package — it falls through to
-    /// the generic property-bag parse (degrading that export to
-    /// `Generic`, not propagating), so sibling exports survive.
+    /// Pins the typed-dispatch fall-through: a typed-reader failure that
+    /// `ends_package_read` does not match must NOT abort the package — it
+    /// falls through to the generic property-bag parse (degrading that
+    /// export to `Generic`, not propagating), so sibling exports survive.
     ///
     /// The fixture has two `DataTable` exports: a valid empty one and a
     /// corrupt one (segment-2 `RowName` index out of bounds). Asserting
@@ -2606,7 +2600,7 @@ mod tests {
 
     /// A companion that fails to load is loaded once per package, however
     /// many mesh exports stream LODs from it; each export degrades to its
-    /// generic property bag.
+    /// generic property bag unless the fault ends the package read.
     #[test]
     fn a_failed_companion_load_runs_once_across_mesh_exports() {
         use crate::asset::bulk_data::counting_loader;

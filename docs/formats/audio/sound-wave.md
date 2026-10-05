@@ -314,7 +314,8 @@ A `USoundWave` reader MUST:
   forward-compatibility with miscued version-table assets;
   paksmith's Phase 3f reader mirrors it — on a parse failure it
   rewinds, flips the resolved `bStreaming`, and re-parses the
-  opposite branch.
+  opposite branch, except that an allocation failure or the
+  package-wide name budget ends the read instead.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 

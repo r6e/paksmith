@@ -11,13 +11,13 @@
 //! (per-codec keys + `FByteBulkData` buffers) + `CompressedDataGuid`. **3f-4**
 //! parses the streaming branch: the `CompressedDataGuid` then (when cooked) the
 //! `FStreamedAudioPlatformData` (`AudioFormat` + per-chunk metadata + chunk
-//! `FByteBulkData` buffers). **3f-5** adds the oracle's streaming-flip retry —
-//! re-parsing the opposite branch when a mis-resolved `streaming` guess makes
-//! the chosen branch fail. **This slice** parses the non-streaming non-cooked
-//! `RawData` path (a single `FByteBulkData` + `CompressedDataGuid`), completing
-//! the platform-data matrix — so every `(streaming, cooked)` combo is a real
-//! read and the retry is now unconditional. (UE 5.4+ cue points are consumed
-//! and discarded for versioned packages as of #643 — previously they needed
+//! `FByteBulkData` buffers). **3f-5** adds the oracle's streaming-flip retry,
+//! which can re-parse the opposite branch when a mis-resolved `streaming` guess
+//! makes the chosen branch fail. **This slice** parses the non-streaming
+//! non-cooked `RawData` path (a single `FByteBulkData` + `CompressedDataGuid`),
+//! completing the platform-data matrix — so every `(streaming, cooked)` combo
+//! is a real read and the retry now covers every combo. (UE 5.4+ cue points are
+//! consumed and discarded for versioned packages as of #643 — previously they needed
 //! object version 1012, above the then-1011
 //! `FPropertyTag` ceiling
 //! — so platform data follows
@@ -123,8 +123,9 @@ struct PlatformData {
 ///   segment.
 /// - [`AssetParseFault::NegativeValue`] / [`AssetParseFault::BoundsExceeded`]
 ///   on a bad format / chunk count, or any `FName` / `FByteBulkData` fault.
-/// - [`AssetParseFault::DerivedStringBudgetExceeded`] from either platform-data
-///   attempt; it ends the read instead of triggering the streaming-flip retry.
+/// - Any fault `ends_package_read` matches (e.g.
+///   [`AssetParseFault::DerivedStringBudgetExceeded`]) from either
+///   platform-data attempt, returned without the streaming-flip retry.
 pub(crate) fn read_from(
     payload: &[u8],
     ctx: &AssetContext,
@@ -190,9 +191,9 @@ pub(crate) fn read_from(
             // value, so the failed attempt's partial state (incl. its `bulk`
             // Vec) is dropped here — no explicit field reset needed (vs the
             // oracle nulling its in-place fields). A second failure propagates
-            // (→ `Asset::Generic`).
+            // (→ `Asset::Generic`, unless it ends the package read).
             //
-            // Unconditional (matching the oracle), now that both branches are
+            // Ungated on `cooked` (as in the oracle), now that both branches are
             // real reads in every `(streaming, cooked)` combo — `FFormatContainer`
             // / `RawData` (non-streaming) and `FStreamedAudioPlatformData` /
             // GUID-only (streaming). (3f-5 gated this on `cooked` while `RawData`
@@ -229,8 +230,8 @@ pub(crate) fn read_from(
 /// `!streaming` → `FFormatContainer` (cooked) or a single `RawData`
 /// `FByteBulkData` (non-cooked), then `CompressedDataGuid`; `streaming` →
 /// `CompressedDataGuid` + (when `cooked`) `FStreamedAudioPlatformData`. Every
-/// `(streaming, cooked)` combo is a real read. Driven twice (with flipped
-/// `streaming`) by the [`read_from`] streaming-flip retry.
+/// `(streaming, cooked)` combo is a real read. Can be driven twice (with
+/// flipped `streaming`) by the [`read_from`] streaming-flip retry.
 fn read_platform_data(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,
@@ -439,8 +440,8 @@ fn read_capped_count(
 ///
 /// Steps 2 and 3 are mutually exclusive. The per-game `OverrideUseAudioStreaming`
 /// refinement (and the `GAME_Stray` `RetainOnLoad` clamp) are Phase-5
-/// game-profile concerns, deferred. A wrong initial guess is corrected by the
-/// 3f-5 streaming-flip retry once the platform-data parse runs.
+/// game-profile concerns, deferred. A wrong initial guess can be corrected by
+/// the 3f-5 streaming-flip retry once the platform-data parse runs.
 fn resolve_streaming(properties: &[Property], version: AssetVersion) -> bool {
     if let Some(streaming) = bool_property(properties, "bStreaming") {
         return streaming;
@@ -854,7 +855,7 @@ mod tests {
     }
 
     // Resolution tests call `resolve_streaming` directly (via
-    // `resolve_streaming_from`): the `read_from` retry would recover a
+    // `resolve_streaming_from`): the `read_from` retry can recover a
     // mis-resolved guess and mask the resolution logic these pin.
 
     #[test]
@@ -1254,9 +1255,9 @@ mod tests {
     }
 
     // These pin the streaming reader's OWN error tagging, so they call
-    // `read_streaming_platform_data` directly — at `read_from` level a
-    // first-attempt failure triggers the streaming-flip retry (tested
-    // separately), which would recover or change the surfaced fault.
+    // `read_streaming_platform_data` directly — at `read_from` level the
+    // streaming-flip retry (tested separately) can recover a first-attempt
+    // failure or change the surfaced fault.
 
     #[test]
     fn chunk_count_negative_and_over_cap_rejected() {
@@ -1388,7 +1389,7 @@ mod tests {
     }
 
     // These pin the non-streaming reader's OWN error tagging, so they call
-    // `read_nonstreaming_platform_data` directly (the `read_from` retry would
+    // `read_nonstreaming_platform_data` directly (the `read_from` retry can
     // otherwise recover or re-tag a first-attempt failure).
 
     #[test]

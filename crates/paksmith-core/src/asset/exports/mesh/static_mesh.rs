@@ -30,10 +30,10 @@
 //! [`super::lod::read_lod_legacy`]) + UE 4.23–4.27 (full) + UE 5.0–5.3
 //! (geometry-only, the classic LOD geometry without the un-decoded Nanite tail).
 //! UE5.4+ degrades to a generic property bag. A non-inlined LOD's streamed
-//! geometry is resolved from its companion `.ubulk` (degrading to a property bag
-//! only when the record is unresolvable); a distance-field-present UE4 mesh is
-//! parsed (the `FDistanceFieldVolumeData` is validated-skipped) and still exports
-//! its geometry.
+//! geometry is resolved from its companion `.ubulk` (see [`StaticMeshData`]
+//! for when an unresolvable record degrades the export); a distance-field-present
+//! UE4 mesh is parsed (the `FDistanceFieldVolumeData` is validated-skipped)
+//! and still exports its geometry.
 
 use std::io::Cursor;
 
@@ -63,7 +63,8 @@ pub(crate) const MAX_SOCKETS_PER_MESH: u32 = 4096;
 /// truncated `Deserialize` field, or an unsupported render-data variant
 /// ([`crate::error::PaksmithError::UnsupportedFeature`]) — all of which the
 /// package walker degrades to a generic property bag (see
-/// `Package::read_payloads`).
+/// `Package::read_payloads`), except a fault that ends the package read
+/// (`ends_package_read`).
 pub(crate) fn read_from(
     payload: &[u8],
     ctx: &AssetContext,

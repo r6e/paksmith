@@ -1490,8 +1490,9 @@ pub fn build_minimal_ue4_27_with_data_table() -> MinimalPackage {
 /// table whose `RowName` FName index (99) is past the 5-entry name
 /// table, so `data_table::read_typed` fails with `PackageIndexOob`.
 ///
-/// Pins the typed-dispatch fall-through (`package.rs`): a failing typed
-/// reader must NOT abort the package — export 1 degrades to
+/// Pins the typed-dispatch fall-through (`package.rs`): a typed-reader
+/// failure that `ends_package_read` does not match must NOT abort the
+/// package — export 1 degrades to
 /// `Generic(Tree)` carrying its segment-1 `Foo` property (the generic
 /// tagged-iteration recovers it, stopping at the `None`), while the
 /// valid sibling export 0 still decodes to `Asset::DataTable`.

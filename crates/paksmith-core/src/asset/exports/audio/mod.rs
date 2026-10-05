@@ -20,7 +20,8 @@
 //! the binary-header `Flags`/`bCooked`, the `DummyCompressionName`, and all
 //! platform-data branches — the non-streaming `FFormatContainer` (cooked) /
 //! `RawData` (non-cooked), the streaming `FStreamedAudioPlatformData`, each with
-//! the `CompressedDataGuid`, plus the (now unconditional) streaming-flip retry.
+//! the `CompressedDataGuid`, plus the streaming-flip retry (now covering every
+//! combo).
 //! What remains is the per-codec audio decoding (the `FormatHandler`s).
 
 pub(crate) mod sound_wave;

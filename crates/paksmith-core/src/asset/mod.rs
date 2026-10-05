@@ -182,8 +182,10 @@ pub enum Asset {
 /// [`crate::error::PaksmithError::UnsupportedFeature`] rather than mis-decoded. A
 /// non-inlined (`bInlined == false`) LOD's streamed geometry is resolved from its
 /// companion `.ubulk` via the bulk resolver, when one is available; an
-/// unresolvable record (no resolver, missing companion, or compressed bulk)
-/// degrades the export to a generic property bag. A present per-LOD
+/// unresolvable record (no resolver, a missing companion, or LZO / BitWindow
+/// compression) degrades the export to a generic property bag; an allocation
+/// failure while loading the companion or inflating a zlib payload ends the
+/// package read instead. A present per-LOD
 /// `FDistanceFieldVolumeData` (`bValid == true`, UE4 path) is validated-skipped,
 /// so a distance-field-bearing mesh still returns its geometry. The
 /// `UStaticMesh.Deserialize` tail *after* the render
@@ -571,13 +573,13 @@ pub struct DataTableRow {
 /// directly. As of 3f-4 the streaming branch (`streaming && cooked`) parses the
 /// `FStreamedAudioPlatformData` — the `CompressedDataGuid`, the `AudioFormat`
 /// codec, and the per-chunk metadata (into [`Self::streamed`]) with the chunk
-/// buffers in the `read_typed` bulk-record list. As of 3f-5 the oracle's
-/// streaming-flip retry re-parses the opposite branch when a mis-resolved
-/// `streaming` guess makes the chosen branch fail. The non-streaming non-cooked
-/// `RawData` path (a single uncompressed `FByteBulkData` + the
-/// `CompressedDataGuid`) is now parsed too, so every `(streaming, cooked)` combo
-/// is a real read and the retry is unconditional (matching the oracle). Only the
-/// per-codec audio decoders (the `FormatHandler`s) remain.
+/// buffers in the `read_typed` bulk-record list. As of 3f-5 a streaming-flip
+/// retry can recover a mis-resolved `streaming` guess (see [`Self::streaming`]).
+/// The non-streaming non-cooked `RawData` path (a single uncompressed
+/// `FByteBulkData` + the `CompressedDataGuid`) is now parsed too, so every
+/// `(streaming, cooked)` combo is a real read and the retry covers every combo
+/// (matching the oracle). Only the per-codec audio decoders (the
+/// `FormatHandler`s) remain.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SoundWaveData {
@@ -597,10 +599,10 @@ pub struct SoundWaveData {
     /// [`Self::streamed`] (3f-4). `streaming = true` is the modern-cooked default
     /// (`is_ue4_25_or_later`). The resolved value is a heuristic that can be
     /// wrong, so 3f-5 added the oracle's streaming-flip retry: on a parse failure
-    /// the reader rewinds, flips this value, and re-parses the opposite branch —
-    /// so a mis-resolved asset recovers and this field reflects the branch that
-    /// actually parsed. The retry is unconditional (every branch is a real read);
-    /// if both branches fail the parse falls back to `Asset::Generic`.
+    /// other than an allocation failure or the package-wide name budget (which
+    /// end the package read), the reader rewinds, flips this value, and
+    /// re-parses the opposite branch — so a mis-resolved asset recovers and this
+    /// field reflects the branch that actually parsed.
     pub streaming: bool,
     /// Per-codec keys of the non-streaming cooked `FFormatContainer` (e.g.
     /// `"OGG"`, `"OPUS"`, `"BINKA"`), in wire order. Each

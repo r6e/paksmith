@@ -1213,7 +1213,8 @@ mod tests {
 
         // A compressed (LZO) streamed payload is rejected by the resolver; the
         // error propagates so the export degrades to a property bag (the
-        // package-resilience contract turns any typed-reader error into Generic).
+        // package-resilience contract turns a typed-reader error that does not
+        // end the package read into Generic).
         let ctx = with_ubulk(make_ctx_with_version(517, None), Vec::new());
 
         let bytes = non_inlined_lod_ue4_23(SEPARATE_FILE_LZO, 16, 0);
