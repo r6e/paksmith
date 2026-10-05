@@ -851,6 +851,7 @@ mod tests {
             data_resources: std::sync::Arc::from(Vec::new()),
             engine_version_hint: None,
             derived_strings: Arc::default(),
+            bulk_reads: Arc::default(),
         }
     }
 

@@ -833,6 +833,7 @@ impl Package {
             data_resources: Arc::clone(&data_resources),
             engine_version_hint: opts.engine_version_hint,
             derived_strings: Arc::default(),
+            bulk_reads: Arc::default(),
         };
 
         // Phase 2f: dispatch the unversioned (schema-driven) property
@@ -1256,7 +1257,7 @@ impl Package {
     /// refcount-shared via `Arc` (#369) and pointer-equal via
     /// [`Arc::ptr_eq`] across calls; use that as a cache key on the
     /// individual fields, not the full context struct. Each call starts
-    /// a fresh budget for copied names.
+    /// a fresh budget for copied names and a fresh bulk-read ledger.
     #[must_use]
     pub fn context(&self) -> AssetContext {
         AssetContext {
@@ -1271,6 +1272,7 @@ impl Package {
             data_resources: Arc::clone(&self.data_resources),
             engine_version_hint: self.engine_version_hint,
             derived_strings: Arc::default(),
+            bulk_reads: Arc::default(),
         }
     }
 }
@@ -2398,33 +2400,54 @@ mod tests {
         build_minimal(spec).bytes
     }
 
-    /// Streamed static-mesh LODs decode through a full package read: the
-    /// eager mesh path resolves each LOD's geometry from its own region of
-    /// the `.ubulk`.
-    #[test]
-    fn streamed_static_mesh_lods_decode_through_a_package_read() {
+    /// Two `StaticMesh` exports, each streaming one `len`-byte LOD from
+    /// its offset in the `.ubulk`.
+    fn streamed_meshes(len: usize, offsets: [usize; 2]) -> Vec<u8> {
         use crate::asset::exports::mesh::lod::test_support::{
             SEPARATE_FILE_NO_FIXUP, cooked_static_mesh_ue4_23, non_inlined_lod_ue4_23,
-            serialize_buffers_blob_ue4_23,
         };
+        static_mesh_package(
+            offsets
+                .iter()
+                .map(|&offset| {
+                    let lod = non_inlined_lod_ue4_23(SEPARATE_FILE_NO_FIXUP, len, offset);
+                    cooked_static_mesh_ue4_23(&[lod])
+                })
+                .collect(),
+        )
+    }
+
+    /// Two `StaticMesh` exports, each streaming one LOD from its own region
+    /// of the returned `.ubulk`, and the triangle each region holds.
+    fn disjoint_streamed_meshes() -> (Vec<u8>, Vec<u8>, [[u16; 3]; 2]) {
+        use crate::asset::exports::mesh::lod::test_support::serialize_buffers_blob_ue4_23;
         let triangles = [[0, 1, 2], [2, 1, 0]];
         let blobs = triangles.map(serialize_buffers_blob_ue4_23);
         let len = blobs[0].len();
-        let bytes = static_mesh_package(vec![
-            cooked_static_mesh_ue4_23(&[non_inlined_lod_ue4_23(SEPARATE_FILE_NO_FIXUP, len, 0)]),
-            cooked_static_mesh_ue4_23(&[non_inlined_lod_ue4_23(SEPARATE_FILE_NO_FIXUP, len, len)]),
-        ]);
-        let ubulk = blobs.concat();
+        (streamed_meshes(len, [0, len]), blobs.concat(), triangles)
+    }
 
-        let pkg = Package::read_from_inner(
-            &bytes,
+    /// Read `bytes` with `ubulk` as its `.ubulk` and no `.uptnl`.
+    fn read_with_ubulk(bytes: &[u8], ubulk: Vec<u8>) -> Package {
+        Package::read_from_inner(
+            bytes,
             None,
             &ReadOptions::new(),
             "m.uasset",
             move || Ok(ubulk.clone()),
             missing_companion_loader(CompanionFileKind::Uptnl, "m.uasset".into()),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    /// Streamed static-mesh LODs decode through a full package read: the
+    /// eager mesh path resolves each LOD's geometry from its own region of
+    /// the `.ubulk`.
+    #[test]
+    fn streamed_static_mesh_lods_decode_through_a_package_read() {
+        let (bytes, ubulk, triangles) = disjoint_streamed_meshes();
+
+        let pkg = read_with_ubulk(&bytes, ubulk);
 
         assert_eq!(pkg.payloads.len(), 2);
         for (payload, triangle) in pkg.payloads.iter().zip(triangles) {
@@ -2435,6 +2458,51 @@ mod tests {
             assert_eq!(lods[0].positions.len(), 3);
             assert_eq!(lods[0].indices, triangle.map(u32::from));
         }
+    }
+
+    /// Every `Package::context` starts a fresh bulk-read ledger, so a
+    /// second decode through one reads the regions the first decode read.
+    #[test]
+    fn a_second_decode_through_a_fresh_context_reads_the_regions_again() {
+        let (bytes, ubulk, _) = disjoint_streamed_meshes();
+        let pkg = read_with_ubulk(&bytes, ubulk);
+
+        let (again, _) = read_payloads(&bytes, &pkg.exports, &pkg.context(), "m.uasset").unwrap();
+
+        assert_eq!(again.len(), 2);
+        for payload in &again {
+            assert!(
+                matches!(payload, crate::asset::Asset::StaticMesh(_)),
+                "got {payload:?}"
+            );
+        }
+    }
+
+    /// Two mesh exports streaming a LOD from one `.ubulk` region decode it
+    /// once: the second trips the bulk-read ledger and degrades to its
+    /// generic property bag.
+    #[test]
+    fn mesh_exports_naming_one_ubulk_region_decode_it_once() {
+        use crate::asset::exports::mesh::lod::test_support::serialize_buffers_blob_ue4_23;
+        let blob = serialize_buffers_blob_ue4_23([0, 1, 2]);
+        let bytes = streamed_meshes(blob.len(), [0, 0]);
+
+        let pkg = read_with_ubulk(&bytes, blob);
+
+        let [
+            crate::asset::Asset::StaticMesh(mesh),
+            crate::asset::Asset::Generic(_),
+        ] = pkg.payloads.as_slice()
+        else {
+            panic!(
+                "expected one decoded mesh and one generic fallback, got {:?}",
+                pkg.payloads
+            );
+        };
+        assert_eq!(
+            mesh.render_data.as_ref().unwrap().lods[0].positions.len(),
+            3
+        );
     }
 
     /// A companion that fails to load is loaded once per package, however

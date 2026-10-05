@@ -16,10 +16,8 @@
 //! - **non-inlined** (`bInlined == false`, the streamed `.ubulk` path): an
 //!   `FByteBulkData` header whose payload is resolved via
 //!   [`AssetContext::bulk_resolver`] and decoded with the same `SerializeBuffers`,
-//!   followed by the in-stream availability-info trailer. When no resolver is
-//!   present (header-only / in-memory parse) or the record is unresolvable
-//!   (compressed bulk, missing companion), it degrades to
-//!   [`crate::error::PaksmithError::UnsupportedFeature`] (→ generic property bag).
+//!   followed by the in-stream availability-info trailer. See
+//!   [`read_non_inlined_lod`] for how it fails.
 //!
 //! Both paths then consume the shared 12-byte `FStaticMeshBuffersSize` trailer.
 //! The pre-4.23 legacy layout is decoded separately by [`read_lod_legacy`]
@@ -80,15 +78,14 @@ const CDSF_RAY_TRACING_RESOURCES: u8 = 8;
 /// `MaxDeviation` (`f32`) → `bIsLODCookedOut` + `bInlined` (`u32` bools).
 /// When the LOD carries buffers (`!AVStripped && !bIsLODCookedOut`): if
 /// `bInlined`, `SerializeBuffers` in-stream; otherwise [`read_non_inlined_lod`]
-/// resolves the streamed `.ubulk` geometry (degrading to
-/// [`PaksmithError::UnsupportedFeature`] when unresolvable). Either way the
-/// 12-byte `FStaticMeshBuffersSize` trailer closes the LOD. A cooked-out /
+/// resolves the streamed `.ubulk` geometry. Either way the 12-byte
+/// `FStaticMeshBuffersSize` trailer closes the LOD. A cooked-out /
 /// audio-visual-stripped LOD has no buffers and decodes to empty geometry (just
 /// its sections).
 ///
 /// # Errors
-/// [`crate::PaksmithError`] from a truncated / corrupt LOD record, or
-/// [`PaksmithError::UnsupportedFeature`] for an unresolvable non-inlined LOD.
+/// [`crate::PaksmithError`] from a truncated / corrupt LOD record, or from
+/// [`read_non_inlined_lod`] for a non-inlined LOD it cannot resolve.
 pub(crate) fn read_lod(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,
@@ -148,9 +145,12 @@ pub(crate) fn read_lod(
 /// decodes it with the same [`serialize_buffers`] used for inlined LODs, then
 /// consumes the in-stream availability-info trailer from the main cursor.
 ///
-/// Degrades to [`PaksmithError::UnsupportedFeature`] (→ generic property bag) when
-/// no resolver is present (header-only / in-memory parse) or the payload is
-/// unresolvable (compressed bulk, missing companion file) — never an
+/// Fails with [`PaksmithError::UnsupportedFeature`] when the context has no
+/// resolver (one built by `AssetContext::new`), and with the resolver's error
+/// when the payload cannot be resolved (for example LZO or BitWindow
+/// compression, a companion that is missing or fails to load, a region outside
+/// its source, or a source this decode has charged past its length).
+/// `read_payloads` degrades either to the generic property bag, never an
 /// empty-geometry typed mesh.
 ///
 /// Wire order (oracle `FStaticMeshLODResources.cs`, `!bInlined` branch, UE4.23–4.27
@@ -178,7 +178,7 @@ fn read_non_inlined_lod(
 
     let bulk = crate::asset::bulk_data::FByteBulkData::read_from_ctx(cur, ctx, asset_path)?;
     if bulk.element_count > 0 {
-        let payload = resolver.resolve(&bulk, asset_path)?;
+        let payload = resolver.resolve_charged(&bulk, asset_path, &ctx.bulk_reads)?;
         let mut buf_cur = Cursor::new(payload.bytes.as_slice());
         serialize_buffers(&mut buf_cur, ctx, asset_path, lod)?;
     }
@@ -1132,28 +1132,21 @@ mod tests {
     // `__test_utils`-gated `new_for_test_with_ubulk`, so they are gated to match
     // (a plain `cargo test` build does not enable `__test_utils`).
     #[cfg(feature = "__test_utils")]
+    use crate::asset::property::test_utils::with_ubulk;
+
+    #[cfg(feature = "__test_utils")]
     #[test]
     fn non_inlined_lod_resolves_geometry_from_ubulk() {
-        use std::sync::Arc;
-
         use super::test_support::{
             SEPARATE_FILE_NO_FIXUP, non_inlined_lod_ue4_23, serialize_buffers_blob_ue4_23,
         };
-        use crate::asset::bulk_data::BulkDataResolver;
 
         // With a bulk resolver on the context, a non-inlined LOD fetches its
         // SerializeBuffers blob from the companion `.ubulk` and decodes the same
         // geometry an inlined LOD would, then consumes the in-stream
         // availability-info trailer + FStaticMeshBuffersSize.
         let blob = serialize_buffers_blob_ue4_23([0, 1, 2]);
-        let resolver = Arc::new(BulkDataResolver::new_for_test_with_ubulk(
-            Vec::<u8>::new(), // stitched uasset — unused for the separate-file tier
-            0,                // total_header_size
-            0,                // bulk_data_start_offset
-            blob.clone(),     // the `.ubulk` payload
-        ));
-        let mut ctx = make_ctx_with_version(517, None);
-        ctx.bulk_resolver = Some(resolver);
+        let ctx = with_ubulk(make_ctx_with_version(517, None), blob.clone());
 
         let bytes = non_inlined_lod_ue4_23(SEPARATE_FILE_NO_FIXUP, blob.len(), 0);
         let mut cur = Cursor::new(bytes.as_slice());
@@ -1167,26 +1160,37 @@ mod tests {
         assert_eq!(lod.indices, vec![0, 1, 2]);
     }
 
+    /// LODs naming one `.ubulk` region decode it once per decode: a second
+    /// read of the region trips the bulk-read ledger.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn lods_naming_one_ubulk_region_decode_it_once() {
+        use super::test_support::{
+            SEPARATE_FILE_NO_FIXUP, non_inlined_lod_ue4_23, serialize_buffers_blob_ue4_23,
+        };
+        use crate::asset::bulk_data::BulkDataTier;
+        use crate::asset::property::test_utils::assert_parse_reads_exceed_source;
+
+        let blob = serialize_buffers_blob_ue4_23([0, 1, 2]);
+        let ctx = with_ubulk(make_ctx_with_version(517, None), blob.clone());
+        let bytes = non_inlined_lod_ue4_23(SEPARATE_FILE_NO_FIXUP, blob.len(), 0);
+        let decode = || read_lod(&mut Cursor::new(bytes.as_slice()), &ctx, "T");
+        let len = u64::try_from(blob.len()).unwrap();
+
+        assert_eq!(decode().unwrap().positions.len(), 3);
+        assert_parse_reads_exceed_source(decode(), BulkDataTier::Streaming, 2 * len, len);
+    }
+
     #[cfg(feature = "__test_utils")]
     #[test]
     fn non_inlined_lod_empty_payload_consumes_trailer_without_adjacency() {
-        use std::sync::Arc;
-
         use super::test_support::non_inlined_lod_ue5_0_empty;
-        use crate::asset::bulk_data::BulkDataResolver;
 
         // UE5 (tessellation removed) + element_count == 0: no geometry is
         // resolved, but the availability-info trailer is still consumed — and it
         // carries NO adjacency stats. Pins the `element_count > 0` gate and the
         // non-inlined tessellation gate (a phantom +8 would break consume-exactly).
-        let resolver = Arc::new(BulkDataResolver::new_for_test_with_ubulk(
-            Vec::<u8>::new(),
-            0,
-            0,
-            Vec::<u8>::new(),
-        ));
-        let mut ctx = ue5_release_ctx(REMOVING_TESSELLATION);
-        ctx.bulk_resolver = Some(resolver);
+        let ctx = with_ubulk(ue5_release_ctx(REMOVING_TESSELLATION), Vec::new());
 
         let bytes = non_inlined_lod_ue5_0_empty();
         let mut cur = Cursor::new(bytes.as_slice());
@@ -1205,22 +1209,12 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn non_inlined_lod_compressed_bulk_is_rejected() {
-        use std::sync::Arc;
-
         use super::test_support::{SEPARATE_FILE_LZO, non_inlined_lod_ue4_23};
-        use crate::asset::bulk_data::BulkDataResolver;
 
         // A compressed (LZO) streamed payload is rejected by the resolver; the
         // error propagates so the export degrades to a property bag (the
         // package-resilience contract turns any typed-reader error into Generic).
-        let resolver = Arc::new(BulkDataResolver::new_for_test_with_ubulk(
-            Vec::<u8>::new(),
-            0,
-            0,
-            Vec::<u8>::new(),
-        ));
-        let mut ctx = make_ctx_with_version(517, None);
-        ctx.bulk_resolver = Some(resolver);
+        let ctx = with_ubulk(make_ctx_with_version(517, None), Vec::new());
 
         let bytes = non_inlined_lod_ue4_23(SEPARATE_FILE_LZO, 16, 0);
         let mut cur = Cursor::new(bytes.as_slice());

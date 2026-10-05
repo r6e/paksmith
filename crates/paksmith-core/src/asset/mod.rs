@@ -919,15 +919,16 @@ impl Default for DerivedStringBudget {
 /// (Phase 2b+).
 ///
 /// **Thread safety:** `AssetContext: Send + Sync`. All components are
-/// `Arc`-shared; the bulk resolver's caches and the derived-string
-/// budget use atomics / `OnceLock`, so the context is safe to clone and
-/// share across worker threads.
+/// `Arc`-shared; the bulk resolver's caches, the derived-string budget
+/// and the bulk-read ledger use atomics / `OnceLock`, so the context is
+/// safe to clone and share across worker threads.
 /// Pinned by the `send_sync_assertions` test in `lib.rs`.
 ///
 /// `Arc`-wrapped components so `clone()` is a handful of atomic refcount
 /// bumps. (`version` is `Copy`; `mappings` is `Option<Arc<_>>`.) Clones
-/// share one budget for copied names that never resets; each
-/// [`AssetContext::new`] or [`Package::context`] call starts a fresh one.
+/// share one budget for copied names and one bulk-read ledger, neither
+/// of which resets; each [`AssetContext::new`] or [`Package::context`]
+/// call starts fresh ones.
 ///
 /// Marked `#[non_exhaustive]` because additional version-gate fields
 /// land here without a major bump (`custom_versions` shipped with #355;
@@ -1014,6 +1015,9 @@ pub struct AssetContext {
     /// [`MAX_DERIVED_STRING_BYTES`]. Clones share it, so every export
     /// of one `Package::read_from*` call draws on one budget.
     pub(crate) derived_strings: Arc<DerivedStringBudget>,
+    /// Bytes this decode's typed readers have charged against each
+    /// bulk-data source (#841). Clones share it, like `derived_strings`.
+    pub(crate) bulk_reads: Arc<bulk_data::BulkReadLedger>,
 }
 
 impl AssetContext {
@@ -1048,6 +1052,7 @@ impl AssetContext {
             // `Package::read_from*` path; see the field's own doc.
             engine_version_hint: None,
             derived_strings: Arc::default(),
+            bulk_reads: Arc::default(),
         }
     }
 

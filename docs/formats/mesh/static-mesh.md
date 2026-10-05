@@ -53,8 +53,9 @@ already-parsed geometry is still returned. The pre-4.23 legacy
 UNVERIFIED** path (no real pre-4.23 fixture; synthetic-only — reachable
 for object ≤516, ~UE4.20; 4.21/4.22 collapse to object 517 and route to
 the new reader). UE5 / Nanite is surfaced as `UnsupportedFeature`; an
-unresolvable non-inlined record (no resolver, missing companion, or
-compressed bulk) degrades the export to a generic property bag. The glTF
+unresolvable non-inlined record (no resolver, or any bulk-resolver error
+such as a missing companion or a source the decode has charged past its
+length) degrades the export to a generic property bag. The glTF
 `FormatHandler` that exports the geometry ships in
 `export/static_mesh.rs` (`GltfStaticMeshHandler`).
 
@@ -325,7 +326,8 @@ decoded as a **deliberately UNVERIFIED** path (no real pre-4.23 fixture;
 synthetic-only, targets object ≤516 (~UE4.20) — the lower sub-band runs the
 same code but is UNVERIFIED at sub-version boundaries and may desync). UE5
 / Nanite is surfaced as `UnsupportedFeature`; an unresolvable non-inlined
-record (no resolver, missing companion, or compressed bulk) degrades the
+record (no resolver, or any bulk-resolver error such as a missing
+companion or a source the decode has charged past its length) degrades the
 export to a generic property bag. Cross-validated against CUE4Parse[^1]
 (except the UNVERIFIED legacy path); in-memory fixtures exercise the
 readers (no `.pak` fixture, to avoid the CI fixture-count gate).
