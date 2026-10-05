@@ -409,27 +409,15 @@ mod tests {
         }
     }
 
-    /// The warn escapes and BOUNDS its untrusted fields. Pins the property
-    /// #658 established: dropping `untrusted::clamp` un-bounds the fields, and
-    /// re-applying the `%` sigil writes them raw; both survive every other
-    /// test in this file.
-    ///
-    /// Every assertion keys on a marker unique to this test. `KEPT` markers
-    /// prove the event reached the buffer, so the negatives cannot pass
-    /// vacuously; the two `CUT` markers prove each VALUE was clamped, which a
-    /// single value shared between both fields could not discriminate.
-    ///
-    /// Scope, because the obvious stronger reading is wrong: `logs_contain`
-    /// substring-matches the whole formatted line, so this pins WHICH VALUE was
-    /// clamped, not which field name it landed under — swapping the two field
-    /// names survives, and closing that needs a field-level capture API. It
-    /// fails a `MAX_UNTRUSTED_CHARS` widened to 400, while a 64->65
-    /// off-by-one is caught by `untrusted`'s `clamp_bounds_untrusted_values`,
-    /// whose literal 65 pins the value, so the two remain a pair.
+    /// The warn escapes and bounds its untrusted fields: dropping
+    /// `untrusted::clamp` un-bounds them, and a `%` sigil writes them raw;
+    /// both survive every other test in this file. Each check keys on one
+    /// value's own marker, so it pins which value was clamped and escaped,
+    /// not which field name it landed under.
     #[tracing_test::traced_test]
     #[test]
     fn warn_bounds_and_escapes_untrusted_hex() {
-        use crate::untrusted::test_support::hostile_name;
+        use crate::untrusted::test_support::{hostile_name, lines_clamped, lines_escaped};
 
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "game.exe", &[0xDE, 0xAD]);
@@ -439,21 +427,10 @@ mod tests {
             d.path(),
             &byte_signature_rules(&hostile_path, &hostile_hex)
         ));
-        // Captured: without these the negative asserts below pass vacuously
-        // whenever this event is missing from the buffer.
-        assert!(logs_contain("PATHKEPT"), "`path` must reach the log");
-        assert!(logs_contain("HEXKEPT"), "`hex` must reach the log");
-        // Clamped, per field. Also kills a WIDENED `MAX_UNTRUSTED_CHARS`, which the
-        // ellipsis form could not see.
-        assert!(!logs_contain("PATHCUT"), "`path` must be clamped at 64");
-        assert!(!logs_contain("HEXCUT"), "`hex` must be clamped at 64");
-        // Escaped: `record_str` renders ESC as `\u{1b}`. Asserting the RAW byte
-        // is ABSENT covers both fields — `%` on either one re-opens the sink.
-        assert!(logs_contain("\\u{1b}"), "ESC must appear escaped, not raw");
-        assert!(
-            !logs_contain("\u{1b}"),
-            "no raw ESC may reach the log record"
-        );
+        for tag in ["PATH", "HEX"] {
+            logs_assert(lines_clamped("this rule can never match", tag));
+            logs_assert(lines_escaped("this rule can never match", tag));
+        }
     }
 
     /// An empty `substring` is vacuously true — `file_contains` returns before

@@ -37,22 +37,52 @@ pub(crate) mod test_support {
     /// A `logs_assert` check: at least one line carries `message`, and
     /// each such line holds the [`hostile_name`] for `tag` clamped —
     /// `{tag}KEPT` present, `{tag}CUT` absent.
-    #[cfg(feature = "__test_utils")]
     pub(crate) fn lines_clamped<'a>(
         message: &'a str,
         tag: &'a str,
     ) -> impl Fn(&[&str]) -> Result<(), String> + 'a {
         move |lines: &[&str]| {
             let (kept, cut) = (format!("{tag}KEPT"), format!("{tag}CUT"));
-            let mut matched = lines.iter().filter(|l| l.contains(message)).peekable();
-            if matched.peek().is_none() {
-                return Err(format!("no `{message}` line was logged"));
-            }
-            match matched.find(|l| !l.contains(&kept) || l.contains(&cut)) {
+            match lines_with(lines, message)?
+                .into_iter()
+                .find(|l| !l.contains(&kept) || l.contains(&cut))
+            {
                 Some(line) => Err(format!("`{tag}` not clamped in {line:?}")),
                 None => Ok(()),
             }
         }
+    }
+
+    /// A `logs_assert` check: at least one line carries `message`, and
+    /// each such line holds the [`hostile_name`] for `tag` with its ESC
+    /// escaped, as a `&str` field renders it. A `%` field writes it raw.
+    pub(crate) fn lines_escaped<'a>(
+        message: &'a str,
+        tag: &'a str,
+    ) -> impl Fn(&[&str]) -> Result<(), String> + 'a {
+        move |lines: &[&str]| {
+            let escaped = format!("{tag}KEPT\\u{{1b}}[2J");
+            match lines_with(lines, message)?
+                .into_iter()
+                .find(|l| !l.contains(&escaped))
+            {
+                Some(line) => Err(format!("`{tag}` ESC not escaped in {line:?}")),
+                None => Ok(()),
+            }
+        }
+    }
+
+    /// The lines carrying `message`, or an error when none was logged.
+    fn lines_with<'l>(lines: &[&'l str], message: &str) -> Result<Vec<&'l str>, String> {
+        let matched: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|l| l.contains(message))
+            .collect();
+        if matched.is_empty() {
+            return Err(format!("no `{message}` line was logged"));
+        }
+        Ok(matched)
     }
 }
 

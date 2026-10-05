@@ -24,6 +24,7 @@ use crate::error::{
     AssetParseFault, AssetWireField, CollectionKind, PaksmithError, try_reserve_asset,
 };
 use crate::seams::AssetSeam;
+use crate::untrusted::clamp;
 
 use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, read_tag, unexpected_eof};
 
@@ -876,7 +877,7 @@ fn bail_map_partial<R: Read + Seek>(
 ) -> crate::Result<Option<PropertyValue>> {
     warn!(
         asset = asset_path,
-        map = tag.name.as_ref(),
+        map = &*clamp(&tag.name),
         key_type = tag.inner_type.as_ref(),
         value_type = tag.value_type.as_ref(),
         entries_decoded = entries.len(),
@@ -919,7 +920,7 @@ fn bail_set_partial<R: Read + Seek>(
 ) -> crate::Result<Option<PropertyValue>> {
     warn!(
         asset = asset_path,
-        set = tag.name.as_ref(),
+        set = &*clamp(&tag.name),
         inner_type = tag.inner_type.as_ref(),
         elements_decoded = elements.len(),
         error = %error,
@@ -2938,6 +2939,33 @@ mod tests {
         }
     }
 
+    /// The bail warning names the map; a long archive name reaches it
+    /// clamped and escaped.
+    #[tracing_test::traced_test]
+    #[test]
+    fn map_bail_warning_bounds_a_long_map_name() {
+        use crate::untrusted::test_support::{hostile_name, lines_clamped, lines_escaped};
+
+        let ctx = make_ctx(MAP_OF_STRUCT_NAMES);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_keys_to_remove
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // count
+        bytes.extend(name_key_body(6)); // "first"
+        bytes.extend(bad_struct_body()); // PackageIndexOob
+
+        let outer_tag = make_map_of_struct_tag(bytes.len()).with_name(&hostile_name("MAP"));
+        let expected_end = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let value = read_map_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset");
+
+        assert!(
+            matches!(value, Ok(Some(PropertyValue::Map { .. }))),
+            "{value:?}"
+        );
+        logs_assert(lines_clamped("returning partial Map", "MAP"));
+        logs_assert(lines_escaped("returning partial Map", "MAP"));
+    }
+
     #[test]
     fn map_of_struct_bails_partial_on_struct_decode_failure() {
         // 3-entry Map<Name, Struct>. Entry 2's struct body trips
@@ -3192,6 +3220,32 @@ mod tests {
             }
             other => panic!("expected Set, got {other:?}"),
         }
+    }
+
+    /// The bail warning names the set; a long archive name reaches it
+    /// clamped and escaped.
+    #[tracing_test::traced_test]
+    #[test]
+    fn set_bail_warning_bounds_a_long_set_name() {
+        use crate::untrusted::test_support::{hostile_name, lines_clamped, lines_escaped};
+
+        let ctx = make_ctx(SET_OF_STRUCT_NAMES);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_elements_to_remove
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // count
+        bytes.extend(bad_struct_body()); // PackageIndexOob
+
+        let outer_tag = make_set_of_struct_tag(bytes.len()).with_name(&hostile_name("SET"));
+        let expected_end = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let value = read_set_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset");
+
+        assert!(
+            matches!(value, Ok(Some(PropertyValue::Set { .. }))),
+            "{value:?}"
+        );
+        logs_assert(lines_clamped("returning partial Set", "SET"));
+        logs_assert(lines_escaped("returning partial Set", "SET"));
     }
 
     #[test]
