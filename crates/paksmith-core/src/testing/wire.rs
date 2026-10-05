@@ -2,7 +2,8 @@
 //! FPakEntry / FString format shared across every pak version;
 //! v10+-specific helpers live in [`v10`].
 //!
-//! Gated behind `__test_utils`; `pub` items are a test-only surface.
+//! Gated behind `__test_utils`; `pub` items are a test and fixture
+//! surface (see the parent module).
 //! `unwrap()`s are infallible (`WriteBytesExt` on `Vec<u8>` never
 //! fails) — hence the module-wide `missing_panics_doc` allow.
 //!

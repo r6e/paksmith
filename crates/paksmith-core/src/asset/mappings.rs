@@ -179,7 +179,8 @@ const MAX_USMAP_ARRAY_NESTING_DEPTH: usize = 16;
 /// Test-only accessor for `MAX_USMAP_ENUM_COUNT`. Boundary tests read
 /// the live value rather than duplicating the literal, which would
 /// silently drift if the cap ever changes. Gated behind `__test_utils`
-/// so downstream consumers cannot pin against this value.
+/// so it is not part of the stable public API; downstream consumers
+/// should not pin against this value.
 #[cfg(feature = "__test_utils")]
 #[must_use]
 pub fn max_usmap_enum_count() -> u32 {

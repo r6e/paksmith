@@ -7,7 +7,7 @@
 //! paksmith's test infra; do not depend on this from downstream
 //! crates"). An in-source test in THIS crate must enable the feature
 //! to reach it. A default-members `cargo build` compiles none of it,
-//! and anything `pub` here is a `cargo test`-only surface that may
+//! and anything `pub` here is a test and fixture surface that may
 //! change in any release.
 //!
 //! That is the gate's INTENT, not a guarantee cargo enforces. Features

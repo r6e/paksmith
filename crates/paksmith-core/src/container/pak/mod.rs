@@ -134,8 +134,8 @@ pub(in crate::container::pak) const MAX_UNCOMPRESSED_ENTRY_BYTES: u64 = 8 * 1024
 ///
 /// Gated behind the `__test_utils` feature so it's not part of the
 /// stable public API. The `paksmith-core-tests` integration tests
-/// enable it through their dev-dependency; downstream consumers cannot
-/// pin against this value.
+/// enable it through their dev-dependency; downstream consumers should
+/// not pin against this value.
 #[cfg(feature = "__test_utils")]
 pub fn max_uncompressed_entry_bytes() -> u64 {
     MAX_UNCOMPRESSED_ENTRY_BYTES
