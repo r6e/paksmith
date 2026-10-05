@@ -97,7 +97,7 @@ jobs:
           # Full history needed for `git diff` against the PR base.
           fetch-depth: 0
       - uses: ./.github/actions/setup-rust
-      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-mutants
       # Same event-pinned diff derivation as the shard jobs below —
@@ -149,7 +149,7 @@ jobs:
           # Full history needed for `git diff` against the PR base.
           fetch-depth: 0
       - uses: ./.github/actions/setup-rust
-      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-mutants
       # Diff against the EVENT-PINNED base commit, not the mutable
