@@ -36,6 +36,7 @@ use crate::error::{
     AssetParseFault, AssetWireField, BoundsUnit, CollectionKind, PaksmithError, try_reserve_asset,
 };
 use crate::seams::AssetSeam;
+use crate::untrusted::clamp;
 
 use super::super::mappings::{MappedProperty, MappedPropertyType, Usmap};
 
@@ -300,7 +301,8 @@ pub(crate) fn read_unversioned_properties(
         }
         warn!(
             asset_path,
-            class_name, "no schema found for class; skipping unversioned properties"
+            class_name = &*clamp(class_name),
+            "no schema found for class; skipping unversioned properties"
         );
         return Ok(Vec::new());
     }
@@ -357,8 +359,8 @@ pub(crate) fn read_unversioned_properties(
             Err(e) if is_partial_tree_stop(&e) && depth == 0 => {
                 warn!(
                     asset_path,
-                    class_name,
-                    property = mapped_prop.name.as_ref(),
+                    class_name = &*clamp(class_name),
+                    property = &*clamp(&mapped_prop.name),
                     error = %e,
                     "unversioned property cannot be decoded; stopping read"
                 );
@@ -1144,20 +1146,78 @@ mod tests {
     /// Builds a single-property `.usmap` [`Usmap`] whose one property has
     /// the given type, for a `read_unversioned_properties` call.
     fn single_prop_usmap(prop_type: MappedPropertyType) -> Usmap {
+        named_single_prop_usmap("C", "P", prop_type)
+    }
+
+    /// [`single_prop_usmap`] with the class and property names given.
+    fn named_single_prop_usmap(class: &str, prop: &str, prop_type: MappedPropertyType) -> Usmap {
         let schema = ClassSchema {
-            name: "C".to_string(),
+            name: class.to_string(),
             super_type: None,
             prop_count: 1,
             properties: vec![MappedProperty {
-                name: Arc::from("P"),
+                name: Arc::from(prop),
                 schema_index: 0,
                 array_index: 0,
                 prop_type,
             }],
         };
         let mut schemas = HashMap::new();
-        let _ = schemas.insert("C".to_string(), schema);
+        let _ = schemas.insert(class.to_string(), schema);
         Usmap::from_parts(schemas, HashMap::new()).expect("from_parts")
+    }
+
+    /// The missing-schema warning names the class; a long name reaches
+    /// it clamped and escaped.
+    #[tracing_test::traced_test]
+    #[test]
+    fn missing_schema_warning_bounds_a_long_class_name() {
+        use crate::untrusted::test_support::{hostile_name, lines_clamped, lines_escaped};
+
+        let usmap = Usmap::from_parts(HashMap::new(), HashMap::new()).expect("from_parts");
+        let props = read_unversioned_properties(
+            &mut Cursor::new(&[][..]),
+            &hostile_name("CLS"),
+            &usmap,
+            &make_ctx(&["None"]),
+            "t",
+            0,
+        );
+
+        assert!(matches!(props.as_deref(), Ok([])), "{props:?}");
+        logs_assert(lines_clamped("no schema found for class", "CLS"));
+        logs_assert(lines_escaped("no schema found for class", "CLS"));
+    }
+
+    /// The partial-tree-stop warning's `class_name` and `property` fields
+    /// carry long names clamped and escaped; `error = %e` repeats the
+    /// property name clamped but with its ESC unescaped (#708).
+    #[tracing_test::traced_test]
+    #[test]
+    fn partial_tree_stop_warning_bounds_long_class_and_property_names() {
+        use crate::untrusted::test_support::{hostile_name, lines_clamped, lines_escaped};
+
+        let class = hostile_name("CLS");
+        let usmap = named_single_prop_usmap(
+            &class,
+            &hostile_name("PROP"),
+            MappedPropertyType::Unknown(0xEE),
+        );
+        let bytes = 0x0300u16.to_le_bytes(); // 1 serialized property
+        let props = read_unversioned_properties(
+            &mut Cursor::new(&bytes[..]),
+            &class,
+            &usmap,
+            &make_ctx(&["None"]),
+            "t",
+            0,
+        );
+
+        assert!(matches!(props.as_deref(), Ok([])), "{props:?}");
+        for tag in ["CLS", "PROP"] {
+            logs_assert(lines_clamped("stopping read", tag));
+            logs_assert(lines_escaped("stopping read", tag));
+        }
     }
 
     #[test]
