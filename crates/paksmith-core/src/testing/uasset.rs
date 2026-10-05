@@ -2833,7 +2833,7 @@ mod tests {
     /// Shape + behaviour pin for the #656 UE5-1009 texture fixture.
     ///
     /// In-source for the same reason as the #648 pins below:
-    /// `cargo-mutants` credits only default-members, and this
+    /// cargo-mutants runs only the mutated package's tests, and this
     /// builder's only other consumer is the `engine_hint_seam`
     /// capstone in `paksmith-core-tests` — so every
     /// `MinimalPackageSpec` field here is invisible to mutation
@@ -3022,11 +3022,10 @@ mod tests {
     ///
     /// **Why this lives in-source** (not only in the
     /// `paksmith-core-tests` `data_table_integration` capstone):
-    /// `cargo-mutants` runs `cargo test` over default-members, which
-    /// EXCLUDES `paksmith-core-tests` — so the builder's hardcoded
-    /// values (NumRows=2, the FName indices, the 10/100/8/120 cell
-    /// values) would survive mutation without an assertion in a
-    /// default-member crate (the PR #487 burn). Re-parsing the produced
+    /// cargo-mutants runs only the mutated package's tests, so without an
+    /// assertion in this crate the builder's hardcoded values (NumRows=2,
+    /// the FName indices, the 10/100/8/120 cell values) would survive
+    /// mutation (the PR #487 burn). Re-parsing the produced
     /// bytes through the full `Package::read_from` dispatch and asserting
     /// every emitted value pins them: a mutated class name → Generic
     /// fallback, a mutated NumRows → wrong row count / EOF, a mutated
@@ -3073,9 +3072,8 @@ mod tests {
     ///
     /// **Why this lives in-source** (and not only in the
     /// `paksmith-core-tests` `typed_struct_integration` capstone):
-    /// `cargo-mutants` runs `cargo test` over default-members, which
-    /// EXCLUDES `paksmith-core-tests` — so without an assertion in a
-    /// default-member crate, every mutation of this builder (the
+    /// cargo-mutants runs only the mutated package's tests, so without an
+    /// assertion in this crate every mutation of this builder (the
     /// negative FBox/FBox2D corner literals, the `idx` `==`, the
     /// `MinimalPackageSpec` field set) survives. This test re-parses
     /// the produced bytes and asserts the mutation-exposed values: a

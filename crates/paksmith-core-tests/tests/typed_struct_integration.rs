@@ -20,7 +20,7 @@
 //! `containers::tests::struct_property_vector_decodes_lwc_widened`.
 //!
 //! Required feature: `__test_utils` (the `testing::uasset` builders
-//! are gated behind it; only this sibling crate enables it).
+//! are gated behind it; this crate's dev-dependency enables it).
 
 #![allow(missing_docs)]
 

@@ -14,7 +14,7 @@
 //! default Texture2D handler turns them into a valid PNG.
 //!
 //! Required feature: `__test_utils` (the `testing::uasset` builders are gated
-//! behind it; only this sibling crate enables it).
+//! behind it; this crate's dev-dependency enables it).
 
 #![allow(missing_docs)]
 

@@ -133,8 +133,8 @@ pub(in crate::container::pak) const MAX_UNCOMPRESSED_ENTRY_BYTES: u64 = 8 * 1024
 /// which would silently drift if the cap ever changes.
 ///
 /// Gated behind the `__test_utils` feature so it's not part of the
-/// stable public API. Integration tests in this crate enable it via
-/// `dev-dependencies`-style activation; downstream consumers cannot
+/// stable public API. The `paksmith-core-tests` integration tests
+/// enable it through their dev-dependency; downstream consumers cannot
 /// pin against this value.
 #[cfg(feature = "__test_utils")]
 pub fn max_uncompressed_entry_bytes() -> u64 {
@@ -1490,8 +1490,9 @@ impl PakReader {
                     // in-source test
                     // `read_encrypted_compressed_block_end_between_buffer_and_file_uses_buffer_ceiling`
                     // (in-source, not the integration crate, so cargo-mutants —
-                    // which runs only default-members — actually credits the
-                    // kill): a forged single-block `end` between the two values
+                    // which runs only the mutated package's tests — actually
+                    // credits the kill): a forged single-block `end` between the
+                    // two values
                     // must reject as `EndPastFileSize`, which the wider
                     // `self.file_size` ceiling would let through.
                     let buffer_end = payload_start
@@ -4012,9 +4013,9 @@ mod tests {
     /// from `default-members`. Catches mutants that short-circuit
     /// the function body to a constant return value (`Ok(0)`,
     /// `Ok(1)`, etc.) — those produce the wrong count even though
-    /// the writer ends up empty, which an integration test in a
-    /// non-default-members crate wouldn't see under `cargo-mutants`'
-    /// default test invocation.
+    /// the writer ends up empty, which an integration test in another
+    /// crate wouldn't credit, since cargo-mutants runs only the mutated
+    /// package's tests.
     #[test]
     fn stream_zlib_to_returns_exact_uncompressed_size() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4045,8 +4046,9 @@ mod tests {
     /// `stream_zlib_to` rejects pre-v5 (absolute-offset) versions at its
     /// version guard, and lets v5+ (entry-relative) through. In-source so
     /// cargo-mutants covers it — the integration-crate
-    /// `read_zlib_rejects_pre_v5_compressed_entry` isn't run under the
-    /// default-members mutant invocation, which let the `<
+    /// `read_zlib_rejects_pre_v5_compressed_entry` isn't run by
+    /// cargo-mutants (it runs only the mutated package's tests), which let
+    /// the `<
     /// RelativeChunkOffsets` boundary drift to `==`/`<=` unnoticed (#637
     /// review). `stream_zlib_to` takes `version` as a plain arg, so we drive
     /// the boundary directly against a real (v8b, entry-relative) compressed
@@ -4441,12 +4443,11 @@ mod tests {
     // operator survive without these.
     // EVERY test that touches the shared builder MUST be gated on
     // `__test_utils` because `crate::testing::wire` is — an ungated
-    // test breaks every PACKAGE-SCOPED build of paksmith-core
-    // (cargo-mutants baseline, `cargo test -p paksmith-core`,
-    // publish). Wider invocations mask it: feature unification turns
-    // `__test_utils` on whenever paksmith-core-tests or
-    // paksmith-gui's dev-dep is in the resolved graph, which
-    // includes the bare default-members `cargo test`. CI's guard is
+    // test breaks the no-feature `cargo test -p paksmith-core` build.
+    // Wider invocations mask it: feature unification turns
+    // `__test_utils` on whenever a crate that enables it (see core's
+    // Cargo.toml) is in the resolved graph, including via
+    // paksmith-gui's dev-dep in the bare default-members `cargo test`. CI's guard is
     // therefore `-p paksmith-core`-scoped (#636 R8/R9).
 
     /// Chunk `plaintext` into `block_size` blocks, LZ4-compress each,
@@ -5439,9 +5440,9 @@ mod tests {
     /// Duplicated (minimally) from `paksmith-core-tests`'s
     /// `build_single_entry_pak_with_flags` / `build_v8b_lz4_pak` ON PURPOSE:
     /// in-source tests can't reach the integration crate, and cargo-mutants
-    /// runs only default-members (paksmith-core, `cargo test`), so a mutant on
+    /// runs only the mutated package's tests, so a mutant on
     /// the encrypted read path (e.g. the `buffer_end` block-bounds ceiling in
-    /// `stream_entry_to`) is killable ONLY by an in-source test. The footer
+    /// `stream_entry_to`) is killable only by a paksmith-core test. The footer
     /// carries one compression-name slot (`method_name`, resolved via the
     /// per-entry 1-based `method_index`; pass 0 for `None`-method entries,
     /// whose records omit the block table) and a PLAINTEXT index (footer
@@ -5528,8 +5529,9 @@ mod tests {
     /// `BlockBoundsViolation { EndPastFileSize }`.
     ///
     /// IN-SOURCE (not `paksmith-core-tests`) on purpose: cargo-mutants runs
-    /// only default-members, so the `buffer_end -> self.file_size` mutant on
-    /// `stream_entry_to` is killable only here. Verified to kill it — under the
+    /// only the mutated package's tests, so the `buffer_end -> self.file_size`
+    /// mutant on
+    /// `stream_entry_to` is killable only from paksmith-core. Verified to kill it — under the
     /// wider `self.file_size` ceiling the forged block is accepted and the read
     /// surfaces `Io(UnexpectedEof)` over the short `RebasedReader` instead of
     /// the typed fault. A single-block entry suffices: the bounds check fires

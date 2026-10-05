@@ -38,8 +38,9 @@ for the phased plan.
 
 ```sh
 cargo build      # builds the default workspace members (core, cli, gui)
-cargo test       # default-member tests (the integration suite + __test_utils
-                 # surface need `cargo test --workspace --all-features`)
+cargo test       # default-member tests (`cargo test --workspace` adds the
+                 # crates excluded below; CI runs the workspace suite with
+                 # `--all-features`)
 ```
 
 Four crates are excluded from `default-members` (`paksmith-fixture-gen`,

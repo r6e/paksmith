@@ -29,8 +29,9 @@
 //!
 //! Lives in `paksmith-core-tests` (not `paksmith-core/tests/`) because
 //! the round-trip arms need `write_to` methods — those are gated
-//! behind the `__test_utils` feature, which only this sibling crate
-//! activates. (`paksmith-core` deliberately doesn't self-import to
+//! behind the `__test_utils` feature, which `cargo test -p paksmith-core`
+//! compiles out and this crate's dev-dependency enables. (`paksmith-core`
+//! deliberately doesn't self-import to
 //! avoid a release-please dep-graph cycle; see this crate's
 //! `Cargo.toml`.)
 

@@ -1670,13 +1670,13 @@ mod read_options_tests {
 
     /// The builders are the documented construction path but live
     /// outside the `__test_utils`-gated module below, which the
-    /// package-scoped mutants baseline compiles out — without this
-    /// their bodies are unpinned.
+    /// no-feature `cargo test -p paksmith-core` build compiles out —
+    /// without this their bodies are unpinned there.
     ///
     /// TWIN: `engine_hint_seam.rs::read_options_fields_are_independent`
     /// asserts the same composition from OUTSIDE the crate, proving the
     /// symbols are public. This copy is the one cargo-mutants credits
-    /// (`paksmith-core-tests` is excluded from `default-members`), so
+    /// (it runs only the mutated package's tests), so
     /// any rigor added there must be mirrored here — the reverse drift
     /// is how a vacuous assertion survived on this side once already.
     #[test]
@@ -1980,8 +1980,9 @@ mod tests {
     /// fall through to the generic parse like a malformed body does.
     ///
     /// In-source (mirrors `oom_asset.rs`'s integration test) because
-    /// `cargo-mutants` runs over default-members and EXCLUDES
-    /// `paksmith-core-tests` — without this, flipping the dispatch's
+    /// cargo-mutants runs only the mutated package's tests, so
+    /// `paksmith-core-tests` never credits a kill — without this, flipping
+    /// the dispatch's
     /// `matches!(.. AllocationFailed ..)` guard to `false` (which would
     /// wrongly degrade OOM to a generic parse) survives mutation.
     #[test]

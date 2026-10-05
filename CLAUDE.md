@@ -5,10 +5,10 @@ Cross-platform Rust rewrite of FModel for exploring and extracting Unreal Engine
 ## Build
 
 - `cargo build` — build default-members (core, cli, gui)
-- `cargo test` — run default-members tests (paksmith-core unit + cli + gui). Skips the `paksmith-core-tests` integration suite. Note: the `__test_utils`-gated in-source tests DO run here — paksmith-gui's dev-dependency enables the feature, and Cargo unifies it — so only package-scoped builds (`cargo test -p paksmith-core`, cargo-mutants baseline, publish) compile paksmith-core without it.
-- `cargo test --workspace --all-features` — run the full suite (matches CI). Includes the heavyweight `paksmith-core-tests` integration suite and paksmith-core's `__test_utils`-gated in-source tests, both excluded from default-members.
+- `cargo test` — run default-members tests (paksmith-core unit + cli + gui). Skips the `paksmith-core-tests` integration suite. Note: paksmith-core's `__test_utils`-gated in-source tests DO run here (paksmith-gui's dev-dependency enables the feature; core's `Cargo.toml` lists every crate that does). `cargo test -p paksmith-core`, which CI's compile-guard step checks, compiles core's tests without it.
+- `cargo test --workspace --all-features` — run the full suite (matches CI). Adds the members excluded from default-members, including the heavyweight `paksmith-core-tests` integration suite.
 - `cargo run -p paksmith-cli -- <args>` — run the CLI
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — lint (mirrors CI; the workspace-default invocation misses the `__test_utils` surface and integration tests, see MEMORY)
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — lint (mirrors CI; without `--all-targets` the workspace invocation misses test, example and bench targets, including the integration tests, see MEMORY)
 - `cargo fmt --all` — format
 - `cargo run -p paksmith-fixture-gen` — regenerate test fixtures (excluded from `default-members` because it depends on a git-sourced parser oracle)
 

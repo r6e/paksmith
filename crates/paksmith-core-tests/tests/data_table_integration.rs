@@ -19,7 +19,7 @@
 //! through the public crate API, and that the registry exports it).
 //!
 //! Required feature: `__test_utils` (the `testing::uasset` builders are
-//! gated behind it; only this sibling crate enables it).
+//! gated behind it; this crate's dev-dependency enables it).
 
 #![allow(missing_docs)]
 

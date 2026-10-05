@@ -83,10 +83,11 @@ tracing-test.workspace = true
 
 [features]
 # Test-only accessors gated behind this feature so they're not part
-# of the stable public API. Activated by the sibling
-# `paksmith-core-tests` crate (which owns the integration tests that
-# need these accessors) and by `paksmith-fixture-gen`. Downstream
-# consumers should NOT enable it.
+# of the stable public API. Activated by `paksmith-fixture-gen` (a
+# normal dependency), by the dev-dependencies of `paksmith-core-tests`
+# (which owns the integration tests that need these accessors),
+# `paksmith-gui` and `paksmith-bench`, and by the out-of-workspace
+# `fuzz/` crate. Downstream consumers should NOT enable it.
 #
 # Previously activated via a dev-dep self-import in this Cargo.toml;
 # that created a `paksmith-core -> paksmith-core` edge in the
@@ -94,13 +95,14 @@ tracing-test.workspace = true
 # release workflow. The dedicated test crate avoids the self-edge.
 #
 # **Feature-unification caveat:** Cargo features are resolved
-# globally per package across the workspace dep graph. If a future
-# workspace member adds `paksmith-core` as a NON-DEV dep AND
-# something else activates `__test_utils` transitively, the gated
-# symbols would land in the non-test build. The leading `__` is
-# convention only; cargo doesn't enforce it. Reviewers adding new
-# paksmith-core consumers should verify they don't accidentally
-# unify this feature open.
+# globally per package across the selected dep graph, so any build
+# that includes `paksmith-fixture-gen` (e.g. `cargo build --workspace`)
+# compiles the gated symbols into paksmith-core's non-test build.
+# The shipped release artifacts stay clean because release.yml builds
+# only `-p paksmith-cli -p paksmith-gui`. The leading `__` is
+# convention only; cargo doesn't enforce it. Reviewers changing
+# release.yml's `-p` set, or giving a released crate a dependency that
+# enables this feature, should check that it stays off there.
 __test_utils = []
 
 # Cross-parser fixture generation (uses the trumank/repak git dep) and

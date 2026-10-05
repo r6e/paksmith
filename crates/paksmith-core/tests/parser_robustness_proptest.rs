@@ -73,7 +73,8 @@ proptest! {
 /// when an asset references it. The proptest only needs a `Usmap`
 /// instance the dispatch will accept; it doesn't decode against the
 /// schema. Inlining here avoids gating the file behind
-/// `__test_utils`, so default `cargo test` runs the panic canaries.
+/// `__test_utils`, so the no-feature `cargo test -p paksmith-core` runs the
+/// panic canaries too.
 fn build_empty_schema_usmap() -> Vec<u8> {
     let mut data: Vec<u8> = Vec::new();
     // Name table: 2 entries — ["Hero", "None"]
