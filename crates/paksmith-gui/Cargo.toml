@@ -88,8 +88,9 @@ zeroize = { workspace = true }
 # compile.
 tokio = { workspace = true, features = ["test-util"] }
 # Phase 7b Task 3: enable __test_utils so tests can build synthetic texture
-# Packages via paksmith_core::testing::uasset. Normal `cargo build` is
-# unaffected; this feature is only active during test compilation.
+# Packages via paksmith_core::testing::uasset. This dev-dependency enables it
+# only when gui's test targets are built; other crates can still turn it on
+# in wider builds (see paksmith-core's Cargo.toml).
 paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
 tempfile.workspace = true
 

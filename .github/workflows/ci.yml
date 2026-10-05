@@ -173,39 +173,16 @@ jobs:
             exit 1
           fi
           echo "| Byte-determinism | ok |" >> "$GITHUB_STEP_SUMMARY"
-      # Issue #102: `--all-features` activates the `__test_utils`
-      # feature so tests gated by it (e.g. cross-crate fixture
-      # sharing) get exercised even when the self-dep feature
-      # propagation chain is incomplete. Today only `paksmith-core`
-      # has a `__test_utils` feature with a single self-dep, but
-      # `--all-features` is cheap insurance against a future
-      # workspace member adding `#[cfg(feature = "__test_utils")]`-
-      # gated tests that don't propagate.
-      #
-      # Fast-fail compile-only guard for the default-features `cargo test`
-      # invocation CLAUDE.md documents. The `--all-features` nextest
-      # run below gates everything behind `__test_utils`; a regression
-      # like PR #406 (where an integration test started calling a
-      # `__test_utils`-gated symbol without opting into the feature)
-      # compiles under `--all-features` but fails the default `cargo
-      # test` command every contributor's pre-commit hook runs. Runs
-      # before nextest so the failure surfaces in seconds instead of
-      # after the long all-features run.
-      #
-      # TWO invocations, deliberately. Only the PACKAGE-scoped form
-      # catches an UNGATED in-package test (e.g. a `mod.rs` test using
-      # `crate::testing::wire` without
-      # `#[cfg(feature = "__test_utils")]` — the #636 R8/R9 finding):
-      # any invocation that resolves the wider graph unifies
-      # `__test_utils` onto paksmith-core (paksmith-core-tests' dep
-      # AND paksmith-gui's dev-dep both enable it, so even the bare
-      # default-members `cargo test --no-run` compiles the gated
-      # surface — empirically verified). `-p paksmith-core` keeps the
-      # feature off, matching every package-scoped build
-      # (cargo-mutants baseline, `cargo test -p paksmith-core`,
-      # publish). The `--workspace` form runs second as a fast
-      # full-graph compile check for test targets nextest would only
-      # fail on later.
+      # Fast-fail compile-only guard, run before the long nextest step.
+      # `cargo test -p paksmith-core` compiles core's own tests without
+      # `__test_utils`, so it is the CI step that catches a core test
+      # reaching a gated symbol without the gate (PR #406; an ungated
+      # `mod.rs` test using `crate::testing::wire`, #636 R8/R9). Wider
+      # test builds unify the feature on (paksmith-gui's dev-dep does so
+      # for the bare default-members `cargo test --no-run`, empirically
+      # verified; core's Cargo.toml lists the other crates that enable
+      # it). The `--workspace` form runs second as a fast full-graph
+      # compile check for test targets nextest would only fail on later.
       - name: Verify default cargo test still compiles
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -214,7 +191,10 @@ jobs:
       # nextest runs unit + integration tests in parallel and emits
       # JUnit XML at target/nextest/ci/junit.xml (configured in
       # .config/nextest.toml). Doctests are NOT covered by nextest
-      # and must run separately via `cargo test --doc`.
+      # and must run separately via `cargo test --doc`. Issue #102:
+      # `--all-features` turns on every selected member's features, so
+      # gated tests run even if nothing else enables their feature
+      # (today only paksmith-core's `__test_utils`; cheap insurance).
       - name: Run tests (nextest)
         run: cargo nextest run --workspace --all-features --profile ci
       - name: Run doctests
@@ -270,11 +250,11 @@ jobs:
         with:
           components: clippy, rustfmt
       - run: cargo fmt --all -- --check
-      # `--all-targets` includes tests, examples, benches; `--all-features`
-      # activates the `__test_utils` feature so lints in the test-utils
-      # surface (`crates/paksmith-core/src/testing/`) are checked too.
-      # Without these flags the default `cargo clippy --workspace` misses
-      # those code paths — exactly the trap MEMORY.md's
+      # `--all-targets` includes tests, examples and benches, and with
+      # them the `#[cfg(test)]` modules; `--all-features` turns on
+      # paksmith-core's `__test_utils` directly. Without
+      # `--all-targets` the default `cargo clippy --workspace` misses
+      # those test code paths — exactly the trap MEMORY.md's
       # `ghas_clippy_extra_lints.md` flagged.
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # `-D warnings` for rustdoc catches broken intra-doc links and

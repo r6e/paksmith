@@ -1129,8 +1129,7 @@ mod tests {
     }
 
     // The resolver-backed tests construct a `BulkDataResolver` via the
-    // `__test_utils`-gated `new_for_test_with_ubulk`, so they are gated to match
-    // (a plain `cargo test` build does not enable `__test_utils`).
+    // `__test_utils`-gated `new_for_test_with_ubulk`, so they are gated to match.
     #[cfg(feature = "__test_utils")]
     use crate::asset::property::test_utils::with_ubulk;
 

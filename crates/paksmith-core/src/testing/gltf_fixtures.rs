@@ -10,8 +10,8 @@
 //!
 //! These mirror the in-crate `#[cfg(test)]` fixtures (`lod_one_triangle`,
 //! `skinned_triangle_data`) but are deliberately separate: moving those to
-//! `__test_utils` would break the default `cargo test` build (their consumers run
-//! without the feature).
+//! `__test_utils` would break the no-feature `cargo test -p paksmith-core` build
+//! (their consumers run without the feature).
 
 use crate::asset::exports::mesh::section::MeshSection;
 use crate::asset::structs::bounds::FBoxSphereBounds;

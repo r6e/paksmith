@@ -44,9 +44,7 @@ jobs:
         run: cargo install --locked --version 0.8.0 clippy-sarif && cargo install --locked --version 0.8.0 sarif-fmt
 
       - name: Run Clippy with SARIF output
-        # `--all-features` activates the `__test_utils` feature so
-        # lints in the test-utils surface (`crates/paksmith-core/src/testing/`)
-        # are scanned too.
+        # Same flags as the CI Lint job (rationale there).
         #
         # No command injection surface: the command line is fully
         # static (no `${{ github.event.* }}` interpolation), and

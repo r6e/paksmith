@@ -179,7 +179,8 @@ const MAX_USMAP_ARRAY_NESTING_DEPTH: usize = 16;
 /// Test-only accessor for `MAX_USMAP_ENUM_COUNT`. Boundary tests read
 /// the live value rather than duplicating the literal, which would
 /// silently drift if the cap ever changes. Gated behind `__test_utils`
-/// so downstream consumers cannot pin against this value.
+/// so it is not part of the stable public API; downstream consumers
+/// should not pin against this value.
 #[cfg(feature = "__test_utils")]
 #[must_use]
 pub fn max_usmap_enum_count() -> u32 {
@@ -1568,11 +1569,11 @@ pub(crate) fn hero_usmap_fixture() -> std::path::PathBuf {
 // because they reuse `testing::usmap::build_minimal_usmap_bytes` — the
 // canonical source for the minimal `.usmap` byte fixture, shared with
 // fixture-gen + integration tests. Same precedent as `package.rs`. The
-// trade-off: these four tests run only under `cargo test --workspace
-// --all-features` (i.e., the CI invocation), not bare `cargo test`. The
-// DRY win (≥45 lines of duplicate wire-format bytes) is worth the
-// local-vs-CI signal gap; a future stand-alone reader-only test that
-// doesn't need the helper can sit in a separate `#[cfg(test)]` module.
+// trade-off: these tests do not run in the no-feature
+// `cargo test -p paksmith-core` build. The DRY win (≥45 lines of
+// duplicate wire-format bytes) is worth that gap; a future stand-alone
+// reader-only test that doesn't need the helper can sit in a separate
+// `#[cfg(test)]` module.
 #[cfg(all(test, feature = "__test_utils"))]
 mod tests {
     use super::*;

@@ -173,11 +173,11 @@ jobs:
       # shards partition the ORDERED list into consecutive slices, so
       # a shuffled order would break the partition's determinism. `-j 2`
       # parallelism is conservative — bump if jobs are I/O-bound on a
-      # given runner. `--all-features` matches CI's full test invocation
-      # so mutations on `__test_utils`-gated code and the
-      # `paksmith-core-tests` integration suite are validated against
-      # the same surface CI runs (per CLAUDE.md: default `cargo test`
-      # misses these).
+      # given runner. cargo-mutants runs only the mutated package's tests
+      # (so the `paksmith-core-tests` suite never credits a kill), and
+      # that package-scoped build leaves `__test_utils` off;
+      # `--all-features` turns it on so the gated code and tests are
+      # compiled and run.
       - name: Run cargo-mutants shard on PR diff
         run: |
           cargo mutants \
