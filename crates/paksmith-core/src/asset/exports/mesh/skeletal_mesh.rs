@@ -1321,9 +1321,6 @@ fn read_lod_post_loop_tail(
 /// reads + the section reader's caps as the natural backstop against a
 /// legacy-as-new mis-parse.
 ///
-/// All `UnsupportedFeature` returns degrade to a generic property bag via the
-/// package walker, exactly like any other typed-read failure.
-///
 /// **Multi-LOD iteration (PR4 + PR5a/b/c):** `read_typed` loops over EVERY
 /// `LODModels[i]`. For each LOD it reads the header (sections + required /
 /// active bones, before the streamed blob, via [`read_static_lod_model`]); for
@@ -1366,9 +1363,9 @@ fn read_lod_post_loop_tail(
 /// `FStaticLODModel` fault, the bulk resolver's error for an external LOD
 /// payload, or [`crate::PaksmithError::UnsupportedFeature`] for a legacy /
 /// non-cooked / pre-UE4.24 mesh (see *Scope* above) or an external LOD
-/// without a resolver — all of which
-/// the package walker degrades to a generic property bag (see
-/// `Package::read_payloads`).
+/// without a resolver — all of which the package walker degrades to a
+/// generic property bag (see `Package::read_payloads`), except a fault
+/// that ends the package read (`ends_package_read`).
 #[allow(
     clippy::too_many_lines,
     reason = "a flat in-order segment-2 wire sequence (strip flags → bounds → \

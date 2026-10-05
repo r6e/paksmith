@@ -550,7 +550,8 @@ readers, which resolve streamed LODs while the package is parsed, charge
 each record against a per-source bulk-read ledger; a record that would
 take the decode's charges against its source past the source's length
 fails with `BulkDataParseReadsExceedSource`, and the mesh degrades to its
-generic property bag.
+generic property bag. A companion load that runs out of memory fails the
+package read instead.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 + the per-task
 plans in `docs/plans/phase-3b-bulk-data-resolver.md`.

@@ -31,7 +31,7 @@ use crate::asset::property::primitives::{
 use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::property::{MAX_COLLECTION_ELEMENTS, Property, read_fname_pair};
 use crate::asset::read_asset_fstring;
-use crate::asset::{AssetContext, is_derived_budget_trip};
+use crate::asset::{AssetContext, ends_package_read};
 use crate::error::{
     AssetParseFault, AssetWireField, BoundsUnit, CollectionKind, PaksmithError, try_reserve_asset,
 };
@@ -494,7 +494,7 @@ fn read_unversioned_value(
                 },
             })?;
             let name = match resolve_package_index(kind, ctx, asset_path) {
-                Err(err) if is_derived_budget_trip(&err) => return Err(err),
+                Err(err) if ends_package_read(&err) => return Err(err),
                 resolved => resolved.unwrap_or_default(),
             };
             PropertyValue::Object { kind, name }

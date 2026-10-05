@@ -52,7 +52,8 @@ pub enum PropertyBag {
     /// Phase 2a: raw bytes carved out of the asset's payload region.
     /// Also the fallback if Phase 2b's tagged-property iterator
     /// errors mid-parse (the iterator's `warn!` fallback path
-    /// re-reads the export bytes verbatim).
+    /// re-reads the export bytes verbatim); an allocation failure or
+    /// the package-wide name budget ends the package read instead.
     ///
     /// **Round-trip note:** serialization is intentionally lossy
     /// (only the byte count appears in JSON; see

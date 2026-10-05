@@ -55,7 +55,9 @@ for object ≤516, ~UE4.20; 4.21/4.22 collapse to object 517 and route to
 the new reader). UE5 / Nanite is surfaced as `UnsupportedFeature`; an
 unresolvable non-inlined record (no resolver, or any bulk-resolver error
 such as a missing companion or a source the decode has charged past its
-length) degrades the export to a generic property bag. The glTF
+length) degrades the export to a generic property bag, except an
+allocation failure while loading or inflating the companion, which ends
+the package read. The glTF
 `FormatHandler` that exports the geometry ships in
 `export/static_mesh.rs` (`GltfStaticMeshHandler`).
 
@@ -328,7 +330,8 @@ same code but is UNVERIFIED at sub-version boundaries and may desync). UE5
 / Nanite is surfaced as `UnsupportedFeature`; an unresolvable non-inlined
 record (no resolver, or any bulk-resolver error such as a missing
 companion or a source the decode has charged past its length) degrades the
-export to a generic property bag. Cross-validated against CUE4Parse[^1]
+export to a generic property bag, except an allocation failure while
+loading or inflating the companion, which ends the package read. Cross-validated against CUE4Parse[^1]
 (except the UNVERIFIED legacy path); in-memory fixtures exercise the
 readers (no `.pak` fixture, to avoid the CI fixture-count gate).
 

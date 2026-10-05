@@ -222,7 +222,8 @@ pub(crate) const VER_UE4_GAME_UE4_23_OBJECT_PROXY: i32 = 517;
 /// OverrideUseAudioStreaming()`; the per-game `OverrideUseAudioStreaming`
 /// refinement is a Phase-5 game-profile concern). `USoundWave` (3f-2) consults
 /// this for its initial `bStreaming` default — a 4.24 false positive (default
-/// `true` instead of `false`) is corrected by the 3f-5 streaming-flip retry.
+/// `true` instead of `false`) can be corrected by the 3f-5 streaming-flip
+/// retry.
 /// Shares the `518` object version with [`VER_UE4_ADDED_PACKAGE_OWNER`] (an
 /// unrelated feature at the same boundary). See [`AssetVersion::is_ue4_25_or_later`].
 pub(crate) const VER_UE4_GAME_UE4_25_OBJECT_PROXY: i32 = 518;
@@ -472,8 +473,8 @@ impl AssetVersion {
     /// crate-private) boundary or above. Proxies CUE4Parse's `Ar.Game >=
     /// GAME_UE4_25` — the stock default of `Ar.Versions["SoundWave.UseAudioStreaming"]`.
     /// `USoundWave` (3f-2) consults this for its initial `bStreaming` default
-    /// (overridden by a tagged `bStreaming` / `LoadingBehavior` property, and a
-    /// wrong guess is corrected by the 3f-5 streaming-flip retry).
+    /// (overridden by a tagged `bStreaming` / `LoadingBehavior` property; the
+    /// 3f-5 streaming-flip retry can correct a wrong guess).
     #[must_use]
     pub fn is_ue4_25_or_later(self) -> bool {
         self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_25_OBJECT_PROXY)

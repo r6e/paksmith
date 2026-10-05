@@ -13,7 +13,9 @@
 //! (Array/Map/Set/Struct), object references, and unversioned /
 //! `.usmap` schema-driven properties. `.uexp` companion bodies are
 //! stitched at parse time. Parse errors mid-iteration fall back to
-//! [`asset::PropertyBag::Opaque`] with a `tracing::warn!` event.
+//! [`asset::PropertyBag::Opaque`] with a `tracing::warn!` event; an
+//! allocation failure or the package-wide name budget ends the read
+//! instead.
 //!
 //! **Typed engine structs** (Phase 3c): a `StructProperty` whose wire
 //! name is one of the registered decoders (`Vector`, `Vector2D`,

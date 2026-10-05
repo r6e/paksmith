@@ -182,8 +182,10 @@ pub enum Asset {
 /// [`crate::error::PaksmithError::UnsupportedFeature`] rather than mis-decoded. A
 /// non-inlined (`bInlined == false`) LOD's streamed geometry is resolved from its
 /// companion `.ubulk` via the bulk resolver, when one is available; an
-/// unresolvable record (no resolver, missing companion, or compressed bulk)
-/// degrades the export to a generic property bag. A present per-LOD
+/// unresolvable record (no resolver, a missing companion, or LZO / BitWindow
+/// compression) degrades the export to a generic property bag; an allocation
+/// failure while loading the companion or inflating a zlib payload ends the
+/// package read instead. A present per-LOD
 /// `FDistanceFieldVolumeData` (`bValid == true`, UE4 path) is validated-skipped,
 /// so a distance-field-bearing mesh still returns its geometry. The
 /// `UStaticMesh.Deserialize` tail *after* the render
@@ -571,13 +573,13 @@ pub struct DataTableRow {
 /// directly. As of 3f-4 the streaming branch (`streaming && cooked`) parses the
 /// `FStreamedAudioPlatformData` — the `CompressedDataGuid`, the `AudioFormat`
 /// codec, and the per-chunk metadata (into [`Self::streamed`]) with the chunk
-/// buffers in the `read_typed` bulk-record list. As of 3f-5 the oracle's
-/// streaming-flip retry re-parses the opposite branch when a mis-resolved
-/// `streaming` guess makes the chosen branch fail. The non-streaming non-cooked
-/// `RawData` path (a single uncompressed `FByteBulkData` + the
-/// `CompressedDataGuid`) is now parsed too, so every `(streaming, cooked)` combo
-/// is a real read and the retry is unconditional (matching the oracle). Only the
-/// per-codec audio decoders (the `FormatHandler`s) remain.
+/// buffers in the `read_typed` bulk-record list. As of 3f-5 a streaming-flip
+/// retry can recover a mis-resolved `streaming` guess (see [`Self::streaming`]).
+/// The non-streaming non-cooked `RawData` path (a single uncompressed
+/// `FByteBulkData` + the `CompressedDataGuid`) is now parsed too, so every
+/// `(streaming, cooked)` combo is a real read and the retry covers every combo
+/// (matching the oracle). Only the per-codec audio decoders (the
+/// `FormatHandler`s) remain.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SoundWaveData {
@@ -597,10 +599,10 @@ pub struct SoundWaveData {
     /// [`Self::streamed`] (3f-4). `streaming = true` is the modern-cooked default
     /// (`is_ue4_25_or_later`). The resolved value is a heuristic that can be
     /// wrong, so 3f-5 added the oracle's streaming-flip retry: on a parse failure
-    /// the reader rewinds, flips this value, and re-parses the opposite branch —
-    /// so a mis-resolved asset recovers and this field reflects the branch that
-    /// actually parsed. The retry is unconditional (every branch is a real read);
-    /// if both branches fail the parse falls back to `Asset::Generic`.
+    /// other than an allocation failure or the package-wide name budget (which
+    /// end the package read), the reader rewinds, flips this value, and
+    /// re-parses the opposite branch — so a mis-resolved asset recovers and this
+    /// field reflects the branch that actually parsed.
     pub streaming: bool,
     /// Per-codec keys of the non-streaming cooked `FFormatContainer` (e.g.
     /// `"OGG"`, `"OPUS"`, `"BINKA"`), in wire order. Each
@@ -877,16 +879,49 @@ pub fn max_derived_string_bytes() -> u64 {
     MAX_DERIVED_STRING_BYTES
 }
 
-/// Whether `err` is an [`AssetContext::charge_derived`] refusal, which
-/// ends the package read instead of degrading one export.
-pub(crate) fn is_derived_budget_trip(err: &crate::PaksmithError) -> bool {
-    matches!(
-        err,
-        crate::PaksmithError::AssetParse {
-            fault: crate::error::AssetParseFault::DerivedStringBudgetExceeded { .. },
+/// Whether `err` ends a package read instead of degrading one export: a
+/// reported allocation failure at any layer a package read reaches (the
+/// asset parser's own reservations; an FString read, which reports the pak
+/// reader's `IndexParseFault::AllocationFailed`; a `.ubulk`/`.uptnl` load
+/// or inflate; a std read that grows its buffer, which reports
+/// `io::ErrorKind::OutOfMemory`), or a refused
+/// [`AssetContext::charge_derived`]. Caps that refuse before allocating,
+/// and the bulk-read budgets, degrade.
+pub(crate) fn ends_package_read(err: &crate::PaksmithError) -> bool {
+    use crate::PaksmithError as E;
+    use crate::error::{AssetParseFault as A, DecompressionFault as D, IndexParseFault as I};
+    match err {
+        E::AssetParse {
+            fault: A::AllocationFailed { .. } | A::DerivedStringBudgetExceeded { .. },
             ..
         }
-    )
+        | E::InvalidIndex {
+            fault: I::AllocationFailed { .. },
+        }
+        | E::Decompression {
+            fault:
+                D::CompressedBlockReserveFailed { .. }
+                | D::ZlibScratchReserveFailed { .. }
+                | D::Lz4OutputReserveFailed { .. },
+            ..
+        } => true,
+        E::Io(e) => e.kind() == std::io::ErrorKind::OutOfMemory,
+        _ => false,
+    }
+}
+
+/// `err` kept as [`crate::PaksmithError::Io`] when it reports an
+/// allocation failure, so [`ends_package_read`] ends the read; otherwise
+/// `other(err)`. std's `read_to_end` reports a failed buffer reservation as
+/// `io::ErrorKind::OutOfMemory`.
+pub(crate) fn keep_out_of_memory(
+    err: std::io::Error,
+    other: impl FnOnce(std::io::Error) -> crate::PaksmithError,
+) -> crate::PaksmithError {
+    if err.kind() == std::io::ErrorKind::OutOfMemory {
+        return crate::PaksmithError::Io(err);
+    }
+    other(err)
 }
 
 /// Running total of the bytes charged by
@@ -1094,6 +1129,163 @@ impl AssetContext {
     pub fn with_engine_version_hint(mut self, hint: Option<engine_hint::UeVersion>) -> Self {
         self.engine_version_hint = hint;
         self
+    }
+}
+
+#[cfg(test)]
+mod ends_package_read_tests {
+    use super::{ends_package_read, keep_out_of_memory};
+    use crate::PaksmithError;
+    use crate::error::refused_reservation as refused;
+    use crate::error::{
+        AllocationContext, AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit,
+        CollectionKind, CompanionFileKind, DecompressionFault, FStringFault, IndexParseFault,
+        MappingsAllocationContext, MappingsParseFault, WireField,
+    };
+
+    fn asset_parse(fault: AssetParseFault) -> PaksmithError {
+        PaksmithError::AssetParse {
+            asset_path: "a.uasset".into(),
+            fault,
+        }
+    }
+
+    fn index(fault: IndexParseFault) -> PaksmithError {
+        PaksmithError::InvalidIndex { fault }
+    }
+
+    fn decompression(fault: DecompressionFault) -> PaksmithError {
+        PaksmithError::Decompression {
+            path: "a.ubulk".into(),
+            offset: 0,
+            fault,
+        }
+    }
+
+    #[test]
+    fn ends_package_read_matches_out_of_memory_and_the_name_budget() {
+        let ends = [
+            asset_parse(AssetParseFault::AllocationFailed {
+                context: AssetAllocationContext::CollectionElements,
+                requested: 1,
+                source: refused(),
+            }),
+            asset_parse(AssetParseFault::DerivedStringBudgetExceeded { limit: 0 }),
+            index(IndexParseFault::AllocationFailed {
+                context: AllocationContext::FStringUtf8Bytes,
+                requested: 1,
+                source: refused(),
+                path: None,
+            }),
+            index(IndexParseFault::AllocationFailed {
+                context: AllocationContext::EntryPayloadBytes,
+                requested: 1,
+                source: refused(),
+                path: Some("a.ubulk".into()),
+            }),
+            decompression(DecompressionFault::CompressedBlockReserveFailed {
+                block_index: 0,
+                requested: 1,
+                source: refused(),
+            }),
+            decompression(DecompressionFault::ZlibScratchReserveFailed {
+                block_index: 0,
+                requested: 1,
+                already_committed: 0,
+                source: refused(),
+            }),
+            decompression(DecompressionFault::Lz4OutputReserveFailed {
+                block_index: 0,
+                requested: 1,
+                source: refused(),
+            }),
+            PaksmithError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory)),
+        ];
+        for err in &ends {
+            assert!(ends_package_read(err), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn ends_package_read_leaves_recoverable_faults_to_the_caller() {
+        let degrades = [
+            asset_parse(AssetParseFault::BulkDataParseReadsExceedSource {
+                tier: crate::asset::bulk_data::BulkDataTier::Streaming,
+                charged: 2,
+                source_len: 1,
+            }),
+            asset_parse(AssetParseFault::CollectionElementCountExceeded {
+                collection: CollectionKind::Array,
+                count: 2,
+                limit: 1,
+            }),
+            asset_parse(AssetParseFault::MissingCompanionFile {
+                kind: CompanionFileKind::Ubulk,
+            }),
+            asset_parse(AssetParseFault::BulkDataPackageBudgetExceeded {
+                resolved: 2,
+                cap: 1,
+            }),
+            PaksmithError::MappingsParse {
+                fault: MappingsParseFault::AllocationFailed {
+                    context: MappingsAllocationContext::NameTable,
+                    requested: 1,
+                    source: refused(),
+                },
+            },
+            asset_parse(AssetParseFault::UnexpectedEof {
+                field: AssetWireField::PropertyTagName,
+            }),
+            index(IndexParseFault::FStringMalformed {
+                kind: FStringFault::LengthIsZero,
+            }),
+            index(IndexParseFault::BoundsExceeded {
+                field: WireField::UncompressedSize,
+                value: 2,
+                limit: 1,
+                unit: BoundsUnit::Bytes,
+                path: None,
+            }),
+            decompression(DecompressionFault::SizeUnderrun {
+                actual: 1,
+                expected: 2,
+            }),
+            decompression(DecompressionFault::ZlibStreamError {
+                block_index: 0,
+                kind: std::io::ErrorKind::InvalidData,
+                message: "bad".into(),
+            }),
+            PaksmithError::Io(std::io::Error::other("disk")),
+            PaksmithError::EntryNotFound {
+                path: "a.ubulk".into(),
+            },
+            PaksmithError::UnsupportedFeature {
+                context: "tiles".into(),
+            },
+        ];
+        for err in &degrades {
+            assert!(!ends_package_read(err), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn keep_out_of_memory_keeps_only_an_allocation_failure() {
+        let fallback = |_: std::io::Error| PaksmithError::EntryNotFound { path: "x".into() };
+
+        let kept = keep_out_of_memory(
+            std::io::Error::from(std::io::ErrorKind::OutOfMemory),
+            fallback,
+        );
+        let mapped = keep_out_of_memory(
+            std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+            fallback,
+        );
+
+        assert!(ends_package_read(&kept), "{kept:?}");
+        assert!(
+            matches!(mapped, PaksmithError::EntryNotFound { .. }),
+            "{mapped:?}"
+        );
     }
 }
 

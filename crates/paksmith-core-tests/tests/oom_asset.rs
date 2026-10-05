@@ -174,38 +174,26 @@ fn read_asset_export_payload_bytes_surfaces_allocation_failed_under_oom() {
 }
 
 /// Arm `AssetSeam::CollectionElements` → an Array/Map/Set element-vec
-/// reservation fires inside the tagged-property iterator, which is
-/// then caught by `read_payloads`'s Tree/Opaque fallback (swallowing
-/// the typed error and emitting a warn log; no panic, no abort).
-/// The test pins the **observable consequence**: a fixture that
-/// normally decodes to `PropertyBag::Tree` returns `PropertyBag::Opaque`
-/// when this seam is armed. Without the seam armed, the same fixture
-/// returns Tree (pinned by
-/// `collection_of_struct_integration::array_of_struct_decodes_two_elements`).
-/// Tree→Opaque is therefore evidence the seam fired.
-///
-/// Asymmetric vs the other tests in this file (which assert the
-/// typed error variant directly) because the Tree/Opaque fallback at
-/// `package.rs:read_payloads` swallows iteration errors by design
-/// (one corrupt export shouldn't lose every other export's data).
-/// A future test could use `tracing_test::traced_test` to assert the
-/// warn-log fired, but the Tree→Opaque flip is already an
-/// unambiguous signal at this layer.
+/// reservation inside the tagged-property iterator surfaces
+/// `AssetParseFault::AllocationFailed{CollectionElements}`, which ends
+/// the package read rather than degrading the export to `Opaque`.
 #[test]
 fn read_asset_collection_elements_surfaces_allocation_failed_under_oom() {
-    use paksmith_core::asset::property::PropertyBag;
     let pkg = build_minimal_ue4_27_with_array_of_struct();
     let _guard = arm_at(SeamSite::Asset(AssetSeam::CollectionElements), 0);
-    let parsed =
-        Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").expect("parse succeeds");
-    assert_eq!(parsed.payloads.len(), 1, "expected one export");
+    let err = Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").unwrap_err();
     assert!(
         matches!(
-            &parsed.payloads[0],
-            paksmith_core::Asset::Generic(PropertyBag::Opaque { .. })
+            &err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::AllocationFailed {
+                    context: AssetAllocationContext::CollectionElements,
+                    ..
+                },
+                ..
+            }
         ),
-        "armed AssetSeam::CollectionElements seam must flip Tree→Opaque (fallback fired); got {:?}",
-        parsed.payloads[0]
+        "expected AllocationFailed{{CollectionElements}}; got {err:?}"
     );
 }
 

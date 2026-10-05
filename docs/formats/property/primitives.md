@@ -173,8 +173,8 @@ Wire layout above; the table cells call out the variants inline
   Bodies that declare a larger size are rejected before any allocation
   runs.
 - **Per-body `try_reserve_exact`** — any allocation a primitive reader
-  performs (rare; `StrProperty`'s FString reader is the main one)
-  surfaces as `AssetParseFault::AllocationFailed`.
+  performs (rare; `StrProperty`'s FString reader, which reports its own
+  `IndexParseFault::AllocationFailed`) fails the package read.
 - **No collection-cap exposure** — primitive readers don't iterate.
 
 ## Verification

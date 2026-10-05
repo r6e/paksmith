@@ -269,7 +269,11 @@ fn read_skin_weights_new<R: Read + ?Sized>(
         let _read = r
             .take(u64::from(count))
             .read_to_end(&mut buf)
-            .map_err(|_| read::eof(asset_path, AssetWireField::SkinWeightNewData))?;
+            .map_err(|e| {
+                crate::asset::keep_out_of_memory(e, |_| {
+                    read::eof(asset_path, AssetWireField::SkinWeightNewData)
+                })
+            })?;
         if buf.len() != count as usize {
             return Err(read::eof(asset_path, AssetWireField::SkinWeightNewData));
         }

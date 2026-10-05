@@ -18,14 +18,15 @@
 //! - **Versioned typed**: a malformed-body error falls through to the
 //!   generic tagged-property parse (a typed reader must never leave an
 //!   export worse off than the generic parse it replaces), with a
-//!   `tracing::warn!`. An `AllocationFailed` instead **propagates** —
-//!   that is an out-of-memory condition the caller must see, not a
-//!   corrupt export (libraries fail fast). So does a
+//!   `tracing::warn!`. An allocation failure at any layer instead
+//!   **propagates** — that is an out-of-memory condition the caller must
+//!   see, not a corrupt export (libraries fail fast). So does a
 //!   `DerivedStringBudgetExceeded`, which is package-wide.
 //! - **Versioned generic**: tagged-property iteration falls back to
 //!   [`PropertyBag::Opaque`](crate::asset::property::PropertyBag) on any
-//!   parse error other than `DerivedStringBudgetExceeded` (warn-logged),
-//!   so one corrupt versioned export does not abort the package.
+//!   parse error other than an allocation failure or
+//!   `DerivedStringBudgetExceeded` (warn-logged), so one corrupt versioned
+//!   export does not abort the package.
 //! - **Unversioned** (`PKG_UnversionedProperties` + `.usmap`): deserialize
 //!   against the schema and **propagate** on error — an unversioned parse
 //!   failure usually signals a wrong/mismatched `.usmap`, which should
@@ -50,7 +51,7 @@ use crate::asset::name_table::NameTable;
 use crate::asset::property::PropertyBag;
 use crate::asset::property::unversioned::read_unversioned_properties;
 use crate::asset::summary::{PKG_UNVERSIONED_PROPERTIES, PackageSummary};
-use crate::asset::{AssetContext, is_derived_budget_trip};
+use crate::asset::{AssetContext, ends_package_read};
 use crate::error::{
     AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,
     CompanionFileKind, PaksmithError, try_reserve_asset,
@@ -552,6 +553,12 @@ impl Package {
     /// - [`AssetParseFault::DerivedStringBudgetExceeded`] when the names
     ///   and paths copied while decoding the exports pass the package's
     ///   budget
+    /// - an allocation failure while decoding an export:
+    ///   [`AssetParseFault::AllocationFailed`],
+    ///   [`PaksmithError::InvalidIndex`] with
+    ///   [`IndexParseFault::AllocationFailed`](crate::error::IndexParseFault::AllocationFailed)
+    ///   (an FString read), or [`PaksmithError::Io`] with
+    ///   `ErrorKind::OutOfMemory`
     ///
     /// See [`Self::read_from_with`] to also supply a profile's
     /// engine-version hint (#656).
@@ -982,7 +989,8 @@ impl Package {
     /// error from the companion lookup propagates. Missing
     /// `.ubulk` / `.uptnl` at pak-open time is fine — the lazy
     /// loaders only fire when bulk-data resolution actually needs
-    /// them.
+    /// them. A failed reservation while loading or inflating one of them
+    /// during the read ends it with the pak layer's fault.
     ///
     /// See [`Self::read_from_pak_with`] to also supply a profile's
     /// engine-version hint (#656).
@@ -1443,15 +1451,9 @@ fn read_payloads(
             crate::asset::exports::dispatch::class_dispatch().get(&*class_name)
         {
             // Typed reader registered for this class (3d+ populate the
-            // dispatch table). On success, push the typed Asset and
-            // move on. On FAILURE, do NOT abort the whole package —
-            // fall through to the generic tagged-property path below,
-            // exactly as if no typed reader were registered. A typed
-            // reader must never leave an export worse off than the
-            // generic parse would: one corrupt typed export degrades
-            // to `Generic` rather than failing every sibling export's
-            // parse. (Before this, `read_typed(...)?` propagated and a
-            // single malformed DataTable/Texture2D aborted the package.)
+            // dispatch table). On success, push the typed Asset and move
+            // on; the arms below decide which failures end the read and
+            // which fall through to the generic parse.
             //
             // The typed reader's `bulk_records` are surfaced here keyed by
             // `export_idx` and handed back to `read_from_inner`, which holds
@@ -1467,30 +1469,14 @@ fn read_payloads(
                     }
                     continue;
                 }
-                // Environmental failure: `AllocationFailed` means the
-                // process is out of memory, NOT that this export is
-                // corrupt — the caller must know, so propagate (libraries
-                // fail fast). The caps (e.g. `DataTableRowCountExceeded`)
-                // are deliberately NOT environmental: they fire before
-                // allocating, so a malicious oversized-count export still
-                // degrades like any other malformed body below. The
-                // package-wide copied-name budget is the exception.
-                Err(err)
-                    if is_derived_budget_trip(&err)
-                        || matches!(
-                            &err,
-                            PaksmithError::AssetParse {
-                                fault: AssetParseFault::AllocationFailed { .. },
-                                ..
-                            }
-                        ) =>
-                {
-                    return Err(err);
-                }
-                // Malformed data: one corrupt export must not lose its
-                // siblings (the package-resilience contract) — warn and
-                // fall through to the generic parse below, exactly as if
-                // no typed reader were registered.
+                // Out of memory or the package-wide name budget: propagate
+                // (libraries fail fast). Caps such as
+                // `DataTableRowCountExceeded` fire before allocating, so a
+                // malicious oversized-count export still degrades below.
+                Err(err) if ends_package_read(&err) => return Err(err),
+                // Anything else (malformed data, an unsupported variant,
+                // an unresolvable companion): warn and fall through to the
+                // generic parse below.
                 Err(err) => {
                     tracing::warn!(
                         asset = asset_path,
@@ -1514,10 +1500,11 @@ fn read_payloads(
 
         // Phase 2b: attempt tagged-property iteration over the
         // export's bytes. On success, store as `PropertyBag::Tree`;
-        // on parse error, fall back to `PropertyBag::Opaque` with
-        // the original bytes (one corrupt export shouldn't lose every
-        // other export's data). The fallback is logged at warn level
-        // so operators see the version-skew signal.
+        // on a parse error that `ends_package_read` does not match,
+        // fall back to `PropertyBag::Opaque` with the original bytes (one
+        // corrupt export shouldn't lose every other export's data).
+        // The fallback is logged at warn level so operators see the
+        // version-skew signal.
         //
         // `Opaque` needs `Vec<u8>` ownership for storage in the
         // `Package` struct. The cold error path uses
@@ -1550,7 +1537,7 @@ fn read_payloads(
                 );
                 PropertyBag::tree(props)
             }
-            Err(err) if is_derived_budget_trip(&err) => return Err(err),
+            Err(err) if ends_package_read(&err) => return Err(err),
             Err(err) => {
                 tracing::warn!(
                     asset = asset_path,
@@ -1905,10 +1892,10 @@ mod tests {
         assert!(parsed.data_resources.is_empty());
     }
 
-    /// Pins the typed-dispatch fall-through: a typed reader that errors
-    /// on one export must NOT abort the package — it falls through to
-    /// the generic property-bag parse (degrading that export to
-    /// `Generic`, not propagating), so sibling exports survive.
+    /// Pins the typed-dispatch fall-through: a typed-reader failure that
+    /// `ends_package_read` does not match must NOT abort the package — it
+    /// falls through to the generic property-bag parse (degrading that
+    /// export to `Generic`, not propagating), so sibling exports survive.
     ///
     /// The fixture has two `DataTable` exports: a valid empty one and a
     /// corrupt one (segment-2 `RowName` index out of bounds). Asserting
@@ -2021,8 +2008,7 @@ mod tests {
     /// In-source (mirrors `oom_asset.rs`'s integration test) because
     /// cargo-mutants runs only the mutated package's tests, so
     /// `paksmith-core-tests` never credits a kill — without this, flipping
-    /// the dispatch's
-    /// `matches!(.. AllocationFailed ..)` guard to `false` (which would
+    /// the dispatch's `ends_package_read` guard to `false` (which would
     /// wrongly degrade OOM to a generic parse) survives mutation.
     #[test]
     fn typed_reader_allocation_failure_propagates_not_falls_back() {
@@ -2046,6 +2032,112 @@ mod tests {
             "typed-reader AllocationFailed must propagate (fail fast), not \
              fall through to a generic parse; got {err:?}"
         );
+    }
+
+    #[test]
+    fn generic_parse_allocation_failure_fails_the_package_read() {
+        let pkg = crate::testing::uasset::build_minimal_ue4_27_with_array_of_struct();
+        let _guard = crate::testing::oom::arm_at(
+            crate::seams::SeamSite::Asset(crate::seams::AssetSeam::CollectionElements),
+            0,
+        );
+
+        let err = Package::read_from(&pkg.bytes, None, None, "x.uasset").unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::AllocationFailed {
+                        context: AssetAllocationContext::CollectionElements,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn generic_parse_fstring_allocation_failure_fails_the_package_read() {
+        let pkg = crate::testing::uasset::build_minimal_ue4_27_with_properties();
+        let parsed = Package::read_from(&pkg.bytes, None, None, "x.uasset").unwrap();
+        let _guard = crate::testing::oom::arm_at(
+            crate::seams::SeamSite::Pak(crate::seams::PakSeam::FstringUtf8),
+            0,
+        );
+
+        let err =
+            read_payloads(&pkg.bytes, &parsed.exports, &parsed.context(), "x.uasset").unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: crate::error::IndexParseFault::AllocationFailed {
+                        context: crate::error::AllocationContext::FStringUtf8Bytes,
+                        ..
+                    },
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_companion_allocation_failure_fails_the_package_read() {
+        use crate::error::refused_reservation as refused;
+        use crate::error::{AllocationContext, DecompressionFault, IndexParseFault};
+
+        let inflate = |fault| PaksmithError::Decompression {
+            path: "m.ubulk".into(),
+            offset: 0,
+            fault,
+        };
+        let failures = [
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::EntryPayloadBytes,
+                    requested: 1,
+                    source: refused(),
+                    path: Some("m.ubulk".into()),
+                },
+            },
+            inflate(DecompressionFault::CompressedBlockReserveFailed {
+                block_index: 0,
+                requested: 1,
+                source: refused(),
+            }),
+            inflate(DecompressionFault::ZlibScratchReserveFailed {
+                block_index: 0,
+                requested: 1,
+                already_committed: 0,
+                source: refused(),
+            }),
+            inflate(DecompressionFault::Lz4OutputReserveFailed {
+                block_index: 0,
+                requested: 1,
+                source: refused(),
+            }),
+            PaksmithError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory)),
+        ];
+        let bytes = streamed_meshes(64, [0, 0]);
+
+        for failure in failures {
+            let expected = failure.to_string();
+            let err = Package::read_from_inner(
+                &bytes,
+                None,
+                &ReadOptions::new(),
+                "m.uasset",
+                move || Err(failure.replay()),
+                missing_companion_loader(CompanionFileKind::Uptnl, "m.uasset".into()),
+            )
+            .unwrap_err();
+
+            assert_eq!(err.to_string(), expected);
+        }
     }
 
     #[test]
@@ -2547,7 +2639,7 @@ mod tests {
 
     /// A companion that fails to load is loaded once per package, however
     /// many mesh exports stream LODs from it; each export degrades to its
-    /// generic property bag.
+    /// generic property bag unless the fault ends the package read.
     #[test]
     fn a_failed_companion_load_runs_once_across_mesh_exports() {
         use crate::asset::bulk_data::counting_loader;

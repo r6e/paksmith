@@ -151,7 +151,8 @@ pub(crate) fn read_lod(
 /// compression, a companion that is missing or fails to load, a region outside
 /// its source, or a source this decode has charged past its length).
 /// `read_payloads` degrades either to the generic property bag, never an
-/// empty-geometry typed mesh.
+/// empty-geometry typed mesh, except an allocation failure, which ends the
+/// package read.
 ///
 /// Wire order (oracle `FStaticMeshLODResources.cs`, `!bInlined` branch, UE4.23–4.27
 /// / UE5.0–5.3 generic path): the `FByteBulkData` header, then — when
@@ -1212,7 +1213,8 @@ mod tests {
 
         // A compressed (LZO) streamed payload is rejected by the resolver; the
         // error propagates so the export degrades to a property bag (the
-        // package-resilience contract turns any typed-reader error into Generic).
+        // package-resilience contract turns a typed-reader error that does not
+        // end the package read into Generic).
         let ctx = with_ubulk(make_ctx_with_version(517, None), Vec::new());
 
         let bytes = non_inlined_lod_ue4_23(SEPARATE_FILE_LZO, 16, 0);
