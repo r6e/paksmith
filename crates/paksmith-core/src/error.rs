@@ -5517,11 +5517,11 @@ pub enum MappingsParseFault {
 ///
 /// The asset-side helper drops its `context` parameter and derives
 /// it from the seam via [`crate::seams::AssetSeam::context`]. The
-/// index-side helper keeps `context` separate because two `PakSeam`
-/// variants (`CompressedReserve`, `ScratchReserve`) surface as
-/// `DecompressionFault`, not `IndexParseFault`, so a unified
+/// index-side helper keeps `context` separate because three `PakSeam`
+/// variants (`CompressedReserve`, `ScratchReserve`, `Lz4OutputReserve`)
+/// surface as `DecompressionFault`, not `IndexParseFault`, so a unified
 /// `PakSeam::context() -> AllocationContext` accessor would be a
-/// partial function. Those two direct-call variants (and three more
+/// partial function. Those direct-call variants (and three more
 /// — `FstringUtf16`, `FstringUtf8`, `FdiFullPath`) never reach this
 /// helper, so the remaining 9 helper-routed variants do pair 1:1
 /// with their contexts — but the structural binding lives in

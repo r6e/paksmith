@@ -600,9 +600,9 @@ pub trait ContainerReader: Send + Sync {
     ///
     /// A failed reservation should surface as
     /// [`crate::error::IndexParseFault::AllocationFailed`], a
-    /// `DecompressionFault::*ReserveFailed` (`PakReader` uses these two), or
-    /// an `Io` error of kind `OutOfMemory`, so a package read ends instead
-    /// of degrading the export that needed the entry.
+    /// `DecompressionFault::*ReserveFailed`, or an `Io` error of kind
+    /// `OutOfMemory`, so a package read ends instead of degrading the export
+    /// that needed the entry. `PakReader` uses the first two forms.
     fn read_entry(&self, path: &str) -> crate::Result<Vec<u8>>;
 
     /// The container format this reader handles.
