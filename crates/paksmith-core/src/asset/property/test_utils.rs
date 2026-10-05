@@ -63,6 +63,21 @@ pub fn with_derived_budget(mut ctx: AssetContext, limit: u64) -> AssetContext {
     ctx
 }
 
+/// Give `ctx` a bulk resolver serving `ubulk` as its `.ubulk` (the
+/// `.uptnl` loader fails, as in `new_for_test_with_ubulk`).
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn with_ubulk(mut ctx: AssetContext, ubulk: Vec<u8>) -> AssetContext {
+    let resolver = crate::asset::bulk_data::BulkDataResolver::new_for_test_with_ubulk(
+        Vec::<u8>::new(),
+        0,
+        0,
+        ubulk,
+    );
+    ctx.bulk_resolver = Some(Arc::new(resolver));
+    ctx
+}
+
 /// Assert `result` is the derived-string budget refusal for `limit`.
 ///
 /// # Panics
@@ -75,6 +90,30 @@ pub fn assert_derived_budget_exceeded<T: std::fmt::Debug>(result: crate::Result<
             ..
         }) => assert_eq!(got, limit),
         other => panic!("expected DerivedStringBudgetExceeded {{ limit: {limit} }}, got {other:?}"),
+    }
+}
+
+/// Assert `result` is the bulk-read ledger refusal: `charged` bytes
+/// against a `source_len`-byte `tier` source.
+///
+/// # Panics
+///
+/// When `result` is anything else.
+#[cfg(feature = "__test_utils")]
+pub fn assert_parse_reads_exceed_source<T: std::fmt::Debug>(
+    result: crate::Result<T>,
+    tier: crate::asset::bulk_data::BulkDataTier,
+    charged: u64,
+    source_len: u64,
+) {
+    let expected = crate::error::AssetParseFault::BulkDataParseReadsExceedSource {
+        tier,
+        charged,
+        source_len,
+    };
+    match result {
+        Err(crate::PaksmithError::AssetParse { fault, .. }) => assert_eq!(fault, expected),
+        other => panic!("expected {expected:?}, got {other:?}"),
     }
 }
 
@@ -247,6 +286,18 @@ mod tests {
     #[should_panic(expected = "expected DerivedStringBudgetExceeded")]
     fn assert_derived_budget_exceeded_rejects_a_success() {
         assert_derived_budget_exceeded(Ok(()), 1);
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[should_panic(expected = "expected BulkDataParseReadsExceedSource")]
+    fn assert_parse_reads_exceed_source_rejects_a_success() {
+        assert_parse_reads_exceed_source(
+            Ok(()),
+            crate::asset::bulk_data::BulkDataTier::Streaming,
+            2,
+            1,
+        );
     }
 
     #[test]

@@ -3052,6 +3052,22 @@ pub enum AssetParseFault {
         /// The compile-time cap (16 GiB).
         cap: u64,
     },
+    /// Bulk-data records resolved while decoding a package charged more
+    /// bytes against one source than it holds, so their regions repeat
+    /// or overlap (#841). Inline and uexp-resident records share the
+    /// stitched buffer's limit. The mesh reader that hits this degrades
+    /// its export to the generic property bag; that export is the one
+    /// whose charge crosses the limit, which need not be one that repeats
+    /// a region.
+    BulkDataParseReadsExceedSource {
+        /// The tier of the record that crossed the limit.
+        tier: crate::asset::bulk_data::BulkDataTier,
+        /// Bytes charged against the source, this record and earlier
+        /// refused charges included.
+        charged: u64,
+        /// Length of the source.
+        source_len: u64,
+    },
     /// A Phase 3c typed-struct decoder finished its read but the
     /// stream position is BELOW `expected_end` — the caller's
     /// declared size for this struct was larger than the wire
@@ -3648,6 +3664,15 @@ impl fmt::Display for AssetParseFault {
             Self::BulkDataCompanionTooLarge { kind, size, cap } => {
                 write!(f, ".{kind} companion file size {size} exceeds cap {cap}")
             }
+            Self::BulkDataParseReadsExceedSource {
+                tier,
+                charged,
+                source_len,
+            } => write!(
+                f,
+                "bulk-data records resolved while parsing charged {charged} bytes against \
+                 a {source_len}-byte {tier} source; records name overlapping or repeated regions"
+            ),
             Self::TypedStructTrailingBytes {
                 struct_name,
                 trailing,
@@ -9119,6 +9144,24 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `Game/Texture.uasset`: \
              .ubulk companion file size 21474836480 exceeds cap 17179869184"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_parse_reads_exceed_source() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Mesh.uasset".to_string(),
+            fault: AssetParseFault::BulkDataParseReadsExceedSource {
+                tier: crate::asset::bulk_data::BulkDataTier::Streaming,
+                charged: 200,
+                source_len: 100,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Mesh.uasset`: \
+             bulk-data records resolved while parsing charged 200 bytes against a \
+             100-byte streaming source; records name overlapping or repeated regions"
         );
     }
 

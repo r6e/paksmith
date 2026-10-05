@@ -1040,7 +1040,7 @@ pub(crate) fn counting_loader(
 ///
 /// # Defense chain
 ///
-/// `resolve()` enforces, in order:
+/// `resolve()` and `resolve_charged()` enforce, in order:
 ///
 /// 1. Unsupported compression rejection (`LZO` / `BitWindow` fire
 ///    `UnsupportedBulkCompression` — fail-closed, #559).
@@ -1056,6 +1056,11 @@ pub(crate) fn counting_loader(
 /// 4. Bounds: `resolved_offset + size_on_disk` checked against the
 ///    source slice length (`BulkDataEndOffsetOverflow` on `u64`
 ///    overflow, `BulkDataOffsetOob` on OOB).
+///
+///    4b. Bulk-read ledger (`resolve_charged` only): `size_on_disk` is
+///    charged against the record's source; charges past the source's
+///    length fire `BulkDataParseReadsExceedSource`, and nothing is
+///    refunded.
 /// 5. Per-package budget: cumulative bytes-resolved counter
 ///    incremented BEFORE allocation; fires
 ///    `BulkDataPackageBudgetExceeded` if over cap (rollback on
@@ -1232,7 +1237,7 @@ impl BulkDataResolver {
     }
 
     /// Resolve a single `FByteBulkData` record into a materialized
-    /// [`BulkData`] payload.
+    /// [`BulkData`] payload. Charges no bulk-read ledger.
     ///
     /// # Errors
     ///
@@ -1241,12 +1246,32 @@ impl BulkDataResolver {
     /// record violated, or the companion loader's error. A companion
     /// that failed to load reports that failure again instead of
     /// loading again.
+    pub fn resolve(&self, record: &FByteBulkData, asset_path: &str) -> crate::Result<BulkData> {
+        self.resolve_inner(record, asset_path, None)
+    }
+
+    /// [`Self::resolve`] for a typed reader decoding during a package
+    /// read, also charging `reads`, the decode's [`BulkReadLedger`] (#841).
+    pub(crate) fn resolve_charged(
+        &self,
+        record: &FByteBulkData,
+        asset_path: &str,
+        reads: &BulkReadLedger,
+    ) -> crate::Result<BulkData> {
+        self.resolve_inner(record, asset_path, Some(reads))
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "sequential dispatch + cap chain + side-effect-free budget reservation; splitting hurts the line-by-line auditability of the cap chain that the security panel reviewed"
     )]
     #[tracing::instrument(level = "debug", name = "bulk_resolve", skip_all, fields(asset_path = asset_path))]
-    pub fn resolve(&self, record: &FByteBulkData, asset_path: &str) -> crate::Result<BulkData> {
+    fn resolve_inner(
+        &self,
+        record: &FByteBulkData,
+        asset_path: &str,
+        reads: Option<&BulkReadLedger>,
+    ) -> crate::Result<BulkData> {
         // 1. Unsupported compression rejection (fail-closed, #559).
         // LZO is a real LZO1X codec, but only UE3-era content emits it
         // (out of paksmith's UE4.13+ cooked-asset scope) and no
@@ -1383,6 +1408,21 @@ impl BulkDataResolver {
             });
         }
 
+        // 4b. Bulk-read ledger, before the budget reservation so a trip
+        // has nothing to roll back.
+        if let Some(reads) = reads {
+            reads
+                .charge(tier, record.size_on_disk, file_size)
+                .map_err(|total| crate::PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: crate::error::AssetParseFault::BulkDataParseReadsExceedSource {
+                        tier,
+                        charged: total,
+                        source_len: file_size,
+                    },
+                })?;
+        }
+
         // Indices are now in-bounds (verified by the `end > file_size`
         // check above). The `as usize` casts are lossy on 32-bit
         // targets at offsets > 4 GiB, but every cap is u64-bounded and
@@ -1462,6 +1502,48 @@ impl BulkDataResolver {
     pub fn set_bytes_resolved_for_test(&self, n: u64) {
         self.bytes_resolved
             .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Bytes that one package decode's typed readers have charged against
+/// each bulk-data source (#841). Nothing in the format stops several
+/// records from naming one region or overlapping regions, so the eager
+/// mesh readers refuse any charge that takes a source's total past its
+/// length; records over disjoint regions never do. The stitched
+/// `.uasset` + `.uexp` buffer is one source for the inline and
+/// uexp-resident tiers.
+///
+/// Sticky like [`crate::asset::AssetContext::charge_derived`]: refused
+/// bytes stay counted, so every later charge against a spent source
+/// fails too.
+#[derive(Debug, Default)]
+pub(crate) struct BulkReadLedger {
+    stitched: std::sync::atomic::AtomicU64,
+    ubulk: std::sync::atomic::AtomicU64,
+    uptnl: std::sync::atomic::AtomicU64,
+}
+
+impl BulkReadLedger {
+    /// Charge `size` bytes read from `tier`'s source, which holds
+    /// `source_len` bytes. Returns the source's new total as the error
+    /// once it passes `source_len`.
+    fn charge(&self, tier: BulkDataTier, size: u64, source_len: u64) -> Result<(), u64> {
+        let counter = match tier {
+            BulkDataTier::Inline | BulkDataTier::UexpResident => &self.stitched,
+            BulkDataTier::Streaming => &self.ubulk,
+            BulkDataTier::OptionalStreaming => &self.uptnl,
+        };
+        // Cannot wrap: each charge follows the bounds check, so it is at
+        // most one source's length, and a decode makes at most 2^19
+        // exports x 64 LODs = 2^25 charges; wrapping would take sources
+        // of about 2^39 bytes.
+        let total = counter
+            .fetch_add(size, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(size);
+        if total > source_len {
+            return Err(total);
+        }
+        Ok(())
     }
 }
 
@@ -2954,6 +3036,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bulk_read_ledger_refuses_past_the_source_length() {
+        let ledger = BulkReadLedger::default();
+        assert_eq!(ledger.charge(BulkDataTier::Streaming, 3, 5), Ok(()));
+        assert_eq!(ledger.charge(BulkDataTier::Streaming, 2, 5), Ok(()));
+        assert_eq!(ledger.charge(BulkDataTier::Streaming, 1, 5), Err(6));
+        assert_eq!(ledger.charge(BulkDataTier::Streaming, 0, 5), Err(6));
+    }
+
+    #[test]
+    fn bulk_read_ledger_keeps_one_count_per_source() {
+        let ledger = BulkReadLedger::default();
+        assert_eq!(ledger.charge(BulkDataTier::Inline, 4, 8), Ok(()));
+        assert_eq!(ledger.charge(BulkDataTier::UexpResident, 4, 8), Ok(()));
+        assert_eq!(ledger.charge(BulkDataTier::Inline, 1, 8), Err(9));
+        assert_eq!(ledger.charge(BulkDataTier::Streaming, 8, 8), Ok(()));
+        assert_eq!(ledger.charge(BulkDataTier::OptionalStreaming, 8, 8), Ok(()));
+        assert_eq!(ledger.charge(BulkDataTier::OptionalStreaming, 1, 8), Err(9));
+        assert_eq!(ledger.charge(BulkDataTier::Streaming, 1, 8), Err(9));
+    }
+
     // BulkDataResolver tests. Gated on `__test_utils` because the
     // `new_for_test*` constructors are. CI runs `cargo test
     // --workspace --all-features` so these execute in CI.
@@ -2990,22 +3093,31 @@ mod tests {
         uasset.extend_from_slice(&[0xBB; 200]);
         let record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 16, 32);
         let resolver = BulkDataResolver::new_for_test(uasset, 100, 0);
-        let rec = crate::test_spans::SpanRecorder::capture_until(
-            || {
-                let _ = resolver.resolve(&record, "test.uasset").expect("resolve");
-            },
-            |r| r.count("bulk_resolve") == 1,
-        );
-        assert_eq!(
-            rec.count("bulk_resolve"),
-            1,
-            "resolving bulk data must emit exactly one bulk_resolve span; got {:?}",
-            rec.names()
-        );
-        assert_eq!(
-            rec.field("bulk_resolve", "asset_path").as_deref(),
-            Some("test.uasset")
-        );
+        let uncharged = || {
+            let _ = resolver.resolve(&record, "test.uasset").expect("resolve");
+        };
+        let charged = || {
+            let ledger = BulkReadLedger::default();
+            let _ = resolver
+                .resolve_charged(&record, "test.uasset", &ledger)
+                .expect("resolve_charged");
+        };
+        let entry_points: [&dyn Fn(); 2] = [&uncharged, &charged];
+        for resolve in entry_points {
+            let rec = crate::test_spans::SpanRecorder::capture_until(resolve, |r| {
+                r.count("bulk_resolve") == 1
+            });
+            assert_eq!(
+                rec.count("bulk_resolve"),
+                1,
+                "resolving bulk data must emit exactly one bulk_resolve span; got {:?}",
+                rec.names()
+            );
+            assert_eq!(
+                rec.field("bulk_resolve", "asset_path").as_deref(),
+                Some("test.uasset")
+            );
+        }
     }
 
     #[cfg(feature = "__test_utils")]
@@ -4182,6 +4294,65 @@ mod tests {
             };
             assert!(format!("{resolver:?}").contains(&format!("{field}: Some(false)")));
         }
+    }
+
+    /// A second charge of one region trips the ledger, and the trip comes
+    /// before the budget reservation, so it leaves the per-package budget
+    /// untouched.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn a_region_charged_twice_trips_the_ledger_before_the_budget() {
+        use crate::asset::property::test_utils::assert_parse_reads_exceed_source;
+
+        let resolver = BulkDataResolver::new_for_test((0..10).collect::<Vec<u8>>(), 10, 0);
+        let record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_NO_OFFSET_FIXUP, 6, 0);
+        let ledger = BulkReadLedger::default();
+        resolver.set_bytes_resolved_for_test(MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE - 12);
+
+        let first = resolver
+            .resolve_charged(&record, "a.uasset", &ledger)
+            .unwrap();
+        assert_eq!(first.bytes, (0..6).collect::<Vec<u8>>());
+        assert_parse_reads_exceed_source(
+            resolver.resolve_charged(&record, "a.uasset", &ledger),
+            BulkDataTier::Inline,
+            12,
+            10,
+        );
+
+        let fits_exactly = resolver.resolve(&record, "a.uasset");
+        assert!(fits_exactly.is_ok(), "{fits_exactly:?}");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn a_failed_parse_decode_still_spends_its_source_bytes() {
+        use crate::asset::property::test_utils::assert_parse_reads_exceed_source;
+
+        let resolver = BulkDataResolver::new_for_test(vec![0xFF; 32], 0, 0);
+        let record = record_with(
+            FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SERIALIZE_COMPRESSED_ZLIB,
+            32,
+            0,
+        );
+        let ledger = BulkReadLedger::default();
+
+        let first = resolver
+            .resolve_charged(&record, "a.uasset", &ledger)
+            .unwrap_err();
+        let again = resolver.resolve_charged(&record, "a.uasset", &ledger);
+
+        assert!(
+            matches!(
+                first,
+                crate::PaksmithError::AssetParse {
+                    fault: crate::error::AssetParseFault::BulkDataCompressionDecodeFailed { .. },
+                    ..
+                }
+            ),
+            "{first:?}"
+        );
+        assert_parse_reads_exceed_source(again, BulkDataTier::UexpResident, 64, 32);
     }
 
     #[cfg(feature = "__test_utils")]

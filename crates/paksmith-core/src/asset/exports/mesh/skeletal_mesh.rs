@@ -1363,8 +1363,10 @@ fn read_lod_post_loop_tail(
 /// [`crate::PaksmithError`] from the tagged-property parse, the object-GUID
 /// tail, a short / corrupt segment-2 field, an over-cap `SkeletalMaterials` /
 /// `LODModels` count, a nested `FSkeletalMaterial` / `FReferenceSkeleton` /
-/// `FStaticLODModel` fault, or [`crate::PaksmithError::UnsupportedFeature`] for
-/// a legacy / non-cooked / pre-UE4.24 mesh (see *Scope* above) — all of which
+/// `FStaticLODModel` fault, the bulk resolver's error for an external LOD
+/// payload, or [`crate::PaksmithError::UnsupportedFeature`] for a legacy /
+/// non-cooked / pre-UE4.24 mesh (see *Scope* above) or an external LOD
+/// without a resolver — all of which
 /// the package walker degrades to a generic property bag (see
 /// `Package::read_payloads`).
 #[allow(
@@ -1584,7 +1586,11 @@ pub(crate) fn read_typed(
                                         .to_string(),
                                 });
                             };
-                            Some(resolver.resolve(&bulk, asset_path)?.bytes)
+                            Some(
+                                resolver
+                                    .resolve_charged(&bulk, asset_path, &ctx.bulk_reads)?
+                                    .bytes,
+                            )
                         }
                         None => None,
                     };
@@ -5241,22 +5247,15 @@ mod tests {
     /// need its length for the `FByteBulkData` header's `SizeOnDisk`.
     #[cfg(feature = "__test_utils")]
     fn ubulk_backed_ctx() -> (AssetContext, Vec<u8>) {
-        use crate::asset::bulk_data::BulkDataResolver;
+        use crate::asset::property::test_utils::with_ubulk;
 
         let mut blob = Vec::new();
         push_streamed_blob(&mut blob);
-        let resolver = Arc::new(BulkDataResolver::new_for_test_with_ubulk(
-            Vec::<u8>::new(),
-            0,
-            0,
-            blob.clone(),
-        ));
-        let mut ctx = lod_typed_ctx(
+        let ctx = lod_typed_ctx(
             &["None", "Mat0", "Root", "Hip"],
             MATERIAL_SHADER_MAP_ID_SERIALIZATION,
         );
-        ctx.bulk_resolver = Some(resolver);
-        (ctx, blob)
+        (with_ubulk(ctx, blob.clone()), blob)
     }
 
     /// #650 (c): a mixed inline (LOD[0]) + external-bulk (LOD[1]) mesh now
@@ -5371,6 +5370,40 @@ mod tests {
             data.lods[0].positions.len(),
             2,
             "positions decoded from the resolved payload"
+        );
+    }
+
+    /// Two bulk LODs naming one `.ubulk` region: the second trips the
+    /// bulk-read ledger and fails the typed read.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_typed_bulk_lods_naming_one_region_trip_the_bulk_read_ledger() {
+        use crate::asset::bulk_data::BulkDataTier;
+        use crate::asset::property::test_utils::assert_parse_reads_exceed_source;
+
+        let (ctx, blob) = ubulk_backed_ctx();
+        let len = u32::try_from(blob.len()).unwrap();
+
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&2i32.to_le_bytes()); // LODModels count = 2
+        for bone_map in [[10, 11], [20, 21]] {
+            push_non_inlined_lod_external(
+                &mut payload,
+                &bone_map,
+                len,
+                FLAG_PAYLOAD_IN_SEPARATE_FILE,
+            );
+        }
+        push_lod_tail(&mut payload, 0);
+
+        let len = u64::from(len);
+        assert_parse_reads_exceed_source(
+            read_typed(&payload, &ctx, "Mesh.uasset"),
+            BulkDataTier::Streaming,
+            2 * len,
+            len,
         );
     }
 

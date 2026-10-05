@@ -472,6 +472,13 @@ A `FByteBulkDataHeader` reader MUST:
   BulkDataMap.Length` (or `DataResourceMap.Length`) before using
   as an array index. A negative `dataIndex` or one past the table
   length is an OOB read on the lookup.
+- **Bound what a parse reads from each source** when payloads are
+  decoded while the package is parsed rather than on demand. Nothing in
+  the format stops several records, or several UE 5.2+ data-resource
+  indices, from naming one region or overlapping regions, so N records
+  can make one source cost N reads. Capping the bytes read from each
+  source at that source's length stops that; records over disjoint
+  regions never exceed it.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
@@ -538,7 +545,12 @@ deprecated, inert flag with no codec to decode). See
 
 The resolver loads each `.ubulk` / `.uptnl` companion at most once per
 package; a companion that fails to load reports that failure again on
-later resolves instead of loading again.
+later resolves instead of loading again. The static- and skeletal-mesh
+readers, which resolve streamed LODs while the package is parsed, charge
+each record against a per-source bulk-read ledger; a record that would
+take the decode's charges against its source past the source's length
+fails with `BulkDataParseReadsExceedSource`, and the mesh degrades to its
+generic property bag.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 + the per-task
 plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
