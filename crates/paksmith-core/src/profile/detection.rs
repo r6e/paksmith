@@ -429,13 +429,12 @@ mod tests {
     #[tracing_test::traced_test]
     #[test]
     fn warn_bounds_and_escapes_untrusted_hex() {
+        use crate::untrusted::test_support::hostile_name;
+
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "game.exe", &[0xDE, 0xAD]);
-        // Each value: raw ESC + CSI, a KEPT marker inside the 64-char window,
-        // filler, then a CUT marker starting exactly at char 64.
-        let esc = '\u{1b}';
-        let hostile_path = format!("{esc}[2J{}{}PATHCUT", "PATHKEPT", "p".repeat(52));
-        let hostile_hex = format!("{esc}[2J{}{}HEXCUT", "HEXKEPT", "z".repeat(53));
+        let hostile_path = hostile_name("PATH");
+        let hostile_hex = hostile_name("HEX");
         assert!(!rules_match(
             d.path(),
             &byte_signature_rules(&hostile_path, &hostile_hex)
@@ -452,7 +451,7 @@ mod tests {
         // is ABSENT covers both fields — `%` on either one re-opens the sink.
         assert!(logs_contain("\\u{1b}"), "ESC must appear escaped, not raw");
         assert!(
-            !logs_contain(&esc.to_string()),
+            !logs_contain("\u{1b}"),
             "no raw ESC may reach the log record"
         );
     }
