@@ -340,10 +340,9 @@ mod send_sync_assertions {
         assert_send_sync::<RawSoundHandler>();
         assert_send_sync::<BulkData>();
         assert_send_sync::<FByteBulkData>();
-        // BulkDataResolver carries Arc<[u8]>, AtomicU64, OnceLock<Vec<u8>>,
-        // and Box<dyn Fn() -> Result + Send + Sync + 'static>. Send + Sync
-        // required for Phase 5 (async runtime) and Phase 7 (GUI Iced
-        // commands moving `Package` across thread boundaries).
+        // BulkDataResolver: Send + Sync required for Phase 5 (async
+        // runtime) and Phase 7 (GUI Iced commands moving `Package`
+        // across thread boundaries).
         assert_send_sync::<BulkDataResolver>();
 
         // Phase 5b profile types. All carry only owned heap data

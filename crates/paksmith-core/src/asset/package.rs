@@ -964,8 +964,9 @@ impl Package {
     /// Companion files are looked up automatically: a sibling `.uexp`
     /// entry (if present) is stitched in for split assets. Sibling
     /// `.ubulk` / `.uptnl` entries are wired into the bulk-data
-    /// resolver via lazy loaders — first matching-tier
-    /// [`Self::resolve_bulk_for_export`] call materializes them.
+    /// resolver via lazy loaders, each run at most once, by the first
+    /// resolve that needs it: a mesh reader's streamed LOD during this
+    /// read, or [`Self::resolve_bulk_for_export`].
     ///
     /// `mappings` is a parsed `.usmap` schema registry — supply
     /// `Some(&usmap)` to decode assets whose `PKG_UnversionedProperties`
@@ -1076,9 +1077,7 @@ impl Package {
 
         // Phase 3b: build the `.ubulk` / `.uptnl` loader closures via
         // the shared `companion_loader` helper (see its doc for the
-        // `EntryNotFound` -> `MissingCompanionFile` mapping). Each opens
-        // the respective companion on first matching-tier resolution
-        // (via `BulkDataResolver`'s `OnceLock` cache). Closures capture
+        // `EntryNotFound` -> `MissingCompanionFile` mapping). Closures capture
         // `Arc<R>` clones (NOT `&reader`) to satisfy the
         // `'static + Send + Sync` bounds the resolver imposes for
         // Phase 5 async / Phase 7 GUI thread crossings.
@@ -1208,10 +1207,14 @@ impl Package {
     ///
     /// # Errors
     /// Any [`PaksmithError`] from the resolver (offset overflow, cap
-    /// exceeded, companion missing, decompression failure, etc.).
-    /// Errors are NOT cached — a failing resolve attempts again on
-    /// the next call. (Intentional: a transient I/O failure shouldn't
-    /// poison the export forever.)
+    /// exceeded, companion missing, decompression failure, etc.). A
+    /// failing call caches nothing for the export, so the next call
+    /// resolves its records again. A `.ubulk` or `.uptnl` companion
+    /// that failed to load is not loaded again for the life of this
+    /// `Package` and its clones: a later call that reaches that
+    /// companion reports the same failure (same variant and message)
+    /// instead of retrying. Re-read the package to retry a transient
+    /// failure.
     pub fn resolve_bulk_for_export(&self, export_idx: usize) -> crate::Result<&[BulkData]> {
         let Some((records, cache)) = self.bulk_data.get(&export_idx) else {
             return Ok(&[]);
@@ -1220,9 +1223,8 @@ impl Package {
             return Ok(cached.as_slice());
         }
         // Resolve all records up-front (fallible). On any per-record
-        // error, the cache slot stays empty so the next call re-runs
-        // — intentional: transient I/O failures shouldn't poison the
-        // export forever.
+        // error, the cache slot stays empty so the next call resolves
+        // again.
         let mut resolved: Vec<BulkData> = Vec::with_capacity(records.len());
         for record in records {
             resolved.push(self.resolver.resolve(record, &self.asset_path)?);
@@ -1230,8 +1232,7 @@ impl Package {
         // Race-safely place the freshly-resolved value into the
         // OnceLock. `get_or_init`'s closure is infallible
         // (`get_or_try_init` is gated on the unstable `once_cell_try`
-        // feature, so this mirrors the `BulkDataResolver::ubulk` /
-        // `uptnl` pattern). If another thread populated `cache`
+        // feature). If another thread populated `cache`
         // between the `cache.get()` check above and this point, our
         // `resolved` is dropped here and the racing thread's value
         // is returned. **Payload bytes are equivalent** (both threads
@@ -2403,14 +2404,15 @@ mod tests {
     #[test]
     fn streamed_static_mesh_lods_decode_through_a_package_read() {
         use crate::asset::exports::mesh::lod::test_support::{
-            cooked_static_mesh_ue4_23, non_inlined_lod_ue4_23, serialize_buffers_blob_ue4_23,
+            SEPARATE_FILE_NO_FIXUP, cooked_static_mesh_ue4_23, non_inlined_lod_ue4_23,
+            serialize_buffers_blob_ue4_23,
         };
         let triangles = [[0, 1, 2], [2, 1, 0]];
         let blobs = triangles.map(serialize_buffers_blob_ue4_23);
         let len = blobs[0].len();
         let bytes = static_mesh_package(vec![
-            cooked_static_mesh_ue4_23(&[non_inlined_lod_ue4_23(len, 0)]),
-            cooked_static_mesh_ue4_23(&[non_inlined_lod_ue4_23(len, len)]),
+            cooked_static_mesh_ue4_23(&[non_inlined_lod_ue4_23(SEPARATE_FILE_NO_FIXUP, len, 0)]),
+            cooked_static_mesh_ue4_23(&[non_inlined_lod_ue4_23(SEPARATE_FILE_NO_FIXUP, len, len)]),
         ]);
         let ubulk = blobs.concat();
 
@@ -2432,6 +2434,58 @@ mod tests {
             let lods = &mesh.render_data.as_ref().unwrap().lods;
             assert_eq!(lods[0].positions.len(), 3);
             assert_eq!(lods[0].indices, triangle.map(u32::from));
+        }
+    }
+
+    /// A companion that fails to load is loaded once per package, however
+    /// many mesh exports stream LODs from it; each export degrades to its
+    /// generic property bag.
+    #[test]
+    fn a_failed_companion_load_runs_once_across_mesh_exports() {
+        use crate::asset::bulk_data::counting_loader;
+        use crate::asset::exports::mesh::lod::test_support::{
+            OPTIONAL_SEPARATE_FILE_NO_FIXUP, SEPARATE_FILE_NO_FIXUP, cooked_static_mesh_ue4_23,
+            non_inlined_lod_ue4_23,
+        };
+        fn underrun() -> crate::Result<Vec<u8>> {
+            Err(PaksmithError::Decompression {
+                path: "m.ubulk".into(),
+                offset: 0,
+                fault: crate::error::DecompressionFault::SizeUnderrun {
+                    actual: 1,
+                    expected: 2,
+                },
+            })
+        }
+        for flags in [SEPARATE_FILE_NO_FIXUP, OPTIONAL_SEPARATE_FILE_NO_FIXUP] {
+            let body = cooked_static_mesh_ue4_23(&[non_inlined_lod_ue4_23(flags, 64, 0)]);
+            let bytes = static_mesh_package(vec![body.clone(), body]);
+            let (ubulk_loads, ubulk) = counting_loader(underrun);
+            let (uptnl_loads, uptnl) = counting_loader(underrun);
+
+            let pkg = Package::read_from_inner(
+                &bytes,
+                None,
+                &ReadOptions::new(),
+                "m.uasset",
+                ubulk,
+                uptnl,
+            )
+            .unwrap();
+
+            assert_eq!(pkg.payloads.len(), 2);
+            for payload in &pkg.payloads {
+                assert!(
+                    matches!(payload, crate::asset::Asset::Generic(_)),
+                    "expected a generic fallback, got {payload:?}"
+                );
+            }
+            let loads = |count: &std::sync::atomic::AtomicUsize| {
+                count.load(std::sync::atomic::Ordering::SeqCst)
+            };
+            let optional = flags == OPTIONAL_SEPARATE_FILE_NO_FIXUP;
+            assert_eq!(loads(&ubulk_loads), usize::from(!optional));
+            assert_eq!(loads(&uptnl_loads), usize::from(optional));
         }
     }
 
@@ -2961,16 +3015,27 @@ mod tests {
         // cargo-mutants gap where the whole function body could be
         // replaced with `Ok(&[])` and tests still passed.
         //
-        // Streaming-tier record (FLAG_PAYLOAD_IN_SEPARATE_FILE =
-        // 0x100; private constant in `bulk_data.rs` — reproduced as
-        // a literal here). `read_from`'s stub loaders fire
+        // A streaming-tier record whose `.ubulk` loader fires
         // MissingCompanionFile, so the resolver's per-record
-        // resolve() routes through `ubulk()` and surfaces the
-        // typed fault.
+        // resolve() surfaces the typed fault.
         let pkg = build_minimal_ue4_27();
-        let mut parsed = Package::read_from(&pkg.bytes, None, None, "test.uasset").unwrap();
+        let (loads, ubulk) = crate::asset::bulk_data::counting_loader(missing_companion_loader(
+            CompanionFileKind::Ubulk,
+            "test.uasset".into(),
+        ));
+        let mut parsed = Package::read_from_inner(
+            &pkg.bytes,
+            None,
+            &ReadOptions::new(),
+            "test.uasset",
+            ubulk,
+            missing_companion_loader(CompanionFileKind::Uptnl, "test.uasset".into()),
+        )
+        .unwrap();
         let streaming_record = FByteBulkData {
-            flags: crate::asset::bulk_data::BulkDataFlags::from(0x0000_0100u32),
+            flags: crate::asset::bulk_data::BulkDataFlags::from(
+                crate::asset::bulk_data::FLAG_PAYLOAD_IN_SEPARATE_FILE,
+            ),
             element_count: 8,
             size_on_disk: 8,
             offset_in_file: 0,
@@ -2991,9 +3056,8 @@ mod tests {
             ),
             "expected MissingCompanionFile(Ubulk), got {err:?}"
         );
-        // Failure must NOT be cached — a transient I/O failure
-        // shouldn't poison the export forever. Verify by calling
-        // again and expecting the same error class to fire.
+        // The export caches no failure, and the resolver reports the
+        // companion failure again without loading it again.
         let err2 = parsed.resolve_bulk_for_export(0).unwrap_err();
         assert!(
             matches!(
@@ -3003,8 +3067,10 @@ mod tests {
                     ..
                 }
             ),
-            "second call must also error (errors are not cached); got {err2:?}"
+            "second call must also error; got {err2:?}"
         );
+        assert_eq!(err2.to_string(), err.to_string());
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

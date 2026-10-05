@@ -120,9 +120,12 @@ monolithic and split; using `total_header_size` would be tautological
 4. Derive the `.ubulk` and `.uptnl` sibling paths and bake them into
    lazy loader closures (capturing cloned `Arc<PakReader>` handles).
    The closures are wired into the package's `BulkDataResolver`
-   (Phase 3b) and fire only on first matching-tier
-   `Package::resolve_bulk_for_export` call — no eager I/O at pak-open
-   time. `EntryNotFound` from inside a loader maps to the typed
+   (Phase 3b); nothing is read at pak-open time. Each closure runs at
+   most once per package, on the first resolve that needs its
+   companion: a mesh reader's streamed LOD during the package read, or
+   `Package::resolve_bulk_for_export`. A companion that fails to load
+   reports that failure again instead of loading again. `EntryNotFound`
+   from inside a loader maps to the typed
    `MissingCompanionFile { kind: Ubulk | Uptnl }` fault.
 5. Hand the `.uasset` + optional `.uexp` buffers (plus `virtual_path`
    as the asset_path tag) to `Package::read_from_inner`, with the
@@ -131,10 +134,8 @@ monolithic and split; using `total_header_size` would be tautological
 
 Phase 3b superseded the prior Phase 2e detect-and-warn shape: the
 old `tracing::warn!("'.ubulk' companion found but bulk data
-stitching is not yet supported")` is gone. The lazy-loader shape
-ensures `paksmith inspect` (and any other pak-open without
-bulk-data demand) pays zero I/O cost on companion files even when
-present.
+stitching is not yet supported")` is gone, and `paksmith inspect`
+reads no companion bytes for an asset without streamed mesh LODs.
 
 ## Variants
 
