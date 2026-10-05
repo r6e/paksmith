@@ -1738,6 +1738,45 @@ mod tests {
         );
     }
 
+    /// The generic fallback's warning carries the fault's message, which
+    /// bounds the archive name it names.
+    #[tracing_test::traced_test]
+    #[test]
+    fn opaque_fallback_warning_bounds_a_long_array_name() {
+        use crate::untrusted::test_support::{hostile_name, lines_clamped};
+
+        let mut spec = MinimalPackageSpec::default();
+        spec.names.names.extend([
+            crate::asset::FName::new(&hostile_name("ARR")),
+            crate::asset::FName::new("ArrayProperty"),
+            crate::asset::FName::new("StructProperty"),
+        ]);
+        let mut payload = Vec::new();
+        write_fname(&mut payload, 3, 0); // Name: the hostile array name
+        write_fname(&mut payload, 4, 0); // Type: ArrayProperty
+        payload.extend_from_slice(&12i32.to_le_bytes()); // Size
+        payload.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+        write_fname(&mut payload, 5, 0); // InnerType: StructProperty
+        payload.push(0); // HasPropertyGuid
+        payload.extend_from_slice(&1i32.to_le_bytes()); // element count
+        write_none_tag(&mut payload); // where the inner-array header belongs
+        spec.exports.exports[0].serial_size = i64::try_from(payload.len()).unwrap();
+        spec.payloads = vec![payload];
+        let MinimalPackage { bytes, .. } = build_minimal(spec);
+
+        let pkg = Package::read_from(&bytes, None, None, "x.uasset").unwrap();
+
+        assert!(
+            matches!(
+                pkg.payloads[0],
+                crate::asset::Asset::Generic(PropertyBag::Opaque { .. })
+            ),
+            "{:?}",
+            pkg.payloads[0]
+        );
+        logs_assert(lines_clamped("falling back to Opaque", "ARR"));
+    }
+
     /// A trip inside a typed reader fails the read rather than falling
     /// through to the generic parse, which here charges nothing.
     #[test]

@@ -42,6 +42,7 @@ use std::io;
 //   - The `compression` module grows a non-trivial dep that would
 //     transitively pollute consumers of `error::DecompressionFault`.
 use crate::container::pak::index::CompressionMethod;
+use crate::untrusted::clamp;
 
 /// Render the optional path on `Decryption`. `Some(p)` → ` for `<p>``;
 /// `None` → empty string (so the message reads "decryption failed:
@@ -2453,6 +2454,8 @@ pub(crate) fn check_region_bounds(
 ///
 /// **Display format** is wire-stable — every variant has a dedicated
 /// `error_display_asset_parse_*` unit test that pins the exact string.
+/// Names read from the archive or its `.usmap` mappings render clamped
+/// to 64 chars plus an ellipsis; the fields keep the full value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AssetParseFault {
@@ -3215,8 +3218,7 @@ pub enum AssetParseFault {
     /// A `UTexture2D`'s `PixelFormat` (the `EPixelFormat` name, e.g.
     /// `"PF_DXT5"`) is not one paksmith can decode. Covers both genuinely
     /// unknown names and known-but-not-yet-decodable formats (paksmith adds
-    /// decoders per family across Phase 3e); the name is surfaced verbatim
-    /// (Phase 3e-4 pixel decoders).
+    /// decoders per family across Phase 3e).
     UnsupportedPixelFormat {
         /// The `EPixelFormat` variant name from the wire.
         name: String,
@@ -3513,18 +3515,21 @@ impl fmt::Display for AssetParseFault {
             } => write!(
                 f,
                 "unversioned property `{property_name}` has unsupported type byte {type_byte} \
-                 (this property type is not yet decoded in unversioned mode)"
+                 (this property type is not yet decoded in unversioned mode)",
+                property_name = clamp(property_name),
             ),
             Self::UnversionedSchemaMissing { class_name } => write!(
                 f,
                 "no unversioned schema found for class `{class_name}` (a nested struct \
-                 cannot be decoded without its schema; supply a .usmap covering this class)"
+                 cannot be decoded without its schema; supply a .usmap covering this class)",
+                class_name = clamp(class_name),
             ),
             Self::ArrayOfStructHeaderMissing { array_name } => write!(
                 f,
                 "array `{array_name}` declared inner_type=StructProperty but the \
                  inner-array-tag-info header is a (0, 0) None-terminator (asset \
-                 is malformed or the outer tag's inner_type is wrong)"
+                 is malformed or the outer tag's inner_type is wrong)",
+                array_name = clamp(array_name),
             ),
             Self::ArrayOfStructHeaderTypeMismatch {
                 array_name,
@@ -3533,7 +3538,9 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "array `{array_name}` declared inner_type=StructProperty but the \
                  inline header's type_name is `{got_type}` — header would consume \
-                 the wrong extras byte count and desynchronize the cursor"
+                 the wrong extras byte count and desynchronize the cursor",
+                array_name = clamp(array_name),
+                got_type = clamp(got_type),
             ),
             Self::PropertyTagSizeMismatch {
                 expected_end,
@@ -3746,7 +3753,8 @@ impl fmt::Display for AssetParseFault {
             Self::UnsupportedPixelFormat { name } => {
                 write!(
                     f,
-                    "Texture pixel format `{name}` is not supported (no decoder)"
+                    "Texture pixel format `{name}` is not supported (no decoder)",
+                    name = clamp(name),
                 )
             }
             Self::TextureMipSizeMismatch { expected, actual } => write!(
@@ -3764,7 +3772,8 @@ impl fmt::Display for AssetParseFault {
             }
             Self::PixelFormatDecodeFailed { format, reason } => write!(
                 f,
-                "Texture pixel format `{format}` block decode failed: {reason}"
+                "Texture pixel format `{format}` block decode failed: {reason}",
+                format = clamp(format),
             ),
             Self::VertexBufferStrideInvalid {
                 field,
@@ -5630,6 +5639,66 @@ pub(crate) fn refused_reservation() -> TryReserveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asset_parse_display_clamps_name_fields() {
+        use crate::untrusted::test_support::hostile_name;
+
+        let faults = [
+            (
+                "PROP",
+                AssetParseFault::UnversionedTypeNotSupported {
+                    type_byte: 0xEE,
+                    property_name: hostile_name("PROP"),
+                },
+            ),
+            (
+                "CLS",
+                AssetParseFault::UnversionedSchemaMissing {
+                    class_name: hostile_name("CLS"),
+                },
+            ),
+            (
+                "ARR",
+                AssetParseFault::ArrayOfStructHeaderMissing {
+                    array_name: hostile_name("ARR"),
+                },
+            ),
+            (
+                "ARR",
+                AssetParseFault::ArrayOfStructHeaderTypeMismatch {
+                    array_name: hostile_name("ARR"),
+                    got_type: "IntProperty".into(),
+                },
+            ),
+            (
+                "GOT",
+                AssetParseFault::ArrayOfStructHeaderTypeMismatch {
+                    array_name: "Items".into(),
+                    got_type: hostile_name("GOT"),
+                },
+            ),
+            (
+                "PIX",
+                AssetParseFault::UnsupportedPixelFormat {
+                    name: hostile_name("PIX"),
+                },
+            ),
+            (
+                "FMT",
+                AssetParseFault::PixelFormatDecodeFailed {
+                    format: hostile_name("FMT"),
+                    reason: "bad block".into(),
+                },
+            ),
+        ];
+        for (tag, fault) in faults {
+            let shown = fault.to_string();
+            assert!(shown.contains(&format!("{tag}KEPT")), "{shown:?}");
+            assert!(shown.contains('…'), "{shown:?}");
+            assert!(!shown.contains(&format!("{tag}CUT")), "{shown:?}");
+        }
+    }
 
     #[test]
     fn replay_keeps_variant_and_display() {
