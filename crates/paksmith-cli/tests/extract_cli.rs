@@ -888,24 +888,14 @@ fn extract_survives_a_closed_stderr() {
 
 /// Under `--log-json` the locres-degrade warning names a hostile entry with
 /// its controls escaped, and no raw ESC or C1 CSI reaches stderr (#843). The
-/// archive is a runtime copy of a committed fixture with its one entry renamed,
-/// in place and at the same length, to a `.locres` path carrying both.
+/// archive is a runtime copy of a committed fixture with its one entry renamed
+/// to a `.locres` path carrying both. The warning fires before the entry's
+/// name is refused, so the run still ends with that entry FAILED.
 #[test]
 fn log_json_escapes_a_hostile_locres_entry_name() {
-    const FROM: &[u8] = b"Content/Example.uasset";
-    const HOSTILE: &[u8] = b"C/\x1b[2J\xc2\x9b2Jxxxxx.locres";
-    assert_eq!(FROM.len(), HOSTILE.len());
     let work = tempdir().unwrap();
-    let mut bytes = fs::read(fixture_path("real_v3_minimal.pak")).unwrap();
-    let at: Vec<usize> = bytes
-        .windows(FROM.len())
-        .enumerate()
-        .filter_map(|(i, w)| (w == FROM).then_some(i))
-        .collect();
-    assert_eq!(at.len(), 1, "the fixture must name the entry exactly once");
-    bytes[at[0]..at[0] + FROM.len()].copy_from_slice(HOSTILE);
     let pak = work.path().join("hostile.pak");
-    fs::write(&pak, bytes).unwrap();
+    v3_pak_with_entry(&pak, b"C/\x1b[2J\xc2\x9b2Jxxxxx.locres");
 
     let cfg = tempdir().unwrap();
     let out = Command::cargo_bin("paksmith")
@@ -918,6 +908,15 @@ fn log_json_escapes_a_hostile_locres_entry_name() {
         .arg(work.path().join("out"))
         .output()
         .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        summary["failures"][0]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("entry path contains a control"),
+        "{summary:?}"
+    );
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
         !stderr.contains(['\u{1b}', '\u{9b}']),
@@ -936,5 +935,67 @@ fn log_json_escapes_a_hostile_locres_entry_name() {
     assert!(
         entry.contains(r"\u{1b}") && entry.contains(r"\u{9b}"),
         "the entry must be named with its controls escaped: {entry:?}"
+    );
+}
+
+/// `real_v3_minimal.pak` written to `pak` with its one entry,
+/// `Content/Example.uasset`, renamed in place to `name`, which has the same
+/// length.
+fn v3_pak_with_entry(pak: &std::path::Path, name: &[u8; 22]) {
+    const FROM: &[u8; 22] = b"Content/Example.uasset";
+    let mut bytes = fs::read(fixture_path("real_v3_minimal.pak")).unwrap();
+    let at: Vec<usize> = bytes
+        .windows(FROM.len())
+        .enumerate()
+        .filter_map(|(i, w)| (w == FROM).then_some(i))
+        .collect();
+    assert_eq!(at.len(), 1, "the fixture must name the entry exactly once");
+    bytes[at[0]..at[0] + FROM.len()].copy_from_slice(name);
+    fs::write(pak, bytes).unwrap();
+}
+
+/// An entry whose name carries control or bidi characters fails with the
+/// refusal, exit 1, and nothing is created under the output directory. The
+/// same archive with a clean name of the same shape extracts.
+#[test]
+fn extract_refuses_a_hazard_entry_name() {
+    const HOSTILE: &[u8; 22] = b"C/\x1b[2J\xc2\x9b2Jxxxxxxxx.bin";
+    let work = tempdir().unwrap();
+    let cfg = tempdir().unwrap();
+    let extract = |name: &[u8; 22], out: &str| {
+        let pak = work.path().join(format!("{out}.pak"));
+        v3_pak_with_entry(&pak, name);
+        Command::cargo_bin("paksmith")
+            .unwrap()
+            .env("PAKSMITH_CONFIG_DIR", cfg.path())
+            .args(["--format", "json", "extract"])
+            .arg(&pak)
+            .arg("-o")
+            .arg(work.path().join(out))
+            .output()
+            .unwrap()
+    };
+
+    let clean = extract(b"C/abcdefghijklmnop.bin", "clean");
+    assert_eq!(clean.status.code(), Some(0), "{clean:?}");
+    assert!(work.path().join("clean/C/abcdefghijklmnop.bin").is_file());
+
+    let run = extract(HOSTILE, "out");
+
+    assert_eq!(run.status.code(), Some(1), "{run:?}");
+    let summary: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+    let failure = &summary["failures"][0];
+    assert_eq!(failure["entry"], std::str::from_utf8(HOSTILE).unwrap());
+    assert!(
+        failure["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("entry path contains a control"),
+        "{failure:?}"
+    );
+    let created = fs::read_dir(work.path().join("out")).map_or(0, Iterator::count);
+    assert_eq!(
+        created, 0,
+        "nothing may be created under the output directory"
     );
 }
