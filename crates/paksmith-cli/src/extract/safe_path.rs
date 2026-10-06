@@ -12,8 +12,7 @@ pub(crate) enum SafePathError {
     /// which Win32 can route to the device instead of a file. Carries
     /// the offending entry path.
     DeviceName(String),
-    /// A joined component holds an [`is_name_hazard`] character, which a tool
-    /// that prints the name raw would replay to the terminal. Carries the
+    /// A joined component holds an [`is_name_hazard`] character. Carries the
     /// offending entry path.
     Hazard(String),
 }
@@ -26,7 +25,8 @@ impl std::fmt::Display for SafePathError {
             Self::DeviceName(p) => write!(f, "entry path names a reserved device: {p}"),
             Self::Hazard(p) => write!(
                 f,
-                "entry path contains a control or bidirectional-formatting character: {p}"
+                "entry path contains a control, control stand-in (U+F001..U+F01F) or \
+                 bidirectional-formatting character: {p}"
             ),
         }
     }
@@ -196,7 +196,8 @@ mod tests {
         );
         assert_eq!(
             SafePathError::Hazard("Game/a\u{1b}b".to_string()).to_string(),
-            "entry path contains a control or bidirectional-formatting character: Game/a\u{1b}b"
+            "entry path contains a control, control stand-in (U+F001..U+F01F) or \
+             bidirectional-formatting character: Game/a\u{1b}b"
         );
     }
 
@@ -247,9 +248,8 @@ mod tests {
         assert_eq!(p, PathBuf::from("/out/Hero.uasset"));
     }
 
-    /// Every component an entry adds is checked for control and bidi
-    /// characters, which a tool that prints the name raw would replay to the
-    /// terminal.
+    /// Every component an entry adds is checked for controls, control
+    /// stand-ins and bidi controls.
     #[test]
     fn rejects_hazards_in_any_joined_component() {
         for entry in [
