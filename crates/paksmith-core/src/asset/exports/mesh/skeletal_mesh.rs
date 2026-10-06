@@ -1394,7 +1394,8 @@ pub(crate) fn read_typed(
         return Err(crate::PaksmithError::UnsupportedFeature {
             context: format!(
                 "versioned UE 5.5 skeletal-mesh render data (FNaniteResources \
-                 after the LOD array) is not yet supported ({asset_path})"
+                 after the LOD array) is not yet supported ({asset_path})",
+                asset_path = crate::untrusted::clamp_path(asset_path)
             ),
         });
     }
@@ -1645,6 +1646,9 @@ mod tests {
             matches!(err, crate::PaksmithError::UnsupportedFeature { .. }),
             "1013 must fail closed, got {err:?}"
         );
+        let long = crate::untrusted::test_support::long_path();
+        let err = read_typed(&[], &ctx, &long).unwrap_err();
+        crate::untrusted::test_support::assert_message_clamps_long_path(&err);
         let ctx12 = make_ctx_with_version(522, Some(1012));
         let err12 = read_typed(&[], &ctx12, "sk.uasset").unwrap_err();
         assert!(

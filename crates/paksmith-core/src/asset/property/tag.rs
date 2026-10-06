@@ -715,7 +715,8 @@ fn read_tag_complete_type_name<R: Read>(
         return Err(PaksmithError::UnsupportedFeature {
             context: format!(
                 "EPropertyTagFlags {flags:#04x} in {asset_path}: bits outside the known \
-                 0x3F mask have no defined wire shape"
+                 0x3F mask have no defined wire shape",
+                asset_path = crate::untrusted::clamp_path(asset_path)
             ),
         });
     }
@@ -778,7 +779,8 @@ fn read_tag_extension<R: Read>(reader: &mut R, asset_path: &str) -> crate::Resul
             context: format!(
                 "EPropertyTagExtension flags {ext:#04x} in {asset_path}: only \
                  OverridableInformation (0x02) has a known wire shape; other bits \
-                 mark extension groups whose size is undefined"
+                 mark extension groups whose size is undefined",
+                asset_path = crate::untrusted::clamp_path(asset_path)
             ),
         });
     }
@@ -1012,6 +1014,9 @@ mod tests {
                 matches!(err, crate::PaksmithError::UnsupportedFeature { .. }),
                 "flags {bad:#04x} must fail closed, got {err:?}"
             );
+            let long = crate::untrusted::test_support::long_path();
+            let err = read_tag(&mut Cursor::new(&buf[..]), &ctx, &long).unwrap_err();
+            crate::untrusted::test_support::assert_message_clamps_long_path(&err);
         }
     }
 
@@ -1191,6 +1196,9 @@ mod tests {
                 matches!(err, crate::PaksmithError::UnsupportedFeature { .. }),
                 "flags {bad:#04x} must fail closed, got {err:?}"
             );
+            let long = crate::untrusted::test_support::long_path();
+            let err = read_tag(&mut Cursor::new(&buf[..]), &ctx, &long).unwrap_err();
+            crate::untrusted::test_support::assert_message_clamps_long_path(&err);
         }
     }
 
