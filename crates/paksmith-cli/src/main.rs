@@ -128,7 +128,10 @@ fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .log_internal_errors(false);
     if cli.log_json {
-        let _ = builder.json().try_init();
+        let _ = builder
+            .json()
+            .with_writer(|| output::JsonTerminalSafe(io::stderr()))
+            .try_init();
     } else {
         let _ = builder.try_init();
     }

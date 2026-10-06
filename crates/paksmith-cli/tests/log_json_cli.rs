@@ -7,10 +7,30 @@
 
 mod common;
 
+/// `paksmith` against `config_dir`, with the caller's `RUST_LOG` removed so
+/// it cannot steer the filter.
+fn log_cmd(config_dir: &std::path::Path) -> assert_cmd::Command {
+    let mut c = common::paksmith_unpinned(config_dir);
+    let _ = c.env_remove("RUST_LOG");
+    c
+}
+
+/// Each non-empty stderr line, parsed as one JSON document.
+fn json_lines(stderr: &[u8]) -> Vec<serde_json::Value> {
+    std::str::from_utf8(stderr)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            serde_json::from_str(l)
+                .unwrap_or_else(|e| panic!("non-JSON stderr line under --log-json: {e}; {l:?}"))
+        })
+        .collect()
+}
+
 /// The one flag combination that logs before it can fail.
 fn overriding_cmd(config_dir: &std::path::Path) -> assert_cmd::Command {
-    let mut c = common::paksmith_unpinned(config_dir);
-    let _ = c.env_remove("RUST_LOG"); // a caller's RUST_LOG must not steer the filter
+    let mut c = log_cmd(config_dir);
     let _ = c.args([
         "-v",
         "--aes-key",
@@ -66,9 +86,7 @@ fn successful_piped_run_keeps_stderr_pure_json_lines() {
     // the piped-auto advisory; under --log-json it is suppressed, so every
     // non-empty stderr line must be a complete JSON document.
     let dir = tempfile::tempdir().unwrap();
-    let mut c = common::paksmith_unpinned(dir.path());
-    let _ = c.env_remove("RUST_LOG");
-    let out = c
+    let out = log_cmd(dir.path())
         .args(["-v", "--log-json", "list"])
         .arg(common::fixture_path("real_v11_minimal.pak"))
         .output()
@@ -79,16 +97,77 @@ fn successful_piped_run_keeps_stderr_pure_json_lines() {
     let _: serde_json::Value =
         serde_json::from_str(&stdout).expect("piped stdout auto-resolves to the JSON payload");
 
+    let _ = json_lines(&out.stderr);
     let stderr = String::from_utf8(out.stderr).unwrap();
-    for line in stderr.lines().filter(|l| !l.trim().is_empty()) {
-        let _: serde_json::Value = serde_json::from_str(line).unwrap_or_else(|e| {
-            panic!("non-JSON stderr line on a successful --log-json run: {e}; line={line}")
-        });
-    }
     assert!(
         !stderr.contains("note:"),
         "the piped-auto advisory is suppressed under --log-json; stderr={stderr}"
     );
+}
+
+/// DEL, C1 CSI and a right-to-left override as raw UTF-8: what serde_json
+/// leaves unescaped inside a string.
+const RAW_HAZARDS: [&[u8]; 3] = [b"\x7f", b"\xc2\x9b", b"\xe2\x80\xae"];
+
+/// [`json_lines`], after checking no raw hazard byte sequence reached
+/// stderr.
+fn escaped_records(stderr: &[u8]) -> Vec<serde_json::Value> {
+    for raw in RAW_HAZARDS {
+        assert!(
+            !stderr.windows(raw.len()).any(|w| w == raw),
+            "raw {raw:02x?} on stderr: {:?}",
+            String::from_utf8_lossy(stderr)
+        );
+    }
+    json_lines(stderr)
+}
+
+#[test]
+fn log_json_escapes_del_c1_and_bidi_in_event_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let hostile = dir.path().join("x\u{7f}\u{9b}\u{202e}y");
+    let out = log_cmd(dir.path())
+        .args(["--log-json", "--aes-key", &"ab".repeat(32), "--detect"])
+        .arg(&hostile)
+        .arg("list")
+        .arg(common::fixture_path("real_v11_minimal.pak"))
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{out:?}");
+    let records = escaped_records(&out.stderr);
+    let warning = records
+        .iter()
+        .find(|r| {
+            r["fields"]["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("--detect found no unique profile"))
+        })
+        .unwrap_or_else(|| panic!("no --detect warning in {records:?}"));
+    let error = warning["fields"]["error"].as_str().unwrap();
+    assert!(error.contains(hostile.to_str().unwrap()), "{error:?}");
+}
+
+#[test]
+fn log_json_escapes_span_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let pak = dir.path().join("C\u{9b}\u{202e}x.pak");
+    let _ = std::fs::copy(common::fixture_path("real_v11_minimal.pak"), &pak).unwrap();
+    let out = log_cmd(dir.path())
+        .args(["-v", "--log-json", "list"])
+        .arg(&pak)
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{out:?}");
+    let records = escaped_records(&out.stderr);
+    let pak_open = records
+        .iter()
+        .filter_map(|r| r["spans"].as_array())
+        .flatten()
+        .find(|s| s["name"] == "pak_open")
+        .unwrap_or_else(|| panic!("no record inside pak_open in {records:?}"));
+    assert_eq!(pak_open["path"], pak.display().to_string());
 }
 
 #[test]
