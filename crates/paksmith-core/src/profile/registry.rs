@@ -126,10 +126,9 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
                 // reaches a terminal through `main.rs`'s top-level error line,
                 // which does no sanitizing. Measured on a hostile document,
                 // THIS message carries two raw ESC bytes — one from `p.id`, one
-                // from the clamped hex — but that is the small end of the sink:
-                // `ProfileFault::DetectionAmbiguous` joins profile ids with no
-                // cap at all, measured at 10,000 raw ESC on a single 2.58 MB
-                // stderr line at the documented caps.
+                // from the clamped hex — and `ProfileFault::DetectionAmbiguous`
+                // lists up to `MAX_AMBIGUOUS_IDS_LISTED` ids, each clamped to
+                // `MAX_UNTRUSTED_CHARS` chars, control characters included.
                 // `output::sanitize_for_display` does not cover this path;
                 // its own doc carries the list of what it does cover, so that
                 // enumeration deliberately is not duplicated here. #708 tracks

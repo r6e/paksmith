@@ -417,7 +417,7 @@ fn profile_pak_patterns_in(
 
 /// The unique profile id from a detection sweep, or the typed fault the
 /// `--detect` contract specifies: zero matches → `DetectionNoMatch`,
-/// more than one → `DetectionAmbiguous` (ids joined for the message).
+/// more than one → `DetectionAmbiguous` (ids listed by [`ambiguous_ids`]).
 /// The single 0/1/many policy shared by key resolution and the
 /// `--aes-key` best-effort mappings path.
 fn unique_detect_id(mut matches: Vec<DetectMatch>, dir: &Path) -> crate::Result<String> {
@@ -431,13 +431,30 @@ fn unique_detect_id(mut matches: Vec<DetectMatch>, dir: &Path) -> crate::Result<
         _ => Err(PaksmithError::Profile {
             fault: ProfileFault::DetectionAmbiguous {
                 dir: dir.display().to_string(),
-                ids: matches
-                    .iter()
-                    .map(|m| m.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                ids: ambiguous_ids(&matches),
             },
         }),
+    }
+}
+
+/// How many matched ids [`ambiguous_ids`] lists before counting the rest.
+const MAX_AMBIGUOUS_IDS_LISTED: usize = 8;
+
+/// The first [`MAX_AMBIGUOUS_IDS_LISTED`] matched ids, each clamped and
+/// joined with `", "`, then `"… and N more"` for any beyond them. Matches
+/// come from the local store, which has no profile-count cap, and from the
+/// registry (up to `MAX_PROFILES`, ids up to `MAX_STR` bytes); the message
+/// stays a few hundred chars however many there are.
+fn ambiguous_ids(matches: &[DetectMatch]) -> String {
+    let listed = matches
+        .iter()
+        .take(MAX_AMBIGUOUS_IDS_LISTED)
+        .map(|m| crate::untrusted::clamp(&m.id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match matches.len().saturating_sub(MAX_AMBIGUOUS_IDS_LISTED) {
+        0 => listed,
+        rest => format!("{listed}, … and {rest} more"),
     }
 }
 
@@ -1299,28 +1316,68 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unique_detect_id_arms() {
-        let dir = Path::new("/tmp/g");
-        let m = |id: &str| DetectMatch {
+    fn detect_match(id: &str) -> DetectMatch {
+        DetectMatch {
             id: id.into(),
             name: id.into(),
             source: "local",
+        }
+    }
+
+    #[test]
+    fn ambiguous_ids_lists_the_cap_then_counts_the_rest() {
+        let ids = |n: usize| -> Vec<DetectMatch> {
+            (0..n).map(|i| detect_match(&format!("m{i}"))).collect()
         };
-        assert_eq!(unique_detect_id(vec![m("only")], dir).unwrap(), "only");
+        assert_eq!(ambiguous_ids(&ids(8)), "m0, m1, m2, m3, m4, m5, m6, m7");
+        assert_eq!(
+            ambiguous_ids(&ids(9)),
+            "m0, m1, m2, m3, m4, m5, m6, m7, … and 1 more"
+        );
+        assert!(ambiguous_ids(&ids(10_000)).ends_with(", m7, … and 9992 more"));
+    }
+
+    #[test]
+    fn ambiguous_ids_clamps_each_listed_id() {
+        use crate::untrusted::test_support::hostile_name;
+
+        let matches: Vec<DetectMatch> =
+            (0..20).map(|_| detect_match(&hostile_name("ID"))).collect();
+        let listed = ambiguous_ids(&matches);
+
+        assert_eq!(listed.matches("IDKEPT").count(), MAX_AMBIGUOUS_IDS_LISTED);
+        assert!(!listed.contains("IDCUT"), "{listed:?}");
+    }
+
+    #[test]
+    fn unique_detect_id_arms() {
+        let dir = Path::new("/tmp/g");
+        assert_eq!(
+            unique_detect_id(vec![detect_match("only")], dir).unwrap(),
+            "only"
+        );
         assert!(matches!(
             unique_detect_id(vec![], dir),
             Err(PaksmithError::Profile {
                 fault: ProfileFault::DetectionNoMatch { .. }
             })
         ));
-        let err = unique_detect_id(vec![m("a"), m("b")], dir);
+        let err = unique_detect_id(vec![detect_match("a"), detect_match("b")], dir);
         assert!(matches!(
             err,
             Err(PaksmithError::Profile {
                 fault: ProfileFault::DetectionAmbiguous { ref ids, .. }
             }) if ids == "a, b"
         ));
+        // Past the cap, the error carries the bounded list.
+        let many = (0..9).map(|i| detect_match(&format!("m{i}"))).collect();
+        let Err(PaksmithError::Profile {
+            fault: ProfileFault::DetectionAmbiguous { ids, .. },
+        }) = unique_detect_id(many, dir)
+        else {
+            panic!("expected DetectionAmbiguous");
+        };
+        assert_eq!(ids, "m0, m1, m2, m3, m4, m5, m6, m7, … and 1 more");
     }
 
     #[test]

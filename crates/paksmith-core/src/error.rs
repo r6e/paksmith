@@ -1325,7 +1325,9 @@ pub enum ProfileFault {
     DetectionAmbiguous {
         /// The directory that was probed.
         dir: String,
-        /// Comma-separated matched ids.
+        /// The first eight matched ids, each clamped to 64 chars plus an
+        /// ellipsis, joined with `", "`, then `… and N more` for any beyond
+        /// them.
         ids: String,
     },
 }
