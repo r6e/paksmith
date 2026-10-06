@@ -421,9 +421,9 @@ fn build_entries_table(entries: &[EntryRowData], style: bool) -> Table {
     table
 }
 
-/// Replace control characters (C0 incl. ESC/BEL/CR, DEL, and C1 incl.
-/// the U+009B CSI) with U+FFFD in an untrusted pak string bound for
-/// human display. Keyed to the table FORMAT, not TTY-ness — a piped
+/// Replace each [`is_terminal_hazard`] character (ESC, BEL, the U+009B
+/// CSI, a bidi override, ...) with U+FFFD in an untrusted pak string bound
+/// for human display. Keyed to the table FORMAT, not TTY-ness — a piped
 /// table gets paged into a terminal later. The core FString parser
 /// guarantees valid non-NUL Unicode — it does NOT strip controls, so a
 /// hostile pak can embed OSC/CSI sequences (title rewrites, screen
@@ -431,10 +431,10 @@ fn build_entries_table(entries: &[EntryRowData], style: bool) -> Table {
 /// characters.
 ///
 /// Consumers: the `pak:` group header and the list/search entries
-/// table (both here), plus extract's "extracted from" and summary
-/// FAILED lines. THREE same-class surfaces remain, all tracked
-/// as issue #708 (many call sites; their own pass): inspect's table
-/// tree renderer; the top-level error print in `main`, which renders a
+/// table (both here), extract's "extracted from" and summary FAILED
+/// lines, and every line of inspect's table tree (`inspect::tree`).
+/// TWO same-class surfaces remain, both tracked as issue #708: the
+/// top-level error print in `main`, which renders a
 /// `PaksmithError` whose `Display` can embed registry-authored ids and
 /// hex (measured: two raw ESC bytes from a hostile registry document);
 /// and the `profile` command family — `show`, `list`
@@ -444,8 +444,8 @@ fn build_entries_table(entries: &[EntryRowData], style: bool) -> Table {
 /// (`MAX_STR`) but not character-class restricted.
 ///
 /// The JSON path deliberately has no equivalent — NOT because serde
-/// escapes everything (it escapes C0 only; DEL and C1 incl. U+009B pass
-/// through as raw UTF-8) but because JSON is the machine interface and
+/// escapes everything (it escapes C0 only; DEL, C1 incl. U+009B and the
+/// bidi controls pass through as raw UTF-8) but because JSON is the machine interface and
 /// machine consumers don't interpret terminal controls. Round-tripping
 /// is the reason for the fields that ARE fed back (`path` into `inspect`,
 /// `id` into `--game`); for display-only fields (`name`,
@@ -457,18 +457,30 @@ fn build_entries_table(entries: &[EntryRowData], style: bool) -> Table {
 /// not one — it is the machine interface the paragraph above exempts, and
 /// sanitizing it would break the round-tripping contract. Under
 /// `--format auto` the piped case is now the C0-escaped JSON rather than the
-/// raw table; an explicit `--format table | less` still ships raw ESC, DEL
-/// and C1.
+/// raw table; an explicit `--format table | less` still ships raw ESC, DEL,
+/// C1 and bidi controls.
 pub(crate) fn sanitize_for_display(s: &str) -> std::borrow::Cow<'_, str> {
-    if s.chars().any(char::is_control) {
+    if s.chars().any(is_terminal_hazard) {
         std::borrow::Cow::Owned(
             s.chars()
-                .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+                .map(|c| if is_terminal_hazard(c) { '\u{FFFD}' } else { c })
                 .collect(),
         )
     } else {
         std::borrow::Cow::Borrowed(s)
     }
+}
+
+/// Whether `c` must not reach a terminal raw: a Unicode control (C0, DEL,
+/// C1) or one of the 12 Bidi_Control characters, which reorder the text
+/// around them on screen.
+#[must_use]
+pub(crate) fn is_terminal_hazard(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
 }
 
 // `bytes as f64` loses precision past 2^53, but the output is `{:.1}`
@@ -698,6 +710,50 @@ mod table_style_tests {
             !styled.contains('\u{7}') && !styled.contains('\u{9b}'),
             "hostile BEL/CSI must not survive styled rendering: {styled:?}"
         );
+    }
+
+    /// Each range edge from both sides: Cc (C0, DEL, C1) and the 12
+    /// Bidi_Control characters are hazards; their neighbours are not.
+    #[test]
+    fn is_terminal_hazard_matches_controls_and_bidi_controls() {
+        let hazards = [
+            '\u{0}', '\u{1f}', '\u{7f}', '\u{80}', '\u{9f}', '\u{61c}', '\u{200e}', '\u{200f}',
+            '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}',
+        ];
+        let safe = [
+            ' ', '~', '\u{a0}', '\u{61b}', '\u{61d}', '\u{200d}', '\u{2010}', '\u{2029}',
+            '\u{202f}', '\u{2065}', '\u{206a}', 'é', '日',
+        ];
+        for c in hazards {
+            assert!(is_terminal_hazard(c), "{c:?} must be a hazard");
+        }
+        for c in safe {
+            assert!(!is_terminal_hazard(c), "{c:?} must not be a hazard");
+        }
+    }
+
+    #[test]
+    fn sanitize_replaces_bidi_overrides() {
+        assert_eq!(sanitize_for_display("a\u{202e}b"), "a\u{FFFD}b");
+        assert!(matches!(
+            sanitize_for_display("plain/path.uasset"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    /// A right-to-left override in a pak path would reorder the rest of
+    /// the row on screen; the table shows U+FFFD in its place.
+    #[test]
+    fn entries_table_neutralizes_a_bidi_override() {
+        let hostile = vec![EntryRowData::from_metadata(EntryMetadata::new(
+            "Game/\u{202e}txt.exe".into(),
+            10,
+            20,
+            EntryFlags::NONE,
+        ))];
+        let rendered = build_entries_table(&hostile, false).to_string();
+        assert!(!rendered.contains('\u{202e}'), "{rendered:?}");
+        assert!(rendered.contains("Game/\u{FFFD}txt.exe"), "{rendered:?}");
     }
 
     /// Pins the exact frame: `UTF8_FULL_CONDENSED` (no row separators,

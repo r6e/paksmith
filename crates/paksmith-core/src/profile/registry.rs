@@ -123,7 +123,7 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
                 //
                 // The CLI sink is NOT covered, and it is worth being exact
                 // about that rather than gesturing at an issue: this message
-                // reaches a terminal through `main.rs`'s top-level `eprintln!`,
+                // reaches a terminal through `main.rs`'s top-level error line,
                 // which does no sanitizing. Measured on a hostile document,
                 // THIS message carries two raw ESC bytes — one from `p.id`, one
                 // from the clamped hex — and `ProfileFault::DetectionAmbiguous`

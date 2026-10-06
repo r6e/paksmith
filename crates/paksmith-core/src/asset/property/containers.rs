@@ -881,7 +881,7 @@ fn bail_map_partial<R: Read + Seek>(
         key_type = tag.inner_type.as_ref(),
         value_type = tag.value_type.as_ref(),
         entries_decoded = entries.len(),
-        error = %error,
+        error = error.to_string(),
         "{}; seeking to outer tag end and returning partial Map",
         message
     );
@@ -923,7 +923,7 @@ fn bail_set_partial<R: Read + Seek>(
         set = &*clamp(&tag.name),
         inner_type = tag.inner_type.as_ref(),
         elements_decoded = elements.len(),
-        error = %error,
+        error = error.to_string(),
         "{}; seeking to outer tag end and returning partial Set",
         message
     );
@@ -2944,7 +2944,9 @@ mod tests {
     #[tracing_test::traced_test]
     #[test]
     fn map_bail_warning_bounds_a_long_map_name() {
-        use crate::untrusted::test_support::{hostile_name, lines_clamped, lines_escaped};
+        use crate::untrusted::test_support::{
+            hostile_name, lines_clamped, lines_escaped, lines_free_of_raw_controls,
+        };
 
         let ctx = make_ctx(MAP_OF_STRUCT_NAMES);
         let mut bytes: Vec<u8> = Vec::new();
@@ -2956,7 +2958,8 @@ mod tests {
         let outer_tag = make_map_of_struct_tag(bytes.len()).with_name(&hostile_name("MAP"));
         let expected_end = bytes.len() as u64;
         let mut cur = Cursor::new(bytes);
-        let value = read_map_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset");
+        let path = hostile_name("PATH");
+        let value = read_map_value(&outer_tag, &mut cur, &ctx, 0, expected_end, &path);
 
         assert!(
             matches!(value, Ok(Some(PropertyValue::Map { .. }))),
@@ -2964,6 +2967,10 @@ mod tests {
         );
         logs_assert(lines_clamped("returning partial Map", "MAP"));
         logs_assert(lines_escaped("returning partial Map", "MAP"));
+        assert!(logs_contain(
+            "error=\"asset deserialization failed for `PATHKEPT\\u{1b}[2J"
+        ));
+        logs_assert(lines_free_of_raw_controls("returning partial Map"));
     }
 
     #[test]
@@ -3227,7 +3234,9 @@ mod tests {
     #[tracing_test::traced_test]
     #[test]
     fn set_bail_warning_bounds_a_long_set_name() {
-        use crate::untrusted::test_support::{hostile_name, lines_clamped, lines_escaped};
+        use crate::untrusted::test_support::{
+            hostile_name, lines_clamped, lines_escaped, lines_free_of_raw_controls,
+        };
 
         let ctx = make_ctx(SET_OF_STRUCT_NAMES);
         let mut bytes: Vec<u8> = Vec::new();
@@ -3238,7 +3247,8 @@ mod tests {
         let outer_tag = make_set_of_struct_tag(bytes.len()).with_name(&hostile_name("SET"));
         let expected_end = bytes.len() as u64;
         let mut cur = Cursor::new(bytes);
-        let value = read_set_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset");
+        let path = hostile_name("PATH");
+        let value = read_set_value(&outer_tag, &mut cur, &ctx, 0, expected_end, &path);
 
         assert!(
             matches!(value, Ok(Some(PropertyValue::Set { .. }))),
@@ -3246,6 +3256,10 @@ mod tests {
         );
         logs_assert(lines_clamped("returning partial Set", "SET"));
         logs_assert(lines_escaped("returning partial Set", "SET"));
+        assert!(logs_contain(
+            "error=\"asset deserialization failed for `PATHKEPT\\u{1b}[2J"
+        ));
+        logs_assert(lines_free_of_raw_controls("returning partial Set"));
     }
 
     #[test]
