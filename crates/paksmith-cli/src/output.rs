@@ -487,12 +487,14 @@ pub(crate) fn is_terminal_hazard(c: char) -> bool {
 /// Bidi_Control characters as `\uXXXX`. Lossless: outside strings JSON holds
 /// none of them, and inside a string the escape decodes to the same
 /// character. C0 passes through, because serde_json already escapes it
-/// inside strings and outside them it is structural whitespace. Each call
-/// makes exactly one inner `write_all`, so a record written in one call is
-/// never split across inner writes. Input that is not whole UTF-8 is
-/// `InvalidData`. It must be the outermost writer: an error after a partial
-/// inner write reports nothing written, so a buffering wrapper such as
-/// `BufWriter` would send that part again.
+/// inside strings and outside them it is structural whitespace. Each `write`
+/// makes at most one inner `write_all`, so over `Stderr`, whose `write_all`
+/// holds its lock throughout, a record handed to one `write` is not
+/// interleaved with another thread's writes through `io::stderr()`. Input
+/// that is not whole UTF-8 is rejected with `InvalidData`, and nothing is
+/// written. It must be the outermost writer: an error after a partial inner
+/// write reports nothing written, so a buffering wrapper such as `BufWriter`
+/// would send that part again.
 pub(crate) struct JsonTerminalSafe<W>(pub(crate) W);
 
 impl<W: Write> Write for JsonTerminalSafe<W> {
