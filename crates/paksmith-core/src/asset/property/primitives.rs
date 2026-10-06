@@ -403,7 +403,8 @@ pub(super) fn read_soft_path_payload<R: Read>(
                  file_version_ue4={} ({asset_path}); soft paths require \
                  file_version_ue4 >= {VER_UE4_ADDED_SOFT_OBJECT_PATH} \
                  (ADDED_SOFT_OBJECT_PATH)",
-                ctx.version.file_version_ue4
+                ctx.version.file_version_ue4,
+                asset_path = crate::untrusted::clamp_path(asset_path)
             ),
         });
     }
@@ -1635,6 +1636,9 @@ mod tests {
             matches!(err, crate::PaksmithError::UnsupportedFeature { .. }),
             "expected UnsupportedFeature for pre-514 soft path, got {err:?}"
         );
+        let long = crate::untrusted::test_support::long_path();
+        let err = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, &long, 0).unwrap_err();
+        crate::untrusted::test_support::assert_message_clamps_long_path(&err);
     }
 
     /// The pre-514 guard is gated on `file_version_ue4` ALONE, not

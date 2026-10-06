@@ -3286,6 +3286,41 @@ mod tests {
         logs_assert(lines_free_of_raw_controls("returning partial Set"));
     }
 
+    /// The asset path reaches a Map bail's warning clamped, both in its
+    /// `asset` field and in the fault message its `error` field carries: a
+    /// path at the bound renders whole, a longer one is cut.
+    #[tracing_test::traced_test]
+    #[test]
+    fn map_bail_warning_bounds_a_long_asset_path() {
+        use crate::untrusted::MAX_UNTRUSTED_PATH_CHARS;
+        use crate::untrusted::test_support::{lines_counted, long_path, long_path_cut};
+
+        let whole = "w".repeat(MAX_UNTRUSTED_PATH_CHARS);
+        let long = long_path();
+        let ctx = make_ctx(MAP_OF_STRUCT_NAMES);
+        let map = map_with_one_bad_value();
+        let tag = make_map_of_struct_tag(map.len());
+        for path in [&whole, &long] {
+            let mut cur = Cursor::new(&map);
+            let value = read_map_value(&tag, &mut cur, &ctx, 0, map.len() as u64, path);
+            assert!(
+                matches!(value, Ok(Some(PropertyValue::Map { .. }))),
+                "{value:?}"
+            );
+        }
+
+        let cut = long_path_cut();
+        for shown in [
+            format!("asset=\"{whole}\""),
+            format!("`{whole}`"),
+            format!("asset=\"{cut}\""),
+            format!("`{cut}`"),
+        ] {
+            logs_assert(lines_counted(&shown, 1));
+        }
+        assert!(!logs_contain("TAIL"));
+    }
+
     /// Map and Set bails draw on one per-package warning budget: past the
     /// cap they still return their partial collections, and one notice
     /// stands in for the warnings they no longer log.

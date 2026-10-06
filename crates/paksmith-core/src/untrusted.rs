@@ -7,12 +7,28 @@ use std::borrow::Cow;
 /// Characters of untrusted text [`clamp`] keeps before eliding the rest.
 pub(crate) const MAX_UNTRUSTED_CHARS: usize = 64;
 
+/// Characters of an untrusted archive path [`clamp_path`] keeps. Real paths
+/// stay far below it; a v10+ pak entry path joins a directory and a file
+/// FString of up to 64 Ki characters each.
+pub(crate) const MAX_UNTRUSTED_PATH_CHARS: usize = 1024;
+
 /// `s` cut to its first [`MAX_UNTRUSTED_CHARS`] chars plus `…`, or `s`
 /// unchanged when it is no longer than that. Bounds length only; control
 /// characters pass through.
 #[must_use]
 pub(crate) fn clamp(s: &str) -> Cow<'_, str> {
-    match s.char_indices().nth(MAX_UNTRUSTED_CHARS) {
+    clamp_to(s, MAX_UNTRUSTED_CHARS)
+}
+
+/// [`clamp`] for an archive path (an asset or pak entry path), at
+/// [`MAX_UNTRUSTED_PATH_CHARS`].
+#[must_use]
+pub(crate) fn clamp_path(s: &str) -> Cow<'_, str> {
+    clamp_to(s, MAX_UNTRUSTED_PATH_CHARS)
+}
+
+fn clamp_to(s: &str, max_chars: usize) -> Cow<'_, str> {
+    match s.char_indices().nth(max_chars) {
         Some((cut, _)) => Cow::Owned(format!("{}…", &s[..cut])),
         None => Cow::Borrowed(s),
     }
@@ -78,6 +94,37 @@ pub(crate) mod test_support {
         )
     }
 
+    /// 70,000 `p`s then `TAIL`: a path far past [`super::MAX_UNTRUSTED_PATH_CHARS`].
+    pub(crate) fn long_path() -> String {
+        format!("{}TAIL", "p".repeat(70_000))
+    }
+
+    /// The cut [`super::clamp_path`] makes of [`long_path`].
+    pub(crate) fn long_path_cut() -> String {
+        format!("{}…", "p".repeat(super::MAX_UNTRUSTED_PATH_CHARS))
+    }
+
+    /// Assert `message` carries [`long_path`] clamped.
+    pub(crate) fn assert_message_clamps_long_path(message: &impl std::fmt::Display) {
+        let shown = message.to_string();
+        assert!(shown.contains(&long_path_cut()), "{shown:.120}");
+        assert!(!shown.contains("TAIL"), "{shown:.120}");
+    }
+
+    /// A `logs_assert` check: at least one line carries `message`, and each
+    /// such line also carries `needle`.
+    #[cfg(feature = "__test_utils")]
+    pub(crate) fn lines_carrying<'a>(
+        message: &'a str,
+        needle: &'a str,
+    ) -> impl Fn(&[&str]) -> Result<(), String> + 'a {
+        every_line(
+            message,
+            move |l| l.contains(needle),
+            format!("`{needle}` missing"),
+        )
+    }
+
     /// A `logs_assert` check: exactly `n` lines carry `message`.
     pub(crate) fn lines_counted(
         message: &str,
@@ -124,7 +171,7 @@ pub(crate) mod test_support {
 mod tests {
     use std::borrow::Cow;
 
-    use super::{MAX_UNTRUSTED_CHARS, clamp};
+    use super::{MAX_UNTRUSTED_CHARS, MAX_UNTRUSTED_PATH_CHARS, clamp, clamp_path};
 
     #[test]
     fn clamp_bounds_untrusted_values() {
@@ -137,6 +184,14 @@ mod tests {
         let out = clamp(&wide);
         assert!(out.starts_with('é') && out.ends_with('…'));
         assert_eq!(out.chars().count(), 65);
+    }
+
+    #[test]
+    fn clamp_path_keeps_exactly_the_bound() {
+        let at = "p".repeat(MAX_UNTRUSTED_PATH_CHARS);
+        assert!(matches!(clamp_path(&at), Cow::Borrowed(_)));
+        assert_eq!(clamp_path(&format!("{at}q")), format!("{at}…"));
+        assert_eq!(MAX_UNTRUSTED_PATH_CHARS, 1024);
     }
 
     #[test]

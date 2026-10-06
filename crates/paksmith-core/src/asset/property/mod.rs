@@ -330,7 +330,8 @@ pub(crate) fn read_class_serialization_control<R: Read>(
         return Err(PaksmithError::UnsupportedFeature {
             context: format!(
                 "EClassSerializationControlExtension flags {control:#04x} in {asset_path}: \
-                 only OverridableSerializationInformation (0x02) has a known wire shape"
+                 only OverridableSerializationInformation (0x02) has a known wire shape",
+                asset_path = crate::untrusted::clamp_path(asset_path)
             ),
         });
     }
@@ -415,6 +416,10 @@ mod tests {
     fn class_serialization_control_guards() {
         use crate::asset::property::test_utils::make_ctx_with_version;
         let ctx = make_ctx_with_version(522, Some(1011));
+        let long = crate::untrusted::test_support::long_path();
+        let err = read_class_serialization_control(&mut Cursor::new(&[0x01u8][..]), &ctx, &long)
+            .unwrap_err();
+        crate::untrusted::test_support::assert_message_clamps_long_path(&err);
         for bad in [0x01u8, 0x04, 0x80, 0x03] {
             let err =
                 read_class_serialization_control(&mut Cursor::new(&[bad][..]), &ctx, "x.uasset")

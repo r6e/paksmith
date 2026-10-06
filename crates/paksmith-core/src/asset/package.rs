@@ -61,6 +61,7 @@ use crate::error::{
 // CI's package-scoped compile guard under `-D warnings`.
 #[cfg_attr(not(feature = "__test_utils"), allow(unused_imports))]
 use crate::seams::{AssetSeam, SeamSite, seam_check};
+use crate::untrusted::{clamp, clamp_path};
 
 /// Maximum permitted per-export payload size. A single export can
 /// encode an arbitrary `i64` `serial_size` on the wire; overlapping
@@ -613,7 +614,10 @@ impl Package {
         level = "debug",
         name = "package_read",
         skip_all,
-        fields(asset_path = asset_path, has_uexp = uexp.is_some())
+        fields(
+            asset_path = &*clamp_path(asset_path),
+            has_uexp = uexp.is_some()
+        )
     )]
     fn read_from_inner<U, T>(
         uasset: &[u8],
@@ -759,7 +763,7 @@ impl Package {
 
         if !needs_uexp && uexp.is_some() {
             tracing::warn!(
-                asset = asset_path,
+                asset = &*clamp_path(asset_path),
                 total_header_size = summary.total_header_size,
                 "'.uexp' companion bytes provided but no export payload extends \
                  past .uasset.len(); ignoring companion"
@@ -1497,8 +1501,8 @@ fn read_payloads(
             // runs don't spam — UE shipping content carries thousands
             // of distinct classes, Phase 3 covers only a handful.
             tracing::trace!(
-                asset = asset_path,
-                export.class = &*class_name,
+                asset = &*clamp_path(asset_path),
+                export.class = &*clamp(&class_name),
                 "no typed reader registered; using Generic property-bag iteration"
             );
         }
@@ -1533,7 +1537,7 @@ fn read_payloads(
         })() {
             Ok(props) => {
                 tracing::debug!(
-                    asset = asset_path,
+                    asset = &*clamp_path(asset_path),
                     export = %e.object_name,
                     count = props.len(),
                     "decoded property tree"
@@ -1764,6 +1768,84 @@ mod tests {
         spec.exports.exports[0].serial_size = i64::try_from(payload.len()).unwrap();
         spec.payloads = vec![payload];
         build_minimal(spec).bytes
+    }
+
+    /// The `package_read` span and the per-export trace and debug events in it
+    /// carry a long asset path clamped.
+    #[tracing_test::traced_test]
+    #[test]
+    fn package_read_span_bounds_a_long_asset_path() {
+        use crate::untrusted::test_support::{lines_carrying, long_path, long_path_cut};
+
+        let MinimalPackage { bytes, .. } = build_minimal_ue5_1012();
+
+        let _ = Package::read_from(&bytes, None, None, &long_path()).unwrap();
+
+        let cut = long_path_cut();
+        assert!(logs_contain(&format!("package_read{{asset_path=\"{cut}\"")));
+        let field = format!("asset=\"{cut}\"");
+        for event in ["no typed reader registered", "decoded property tree"] {
+            logs_assert(lines_carrying(event, &field));
+        }
+        assert!(!logs_contain("TAIL"));
+    }
+
+    /// The per-export trace event names a long class clamped.
+    #[tracing_test::traced_test]
+    #[test]
+    fn per_export_trace_bounds_a_long_class_name() {
+        use crate::untrusted::test_support::{hostile_name, lines_clamped};
+
+        let mut spec = MinimalPackageSpec::default();
+        spec.names.names[2] = crate::asset::FName::new(&hostile_name("CLS"));
+        let bytes = build_minimal(spec).bytes;
+
+        let _ = Package::read_from(&bytes, None, None, "x.uasset").unwrap();
+
+        logs_assert(lines_clamped("no typed reader registered", "CLS"));
+    }
+
+    /// The unneeded-companion warning carries a long asset path clamped.
+    #[tracing_test::traced_test]
+    #[test]
+    fn unneeded_uexp_warning_bounds_a_long_asset_path() {
+        use crate::untrusted::test_support::{lines_carrying, long_path, long_path_cut};
+
+        let pkg = build_minimal_ue4_27();
+
+        let _ = Package::read_from(&pkg.bytes, Some(&[0xDE, 0xAD]), None, &long_path()).unwrap();
+
+        let field = format!("asset=\"{}\"", long_path_cut());
+        logs_assert(lines_carrying("ignoring companion", &field));
+        assert!(!logs_contain("TAIL"));
+    }
+
+    /// A fault message that names the asset path, here an undefined
+    /// serialization-control flag, reaches the Opaque fallback's warning
+    /// clamped.
+    #[tracing_test::traced_test]
+    #[test]
+    fn unsupported_feature_fallback_warning_bounds_a_long_asset_path() {
+        use crate::untrusted::test_support::{long_path, long_path_cut};
+
+        let MinimalPackage {
+            mut bytes, exports, ..
+        } = build_minimal_ue5_1012();
+        // The export's payload opens with its serialization-control byte.
+        let control = usize::try_from(exports.exports[0].serial_offset).unwrap();
+        assert_eq!(bytes[control], 0x00);
+        bytes[control] = 0x01;
+
+        let pkg = Package::read_from(&bytes, None, None, &long_path()).unwrap();
+
+        assert!(matches!(
+            pkg.payloads[0],
+            crate::asset::Asset::Generic(PropertyBag::Opaque { .. })
+        ));
+        let cut = long_path_cut();
+        assert!(logs_contain("property iteration failed"));
+        assert!(logs_contain(&format!("flags 0x01 in {cut}:")));
+        assert!(!logs_contain("TAIL"));
     }
 
     /// The generic fallback's warning carries the fault's message, which
