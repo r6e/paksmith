@@ -1538,7 +1538,7 @@ fn read_payloads(
             Ok(props) => {
                 tracing::debug!(
                     asset = &*clamp_path(asset_path),
-                    export = %e.object_name,
+                    export = ?e.object_name,
                     count = props.len(),
                     "decoded property tree"
                 );
@@ -1549,7 +1549,7 @@ fn read_payloads(
                 decode_warn!(
                     ctx,
                     asset_path,
-                    export = %e.object_name,
+                    export = ?e.object_name,
                     error = err.to_string(),
                     "property iteration failed, falling back to Opaque"
                 );

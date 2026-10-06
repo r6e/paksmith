@@ -276,15 +276,6 @@ pub fn rules_match(dir: &Path, rules: &DetectRules) -> bool {
         // means a hand-edited local store: warn, because a profile that
         // silently never detects is indistinguishable from a wrong rule.
         let Some(needle) = decode_hex(&rule.hex) else {
-            // Plain field bindings, NOT the `%` sigil: `%` is
-            // `tracing::field::display()`, which the default subscriber writes
-            // RAW, while a plain string field reaches `record_str`. Whether
-            // that ESCAPES is the subscriber's choice, not `record_str`'s — see
-            // `profile::resolve`'s warn for the full statement. These values are
-            // untrusted (a hand-edited store), and a
-            // raw ESC sequence here clears the screen or retitles the terminal.
-            // This is not hypothetical: `%` was applied here once for style
-            // consistency and measured as a live injection sink.
             tracing::warn!(
                 path = &*crate::untrusted::clamp(&rule.path),
                 hex = &*crate::untrusted::clamp(&rule.hex),

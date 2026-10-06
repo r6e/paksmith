@@ -433,8 +433,8 @@ fn build_entries_table(entries: &[EntryRowData], style: bool) -> Table {
 /// paged into one later. Every line the CLI writes itself that interpolates
 /// archive-, registry- or store-derived text goes through this: the tables,
 /// [`note`], [`print_line`] and [`error_line`]. Log records do not: tracing's
-/// text format Debug-escapes plain `String` fields instead (see
-/// `paksmith_core::profile::resolve`), and `--log-json` writes through
+/// text format Debug-escapes plain `String` fields instead (see core's
+/// `tests/no_display_sigil.rs`), and `--log-json` writes through
 /// [`JsonTerminalSafe`].
 ///
 /// JSON on stdout does not either: fields such as `path` and `id` are fed

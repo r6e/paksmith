@@ -148,7 +148,10 @@ impl FormatHandler for WavHandler {
             Ok(Some(pcm)) => Ok(pcm),
             Ok(None) => Ok(wav),
             Err(err) => {
-                tracing::warn!(%err, "ADPCM decode failed; exporting the cooked WAV verbatim");
+                tracing::warn!(
+                    err = err.to_string(),
+                    "ADPCM decode failed; exporting the cooked WAV verbatim"
+                );
                 Ok(wav)
             }
         }

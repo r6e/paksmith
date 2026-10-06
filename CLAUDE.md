@@ -30,6 +30,7 @@ Core is the load-bearing crate. CLI and GUI are thin presentation-layer frontend
 
 - TDD: write failing test first, then implement
 - `thiserror` for error types, `tracing` for structured logging
+- No `%` sigil in core tracing fields: tracing-subscriber's text format writes its value raw. Log untrusted text as a `String` or `&str` field other than `message`; `crates/paksmith-core/tests/no_display_sigil.rs` enforces the `%` rule
 - No panics in core — all fallible operations return `Result<T, PaksmithError>`
 - `byteorder` for binary parsing (little-endian unless explicitly noted)
 - Conventional commits: `feat:`, `fix:`, `chore:`, `test:`, `docs:`
