@@ -16,6 +16,12 @@ use tracing_subscriber::layer::{Context, Layer};
 /// Maximum number of records retained. Oldest are evicted first.
 const CONSOLE_RING_CAPACITY: usize = 2000;
 
+/// Bytes of one record's message the ring keeps; a longer message is cut on
+/// a char boundary and ends with `…`. With [`CONSOLE_RING_CAPACITY`] this
+/// bounds the ring's message allocations at about 8 MiB however large an
+/// event is.
+const CONSOLE_RECORD_MAX_BYTES: usize = 4096;
+
 /// One captured log event.
 #[derive(Debug, Clone)]
 pub struct LogRecord {
@@ -25,7 +31,8 @@ pub struct LogRecord {
     pub level: Level,
     /// Event target (module path or an explicit `target:`).
     pub target: String,
-    /// Rendered message: the `message` field plus any `key=value` fields.
+    /// Rendered message: the `message` field plus any `key=value` fields;
+    /// at most [`CONSOLE_RECORD_MAX_BYTES`] of it, plus `…` when cut.
     pub message: String,
 }
 
@@ -51,11 +58,31 @@ fn ring_is_full(len: usize) -> bool {
     len >= CONSOLE_RING_CAPACITY
 }
 
+/// `message` cut to at most [`CONSOLE_RECORD_MAX_BYTES`] on a char boundary,
+/// plus `…`. The capped copy is a fresh allocation, so an oversized source
+/// buffer is freed rather than kept alive in the ring; a message that fits
+/// but carries more spare capacity than that is shrunk.
+fn cap_record(mut message: String) -> String {
+    if message.len() <= CONSOLE_RECORD_MAX_BYTES {
+        if message.capacity() > CONSOLE_RECORD_MAX_BYTES + '…'.len_utf8() {
+            message.shrink_to_fit();
+        }
+        return message;
+    }
+    let cut = (0..=CONSOLE_RECORD_MAX_BYTES)
+        .rfind(|&i| message.is_char_boundary(i))
+        .unwrap_or(0);
+    [&message[..cut], "…"].concat()
+}
+
 impl LogBuffer {
     /// Append a record, evicting the oldest if at capacity, and assign the next
     /// sequence number. The lock is held only for the push — never across an
     /// `.await`.
     pub fn push(&self, level: Level, target: String, message: String) {
+        // Capped before locking, so the copy and the oversized source's free
+        // stay out of the critical section the UI reads each frame.
+        let message = cap_record(message);
         // A poisoned lock means a prior holder panicked mid-mutation; recover
         // the guard and continue. We only append, so losing atomicity is
         // harmless, and a debug console must never panic the app.
@@ -237,6 +264,64 @@ mod tests {
             r.last().unwrap().message,
             format!("m{}", CONSOLE_RING_CAPACITY + 4)
         );
+    }
+
+    #[test]
+    fn cap_record_keeps_a_record_at_the_cap_whole() {
+        let at_cap = "x".repeat(CONSOLE_RECORD_MAX_BYTES);
+        assert_eq!(cap_record(at_cap.clone()), at_cap);
+    }
+
+    #[test]
+    fn cap_record_cuts_one_byte_over() {
+        let over = "x".repeat(CONSOLE_RECORD_MAX_BYTES + 1);
+        assert_eq!(cap_record(over), "x".repeat(CONSOLE_RECORD_MAX_BYTES) + "…");
+    }
+
+    // The char-boundary test below needs the cap to fall mid-`€`.
+    const _: () = assert!(!CONSOLE_RECORD_MAX_BYTES.is_multiple_of(3));
+
+    /// `€` is three bytes, so the cap falls mid-char and the cut steps back
+    /// to the last whole one.
+    #[test]
+    fn cap_record_cuts_on_a_char_boundary() {
+        let euros = "€".repeat(CONSOLE_RECORD_MAX_BYTES / 3 + 1);
+        let cut = CONSOLE_RECORD_MAX_BYTES - CONSOLE_RECORD_MAX_BYTES % 3;
+        assert_eq!(cap_record(euros.clone()), format!("{}…", &euros[..cut]));
+    }
+
+    /// A record keeps no more than the bound's worth of allocation: a cut
+    /// one gets a fresh buffer, and one that fits but carries a large spare
+    /// capacity is shrunk.
+    #[test]
+    fn cap_record_releases_the_original_allocation() {
+        let bound = CONSOLE_RECORD_MAX_BYTES + '…'.len_utf8();
+        let cut = cap_record("x".repeat(300_000));
+        assert!(cut.capacity() <= bound, "{}", cut.capacity());
+
+        let mut roomy = String::with_capacity(400_000);
+        roomy.push_str("short");
+        let kept = cap_record(roomy);
+        assert_eq!(kept, "short");
+        assert!(kept.capacity() <= bound, "{}", kept.capacity());
+    }
+
+    #[test]
+    fn ring_layer_bounds_an_oversized_field() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let buffer = LogBuffer::default();
+        let subscriber = tracing_subscriber::registry().with(RingBufferLayer::new(buffer.clone()));
+        let huge = "y".repeat(100_000);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "paksmith_test", path = huge.as_str(), "oversized");
+        });
+        let r = buffer.snapshot();
+        assert_eq!(r.len(), 1);
+        let message = &r[0].message;
+        assert!(message.starts_with("oversized"), "{message:.40}");
+        assert!(message.contains("path=\"yyy"), "{message:.40}");
+        assert!(message.ends_with('…'), "the field must have been cut");
+        assert!(message.len() <= CONSOLE_RECORD_MAX_BYTES + '…'.len_utf8());
     }
 
     #[test]

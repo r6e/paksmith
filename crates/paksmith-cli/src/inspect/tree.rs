@@ -63,6 +63,31 @@ pub(crate) fn fmt_linear_color(c: &FLinearColor) -> String {
     })
 }
 
+use sink::TreeOut;
+
+mod sink {
+    use std::io::{self, Write};
+
+    use crate::output::sanitize_for_display;
+
+    /// The tree's only sink. Each line is sanitized whole, so an archive
+    /// name's own `\n` becomes U+FFFD instead of forging a line; the newline
+    /// is added after. It does not implement `Write` and its writer is
+    /// private to this module, so the render functions, which only ever hold
+    /// a `TreeOut`, cannot write past it.
+    pub(super) struct TreeOut<'w>(&'w mut dyn Write);
+
+    impl<'w> TreeOut<'w> {
+        pub(super) fn new(w: &'w mut dyn Write) -> Self {
+            Self(w)
+        }
+
+        pub(super) fn line(&mut self, args: std::fmt::Arguments<'_>) -> io::Result<()> {
+            writeln!(self.0, "{}", sanitize_for_display(&args.to_string()))
+        }
+    }
+}
+
 /// Render `pkg` as a human tree to `w`.
 ///
 /// Emits a one-line header summary (engine version, table counts, package
@@ -73,9 +98,9 @@ pub(crate) fn fmt_linear_color(c: &FLinearColor) -> String {
 /// payload-shape line, and — for a decoded property tree — an indented
 /// property listing applying the compact typed formatters.
 pub(crate) fn render(pkg: &Package, export: Option<usize>, w: &mut dyn Write) -> io::Result<()> {
+    let out = &mut TreeOut::new(w);
     let summary = &pkg.summary;
-    writeln!(
-        w,
+    out.line(format_args!(
         "{} | engine {} | names {} imports {} exports {} | guid {}",
         pkg.asset_path,
         summary.saved_by_engine_version,
@@ -83,14 +108,14 @@ pub(crate) fn render(pkg: &Package, export: Option<usize>, w: &mut dyn Write) ->
         pkg.imports.imports.len(),
         pkg.exports.exports.len(),
         summary.guid,
-    )?;
+    ))?;
 
     let count = pkg.exports.exports.len();
     match export {
-        Some(idx) => render_export(pkg, idx, w)?,
+        Some(idx) => render_export(pkg, idx, out)?,
         None => {
             for idx in 0..count {
-                render_export(pkg, idx, w)?;
+                render_export(pkg, idx, out)?;
             }
         }
     }
@@ -99,7 +124,7 @@ pub(crate) fn render(pkg: &Package, export: Option<usize>, w: &mut dyn Write) ->
 
 /// Render a single export's block: header line, payload-shape line, and the
 /// property tree (for the decoded `Tree` case).
-fn render_export(pkg: &Package, idx: usize, w: &mut dyn Write) -> io::Result<()> {
+fn render_export(pkg: &Package, idx: usize, out: &mut TreeOut<'_>) -> io::Result<()> {
     let Some(export) = pkg.exports.exports.get(idx) else {
         // Defensive: an out-of-range index is rejected upstream by
         // `select::resolve_export`, but render must never panic.
@@ -109,18 +134,18 @@ fn render_export(pkg: &Package, idx: usize, w: &mut dyn Write) -> io::Result<()>
         .names
         .resolve(export.object_name, export.object_name_number);
     let class = class_name(pkg, export.class_index);
-    writeln!(w, "[{idx}] {object_name} : {class}")?;
+    out.line(format_args!("[{idx}] {object_name} : {class}"))?;
 
     match pkg.payloads.get(idx) {
-        Some(Asset::Generic(bag)) => render_bag(bag, w),
+        Some(Asset::Generic(bag)) => render_bag(bag, out),
         Some(other) => {
             // Typed variants (DataTable, Texture2D, …): name the variant and
             // render its property bag when it carries one. Phase 3 ships only
             // `Generic` for the inspect fixture; the typed arms are forward
             // coverage exercised by the formatter unit tests.
-            writeln!(w, "{INDENT}{}", typed_variant_label(other))?;
+            out.line(format_args!("{INDENT}{}", typed_variant_label(other)))?;
             if let Some(bag) = typed_variant_bag(other) {
-                render_bag(bag, w)?;
+                render_bag(bag, out)?;
             }
             Ok(())
         }
@@ -129,31 +154,38 @@ fn render_export(pkg: &Package, idx: usize, w: &mut dyn Write) -> io::Result<()>
 }
 
 /// Render the payload-shape line and (for `Tree`) the property listing.
-fn render_bag(bag: &PropertyBag, w: &mut dyn Write) -> io::Result<()> {
+fn render_bag(bag: &PropertyBag, out: &mut TreeOut<'_>) -> io::Result<()> {
     match bag {
         PropertyBag::Opaque { bytes } => {
-            writeln!(w, "{INDENT}opaque ({} bytes)", bytes.len())
+            out.line(format_args!("{INDENT}opaque ({} bytes)", bytes.len()))
         }
         PropertyBag::Tree { properties } => {
-            writeln!(w, "{INDENT}tree ({} properties)", properties.len())?;
-            render_properties(properties, 2, w)
+            out.line(format_args!(
+                "{INDENT}tree ({} properties)",
+                properties.len()
+            ))?;
+            render_properties(properties, 2, out)
         }
         // `PropertyBag` is #[non_exhaustive].
-        _ => writeln!(w, "{INDENT}<unknown payload>"),
+        _ => out.line(format_args!("{INDENT}<unknown payload>")),
     }
 }
 
 /// Render a flat list of properties at `depth` indent levels.
-fn render_properties(properties: &[Property], depth: usize, w: &mut dyn Write) -> io::Result<()> {
+fn render_properties(
+    properties: &[Property],
+    depth: usize,
+    out: &mut TreeOut<'_>,
+) -> io::Result<()> {
     for prop in properties {
-        render_property(prop, depth, w)?;
+        render_property(prop, depth, out)?;
     }
     Ok(())
 }
 
 /// Render one property: `<name> = <value>` (scalars inline) or a `<name>:`
 /// header followed by indented children (containers / structs).
-fn render_property(prop: &Property, depth: usize, w: &mut dyn Write) -> io::Result<()> {
+fn render_property(prop: &Property, depth: usize, out: &mut TreeOut<'_>) -> io::Result<()> {
     let pad = INDENT.repeat(depth);
     let name = prop.name();
     match &prop.value {
@@ -161,8 +193,8 @@ fn render_property(prop: &Property, depth: usize, w: &mut dyn Write) -> io::Resu
             struct_name,
             properties,
         } => {
-            writeln!(w, "{pad}{name} ({struct_name}):")?;
-            render_properties(properties, depth + 1, w)
+            out.line(format_args!("{pad}{name} ({struct_name}):"))?;
+            render_properties(properties, depth + 1, out)
         }
         PropertyValue::Array {
             inner_type,
@@ -172,19 +204,22 @@ fn render_property(prop: &Property, depth: usize, w: &mut dyn Write) -> io::Resu
             inner_type,
             elements,
         } => {
-            writeln!(w, "{pad}{name} [{inner_type}] ({} items):", elements.len())?;
-            render_values(elements, depth + 1, w)
+            out.line(format_args!(
+                "{pad}{name} [{inner_type}] ({} items):",
+                elements.len()
+            ))?;
+            render_values(elements, depth + 1, out)
         }
         PropertyValue::Map { entries, .. } => {
-            writeln!(w, "{pad}{name} ({} entries):", entries.len())?;
-            render_map_entries(entries, depth + 1, w)
+            out.line(format_args!("{pad}{name} ({} entries):", entries.len()))?;
+            render_map_entries(entries, depth + 1, out)
         }
-        other => writeln!(w, "{pad}{name} = {}", scalar(other)),
+        other => out.line(format_args!("{pad}{name} = {}", scalar(other))),
     }
 }
 
 /// Render array/set elements (no per-element name).
-fn render_values(values: &[PropertyValue], depth: usize, w: &mut dyn Write) -> io::Result<()> {
+fn render_values(values: &[PropertyValue], depth: usize, out: &mut TreeOut<'_>) -> io::Result<()> {
     let pad = INDENT.repeat(depth);
     for value in values {
         match value {
@@ -192,20 +227,24 @@ fn render_values(values: &[PropertyValue], depth: usize, w: &mut dyn Write) -> i
                 struct_name,
                 properties,
             } => {
-                writeln!(w, "{pad}({struct_name}):")?;
-                render_properties(properties, depth + 1, w)?;
+                out.line(format_args!("{pad}({struct_name}):"))?;
+                render_properties(properties, depth + 1, out)?;
             }
-            other => writeln!(w, "{pad}- {}", scalar(other))?,
+            other => out.line(format_args!("{pad}- {}", scalar(other)))?,
         }
     }
     Ok(())
 }
 
 /// Render map key/value entries.
-fn render_map_entries(entries: &[MapEntry], depth: usize, w: &mut dyn Write) -> io::Result<()> {
+fn render_map_entries(entries: &[MapEntry], depth: usize, out: &mut TreeOut<'_>) -> io::Result<()> {
     let pad = INDENT.repeat(depth);
     for entry in entries {
-        writeln!(w, "{pad}{} => {}", scalar(&entry.key), scalar(&entry.value))?;
+        out.line(format_args!(
+            "{pad}{} => {}",
+            scalar(&entry.key),
+            scalar(&entry.value)
+        ))?;
     }
     Ok(())
 }
@@ -366,6 +405,7 @@ fn class_name(pkg: &Package, class_index: PackageIndex) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::is_terminal_hazard;
 
     /// An object reference renders as its name, or `null` when it has none.
     #[test]
@@ -476,5 +516,164 @@ mod tests {
             }),
             "#FF0000"
         );
+    }
+
+    /// No hazard but the line's own newlines.
+    fn assert_no_hazards(out: &str) {
+        assert!(
+            !out.chars().any(|c| c != '\n' && is_terminal_hazard(c)),
+            "{out:?}"
+        );
+    }
+
+    /// A name's own newline cannot forge a tree line.
+    #[test]
+    fn tree_line_neutralizes_controls_and_embedded_newlines() {
+        let mut buf = Vec::new();
+        let hostile = "\u{1b}[2J\nX\u{202e}";
+        TreeOut::new(&mut buf)
+            .line(format_args!("a{hostile}b"))
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "a\u{FFFD}[2J\u{FFFD}X\u{FFFD}b\n"
+        );
+    }
+
+    /// The property fixture with same-length byte rewrites applied; each
+    /// needle must occur exactly the stated number of times.
+    fn property_fixture_with(edits: &[(&[u8], &[u8], usize)]) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/minimal_uasset_v5_with_properties.uasset");
+        let mut bytes = std::fs::read(path).unwrap();
+        for (needle, replacement, count) in edits {
+            assert_eq!(needle.len(), replacement.len());
+            let at: Vec<usize> = bytes
+                .windows(needle.len())
+                .enumerate()
+                .filter(|(_, w)| w == needle)
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(at.len(), *count, "{needle:?} occurrences");
+            for i in at {
+                bytes[i..i + needle.len()].copy_from_slice(replacement);
+            }
+        }
+        bytes
+    }
+
+    fn render_package(bytes: &[u8], asset_path: &str) -> String {
+        let pkg = Package::read_from(bytes, None, None, asset_path).expect("fixture parses");
+        let mut out = Vec::new();
+        render(&pkg, None, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// Archive text reaches every tree sink neutralized: the asset path and
+    /// engine branch in the header, an export's object name and a property
+    /// name.
+    #[test]
+    fn render_neutralizes_archive_text_in_a_real_package() {
+        let clean = render_package(&property_fixture_with(&[]), "Game/x.uasset");
+        assert_eq!(
+            clean,
+            "Game/x.uasset | engine 4.27.2-0+++UE4+Release-4.27 | names 10 imports 1 exports 1 \
+             | guid 00000000-0000-0000-0000-000000000000\n\
+             [0] Hero : Default__Object\n  tree (3 properties)\n    bEnabled = true\n    \
+             MaxSpeed = 1500\n    ObjectName = \"Hero_C\"\n"
+        );
+        let hostile = property_fixture_with(&[
+            (b"MaxSpeed", b"\x1b[2JPROP", 1),
+            (b"Hero\0", b"H\x1b[O\0", 1),
+            (b"++UE4+Release-4.27", b"\xc2\x9b2JBRANCHxxxxxxxx", 2),
+        ]);
+        let out = render_package(&hostile, "Game/\u{1b}]0;PATH\u{7}\n.uasset");
+
+        assert_no_hazards(&out);
+        for sink in [
+            "\u{FFFD}[2JPROP = ",
+            "] H\u{FFFD}[O : ",
+            "\u{FFFD}2JBRANCH",
+            "Game/\u{FFFD}]0;PATH\u{FFFD}\u{FFFD}.uasset",
+        ] {
+            assert!(out.contains(sink), "{sink:?} missing from {out:?}");
+        }
+        // The path's own newline did not forge a line.
+        assert_eq!(out.lines().count(), clean.lines().count());
+    }
+
+    /// Every name-bearing property shape the fixture lacks: container and
+    /// struct headers, enum, unknown, soft path, object and name values, and
+    /// the placeholders for a container nested as a map key or value.
+    #[test]
+    fn render_property_neutralizes_every_name_bearing_arm() {
+        let h = "\u{1b}[2J\u{202e}";
+        let child = serde_json::json!({ "name": "c", "array_index": 0, "value": { "Name": h } });
+        let nested = serde_json::json!({ "Struct": { "struct_name": h, "properties": [child] } });
+        let values = [
+            nested.clone(),
+            serde_json::json!({ "Array": { "inner_type": h, "elements": [{ "Name": h }, nested] } }),
+            serde_json::json!({ "Set": { "inner_type": h, "elements": [] } }),
+            serde_json::json!({ "Map": { "key_type": "K", "value_type": "V", "entries": [
+                { "key": { "Name": h }, "value": { "Enum": { "type_name": h, "value": h } } },
+                {
+                    "key": { "Array": { "inner_type": h, "elements": [] } },
+                    "value": { "Struct": { "struct_name": h, "properties": [] } }
+                }
+            ] } }),
+            serde_json::json!({ "Unknown": { "type_name": h, "skipped_bytes": 1 } }),
+            serde_json::json!({ "SoftObjectPath": { "asset_path": h, "sub_path": h } }),
+            serde_json::json!({ "Object": { "kind": "Import(0)", "name": h } }),
+            serde_json::json!({ "Name": h }),
+            serde_json::json!({ "Enum": { "type_name": h, "value": h } }),
+        ];
+        let mut buf = Vec::new();
+        for value in values {
+            // From text: `PackageIndex` deserializes a borrowed `&str`.
+            let json = serde_json::json!({ "name": h, "array_index": 0, "value": value });
+            let prop: Property = serde_json::from_str(&json.to_string()).unwrap();
+            render_property(&prop, 0, &mut TreeOut::new(&mut buf)).unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+
+        let k = "\u{FFFD}[2J\u{FFFD}";
+        let expected = [
+            format!("{k} ({k}):"),
+            format!("  c = {k}"),
+            format!("{k} [{k}] (2 items):"),
+            format!("  - {k}"),
+            format!("  ({k}):"),
+            format!("    c = {k}"),
+            format!("{k} [{k}] (0 items):"),
+            format!("{k} (2 entries):"),
+            format!("  {k} => {k}::{k}"),
+            format!("  [{k} …] => ({k} …)"),
+            format!("{k} = <{k}: 1 bytes>"),
+            format!("{k} = {k}:{k}"),
+            format!("{k} = {k}"),
+            format!("{k} = {k}"),
+            format!("{k} = {k}::{k}"),
+        ];
+        assert_eq!(out, expected.join("\n") + "\n");
+    }
+
+    /// The payload-shape line for each bag kind, and a tree's children one
+    /// level deeper.
+    #[test]
+    fn render_bag_names_the_payload_shape() {
+        let bag_out = |bag: &PropertyBag| {
+            let mut buf = Vec::new();
+            render_bag(bag, &mut TreeOut::new(&mut buf)).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        assert_eq!(
+            bag_out(&PropertyBag::opaque(vec![0; 3])),
+            "  opaque (3 bytes)\n"
+        );
+        let tree: PropertyBag = serde_json::from_str(
+            r#"{"kind":"tree","properties":[{"name":"p","array_index":0,"value":{"Name":"x"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(bag_out(&tree), "  tree (1 properties)\n    p = x\n");
     }
 }
