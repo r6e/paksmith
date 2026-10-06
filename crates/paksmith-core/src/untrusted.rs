@@ -41,16 +41,12 @@ pub(crate) mod test_support {
         message: &'a str,
         tag: &'a str,
     ) -> impl Fn(&[&str]) -> Result<(), String> + 'a {
-        move |lines: &[&str]| {
-            let (kept, cut) = (format!("{tag}KEPT"), format!("{tag}CUT"));
-            match lines_with(lines, message)?
-                .into_iter()
-                .find(|l| !l.contains(&kept) || l.contains(&cut))
-            {
-                Some(line) => Err(format!("`{tag}` not clamped in {line:?}")),
-                None => Ok(()),
-            }
-        }
+        let (kept, cut) = (format!("{tag}KEPT"), format!("{tag}CUT"));
+        every_line(
+            message,
+            move |l| l.contains(&kept) && !l.contains(&cut),
+            format!("`{tag}` not clamped"),
+        )
     }
 
     /// A `logs_assert` check: at least one line carries `message`, and
@@ -62,29 +58,54 @@ pub(crate) mod test_support {
         message: &'a str,
         tag: &'a str,
     ) -> impl Fn(&[&str]) -> Result<(), String> + 'a {
+        let escaped = format!("{tag}KEPT\\u{{1b}}[2J");
+        every_line(
+            message,
+            move |l| l.contains(&escaped),
+            format!("`{tag}` lacks its escaped ESC"),
+        )
+    }
+
+    /// A `logs_assert` check: at least one line carries `message`, and no
+    /// such line holds a raw control (Cc) or bidi control character.
+    pub(crate) fn lines_free_of_raw_controls(
+        message: &str,
+    ) -> impl Fn(&[&str]) -> Result<(), String> + '_ {
+        every_line(
+            message,
+            |l| !l.chars().any(is_raw_hazard),
+            "raw control character".to_owned(),
+        )
+    }
+
+    /// A control character (Cc) or one of Unicode's 12 Bidi_Control
+    /// characters.
+    fn is_raw_hazard(c: char) -> bool {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
+    }
+
+    /// A `logs_assert` check: at least one line carries `message`, and every
+    /// such line satisfies `ok`; `what` names the failure for the first line
+    /// that does not.
+    fn every_line<'a>(
+        message: &'a str,
+        ok: impl Fn(&str) -> bool + 'a,
+        what: String,
+    ) -> impl Fn(&[&str]) -> Result<(), String> + 'a {
         move |lines: &[&str]| {
-            let escaped = format!("{tag}KEPT\\u{{1b}}[2J");
-            match lines_with(lines, message)?
-                .into_iter()
-                .find(|l| !l.contains(&escaped))
-            {
-                Some(line) => Err(format!("`{tag}` lacks its escaped ESC in {line:?}")),
+            let mut matched = lines.iter().filter(|l| l.contains(message)).peekable();
+            if matched.peek().is_none() {
+                return Err(format!("no `{message}` line was logged"));
+            }
+            match matched.find(|l| !ok(l)) {
+                Some(line) => Err(format!("{what} in {line:?}")),
                 None => Ok(()),
             }
         }
-    }
-
-    /// The lines carrying `message`, or an error when none was logged.
-    fn lines_with<'l>(lines: &[&'l str], message: &str) -> Result<Vec<&'l str>, String> {
-        let matched: Vec<&str> = lines
-            .iter()
-            .copied()
-            .filter(|l| l.contains(message))
-            .collect();
-        if matched.is_empty() {
-            return Err(format!("no `{message}` line was logged"));
-        }
-        Ok(matched)
     }
 }
 
@@ -105,6 +126,27 @@ mod tests {
         let out = clamp(&wide);
         assert!(out.starts_with('é') && out.ends_with('…'));
         assert_eq!(out.chars().count(), 65);
+    }
+
+    #[test]
+    fn lines_free_of_raw_controls_rejects_raw_and_missing() {
+        use super::test_support::lines_free_of_raw_controls;
+
+        let check = lines_free_of_raw_controls("evt");
+        assert!(check(&["evt a\u{1b}b"][..]).is_err());
+        assert!(check(&["evt a\u{202e}b"][..]).is_err());
+        assert!(check(&["evt a\\u{1b}b"][..]).is_ok());
+        assert!(check(&["other"][..]).is_err());
+    }
+
+    /// A `&str` field renders a bidi override escaped; the escaped-string
+    /// log fields rely on it.
+    #[tracing_test::traced_test]
+    #[test]
+    fn text_fields_escape_bidi_controls() {
+        tracing::warn!(path = "a\u{202e}b", "bidi pin");
+        assert!(logs_contain("a\\u{202e}b"));
+        assert!(!logs_contain("\u{202e}"));
     }
 
     #[test]

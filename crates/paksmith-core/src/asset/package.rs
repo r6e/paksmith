@@ -957,7 +957,7 @@ impl Package {
                 tracing::warn!(
                     asset = asset_path,
                     export.index = export_idx,
-                    error = %err,
+                    error = err.to_string(),
                     "bulk-record cap exceeded; dropping this export's bulk records"
                 );
             }
@@ -1481,7 +1481,7 @@ fn read_payloads(
                     tracing::warn!(
                         asset = asset_path,
                         export.class = &*class_name,
-                        error = %err,
+                        error = err.to_string(),
                         "typed reader failed; falling back to generic property-bag parse"
                     );
                     // fall through to the generic path below
@@ -1542,7 +1542,7 @@ fn read_payloads(
                 tracing::warn!(
                     asset = asset_path,
                     export = %e.object_name,
-                    error = %err,
+                    error = err.to_string(),
                     "property iteration failed, falling back to Opaque"
                 );
                 let mut buf: Vec<u8> = Vec::new();
@@ -1743,7 +1743,9 @@ mod tests {
     #[tracing_test::traced_test]
     #[test]
     fn opaque_fallback_warning_bounds_a_long_array_name() {
-        use crate::untrusted::test_support::{hostile_name, lines_clamped};
+        use crate::untrusted::test_support::{
+            hostile_name, lines_clamped, lines_free_of_raw_controls,
+        };
 
         let mut spec = MinimalPackageSpec::default();
         spec.names.names.extend([
@@ -1775,6 +1777,7 @@ mod tests {
             pkg.payloads[0]
         );
         logs_assert(lines_clamped("falling back to Opaque", "ARR"));
+        logs_assert(lines_free_of_raw_controls("falling back to Opaque"));
     }
 
     /// A trip inside a typed reader fails the read rather than falling
@@ -1905,8 +1908,10 @@ mod tests {
     #[tracing_test::traced_test]
     #[test]
     fn typed_reader_failure_falls_back_to_generic_without_aborting_package() {
+        use crate::untrusted::test_support::{hostile_name, lines_free_of_raw_controls};
+
         let pkg = build_minimal_ue4_27_with_valid_and_corrupt_data_tables();
-        let parsed = Package::read_from(&pkg.bytes, None, None, "x.uasset")
+        let parsed = Package::read_from(&pkg.bytes, None, None, &hostile_name("PATH"))
             .expect("package must parse despite one corrupt typed export");
 
         assert_eq!(
@@ -1939,6 +1944,10 @@ mod tests {
             logs_contain("typed reader failed; falling back to generic property-bag parse"),
             "the fall-through must emit a warn so operators see the typed-parse failure"
         );
+        assert!(logs_contain(
+            "error=\"asset deserialization failed for `PATHKEPT\\u{1b}[2J"
+        ));
+        logs_assert(lines_free_of_raw_controls("typed reader failed"));
     }
 
     /// 3e-3b: parsing a package whose typed export surfaces `FByteBulkData`
