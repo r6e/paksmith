@@ -185,7 +185,7 @@ fn main() -> ExitCode {
             // `main()` returns.
             //
             // Best-effort, like `output::note`.
-            let _ = writeln!(io::stderr(), "paksmith: error: {e}");
+            let _ = writeln!(io::stderr(), "{}", output::error_line(&e.to_string()));
             ExitCode::from(2)
         }
     }

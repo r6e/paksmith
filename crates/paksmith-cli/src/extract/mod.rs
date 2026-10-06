@@ -399,7 +399,7 @@ fn locres_output(
     let resource = match paksmith_core::LocresResource::parse(bytes) {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(entry = ?entry_path, error = %e, "locres parse failed, copying raw");
+            tracing::warn!(entry = ?entry_path, error = e.to_string(), "locres parse failed, copying raw");
             return None;
         }
     };
@@ -412,7 +412,7 @@ fn locres_output(
     match result {
         Ok(pair) => Some(pair),
         Err(e) => {
-            tracing::warn!(entry = ?entry_path, error = %e, "locres export failed, copying raw");
+            tracing::warn!(entry = ?entry_path, error = e.to_string(), "locres export failed, copying raw");
             None
         }
     }

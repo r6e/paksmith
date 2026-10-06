@@ -6,7 +6,8 @@ use tempfile::tempdir;
 
 mod common;
 use common::{
-    assert_envelope_first, paksmith_json, paksmith_table, paksmith_unpinned,
+    HOSTILE_ID_SHOWN, HOSTILE_NAME_SHOWN, assert_envelope_first, assert_neutralized,
+    hostile_registry_profile, paksmith_json, paksmith_table, paksmith_unpinned,
     seed_registry_cache_json,
 };
 
@@ -669,4 +670,65 @@ fn detect_table_also_dedupes_a_repeated_registry_id() {
         stdout.contains("First Copy") && !stdout.contains("Second Copy"),
         "first occurrence wins in the table too: {stdout}"
     );
+}
+
+#[test]
+fn profile_detect_table_neutralizes_registry_controls() {
+    let cfg = tempdir().unwrap();
+    let game = dup_game_dir();
+    let rules = dup_rules();
+    seed_registry_cache_json(
+        cfg.path(),
+        &hostile_registry_profile(&format!(r#","detect":{rules}"#)),
+    );
+
+    let out = paksmith_table(cfg.path())
+        .args(["profile", "detect"])
+        .arg(game.path())
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_neutralized(&stdout, &[HOSTILE_ID_SHOWN, HOSTILE_NAME_SHOWN]);
+}
+
+/// Ten long hostile ids match one directory: the ambiguity error lists the
+/// first eight, each clamped, counts the rest, and reaches stderr
+/// neutralized.
+#[test]
+fn ambiguous_detect_error_line_is_bounded_and_neutralized() {
+    let cfg = tempdir().unwrap();
+    let game = dup_game_dir();
+    let rules = dup_rules();
+    let filler = "x".repeat(190);
+    let profiles: Vec<String> = (0..10)
+        .map(|i| {
+            format!(r#"{{"id":"id{i}\u001b[2J{filler}","name":"n","keys":{{}},"detect":{rules}}}"#)
+        })
+        .collect();
+    seed_registry_cache_json(cfg.path(), &profiles.join(","));
+
+    let out = paksmith_unpinned(cfg.path())
+        .env("NO_COLOR", "1")
+        .env_remove("RUST_LOG")
+        .arg("--detect")
+        .arg(game.path())
+        .arg("list")
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let line = stderr
+        .lines()
+        .find(|l| l.starts_with("paksmith: error:"))
+        .unwrap_or_else(|| panic!("no error line in {stderr:?}"));
+    assert!(
+        line.contains("matched multiple game profiles") && line.contains("and 2 more"),
+        "{line:?}"
+    );
+    assert!(!line.contains(&filler), "an id was not clamped: {line:?}");
+    assert_eq!(line.matches("\u{FFFD}[2J").count(), 8, "{line:?}");
+    assert_neutralized(&stderr, &[]);
 }

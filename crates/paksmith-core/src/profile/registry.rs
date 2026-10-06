@@ -105,34 +105,9 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
                 .iter()
                 .find(|b| crate::profile::detection::decode_hex(&b.hex).is_none())
             {
-                // `bad.hex` is <= MAX_STR here (cap-before-parse above), and
-                // clamped so the message stays readable. The clamp bounds
-                // LENGTH, not capability — `ESC [2J` is four bytes — and `p.id`
-                // in this same message is interpolated unclamped at MAX_STR, so
-                // the clamp is emphatically not what makes this safe.
-                //
-                // ESCAPING belongs at each sink, not here: this text also
-                // reaches the GUI (where ANSI is inert) and JSON output (where
-                // exact bytes are the round-trip contract). Core's own terminal
-                // EMISSION sites are the `tracing` warns in `resolve.rs`,
-                // which bind the error as a plain `String`. Whether that
-                // ESCAPES is the subscriber's choice, not `record_str`'s — see
-                // `profile::resolve` for the canonical statement. That matters
-                // because #708's real fix lands at the subscriber and at
-                // `main.rs`, not here.
-                //
-                // The CLI sink is NOT covered, and it is worth being exact
-                // about that rather than gesturing at an issue: this message
-                // reaches a terminal through `main.rs`'s top-level error line,
-                // which does no sanitizing. Measured on a hostile document,
-                // THIS message carries two raw ESC bytes — one from `p.id`, one
-                // from the clamped hex — and `ProfileFault::DetectionAmbiguous`
-                // lists up to `MAX_AMBIGUOUS_IDS_LISTED` ids, each clamped to
-                // `MAX_UNTRUSTED_CHARS` chars, control characters included.
-                // `output::sanitize_for_display` does not cover this path;
-                // its own doc carries the list of what it does cover, so that
-                // enumeration deliberately is not duplicated here. #708 tracks
-                // the gap; it does not close it.
+                // The clamp keeps the message readable; it bounds length, not
+                // content. Control characters in `p.id` and `bad.hex` are each
+                // sink's to neutralize, as the CLI's error line does.
                 return Err(format!(
                     "byte signature in `{}` is not an even-length unprefixed hex string: `{}`",
                     p.id,
