@@ -8,8 +8,9 @@ use tempfile::tempdir;
 mod common;
 use common::{
     HOSTILE_ID, HOSTILE_ID_SHOWN, HOSTILE_NAME_SHOWN, assert_closed_stdout_exits_clean,
-    assert_envelope_first, assert_neutralized, hostile_registry_profile, paksmith_json,
-    paksmith_table, paksmith_unpinned, seed_registry_cache_json,
+    assert_envelope_first, assert_neutralized, assert_no_raw_json_hazards,
+    hostile_registry_profile, paksmith_json, paksmith_table, paksmith_unpinned,
+    seed_registry_cache_json,
 };
 
 /// Deterministic test keypair (seed `[7u8; 32]`) + its verifying key as lowercase
@@ -2400,6 +2401,26 @@ fn profile_show_table_neutralizes_registry_controls() {
             "engine_version: 5.\u{FFFD}3",
         ],
     );
+}
+
+/// `profile show` JSON escapes the registry text's bidi and C1 characters,
+/// and each field still decodes exactly.
+#[test]
+fn profile_show_json_escapes_registry_controls() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache_json(cfg.path(), &hostile_profile_with_engine());
+
+    let out = paksmith_json(cfg.path())
+        .args(["profile", "show", HOSTILE_ID])
+        .assert()
+        .success();
+
+    let stdout = &out.get_output().stdout;
+    assert_no_raw_json_hazards(stdout);
+    let v: serde_json::Value = serde_json::from_slice(stdout).unwrap();
+    assert_eq!(v["id"], HOSTILE_ID);
+    assert_eq!(v["name"], "N\u{1b}]0;NAME\u{7}\u{202e}");
+    assert_eq!(v["engine_version"], "5.\u{9b}3");
 }
 
 /// The not-found note and the error line echo the id as typed, neutralized.

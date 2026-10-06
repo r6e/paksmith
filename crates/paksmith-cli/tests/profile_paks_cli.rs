@@ -6,20 +6,13 @@
 use assert_cmd::Command;
 use tempfile::tempdir;
 
+mod common;
+use common::fixture_path;
+
 fn paksmith(config_dir: &std::path::Path) -> Command {
     let mut c = Command::cargo_bin("paksmith").unwrap();
     let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
     c
-}
-
-fn fixture(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("tests/fixtures")
-        .join(name)
 }
 
 /// `profile add <id> --pak-path <pattern>` under `cfg`.
@@ -43,8 +36,12 @@ fn seeded_install(cfg: &std::path::Path) -> tempfile::TempDir {
     let install = tempdir().unwrap();
     let paks = install.path().join("Paks");
     std::fs::create_dir_all(&paks).unwrap();
-    let _ = std::fs::copy(fixture("real_v8b_uasset.pak"), paks.join("a_uasset.pak")).unwrap();
-    let _ = std::fs::copy(fixture("real_v8b_multi.pak"), paks.join("b_multi.pak")).unwrap();
+    let _ = std::fs::copy(
+        fixture_path("real_v8b_uasset.pak"),
+        paks.join("a_uasset.pak"),
+    )
+    .unwrap();
+    let _ = std::fs::copy(fixture_path("real_v8b_multi.pak"), paks.join("b_multi.pak")).unwrap();
     add_pak_path_profile(cfg, "hero", &paks.join("*.pak").to_string_lossy());
     install
 }
@@ -90,6 +87,28 @@ fn list_over_profile_paks_merges_archives_with_source() {
     );
 }
 
+/// Profile-paks `list` JSON escapes an entry path's DEL, C1 and bidi
+/// characters, and the path still decodes exactly.
+#[test]
+fn list_over_profile_paks_json_escapes_a_hostile_entry_path() {
+    let cfg = tempdir().unwrap();
+    let install = tempdir().unwrap();
+    common::v3_pak_with_entry(&install.path().join("hostile.pak"), common::HOSTILE_ENTRY);
+    add_pak_path_profile(
+        cfg.path(),
+        "hero",
+        &install.path().join("*.pak").to_string_lossy(),
+    );
+
+    let out = paksmith(cfg.path())
+        .args(["--game", "hero", "list", "--format", "json"])
+        .assert()
+        .success();
+
+    let row = common::hostile_entry_row(&out.get_output().stdout);
+    assert!(row["source"].is_string(), "the grouped writer: {row}");
+}
+
 #[test]
 fn list_explicit_path_has_no_source_key() {
     // Explicit-path invocations must stay byte-identical to pre-#655:
@@ -97,7 +116,7 @@ fn list_explicit_path_has_no_source_key() {
     let cfg = tempdir().unwrap();
     let out = paksmith(cfg.path())
         .args(["list"])
-        .arg(fixture("real_v8b_multi.pak"))
+        .arg(fixture_path("real_v8b_multi.pak"))
         .args(["--format", "json"])
         .assert()
         .success();
@@ -170,8 +189,8 @@ fn inspect_ambiguous_asset_across_profile_paks_is_an_error() {
     let install = tempdir().unwrap();
     let paks = install.path().join("Paks");
     std::fs::create_dir_all(&paks).unwrap();
-    let _ = std::fs::copy(fixture("real_v8b_uasset.pak"), paks.join("a.pak")).unwrap();
-    let _ = std::fs::copy(fixture("real_v8b_uasset.pak"), paks.join("b.pak")).unwrap();
+    let _ = std::fs::copy(fixture_path("real_v8b_uasset.pak"), paks.join("a.pak")).unwrap();
+    let _ = std::fs::copy(fixture_path("real_v8b_uasset.pak"), paks.join("b.pak")).unwrap();
     add_pak_path_profile(cfg.path(), "hero", &paks.join("*.pak").to_string_lossy());
     let out = paksmith(cfg.path())
         .args(["--game", "hero", "inspect", "Game/Maps/Demo.uasset"])
@@ -242,7 +261,7 @@ fn single_archive_profile_mode_still_carries_source() {
     let install = tempdir().unwrap();
     let paks = install.path().join("Paks");
     std::fs::create_dir_all(&paks).unwrap();
-    let _ = std::fs::copy(fixture("real_v8b_multi.pak"), paks.join("only.pak")).unwrap();
+    let _ = std::fs::copy(fixture_path("real_v8b_multi.pak"), paks.join("only.pak")).unwrap();
     add_pak_path_profile(cfg.path(), "hero", &paks.join("*.pak").to_string_lossy());
     let out = paksmith(cfg.path())
         .args(["--game", "hero", "list", "--format", "json"])
@@ -268,8 +287,8 @@ fn overlapping_archives_extract_without_spurious_failures() {
     let install = tempdir().unwrap();
     let paks = install.path().join("Paks");
     std::fs::create_dir_all(&paks).unwrap();
-    let _ = std::fs::copy(fixture("real_v8b_uasset.pak"), paks.join("base.pak")).unwrap();
-    let _ = std::fs::copy(fixture("real_v8b_uasset.pak"), paks.join("zpatch.pak")).unwrap();
+    let _ = std::fs::copy(fixture_path("real_v8b_uasset.pak"), paks.join("base.pak")).unwrap();
+    let _ = std::fs::copy(fixture_path("real_v8b_uasset.pak"), paks.join("zpatch.pak")).unwrap();
     add_pak_path_profile(cfg.path(), "hero", &paks.join("*.pak").to_string_lossy());
     let outdir = tempdir().unwrap();
     let out = paksmith(cfg.path())
@@ -302,7 +321,7 @@ fn explicit_path_extract_summary_has_no_sources_key() {
     let out = paksmith(cfg.path())
         .args(["extract", "--format", "json", "-o"])
         .arg(outdir.path())
-        .arg(fixture("real_v8b_uasset.pak"))
+        .arg(fixture_path("real_v8b_uasset.pak"))
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
@@ -354,7 +373,7 @@ fn relative_pattern_resolves_against_detect_dir() {
     let install = tempdir().unwrap();
     let paks = install.path().join("Paks");
     std::fs::create_dir_all(&paks).unwrap();
-    let _ = std::fs::copy(fixture("real_v8b_multi.pak"), paks.join("game.pak")).unwrap();
+    let _ = std::fs::copy(fixture_path("real_v8b_multi.pak"), paks.join("game.pak")).unwrap();
     add_pak_path_profile(cfg.path(), "hero", "Paks/*.pak");
     // Detect rules have no `profile add` flag; seed them by appending a
     // TOML table (the detect_cli.rs pattern — the store round-trips it

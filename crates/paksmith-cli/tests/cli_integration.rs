@@ -533,3 +533,27 @@ fn error_line_neutralizes_controls_in_the_message() {
     );
     common::assert_neutralized(&stderr, &["Game/\u{FFFD}[2J\u{FFFD}x.uasset"]);
 }
+
+/// `list --format json` escapes an entry path's DEL, C1 and bidi
+/// characters, and the path still decodes exactly.
+#[test]
+fn list_json_escapes_a_hostile_entry_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let pak = dir.path().join("hostile.pak");
+    common::v3_pak_with_entry(&pak, common::HOSTILE_ENTRY);
+
+    let out = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", dir.path())
+        .args(["--format", "json", "list"])
+        .arg(&pak)
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{out:?}");
+    let row = common::hostile_entry_row(&out.stdout);
+    assert!(
+        row.get("source").is_none(),
+        "the single-archive writer: {row}"
+    );
+}

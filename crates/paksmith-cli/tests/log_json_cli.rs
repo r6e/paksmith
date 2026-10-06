@@ -105,20 +105,10 @@ fn successful_piped_run_keeps_stderr_pure_json_lines() {
     );
 }
 
-/// DEL, C1 CSI and a right-to-left override as raw UTF-8: what serde_json
-/// leaves unescaped inside a string.
-const RAW_HAZARDS: [&[u8]; 3] = [b"\x7f", b"\xc2\x9b", b"\xe2\x80\xae"];
-
 /// [`json_lines`], after checking no raw hazard byte sequence reached
 /// stderr.
 fn escaped_records(stderr: &[u8]) -> Vec<serde_json::Value> {
-    for raw in RAW_HAZARDS {
-        assert!(
-            !stderr.windows(raw.len()).any(|w| w == raw),
-            "raw {raw:02x?} on stderr: {:?}",
-            String::from_utf8_lossy(stderr)
-        );
-    }
+    common::assert_no_raw_json_hazards(stderr);
     json_lines(stderr)
 }
 

@@ -4,7 +4,7 @@ use std::io::{self, Write};
 
 use serde::Serialize;
 
-use crate::output::{ResolvedFormat, sanitize_for_display, serde_json_to_io};
+use crate::output::{ResolvedFormat, sanitize_for_display, write_json};
 
 #[derive(Debug, Clone)]
 pub(crate) enum EntryOutcome {
@@ -137,10 +137,7 @@ impl ExtractSummary {
 
     pub(crate) fn render(&self, format: ResolvedFormat, w: &mut dyn Write) -> io::Result<()> {
         match format {
-            ResolvedFormat::Json => {
-                serde_json::to_writer_pretty(&mut *w, self).map_err(serde_json_to_io)?;
-                writeln!(w)
-            }
+            ResolvedFormat::Json => write_json(w, self),
             ResolvedFormat::Table => {
                 // In profile-paks mode `pak` carries glob-DISCOVERED
                 // filenames, not user-typed argv — same trust class as
@@ -229,6 +226,30 @@ mod tests {
             rendered.contains("FAILED") && rendered.contains('\u{FFFD}'),
             "the failure stays visible with replacement marks: {rendered:?}"
         );
+    }
+
+    /// The JSON summary escapes a hostile FAILED entry's controls, and the
+    /// entry still decodes exactly.
+    #[test]
+    fn json_failures_escape_a_hostile_entry() {
+        let entry = "B\u{9b}2J\u{202e}x.uasset";
+        let s = ExtractSummary::from_outcomes(
+            "Game.pak".into(),
+            "out".into(),
+            false,
+            vec![EntryOutcome::Failed {
+                entry: entry.into(),
+                error: "bad".into(),
+            }],
+        );
+        let mut buf = Vec::new();
+
+        s.render(ResolvedFormat::Json, &mut buf).unwrap();
+
+        let text = String::from_utf8(buf.clone()).unwrap();
+        assert!(!text.contains(['\u{9b}', '\u{202e}']), "{text:?}");
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["failures"][0]["entry"], entry);
     }
 
     /// In profile-paks mode `pak` carries glob-DISCOVERED filenames,

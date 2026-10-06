@@ -895,7 +895,7 @@ fn extract_survives_a_closed_stderr() {
 fn log_json_escapes_a_hostile_locres_entry_name() {
     let work = tempdir().unwrap();
     let pak = work.path().join("hostile.pak");
-    v3_pak_with_entry(&pak, b"C/\x1b[2J\xc2\x9b2Jxxxxx.locres");
+    common::v3_pak_with_entry(&pak, b"C/\x1b[2J\xc2\x9b2Jxxxxx.locres");
 
     let cfg = tempdir().unwrap();
     let out = Command::cargo_bin("paksmith")
@@ -938,22 +938,6 @@ fn log_json_escapes_a_hostile_locres_entry_name() {
     );
 }
 
-/// `real_v3_minimal.pak` written to `pak` with its one entry,
-/// `Content/Example.uasset`, renamed in place to `name`, which has the same
-/// length.
-fn v3_pak_with_entry(pak: &std::path::Path, name: &[u8; 22]) {
-    const FROM: &[u8; 22] = b"Content/Example.uasset";
-    let mut bytes = fs::read(fixture_path("real_v3_minimal.pak")).unwrap();
-    let at: Vec<usize> = bytes
-        .windows(FROM.len())
-        .enumerate()
-        .filter_map(|(i, w)| (w == FROM).then_some(i))
-        .collect();
-    assert_eq!(at.len(), 1, "the fixture must name the entry exactly once");
-    bytes[at[0]..at[0] + FROM.len()].copy_from_slice(name);
-    fs::write(pak, bytes).unwrap();
-}
-
 /// An entry whose name carries control or bidi characters fails with the
 /// refusal, exit 1, and nothing is created under the output directory. The
 /// same archive with a clean name of the same shape extracts.
@@ -964,7 +948,7 @@ fn extract_refuses_a_hazard_entry_name() {
     let cfg = tempdir().unwrap();
     let extract = |name: &[u8; 22], out: &str| {
         let pak = work.path().join(format!("{out}.pak"));
-        v3_pak_with_entry(&pak, name);
+        common::v3_pak_with_entry(&pak, name);
         Command::cargo_bin("paksmith")
             .unwrap()
             .env("PAKSMITH_CONFIG_DIR", cfg.path())
@@ -983,6 +967,7 @@ fn extract_refuses_a_hazard_entry_name() {
     let run = extract(HOSTILE, "out");
 
     assert_eq!(run.status.code(), Some(1), "{run:?}");
+    common::assert_no_raw_json_hazards(&run.stdout);
     let summary: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
     let failure = &summary["failures"][0];
     assert_eq!(failure["entry"], std::str::from_utf8(HOSTILE).unwrap());

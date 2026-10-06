@@ -100,15 +100,22 @@ pub(crate) fn serde_json_to_io(e: serde_json::Error) -> io::Error {
         .map_or_else(|| io::Error::other(e.to_string()), io::Error::from)
 }
 
+/// Pretty-print `value` as JSON to `w` through [`JsonTerminalSafe`], then a
+/// newline: DEL, C1 and the Bidi_Control characters come out as `\uXXXX`
+/// escapes, and the decoded value is unchanged.
+pub(crate) fn write_json<T: Serialize + ?Sized>(w: &mut dyn Write, value: &T) -> io::Result<()> {
+    serde_json::to_writer_pretty(JsonTerminalSafe(&mut *w), value).map_err(serde_json_to_io)?;
+    writeln!(w)
+}
+
 /// Write `value` as pretty JSON to stdout, then a newline.
 ///
 /// Streaming to a locked `BufWriter` rather than `println!("{}",
 /// to_string_pretty(..)?)` is load-bearing, not stylistic: `println!`
 /// PANICS when the downstream reader closes the pipe (`… | head -1`),
 /// exiting 101 — a code the shipped scheme does not contain (SPEC: "0
-/// success, including BrokenPipe on stdout"). Going through
-/// `serde_json_to_io` instead yields `Io(BrokenPipe)`, which `main.rs`
-/// maps to a clean 0.
+/// success, including BrokenPipe on stdout"). [`write_json`] instead
+/// yields `Io(BrokenPipe)`, which `main.rs` maps to a clean 0.
 ///
 /// In the field the bug is payload-size dependent: a document smaller than
 /// the 64 KiB pipe buffer lands before the reader exits and appears to work.
@@ -116,21 +123,14 @@ pub(crate) fn serde_json_to_io(e: serde_json::Error) -> io::Error {
 /// Reach for this helper for any new JSON surface that owns stdout for the
 /// whole command.
 ///
-/// It is NOT the only writer of the `to_writer_pretty` + `serde_json_to_io`
-/// pair, and deliberately so, for two different reasons.
-/// `print_entries`/`print_entries_grouped` acquire ONE `BufWriter` before
-/// the format match and emit both forms through it, so delegating would
-/// mean hoisting that lock into each arm — and calling this helper under a
-/// live outer `BufWriter` would take a second `stdout.lock()` and interleave
-/// the output (the lock is reentrant, so it would not even deadlock to warn
-/// you). `ExtractSummary::render` has no lock at all: it writes to a
-/// caller-supplied `&mut dyn Write` so its unit tests can capture the
-/// output, and this helper hardcodes stdout.
+/// Not for a caller that already holds a stdout `BufWriter`, as
+/// `print_entries` does: the stdout lock is reentrant, so a second one
+/// interleaves the output instead of deadlocking. Such a caller uses
+/// [`write_json`] directly.
 pub(crate) fn print_json<T: Serialize>(value: &T) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
-    serde_json::to_writer_pretty(&mut out, value).map_err(serde_json_to_io)?;
-    writeln!(out)?;
+    write_json(&mut out, value)?;
     // Explicit: `BufWriter::drop` also flushes but SWALLOWS the error, so
     // without this the pipe-closed signal is lost before `?` can see it.
     out.flush()
@@ -266,12 +266,7 @@ fn print_entries(entries: &[EntryRowData], format: ResolvedFormat) -> io::Result
                 schema_version: ENTRIES_SCHEMA_VERSION,
                 entries: entries.iter().map(|e| EntryRow::new(e, None)).collect(),
             };
-            // Stream directly to stdout instead of building the full string in
-            // memory. serde_json wraps the underlying io::Error; the helper
-            // surfaces its kind so callers can distinguish BrokenPipe from
-            // real errors.
-            serde_json::to_writer_pretty(&mut out, &envelope).map_err(serde_json_to_io)?;
-            writeln!(out)?;
+            write_json(&mut out, &envelope)?;
         }
         ResolvedFormat::Table => {
             let table = build_entries_table(entries, styling_enabled(std::env::var_os("NO_COLOR")));
@@ -345,8 +340,7 @@ fn print_entries_grouped(
                     })
                     .collect(),
             };
-            serde_json::to_writer_pretty(&mut out, &envelope).map_err(serde_json_to_io)?;
-            writeln!(out)?;
+            write_json(&mut out, &envelope)?;
         }
         ResolvedFormat::Table => {
             let styled = styling_enabled(std::env::var_os("NO_COLOR"));
@@ -443,10 +437,10 @@ fn build_entries_table(entries: &[EntryRowData], style: bool) -> Table {
 /// `paksmith_core::profile::resolve`), and `--log-json` writes through
 /// [`JsonTerminalSafe`].
 ///
-/// JSON on stdout does not either: JSON is the machine interface, and fields
-/// such as `path` and `id` are fed back into later commands, so they must
-/// round-trip. serde_json escapes only C0 there; DEL, C1 and the bidi
-/// controls pass through as raw UTF-8.
+/// JSON on stdout does not either: fields such as `path` and `id` are fed
+/// back into later commands and must round-trip, so [`write_json`] writes
+/// these characters, wherever a value holds one, as JSON escapes instead,
+/// which decode to the exact text.
 pub(crate) fn sanitize_for_display(s: &str) -> std::borrow::Cow<'_, str> {
     if s.chars().any(is_terminal_hazard) {
         std::borrow::Cow::Owned(
@@ -502,7 +496,7 @@ impl<W: Write> Write for JsonTerminalSafe<W> {
 /// character. It escapes C0 itself.
 #[must_use]
 fn is_json_hazard(c: char) -> bool {
-    is_terminal_hazard(c) && c >= '\u{7f}'
+    c >= '\u{7f}' && is_terminal_hazard(c)
 }
 
 /// `s` with each [`is_json_hazard`] character written as `\uXXXX`.
@@ -1046,6 +1040,50 @@ mod json_terminal_safe_tests {
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(w.0, [] as [u8; 0]);
+    }
+
+    /// DEL, C1 CSI, a right-to-left override and ESC, in a key and a value.
+    #[test]
+    fn write_json_round_trips_hostile_strings_exactly() {
+        let value = serde_json::json!({
+            "k\u{7f}\u{9b}\u{202e}\u{1b}": ["v\u{7f}\u{9b}\u{202e}\u{1b}", 1]
+        });
+        let mut out = Vec::new();
+
+        write_json(&mut out, &value).unwrap();
+
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(
+            !text.contains(['\u{7f}', '\u{9b}', '\u{202e}', '\u{1b}']),
+            "{text:?}"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&out).unwrap(),
+            value
+        );
+        let plain = serde_json::to_vec_pretty(&value).unwrap();
+        assert!(
+            plain.windows(2).any(|w| w == [0xC2, 0x9B]),
+            "serde_json alone leaves C1 raw"
+        );
+    }
+
+    #[test]
+    fn write_json_matches_serde_pretty_layout_on_clean_input() {
+        let value = serde_json::json!({
+            "a": [],
+            "b": {},
+            "c": [1, {"d": "e"}],
+            "f": {"g": [true, null]}
+        });
+        let mut out = Vec::new();
+
+        write_json(&mut out, &value).unwrap();
+
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            serde_json::to_string_pretty(&value).unwrap() + "\n"
+        );
     }
 
     #[test]

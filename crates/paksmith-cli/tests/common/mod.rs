@@ -59,6 +59,54 @@ pub fn assert_neutralized(text: &str, shown: &[&str]) {
     }
 }
 
+/// A [`v3_pak_with_entry`] name holding DEL, C1 CSI (U+009B) and a
+/// right-to-left override (U+202E).
+pub const HOSTILE_ENTRY: &[u8; 22] = b"C/\x7f\xc2\x9b\xe2\x80\xaexxxxxxxxxx.bin";
+
+/// Assert `bytes` holds none of DEL, C1 CSI (U+009B) and a right-to-left
+/// override (U+202E) raw: characters serde_json alone leaves unescaped.
+pub fn assert_no_raw_json_hazards(bytes: &[u8]) {
+    const RAW_HAZARDS: [&[u8]; 3] = [b"\x7f", b"\xc2\x9b", b"\xe2\x80\xae"];
+    for raw in RAW_HAZARDS {
+        assert!(
+            !bytes.windows(raw.len()).any(|w| w == raw),
+            "raw {raw:02x?} in {:?}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+}
+
+/// The first `entries` row of the `list` JSON document in `stdout`, after
+/// checking that no raw hazard reached `stdout` and that the row's path
+/// decodes to exactly [`HOSTILE_ENTRY`].
+pub fn hostile_entry_row(stdout: &[u8]) -> serde_json::Value {
+    assert_no_raw_json_hazards(stdout);
+    let doc: serde_json::Value = serde_json::from_slice(stdout).unwrap();
+    let row = doc["entries"][0].clone();
+    assert_eq!(
+        row["path"],
+        std::str::from_utf8(HOSTILE_ENTRY).unwrap(),
+        "{doc}"
+    );
+    row
+}
+
+/// `real_v3_minimal.pak` written to `pak` with its one entry,
+/// `Content/Example.uasset`, renamed in place to `name`, which has the same
+/// length.
+pub fn v3_pak_with_entry(pak: &std::path::Path, name: &[u8; 22]) {
+    const FROM: &[u8; 22] = b"Content/Example.uasset";
+    let mut bytes = std::fs::read(fixture_path("real_v3_minimal.pak")).unwrap();
+    let at: Vec<usize> = bytes
+        .windows(FROM.len())
+        .enumerate()
+        .filter_map(|(i, w)| (w == FROM).then_some(i))
+        .collect();
+    assert_eq!(at.len(), 1, "the fixture must name the entry exactly once");
+    bytes[at[0]..at[0] + FROM.len()].copy_from_slice(name);
+    std::fs::write(pak, bytes).unwrap();
+}
+
 /// Shared writer for the `hero` profile seeders: `extra` is appended
 /// verbatim after the `[profiles.hero]` table (pass `""` for none).
 #[allow(
@@ -369,4 +417,29 @@ fn envelope_helper_accepts_the_key_in_both_serde_forms() {
         "id",
         "pretty",
     );
+}
+
+/// [`assert_no_raw_json_hazards`] must reject each raw character and accept
+/// its JSON escape, or an emptied helper would pass every caller.
+#[test]
+#[should_panic(expected = "raw [7f]")]
+fn raw_json_hazards_helper_rejects_a_raw_del() {
+    assert_no_raw_json_hazards("a\u{7f}b".as_bytes());
+}
+
+#[test]
+#[should_panic(expected = "raw [c2, 9b]")]
+fn raw_json_hazards_helper_rejects_a_raw_c1_csi() {
+    assert_no_raw_json_hazards("a\u{9b}b".as_bytes());
+}
+
+#[test]
+#[should_panic(expected = "raw [e2, 80, ae]")]
+fn raw_json_hazards_helper_rejects_a_raw_bidi_override() {
+    assert_no_raw_json_hazards("a\u{202e}b".as_bytes());
+}
+
+#[test]
+fn raw_json_hazards_helper_accepts_their_json_escapes() {
+    assert_no_raw_json_hazards(br#""\u007f\u009b\u202e""#);
 }
