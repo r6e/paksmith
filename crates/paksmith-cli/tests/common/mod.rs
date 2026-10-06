@@ -29,6 +29,36 @@ pub fn fixture_path(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+/// The hostile registry id, decoded: ESC and an erase-display sequence.
+pub const HOSTILE_ID: &str = "reg\u{1b}[2JID";
+/// How a neutralized line shows [`HOSTILE_ID`] and the hostile name.
+pub const HOSTILE_ID_SHOWN: &str = "reg\u{FFFD}[2JID";
+pub const HOSTILE_NAME_SHOWN: &str = "N\u{FFFD}]0;NAME\u{FFFD}\u{FFFD}";
+
+/// A registry-cache profile object with [`HOSTILE_ID`] and a name carrying
+/// ESC, an OSC title sequence, BEL and a right-to-left override, followed by
+/// `extra`: more members, each with a leading comma, or `""`.
+pub fn hostile_registry_profile(extra: &str) -> String {
+    format!(r#"{{"id":"reg\u001b[2JID","name":"N\u001b]0;NAME\u0007\u202e","keys":{{}}{extra}}}"#)
+}
+
+/// Assert `text` holds no raw control character other than the `\n` and
+/// `\t` that tables use as separators, and no Unicode Bidi_Control character,
+/// and that it contains each of `shown`.
+pub fn assert_neutralized(text: &str, shown: &[&str]) {
+    let raw = text.chars().find(|&c| {
+        (c.is_control() && c != '\n' && c != '\t')
+            || matches!(
+                c,
+                '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            )
+    });
+    assert_eq!(raw, None, "raw hazard in {text:?}");
+    for s in shown {
+        assert!(text.contains(s), "{s:?} missing from {text:?}");
+    }
+}
+
 /// Shared writer for the `hero` profile seeders: `extra` is appended
 /// verbatim after the `[profiles.hero]` table (pass `""` for none).
 #[allow(
@@ -237,6 +267,32 @@ pub fn assert_closed_stderr_exits(
 }
 
 /// [`assert_closed_stderr_exits`]'s own failure polarity: a wrong exit code
+/// [`assert_neutralized`] must reject a raw control, a bidi control and
+/// missing text, and accept the table separators, or an emptied helper would
+/// pass every caller.
+#[test]
+#[should_panic(expected = "raw hazard")]
+fn neutralized_helper_rejects_a_raw_control() {
+    assert_neutralized("a\u{1b}b", &[]);
+}
+
+#[test]
+#[should_panic(expected = "raw hazard")]
+fn neutralized_helper_rejects_a_bidi_control() {
+    assert_neutralized("a\u{202e}b", &[]);
+}
+
+#[test]
+#[should_panic(expected = "missing from")]
+fn neutralized_helper_rejects_missing_text() {
+    assert_neutralized("ab", &["c"]);
+}
+
+#[test]
+fn neutralized_helper_accepts_the_table_separators() {
+    assert_neutralized("a\tb\nc", &["b"]);
+}
+
 /// must panic, or an emptied helper would pass every caller.
 #[test]
 #[should_panic(expected = "must exit 0")]

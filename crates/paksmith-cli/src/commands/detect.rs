@@ -7,6 +7,8 @@ use serde::Serialize;
 
 use paksmith_core::profile::resolve::detect_matches;
 
+use crate::output::sanitize_for_display;
+
 /// Own `schema_version`: the repo shares one only when the SHAPE is shared
 /// (`list`/`search` both emit `EntryRow`); `detect`'s document matches no
 /// other surface, so coupling it would make consumers re-check on unrelated
@@ -65,7 +67,13 @@ pub(crate) fn run(dir: &Path, fmt: crate::output::ResolvedFormat) -> paksmith_co
     let mut out = io::BufWriter::new(stdout.lock());
     writeln!(out, "matched {} profile(s):", matches.len())?;
     for m in &matches {
-        writeln!(out, "  {}\t{}\t[{}]", m.id, m.name, m.source)?;
+        writeln!(
+            out,
+            "  {}\t{}\t[{}]",
+            sanitize_for_display(&m.id),
+            sanitize_for_display(&m.name),
+            m.source
+        )?;
     }
     out.flush()?;
     Ok(0)

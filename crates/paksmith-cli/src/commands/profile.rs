@@ -13,7 +13,7 @@ use paksmith_core::{
     display_guid, resolve_profile_layered,
 };
 
-use crate::output::{OutputFormat, ResolvedFormat};
+use crate::output::{OutputFormat, ResolvedFormat, sanitize_for_display};
 
 /// Profile management subcommands.
 #[derive(Subcommand)]
@@ -571,8 +571,12 @@ fn list(fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
         let engine = r.engine_version.as_deref().unwrap_or("-");
         writeln!(
             out,
-            "{}\t{}\t{engine}\t{} key(s)\t[{}]",
-            r.id, r.name, r.key_count, r.source
+            "{}\t{}\t{}\t{} key(s)\t[{}]",
+            sanitize_for_display(&r.id),
+            sanitize_for_display(&r.name),
+            sanitize_for_display(engine),
+            r.key_count,
+            r.source
         )?;
     }
     out.flush()?;
@@ -624,18 +628,22 @@ fn show(a: &ShowArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
 
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
-    writeln!(out, "id: {}", a.id)?;
+    writeln!(out, "id: {}", sanitize_for_display(&a.id))?;
     writeln!(out, "source: {}", resolved.source())?;
-    writeln!(out, "name: {}", resolved.name())?;
+    writeln!(out, "name: {}", sanitize_for_display(resolved.name()))?;
     writeln!(
         out,
         "engine_version: {}",
-        resolved.engine_version().unwrap_or("-")
+        sanitize_for_display(resolved.engine_version().unwrap_or("-"))
     )?;
     match mappings {
         // Not key material — safe to show unredacted.
         Some(MappingsSource::Path(path)) => {
-            writeln!(out, "mappings: {}", path.display())?;
+            writeln!(
+                out,
+                "mappings: {}",
+                sanitize_for_display(&path.display().to_string())
+            )?;
         }
         None => writeln!(out, "mappings: -")?,
     }
@@ -645,7 +653,7 @@ fn show(a: &ShowArgs, fmt: ResolvedFormat, quiet: bool) -> paksmith_core::Result
     } else {
         writeln!(out, "pak_paths:")?;
         for pattern in pak_paths {
-            writeln!(out, "  {pattern}")?;
+            writeln!(out, "  {}", sanitize_for_display(pattern))?;
         }
     }
     writeln!(out, "keys:")?;

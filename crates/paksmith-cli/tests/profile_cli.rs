@@ -7,8 +7,9 @@ use tempfile::tempdir;
 
 mod common;
 use common::{
-    assert_closed_stdout_exits_clean, assert_envelope_first, paksmith_json, paksmith_table,
-    paksmith_unpinned, seed_registry_cache_json,
+    HOSTILE_ID, HOSTILE_ID_SHOWN, HOSTILE_NAME_SHOWN, assert_closed_stdout_exits_clean,
+    assert_envelope_first, assert_neutralized, hostile_registry_profile, paksmith_json,
+    paksmith_table, paksmith_unpinned, seed_registry_cache_json,
 };
 
 /// Deterministic test keypair (seed `[7u8; 32]`) + its verifying key as lowercase
@@ -2355,4 +2356,94 @@ fn profile_json_reports_a_missing_engine_version_as_null() {
             "{ctx}: an unset engine_version must be null, not the table's `-`: {stdout}"
         );
     }
+}
+
+/// The shared hostile registry profile, with an engine version carrying C1
+/// CSI.
+fn hostile_profile_with_engine() -> String {
+    hostile_registry_profile(r#","engine_version":"5.\u009b3""#)
+}
+
+#[test]
+fn profile_list_table_neutralizes_registry_controls() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache_json(cfg.path(), &hostile_profile_with_engine());
+
+    let out = paksmith_table(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_neutralized(
+        &stdout,
+        &[HOSTILE_ID_SHOWN, HOSTILE_NAME_SHOWN, "5.\u{FFFD}3"],
+    );
+}
+
+#[test]
+fn profile_show_table_neutralizes_registry_controls() {
+    let cfg = tempdir().unwrap();
+    seed_registry_cache_json(cfg.path(), &hostile_profile_with_engine());
+
+    let out = paksmith_table(cfg.path())
+        .args(["profile", "show", HOSTILE_ID])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_neutralized(
+        &stdout,
+        &[
+            &format!("id: {HOSTILE_ID_SHOWN}"),
+            &format!("name: {HOSTILE_NAME_SHOWN}"),
+            "engine_version: 5.\u{FFFD}3",
+        ],
+    );
+}
+
+/// The not-found note and the error line echo the id as typed, neutralized.
+#[test]
+fn not_found_note_neutralizes_the_typed_id() {
+    let cfg = tempdir().unwrap();
+
+    let out = paksmith_table(cfg.path())
+        .env("NO_COLOR", "1")
+        .env_remove("RUST_LOG")
+        .args(["profile", "show", "x\u{1b}[2Jy"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert_neutralized(&stderr, &["`x\u{FFFD}[2Jy` is in neither"]);
+}
+
+/// Store-derived text reaches the add confirmation (through `print_line`)
+/// and show's mappings and pak-path lines neutralized.
+#[test]
+fn profile_add_and_show_neutralize_store_text() {
+    let cfg = tempdir().unwrap();
+
+    let added = paksmith_table(cfg.path())
+        .args(["profile", "add", "p\u{202e}q", "--name", "n"])
+        .args([
+            "--mappings",
+            "m\u{1b}[2J.usmap",
+            "--pak-path",
+            "Paks/\u{9b}*.pak",
+        ])
+        .assert()
+        .success();
+    let shown = paksmith_table(cfg.path())
+        .args(["profile", "show", "p\u{202e}q"])
+        .assert()
+        .success();
+
+    let added = String::from_utf8(added.get_output().stdout.clone()).unwrap();
+    assert_neutralized(&added, &["p\u{FFFD}q"]);
+    let shown = String::from_utf8(shown.get_output().stdout.clone()).unwrap();
+    assert_neutralized(
+        &shown,
+        &["mappings: m\u{FFFD}[2J.usmap", "  Paks/\u{FFFD}*.pak"],
+    );
 }
