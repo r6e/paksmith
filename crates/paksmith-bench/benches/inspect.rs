@@ -1,13 +1,14 @@
 //! Inspect/JSON emission benchmarks (issue #245).
 //!
-//! Two targets covering `paksmith inspect`'s JSON output path:
+//! Two targets covering the serde_json serialization behind `paksmith
+//! inspect`'s JSON output (the CLI also escapes it through its own writer):
 //!
 //! - `inspect_json_pretty` — `serde_json::to_writer_pretty` on a
 //!   medium-tier parsed Package.
 //! - `inspect_json_compact` — `serde_json::to_writer` on the same
 //!   input. Comparing the two quantifies the pretty-mode tax
-//!   (extra whitespace + indentation work) on the CLI's
-//!   default-on `--pretty` output.
+//!   (extra whitespace + indentation work) on the CLI's JSON
+//!   output, which is always pretty-printed.
 //!
 //! Reusing a single parsed Package between both benches isolates
 //! the JSON-emit path — without it, parse-time variance would

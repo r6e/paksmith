@@ -113,9 +113,9 @@ table (with color; set `NO_COLOR` to disable) interactively, JSON when piped or
 redirected. Override with `--format table` or `--format json`. `--quiet` silences
 advisory notes and drops logging to error-level (errors still print). `--log-json` switches stderr
 diagnostics to line-delimited JSON records and suppresses the advisory notes.
-Control and bidirectional-control characters in record values are written as
-JSON escapes such as `\u001b`, so they decode to the original text but never
-reach the terminal raw. Human-readable output (tables, `note:` lines and the
+Control and bidirectional-control characters in record values, as in JSON on
+stdout, are written as JSON escapes such as `\u001b`, so they decode to the
+original text but never reach the terminal raw. Human-readable output (tables, `note:` lines and the
 `paksmith: error:` line) shows control and bidirectional-control characters
 from archive, registry or store text as U+FFFD, and a multi-line error indents
 its continuation lines. Execution failures (exit 2) still end with the plain `paksmith: error:` line
