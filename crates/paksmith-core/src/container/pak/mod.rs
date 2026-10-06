@@ -275,7 +275,7 @@ impl PakReader {
         level = "debug",
         name = "pak_open",
         skip_all,
-        fields(path = %path.display(), keyed = key.is_some())
+        fields(path = path.display().to_string(), keyed = key.is_some())
     )]
     fn open_inner(path: &Path, key: Option<AesKey>) -> crate::Result<Self> {
         // F4 (security hardening, defense-in-depth): warn when the path
@@ -298,7 +298,7 @@ impl PakReader {
             && metadata.file_type().is_symlink()
         {
             tracing::warn!(
-                path = %path.display(),
+                path = path.display().to_string(),
                 "opening pak via symbolic link; defense-in-depth: future daemon mode will require explicit opt-in"
             );
         }
@@ -3970,10 +3970,11 @@ mod tests {
     #[test]
     #[tracing_test::traced_test]
     fn open_warns_on_symlink_then_succeeds() {
-        let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/real_v11_minimal.pak");
+        use crate::untrusted::test_support::lines_free_of_raw_controls;
+
+        let real = fixture("real_v11_minimal.pak");
         let tmp = tempfile::tempdir().expect("create tempdir");
-        let link = tmp.path().join("link.pak");
+        let link = tmp.path().join("L\u{9b}\u{202e}link.pak");
         std::os::unix::fs::symlink(&real, &link).expect("create symlink");
 
         let reader = PakReader::open(&link).expect("open via symlink should succeed");
@@ -3987,6 +3988,26 @@ mod tests {
             logs_contain("opening pak via symbolic link"),
             "expected symlink warn token in captured logs"
         );
+        // No raw control from the link's name reaches the warning.
+        assert!(logs_contain("L\\u{9b}\\u{202e}link.pak"));
+        logs_assert(lines_free_of_raw_controls("opening pak via symbolic link"));
+    }
+
+    /// The `pak_open` span records the archive path as an escaped string:
+    /// a file name carrying C1 and bidi controls reaches the log with
+    /// neither raw.
+    #[test]
+    #[tracing_test::traced_test]
+    fn pak_open_span_escapes_a_hostile_file_name() {
+        use crate::untrusted::test_support::lines_free_of_raw_controls;
+
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let hostile = tmp.path().join("C\u{9b}\u{202e}x.pak");
+        let _ = std::fs::copy(fixture("real_v11_minimal.pak"), &hostile).expect("copy fixture");
+
+        let _reader = PakReader::open(&hostile).expect("open should succeed");
+
+        logs_assert(lines_free_of_raw_controls("C\\u{9b}\\u{202e}x.pak"));
     }
 
     /// F4 (security hardening): the warn must NOT fire on a plain
@@ -4144,8 +4165,7 @@ mod tests {
         // recorder is thread-local, so nothing leaks into parallel tests.
         let rec = crate::test_spans::SpanRecorder::capture_until(
             || {
-                let reader =
-                    PakReader::open(lz4_fixture("real_v8b_lz4.pak")).expect("open fixture");
+                let reader = PakReader::open(fixture("real_v8b_lz4.pak")).expect("open fixture");
                 let mut buf: Vec<u8> = Vec::new();
                 let _ = reader
                     .read_entry_to("Content/Compressed.uasset", &mut buf)
@@ -4201,7 +4221,7 @@ mod tests {
         let rec = crate::test_spans::SpanRecorder::capture_until(
             || {
                 let reader: std::sync::Arc<dyn crate::container::ContainerReader> =
-                    crate::container::open(&lz4_fixture("real_v8b_lz4.pak"), None).expect("open");
+                    crate::container::open(&fixture("real_v8b_lz4.pak"), None).expect("open");
                 let _ = crate::asset::Package::read_from_reader(
                     &reader,
                     "Content/Compressed.uasset",
@@ -4287,7 +4307,7 @@ mod tests {
         // span-based profiling just because no path exists.
         let rec = crate::test_spans::SpanRecorder::capture_until(
             || {
-                let bytes = std::fs::read(lz4_fixture("real_v8b_lz4.pak")).expect("read fixture");
+                let bytes = std::fs::read(fixture("real_v8b_lz4.pak")).expect("read fixture");
                 let _ = PakReader::from_bytes(bytes).expect("from_bytes");
             },
             |r| r.count("pak_open") == 1,
@@ -4302,14 +4322,14 @@ mod tests {
         assert_eq!(rec.field("pak_open", "keyed").as_deref(), Some("false"));
     }
 
-    fn lz4_fixture(name: &str) -> std::path::PathBuf {
+    fn fixture(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("../../tests/fixtures/{name}"))
     }
 
     #[test]
     fn read_lz4_entry_round_trips_v11() {
-        let reader = PakReader::open(lz4_fixture("real_v11_lz4.pak")).expect("open lz4 fixture");
+        let reader = PakReader::open(fixture("real_v11_lz4.pak")).expect("open lz4 fixture");
         let path = "Content/Compressed.uasset";
         let entry = reader.index_entry(path).expect("lz4 entry present");
         assert!(
@@ -4335,7 +4355,7 @@ mod tests {
         // 4-slot/u8-index variant is exercised by the zlib corpus's
         // real_v8a_compressed.pak; slot resolution is method-agnostic
         // upstream of the decoder).
-        let reader = PakReader::open(lz4_fixture("real_v8b_lz4.pak")).expect("open lz4 fixture");
+        let reader = PakReader::open(fixture("real_v8b_lz4.pak")).expect("open lz4 fixture");
         let path = "Content/Compressed.uasset";
         let mut buf: Vec<u8> = Vec::new();
         let written = reader
@@ -4359,7 +4379,7 @@ mod tests {
         // `verify_lz4_entry_v8b_legacy_index_verifies` below (v8b's
         // legacy index does carry the SHA1) and by the synthetic
         // `verify_entry_lz4_succeeds` in paksmith-core-tests.
-        let reader = PakReader::open(lz4_fixture("real_v11_lz4.pak")).expect("open lz4 fixture");
+        let reader = PakReader::open(fixture("real_v11_lz4.pak")).expect("open lz4 fixture");
         let outcome = reader
             .verify_entry("Content/Compressed.uasset")
             .expect("verify_entry(lz4) must succeed");
@@ -4379,7 +4399,7 @@ mod tests {
         // real repak-written blocks: the outcome is Verified, NOT
         // SkippedNoHash, proving the LZ4 method routes through the
         // block-walk hash arm on a REAL (non-zero) stored hash.
-        let reader = PakReader::open(lz4_fixture("real_v8b_lz4.pak")).expect("open lz4 fixture");
+        let reader = PakReader::open(fixture("real_v8b_lz4.pak")).expect("open lz4 fixture");
         let outcome = reader
             .verify_entry("Content/Compressed.uasset")
             .expect("verify_entry(lz4, v8b) must succeed");
@@ -4401,8 +4421,7 @@ mod tests {
         // rather than hardcoded, so fixture regeneration can't
         // silently move the target into the in-data header (which
         // would trip the index-mismatch guard instead).
-        let pristine =
-            PakReader::open(lz4_fixture("real_v11_lz4.pak")).expect("open pristine fixture");
+        let pristine = PakReader::open(fixture("real_v11_lz4.pak")).expect("open pristine fixture");
         let entry = pristine
             .index_entry("Content/Compressed.uasset")
             .expect("entry present");
@@ -4410,7 +4429,7 @@ mod tests {
         let target = usize::try_from(entry.header().offset() + block0.start())
             .expect("fixture offsets fit usize");
         drop(pristine);
-        let original = std::fs::read(lz4_fixture("real_v11_lz4.pak")).expect("read fixture");
+        let original = std::fs::read(fixture("real_v11_lz4.pak")).expect("read fixture");
         let mut corrupted = original.clone();
         corrupted[target] = 0xFF; // token demanding more input than the block holds
         let dir = tempfile::tempdir().expect("create tempdir");

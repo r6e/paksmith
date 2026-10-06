@@ -8,7 +8,7 @@ mod path_util;
 mod profile_paks;
 mod search;
 
-use std::io;
+use std::io::{self, Write as _};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -119,10 +119,14 @@ fn main() -> ExitCode {
     });
 
     // `try_init`, not `init`: a host that already installed a global
-    // subscriber must not panic CLI startup.
+    // subscriber must not panic CLI startup. Internal-error logging is off
+    // because it reports a failed event write with `eprintln!`, which
+    // panics when stderr's reader is gone; the same switch also drops the
+    // notice for an event that fails to format.
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr);
+        .with_writer(std::io::stderr)
+        .log_internal_errors(false);
     if cli.log_json {
         let _ = builder.json().try_init();
     } else {
@@ -151,7 +155,7 @@ fn main() -> ExitCode {
         // shell pipelines don't surface a misleading non-zero status.
         Err(PaksmithError::Io(e)) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(e) => {
-            // Issue #93 design note: this `eprintln!` is the user-facing
+            // Issue #93 design note: this line is the user-facing
             // top-level error summary, deliberately NOT routed through
             // `tracing::error!` despite CLAUDE.md's tracing discipline.
             // Two reasons:
@@ -176,7 +180,9 @@ fn main() -> ExitCode {
             // in a host with its own logging, the host can suppress
             // this print by intercepting the `Err(_)` before
             // `main()` returns.
-            eprintln!("paksmith: error: {e}");
+            //
+            // Best-effort, like `output::note`.
+            let _ = writeln!(io::stderr(), "paksmith: error: {e}");
             ExitCode::from(2)
         }
     }

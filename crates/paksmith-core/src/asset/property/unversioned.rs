@@ -361,7 +361,7 @@ pub(crate) fn read_unversioned_properties(
                     asset_path,
                     class_name = &*clamp(class_name),
                     property = &*clamp(&mapped_prop.name),
-                    error = %e,
+                    error = e.to_string(),
                     "unversioned property cannot be decoded; stopping read"
                 );
                 break;
@@ -1189,13 +1189,14 @@ mod tests {
         logs_assert(lines_escaped("no schema found for class", "CLS"));
     }
 
-    /// The partial-tree-stop warning's `class_name` and `property` fields
-    /// carry long names clamped and escaped; `error = %e` repeats the
-    /// property name clamped but with its ESC unescaped (#708).
+    /// The partial-tree-stop warning names the class and the property;
+    /// long names reach every field of it clamped and escaped.
     #[tracing_test::traced_test]
     #[test]
     fn partial_tree_stop_warning_bounds_long_class_and_property_names() {
-        use crate::untrusted::test_support::{hostile_name, lines_clamped, lines_escaped};
+        use crate::untrusted::test_support::{
+            hostile_name, lines_clamped, lines_escaped, lines_free_of_raw_controls,
+        };
 
         let class = hostile_name("CLS");
         let usmap = named_single_prop_usmap(
@@ -1218,6 +1219,7 @@ mod tests {
             logs_assert(lines_clamped("stopping read", tag));
             logs_assert(lines_escaped("stopping read", tag));
         }
+        logs_assert(lines_free_of_raw_controls("stopping read"));
     }
 
     #[test]

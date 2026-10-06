@@ -869,24 +869,21 @@ fn extract_survives_a_closed_stderr() {
     let out = tempdir().unwrap();
     let cfg = tempdir().unwrap();
     let pak = fixture_path("minimal_v6.pak");
-    let run = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
-        .env("PAKSMITH_CONFIG_DIR", cfg.path())
-        .env_remove("RUST_LOG")
-        .arg("extract")
-        .arg(&pak)
-        .arg("-o")
-        .arg(out.path())
-        .stderr(common::closed_pipe_writer())
-        .output()
-        .unwrap();
+    let run = common::assert_closed_stderr_exits(
+        cfg.path(),
+        &[
+            "extract",
+            pak.to_str().unwrap(),
+            "-o",
+            out.path().to_str().unwrap(),
+            "--overwrite",
+        ],
+        1,
+        "stdout is not a terminal",
+    );
     let stdout = String::from_utf8(run.stdout).unwrap();
     let _: serde_json::Value =
         serde_json::from_str(&stdout).expect("the JSON summary is still written");
-    assert_eq!(
-        run.status.code(),
-        Some(1),
-        "exit must follow the summary, not a panic"
-    );
 }
 
 /// Under `--log-json` the locres-degrade warning names a hostile entry with

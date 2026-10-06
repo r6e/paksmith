@@ -467,3 +467,41 @@ fn list_with_closed_stdout_exits_cleanly() {
         &["list", &fixture_path("minimal_v6.pak"), "--format", "json"],
     );
 }
+
+/// A log event written to a stderr nobody reads keeps the command's own
+/// exit code, in both log formats. `--aes-key` with a `--detect` dir that
+/// matches no profile warns at the default level, then still lists.
+#[test]
+fn a_log_event_on_a_closed_stderr_keeps_exit_0() {
+    let cfg = tempfile::tempdir().unwrap();
+    let detect_dir = tempfile::tempdir().unwrap();
+    let detect = detect_dir.path().display().to_string();
+    let key = "ab".repeat(32);
+    let fixture = fixture_path("real_v11_minimal.pak");
+    let listing = ["--aes-key", &key, "--detect", &detect, "list", &fixture];
+    for log_json in [false, true] {
+        let args: Vec<&str> = log_json
+            .then_some("--log-json")
+            .into_iter()
+            .chain(listing)
+            .collect();
+        common::assert_closed_stderr_exits(
+            cfg.path(),
+            &args,
+            0,
+            "--detect found no unique profile",
+        );
+    }
+}
+
+/// The top-level error line on a stderr nobody reads keeps exit 2.
+#[test]
+fn an_error_on_a_closed_stderr_keeps_exit_2() {
+    let cfg = tempfile::tempdir().unwrap();
+    common::assert_closed_stderr_exits(
+        cfg.path(),
+        &["list", "no-such-archive.pak"],
+        2,
+        "paksmith: error:",
+    );
+}

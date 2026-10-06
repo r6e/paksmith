@@ -232,7 +232,7 @@ pub async fn resolve_pak_key(
     level = "debug",
     name = "profile_resolve",
     skip_all,
-    fields(path = %path.display())
+    fields(path = path.display().to_string())
 )]
 pub async fn resolve_pak_context(
     path: &Path,

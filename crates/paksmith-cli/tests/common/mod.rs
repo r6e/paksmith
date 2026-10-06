@@ -155,9 +155,7 @@ pub fn seed_registry_cache_json(config_dir: &std::path::Path, profiles: &str) {
 /// fixture still reaches the BrokenPipe path that a `println!` would turn
 /// into exit 101.
 pub fn assert_closed_stdout_exits_clean(config_dir: &std::path::Path, args: &[&str]) {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
-        .env("PAKSMITH_CONFIG_DIR", config_dir)
-        .args(args)
+    let out = paksmith_std(config_dir, args)
         .stdout(closed_pipe_writer())
         .output()
         .unwrap();
@@ -189,6 +187,81 @@ pub fn closed_pipe_writer() -> std::io::PipeWriter {
             Err(e) => panic!("probing a closed pipe: {e}"),
         }
     }
+}
+
+/// A `std::process::Command` for the `paksmith` binary with `args`, the
+/// sandboxed config dir and no inherited `RUST_LOG`.
+fn paksmith_std(config_dir: &std::path::Path, args: &[&str]) -> std::process::Command {
+    let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"));
+    let _ = c
+        .env("PAKSMITH_CONFIG_DIR", config_dir)
+        .env_remove("RUST_LOG")
+        .args(args);
+    c
+}
+
+/// Run `paksmith` with `args` twice and assert both runs exit with `code`:
+/// first with stderr piped, where it must also write `stderr_marker` (so the
+/// write under test really happens), then on a stderr pipe whose reader is
+/// already closed. A panicking write on that path shows up as exit 101.
+/// Returns the closed-stderr run's output.
+pub fn assert_closed_stderr_exits(
+    config_dir: &std::path::Path,
+    args: &[&str],
+    code: i32,
+    stderr_marker: &str,
+) -> std::process::Output {
+    let piped = paksmith_std(config_dir, args).output().unwrap();
+    let stderr = String::from_utf8_lossy(&piped.stderr);
+    assert_eq!(
+        piped.status.code(),
+        Some(code),
+        "{args:?} with stderr piped must exit {code}: {stderr}"
+    );
+    assert!(
+        stderr.contains(stderr_marker),
+        "{args:?} must write {stderr_marker:?} to stderr: {stderr}"
+    );
+
+    let closed = paksmith_std(config_dir, args)
+        .stderr(closed_pipe_writer())
+        .output()
+        .unwrap();
+    assert_eq!(
+        closed.status.code(),
+        Some(code),
+        "{args:?} on a closed stderr must exit {code}, got {:?}",
+        closed.status
+    );
+    closed
+}
+
+/// [`assert_closed_stderr_exits`]'s own failure polarity: a wrong exit code
+/// must panic, or an emptied helper would pass every caller.
+#[test]
+#[should_panic(expected = "must exit 0")]
+fn closed_stderr_helper_rejects_a_wrong_exit() {
+    let cfg = tempfile::tempdir().unwrap();
+    let _ = assert_closed_stderr_exits(
+        cfg.path(),
+        &["list", "no-such-archive.pak"],
+        0,
+        "paksmith: error:",
+    );
+}
+
+/// The marker is the helper's positive control: a missing marker must
+/// panic even when the exit code is right.
+#[test]
+#[should_panic(expected = "must write")]
+fn closed_stderr_helper_rejects_a_missing_marker() {
+    let cfg = tempfile::tempdir().unwrap();
+    let _ = assert_closed_stderr_exits(
+        cfg.path(),
+        &["list", "no-such-archive.pak"],
+        2,
+        "a marker that never appears",
+    );
 }
 
 /// The helper's own failure polarity: a non-zero exit that is not a
