@@ -1902,7 +1902,7 @@ impl ContainerReader for PakReader {
             warn!(
                 path,
                 size = size_usize,
-                error = source.to_string(),
+                error = ?source,
                 "output reservation failed"
             );
             PaksmithError::InvalidIndex {
@@ -2498,7 +2498,7 @@ fn read_compressed_block<R: Read + Seek>(
             path,
             block = block_index,
             block_len,
-            error = e.to_string(),
+            error = ?e,
             "{codec} block reservation failed"
         );
         PaksmithError::Decompression {
@@ -2696,7 +2696,7 @@ fn stream_zlib_to<R: Read + Seek>(
                     block = i,
                     requested = n,
                     already_committed = block_out.len(),
-                    error = e.to_string(),
+                    error = ?e,
                     "zlib scratch reservation failed mid-decode"
                 );
                 PaksmithError::Decompression {
@@ -2952,7 +2952,7 @@ fn stream_lz4_to<R: Read + Seek>(
                 path,
                 block = i,
                 requested = alloc_usize,
-                error = e.to_string(),
+                error = ?e,
                 "lz4 output reservation failed"
             );
             PaksmithError::Decompression {
@@ -4048,6 +4048,43 @@ mod tests {
             !logs_contain("opening pak via symbolic link"),
             "regular-file open should not emit the symlink warn"
         );
+    }
+
+    /// A failed reservation logs its `TryReserveError` with `?`, rather than
+    /// first formatting it into a new `String` on the path that just failed
+    /// to allocate.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn reservation_failures_log_the_error_lazily() {
+        use crate::testing::oom::{SeamSite, arm_at};
+        use crate::untrusted::test_support::lines_carrying;
+
+        for (seam, pak, message) in [
+            (
+                PakSeam::CompressedReserve,
+                "real_v11_compressed.pak",
+                "zlib block reservation failed",
+            ),
+            (
+                PakSeam::ScratchReserve,
+                "real_v11_compressed.pak",
+                "zlib scratch reservation failed mid-decode",
+            ),
+            (
+                PakSeam::Lz4OutputReserve,
+                "real_v11_lz4.pak",
+                "lz4 output reservation failed",
+            ),
+        ] {
+            let reader = PakReader::open(fixture(pak)).expect("open fixture");
+            let _guard = arm_at(SeamSite::Pak(seam), 0);
+            assert!(
+                reader.read_entry("Content/Compressed.uasset").is_err(),
+                "{seam:?}"
+            );
+            logs_assert(lines_carrying(message, "error=TryReserveError"));
+        }
     }
 
     /// `stream_zlib_to`'s returned `u64` must equal the decompressed
