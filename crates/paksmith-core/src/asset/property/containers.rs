@@ -12,14 +12,13 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use tracing::warn;
 
-use crate::asset::AssetContext;
 use crate::asset::package_index::PackageIndex;
 use crate::asset::property::primitives::{MapEntry, PropertyValue, read_soft_path_payload};
 use crate::asset::property::tag::{EMPTY_ARC_STR, PropertyTag};
 use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::read_asset_fstring;
+use crate::asset::{AssetContext, decode_warn};
 use crate::error::{
     AssetParseFault, AssetWireField, CollectionKind, PaksmithError, try_reserve_asset,
 };
@@ -333,8 +332,8 @@ fn read_array_value<R: Read + Seek>(
 /// `Map<*, Struct>` / `Set<Struct>` collection. The Array<Struct>
 /// path no longer uses this predicate — after #357 those errors
 /// propagate; only the collection-level callers (Map/Set) bail
-/// gracefully via this classifier, reseat to the outer tag's
-/// `expected_end`, and emit a `tracing::warn!` summary.
+/// gracefully via this classifier and reseat to the outer tag's
+/// `expected_end`.
 ///
 /// In `Map<*, *>` scope the failure may originate in a primitive
 /// slot whose bytes were pre-consumed by a misparsed adjacent
@@ -749,6 +748,7 @@ fn read_map_value<R: Read + Seek>(
                 // loop did not run, so no entries were collected.
                 return bail_map_partial(
                     tag,
+                    ctx,
                     Vec::new(),
                     AssetWireField::MapKey,
                     reader,
@@ -800,6 +800,7 @@ fn read_map_value<R: Read + Seek>(
             Err(e) if has_struct && is_recoverable_struct_element_error(&e) => {
                 return bail_map_partial(
                     tag,
+                    ctx,
                     entries,
                     AssetWireField::MapKey,
                     reader,
@@ -825,6 +826,7 @@ fn read_map_value<R: Read + Seek>(
             Err(e) if has_struct && is_recoverable_struct_element_error(&e) => {
                 return bail_map_partial(
                     tag,
+                    ctx,
                     entries,
                     AssetWireField::MapValue,
                     reader,
@@ -846,9 +848,8 @@ fn read_map_value<R: Read + Seek>(
     }))
 }
 
-/// Collection-level bail for [`read_map_value`]: emit one warn,
-/// seek to `expected_end`, and return the partial Map collected
-/// so far. Used by both the `num_keys_to_remove` discard loop
+/// Collection-level bail for [`read_map_value`]: seek to
+/// `expected_end` and return the partial Map collected so far. Used by both the `num_keys_to_remove` discard loop
 /// (where `entries` is empty) and the main count loop.
 ///
 /// Map/Set have no per-entry boundary on the wire, so the only sound
@@ -859,14 +860,16 @@ fn read_map_value<R: Read + Seek>(
 /// the Array path now propagates errors rather than re-anchoring.)
 #[allow(
     clippy::too_many_arguments,
-    reason = "bail context carries the outer tag for log fields + the partial \
-              entries vec + the EOF-diagnostic field for the seek-failure \
-              path + reader + expected_end + asset_path + the source error + \
-              a static log message; collapsing them would add a wrapper \
-              struct used at three call sites for no clarity win"
+    reason = "bail context carries the outer tag for log fields + the decode \
+              context for its warning budget + the partial entries vec + the \
+              EOF-diagnostic field for the seek-failure path + reader + \
+              expected_end + asset_path + the source error + a static log \
+              message; collapsing them would add a wrapper struct used at \
+              three call sites for no clarity win"
 )]
 fn bail_map_partial<R: Read + Seek>(
     tag: &PropertyTag,
+    ctx: &AssetContext,
     entries: Vec<MapEntry>,
     field: AssetWireField,
     reader: &mut R,
@@ -875,8 +878,9 @@ fn bail_map_partial<R: Read + Seek>(
     error: &PaksmithError,
     message: &'static str,
 ) -> crate::Result<Option<PropertyValue>> {
-    warn!(
-        asset = asset_path,
+    decode_warn!(
+        ctx,
+        asset_path,
         map = &*clamp(&tag.name),
         key_type = tag.inner_type.as_ref(),
         value_type = tag.value_type.as_ref(),
@@ -897,8 +901,8 @@ fn bail_map_partial<R: Read + Seek>(
 
 /// Collection-level bail for [`read_set_value`] — the `Set<Struct>`
 /// sibling of [`bail_map_partial`]. On a recoverable wire-shape
-/// failure inside a struct element, emit one warn, seek to
-/// `expected_end`, and return the partial Set collected so far
+/// failure inside a struct element, seek to `expected_end` and
+/// return the partial Set collected so far
 /// (empty when called from the discard loop).
 ///
 /// Unlike [`bail_map_partial`], no `field` parameter is needed —
@@ -909,8 +913,13 @@ fn bail_map_partial<R: Read + Seek>(
 /// `key_type + value_type`, `elements_decoded` vs `entries_decoded`)
 /// are part of the log schema and don't compose through a shared
 /// helper without adding a wrapper type for two call sites.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "bail_map_partial's parameters minus the EOF-diagnostic field"
+)]
 fn bail_set_partial<R: Read + Seek>(
     tag: &PropertyTag,
+    ctx: &AssetContext,
     elements: Vec<PropertyValue>,
     reader: &mut R,
     expected_end: u64,
@@ -918,8 +927,9 @@ fn bail_set_partial<R: Read + Seek>(
     error: &PaksmithError,
     message: &'static str,
 ) -> crate::Result<Option<PropertyValue>> {
-    warn!(
-        asset = asset_path,
+    decode_warn!(
+        ctx,
+        asset_path,
         set = &*clamp(&tag.name),
         inner_type = tag.inner_type.as_ref(),
         elements_decoded = elements.len(),
@@ -1003,6 +1013,7 @@ fn read_set_value<R: Read + Seek>(
                 // `expected_end` and return an EMPTY Set.
                 return bail_set_partial(
                     tag,
+                    ctx,
                     Vec::new(),
                     reader,
                     expected_end,
@@ -1053,6 +1064,7 @@ fn read_set_value<R: Read + Seek>(
             Err(e) if has_struct && is_recoverable_struct_element_error(&e) => {
                 return bail_set_partial(
                     tag,
+                    ctx,
                     elements,
                     reader,
                     expected_end,
@@ -2871,6 +2883,17 @@ mod tests {
         body
     }
 
+    /// A one-entry Map<Name, Struct> body whose value fails with
+    /// `PackageIndexOob`, so the read bails with an empty partial Map.
+    fn map_with_one_bad_value() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_keys_to_remove
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // count
+        bytes.extend(name_key_body(6)); // "first"
+        bytes.extend(bad_struct_body()); // PackageIndexOob
+        bytes
+    }
+
     #[test]
     fn map_of_name_to_struct_decodes_two_entries() {
         // Wire: num_keys_to_remove(0) + count(2) + 2 × (8-byte FName
@@ -2949,12 +2972,7 @@ mod tests {
         };
 
         let ctx = make_ctx(MAP_OF_STRUCT_NAMES);
-        let mut bytes: Vec<u8> = Vec::new();
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_keys_to_remove
-        bytes.extend_from_slice(&1i32.to_le_bytes()); // count
-        bytes.extend(name_key_body(6)); // "first"
-        bytes.extend(bad_struct_body()); // PackageIndexOob
-
+        let bytes = map_with_one_bad_value();
         let outer_tag = make_map_of_struct_tag(bytes.len()).with_name(&hostile_name("MAP"));
         let expected_end = bytes.len() as u64;
         let mut cur = Cursor::new(bytes);
@@ -3182,6 +3200,16 @@ mod tests {
         .with_inner_type("StructProperty")
     }
 
+    /// A one-element Set<Struct> body whose element fails with
+    /// `PackageIndexOob`, so the read bails with an empty partial Set.
+    fn set_with_one_bad_element() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_elements_to_remove
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // count
+        bytes.extend(bad_struct_body()); // PackageIndexOob
+        bytes
+    }
+
     #[test]
     fn set_of_struct_decodes_two_elements() {
         // Wire: num_elements_to_remove(0) + count(2) + 2 × 37-byte
@@ -3239,11 +3267,7 @@ mod tests {
         };
 
         let ctx = make_ctx(SET_OF_STRUCT_NAMES);
-        let mut bytes: Vec<u8> = Vec::new();
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_elements_to_remove
-        bytes.extend_from_slice(&1i32.to_le_bytes()); // count
-        bytes.extend(bad_struct_body()); // PackageIndexOob
-
+        let bytes = set_with_one_bad_element();
         let outer_tag = make_set_of_struct_tag(bytes.len()).with_name(&hostile_name("SET"));
         let expected_end = bytes.len() as u64;
         let mut cur = Cursor::new(bytes);
@@ -3260,6 +3284,41 @@ mod tests {
             "error=\"asset deserialization failed for `PATHKEPT\\u{1b}[2J"
         ));
         logs_assert(lines_free_of_raw_controls("returning partial Set"));
+    }
+
+    /// Map and Set bails draw on one per-package warning budget: past the
+    /// cap they still return their partial collections, and one notice
+    /// stands in for the warnings they no longer log.
+    #[tracing_test::traced_test]
+    #[test]
+    fn map_and_set_bails_past_the_cap_log_a_bounded_number_of_lines() {
+        use crate::asset::MAX_DECODE_WARNINGS;
+        use crate::untrusted::test_support::lines_counted;
+
+        let ctx = make_ctx(MAP_OF_STRUCT_NAMES);
+        let map = map_with_one_bad_value();
+        let map_tag = make_map_of_struct_tag(map.len());
+        for _ in 0..MAX_DECODE_WARNINGS + 5 {
+            let mut cur = Cursor::new(&map);
+            let value = read_map_value(&map_tag, &mut cur, &ctx, 0, map.len() as u64, "p");
+            assert!(
+                matches!(value, Ok(Some(PropertyValue::Map { .. }))),
+                "{value:?}"
+            );
+        }
+        let set = set_with_one_bad_element();
+        let set_tag = make_set_of_struct_tag(set.len());
+        let mut cur = Cursor::new(&set);
+        let value = read_set_value(&set_tag, &mut cur, &ctx, 0, set.len() as u64, "p");
+
+        assert!(
+            matches!(value, Ok(Some(PropertyValue::Set { .. }))),
+            "{value:?}"
+        );
+        let cap = usize::try_from(MAX_DECODE_WARNINGS).unwrap();
+        logs_assert(lines_counted("returning partial Map", cap));
+        logs_assert(lines_counted("returning partial Set", 0));
+        logs_assert(lines_counted("warnings for this package suppressed", 1));
     }
 
     #[test]

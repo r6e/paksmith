@@ -511,9 +511,8 @@ pub struct SkelMeshSection {
 #[non_exhaustive]
 pub struct DataTableData {
     /// Name of the `RowStruct` (`UScriptStruct`) every row conforms to.
-    /// Empty when the table's `RowStruct` couldn't be resolved (a
-    /// `tracing::warn!` is logged at parse time — see the format doc's
-    /// §RowStruct resolution failure).
+    /// Empty when the table's `RowStruct` couldn't be resolved; see the
+    /// format doc's §RowStruct resolution failure.
     pub row_struct: String,
     /// One entry per table row, in wire order.
     pub rows: Vec<DataTableRow>,
@@ -879,6 +878,54 @@ pub fn max_derived_string_bytes() -> u64 {
     MAX_DERIVED_STRING_BYTES
 }
 
+/// Decode-time warnings one package decode logs before it suppresses the
+/// rest. A crafted package can trip one per Map or Set tag, so without a
+/// cap their count is bounded only by the payload bytes.
+pub(crate) const MAX_DECODE_WARNINGS: u64 = 32;
+
+/// What [`AssetContext::admit_decode_warning`] lets one decode-time warning
+/// do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DecodeWarning {
+    /// Within the budget: log it.
+    Log,
+    /// The first past the budget: log the suppression notice instead.
+    Notice,
+    /// Past the notice: log nothing.
+    Silent,
+}
+
+/// `tracing::warn!` with `asset = $asset_path` and the given arguments,
+/// drawn on `$ctx`'s budget of [`MAX_DECODE_WARNINGS`]: the first warning
+/// past it logs one notice that the rest are suppressed instead, and later
+/// ones log nothing. Both events
+/// take the caller's target, so a per-module filter that shows the warning
+/// shows the notice. A warning the subscriber filters out still spends the
+/// budget.
+macro_rules! decode_warn {
+    ($ctx:expr, $asset_path:expr, $($warning:tt)+) => {
+        match $ctx.admit_decode_warning() {
+            $crate::asset::DecodeWarning::Log => {
+                ::tracing::warn!(asset = $asset_path, $($warning)+)
+            }
+            $crate::asset::DecodeWarning::Notice => ::tracing::warn!(
+                asset = $asset_path,
+                limit = $crate::asset::MAX_DECODE_WARNINGS,
+                "further decode-time warnings for this package suppressed"
+            ),
+            $crate::asset::DecodeWarning::Silent => {}
+        }
+    };
+}
+pub(crate) use decode_warn;
+
+/// Test-only accessor for `MAX_DECODE_WARNINGS` (32).
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_decode_warnings() -> u64 {
+    MAX_DECODE_WARNINGS
+}
+
 /// Whether `err` ends a package read instead of degrading one export: a
 /// reported allocation failure at any layer a package read reaches (the
 /// asset parser's own reservations; an FString read, which reports the pak
@@ -954,16 +1001,16 @@ impl Default for DerivedStringBudget {
 /// (Phase 2b+).
 ///
 /// **Thread safety:** `AssetContext: Send + Sync`. All components are
-/// `Arc`-shared; the bulk resolver's caches, the derived-string budget
-/// and the bulk-read ledger use atomics / `OnceLock`, so the context is
-/// safe to clone and share across worker threads.
-/// Pinned by the `send_sync_assertions` test in `lib.rs`.
+/// `Arc`-shared; the bulk resolver's caches, the derived-string budget,
+/// the decode-time warning count and the bulk-read ledger use atomics /
+/// `OnceLock`, so the context is safe to clone and share across worker
+/// threads. Pinned by the `send_sync_assertions` test in `lib.rs`.
 ///
 /// `Arc`-wrapped components so `clone()` is a handful of atomic refcount
 /// bumps. (`version` is `Copy`; `mappings` is `Option<Arc<_>>`.) Clones
-/// share one budget for copied names and one bulk-read ledger, neither
-/// of which resets; each [`AssetContext::new`] or [`Package::context`]
-/// call starts fresh ones.
+/// share one budget for copied names, one decode-time warning count and
+/// one bulk-read ledger, none of which resets; each [`AssetContext::new`]
+/// or [`Package::context`] call starts fresh ones.
 ///
 /// Marked `#[non_exhaustive]` because additional version-gate fields
 /// land here without a major bump (`custom_versions` shipped with #355;
@@ -1053,6 +1100,9 @@ pub struct AssetContext {
     /// Bytes this decode's typed readers have charged against each
     /// bulk-data source (#841). Clones share it, like `derived_strings`.
     pub(crate) bulk_reads: Arc<bulk_data::BulkReadLedger>,
+    /// Decode-time warnings this decode has asked to log; see
+    /// [`MAX_DECODE_WARNINGS`]. Clones share it, like `derived_strings`.
+    pub(crate) decode_warnings: Arc<AtomicU64>,
 }
 
 impl AssetContext {
@@ -1088,6 +1138,17 @@ impl AssetContext {
             engine_version_hint: None,
             derived_strings: Arc::default(),
             bulk_reads: Arc::default(),
+            decode_warnings: Arc::default(),
+        }
+    }
+
+    /// Spend one of this decode's decode-time warnings; `decode_warn!`
+    /// logs what the result allows.
+    pub(crate) fn admit_decode_warning(&self) -> DecodeWarning {
+        match self.decode_warnings.fetch_add(1, Ordering::Relaxed) {
+            seen if seen < MAX_DECODE_WARNINGS => DecodeWarning::Log,
+            MAX_DECODE_WARNINGS => DecodeWarning::Notice,
+            _ => DecodeWarning::Silent,
         }
     }
 
@@ -1332,6 +1393,79 @@ mod derived_string_budget_tests {
     #[test]
     fn accessor_reads_the_live_cap() {
         assert_eq!(max_derived_string_bytes(), MAX_DERIVED_STRING_BYTES);
+    }
+}
+
+#[cfg(test)]
+mod decode_warning_budget_tests {
+    use super::*;
+    use crate::asset::property::test_utils::{make_ctx, with_decode_warnings_spent};
+    use crate::untrusted::test_support::lines_counted;
+
+    #[test]
+    fn admits_the_cap_then_one_notice_then_nothing() {
+        let ctx = make_ctx(&[]);
+        for _ in 0..MAX_DECODE_WARNINGS {
+            assert_eq!(ctx.admit_decode_warning(), DecodeWarning::Log);
+        }
+        assert_eq!(ctx.admit_decode_warning(), DecodeWarning::Notice);
+        assert_eq!(ctx.admit_decode_warning(), DecodeWarning::Silent);
+        assert_eq!(MAX_DECODE_WARNINGS, 32);
+    }
+
+    /// The cap's worth of warnings, then one notice in their place, both
+    /// under the caller's target.
+    #[tracing_test::traced_test]
+    #[test]
+    fn decode_warn_logs_the_cap_then_one_notice_under_the_callers_target() {
+        let ctx = make_ctx(&[]);
+        for _ in 0..MAX_DECODE_WARNINGS + 2 {
+            decode_warn!(ctx, "p.uasset", "probe warning");
+        }
+
+        let cap = usize::try_from(MAX_DECODE_WARNINGS).unwrap();
+        logs_assert(lines_counted("probe warning", cap));
+        logs_assert(lines_counted("for this package suppressed", 1));
+        let limit = format!("limit={MAX_DECODE_WARNINGS}");
+        logs_assert(|lines: &[&str]| {
+            let mut both = lines
+                .iter()
+                .filter(|l| l.contains("probe warning") || l.contains("suppressed"));
+            match both.find(|l| !(l.contains(module_path!()) && l.contains("asset=\"p.uasset\""))) {
+                Some(line) => Err(format!(
+                    "not under {} with its asset: {line}",
+                    module_path!()
+                )),
+                None => Ok(()),
+            }
+        });
+        logs_assert(|lines: &[&str]| {
+            lines
+                .iter()
+                .any(|l| l.contains("suppressed") && l.contains(&limit))
+                .then_some(())
+                .ok_or_else(|| format!("no notice with {limit}"))
+        });
+    }
+
+    #[test]
+    fn the_spent_test_budget_is_past_its_notice() {
+        let spent = with_decode_warnings_spent(make_ctx(&[]));
+        assert_eq!(spent.admit_decode_warning(), DecodeWarning::Silent);
+    }
+
+    #[test]
+    fn clones_share_one_budget_and_each_context_starts_fresh() {
+        let ctx = make_ctx(&[]);
+        let _ = ctx.clone().admit_decode_warning();
+        assert_eq!(ctx.decode_warnings.load(Ordering::Relaxed), 1);
+        assert_eq!(make_ctx(&[]).decode_warnings.load(Ordering::Relaxed), 0);
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn accessor_reads_the_live_cap() {
+        assert_eq!(max_decode_warnings(), MAX_DECODE_WARNINGS);
     }
 }
 

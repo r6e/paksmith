@@ -166,8 +166,8 @@ appears mostly in delta-update artifacts.
 When Map or Set contains `StructProperty` elements and a recoverable
 wire-shape error occurs inside an element (bogus FName index, truncated
 body, tag size mismatch, etc.), paksmith performs a collection-level
-bail: emit one `tracing::warn!`, seek to the outer tag's `expected_end`,
-and return the partial collection decoded so far. This matches
+bail: seek to the outer tag's `expected_end` and return the partial
+collection decoded so far. This matches
 `unreal_asset`'s discard behavior.
 
 Array<Struct> does **not** do this: errors from `Array<StructProperty>`

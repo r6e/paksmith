@@ -21,7 +21,6 @@ use std::io::{Cursor, Read};
 use std::sync::{Arc, LazyLock};
 
 use byteorder::{LE, ReadBytesExt};
-use tracing::warn;
 
 use crate::asset::package_index::PackageIndex;
 use crate::asset::property::bag::MAX_PROPERTY_DEPTH;
@@ -31,7 +30,7 @@ use crate::asset::property::primitives::{
 use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::property::{MAX_COLLECTION_ELEMENTS, Property, read_fname_pair};
 use crate::asset::read_asset_fstring;
-use crate::asset::{AssetContext, ends_package_read};
+use crate::asset::{AssetContext, decode_warn, ends_package_read};
 use crate::error::{
     AssetParseFault, AssetWireField, BoundsUnit, CollectionKind, PaksmithError, try_reserve_asset,
 };
@@ -253,7 +252,7 @@ impl UnversionedHeader {
 /// [`AssetParseFault::UnversionedTypeNotSupported`] at any depth (a
 /// property type paksmith doesn't yet decode in the unversioned path),
 /// the recursion unwinds back to this
-/// function, which logs at `warn` and returns the partial
+/// function, which returns the partial
 /// `Vec<Property>` collected
 /// so far. Subsequent properties — whose offsets depend on the
 /// failed read's byte count — are NOT decoded; the alternative is
@@ -280,8 +279,8 @@ pub(crate) fn read_unversioned_properties(
 
     let all_props = usmap.get_all_properties(class_name);
     if all_props.is_empty() {
-        // At depth 0 the export simply has no schema — log and emit an
-        // empty bag (the outermost class lookup may resolve to `""` for
+        // At depth 0 the export simply has no schema — emit an empty
+        // bag (the outermost class lookup may resolve to `""` for
         // `PackageIndex::Null`, which we treat as "skip this export"
         // rather than a hard error).
         //
@@ -299,7 +298,8 @@ pub(crate) fn read_unversioned_properties(
                 },
             });
         }
-        warn!(
+        decode_warn!(
+            ctx,
             asset_path,
             class_name = &*clamp(class_name),
             "no schema found for class; skipping unversioned properties"
@@ -357,7 +357,8 @@ pub(crate) fn read_unversioned_properties(
             // schema isn't in the .usmap) trigger the same partial-tree stop:
             // each represents "cannot safely advance the cursor".
             Err(e) if is_partial_tree_stop(&e) && depth == 0 => {
-                warn!(
+                decode_warn!(
+                    ctx,
                     asset_path,
                     class_name = &*clamp(class_name),
                     property = &*clamp(&mapped_prop.name),
@@ -1167,6 +1168,25 @@ mod tests {
         Usmap::from_parts(schemas, HashMap::new()).expect("from_parts")
     }
 
+    /// `class` read at depth 0 against a `.usmap` with no schema for it:
+    /// the missing-schema skip.
+    fn read_without_schema(class: &str, ctx: &AssetContext) -> crate::Result<Vec<Property>> {
+        let usmap = Usmap::from_parts(HashMap::new(), HashMap::new()).expect("from_parts");
+        read_unversioned_properties(&mut Cursor::new(&[][..]), class, &usmap, ctx, "t", 0)
+    }
+
+    /// `class` read at depth 0 with its one property, `prop`, of a type the
+    /// decoder lacks: the partial-tree stop.
+    fn read_unknown_type(
+        class: &str,
+        prop: &str,
+        ctx: &AssetContext,
+    ) -> crate::Result<Vec<Property>> {
+        let usmap = named_single_prop_usmap(class, prop, MappedPropertyType::Unknown(0xEE));
+        let bytes = 0x0300u16.to_le_bytes(); // 1 serialized property
+        read_unversioned_properties(&mut Cursor::new(&bytes[..]), class, &usmap, ctx, "t", 0)
+    }
+
     /// The missing-schema warning names the class; a long name reaches
     /// it clamped and escaped.
     #[tracing_test::traced_test]
@@ -1174,15 +1194,7 @@ mod tests {
     fn missing_schema_warning_bounds_a_long_class_name() {
         use crate::untrusted::test_support::{hostile_name, lines_clamped, lines_escaped};
 
-        let usmap = Usmap::from_parts(HashMap::new(), HashMap::new()).expect("from_parts");
-        let props = read_unversioned_properties(
-            &mut Cursor::new(&[][..]),
-            &hostile_name("CLS"),
-            &usmap,
-            &make_ctx(&["None"]),
-            "t",
-            0,
-        );
+        let props = read_without_schema(&hostile_name("CLS"), &make_ctx(&["None"]));
 
         assert!(matches!(props.as_deref(), Ok([])), "{props:?}");
         logs_assert(lines_clamped("no schema found for class", "CLS"));
@@ -1198,20 +1210,10 @@ mod tests {
             hostile_name, lines_clamped, lines_escaped, lines_free_of_raw_controls,
         };
 
-        let class = hostile_name("CLS");
-        let usmap = named_single_prop_usmap(
-            &class,
+        let props = read_unknown_type(
+            &hostile_name("CLS"),
             &hostile_name("PROP"),
-            MappedPropertyType::Unknown(0xEE),
-        );
-        let bytes = 0x0300u16.to_le_bytes(); // 1 serialized property
-        let props = read_unversioned_properties(
-            &mut Cursor::new(&bytes[..]),
-            &class,
-            &usmap,
             &make_ctx(&["None"]),
-            "t",
-            0,
         );
 
         assert!(matches!(props.as_deref(), Ok([])), "{props:?}");
@@ -1220,6 +1222,27 @@ mod tests {
             logs_assert(lines_escaped("stopping read", tag));
         }
         logs_assert(lines_free_of_raw_controls("stopping read"));
+    }
+
+    /// Both warnings draw on the package's decode-time warning budget:
+    /// with it spent, the reads still skip or stop but log nothing.
+    #[tracing_test::traced_test]
+    #[test]
+    fn missing_schema_and_partial_tree_warnings_respect_a_spent_budget() {
+        use crate::asset::property::test_utils::with_decode_warnings_spent;
+        use crate::untrusted::test_support::lines_counted;
+
+        let fresh = make_ctx(&["None"]);
+        let spent = with_decode_warnings_spent(make_ctx(&["None"]));
+        for ctx in [&fresh, &spent] {
+            let skipped = read_without_schema("Cls", ctx);
+            let stopped = read_unknown_type("Cls", "Prop", ctx);
+            assert!(matches!(skipped.as_deref(), Ok([])), "{skipped:?}");
+            assert!(matches!(stopped.as_deref(), Ok([])), "{stopped:?}");
+            // The fresh pass logs one of each; the spent pass adds none.
+            logs_assert(lines_counted("no schema found for class", 1));
+            logs_assert(lines_counted("stopping read", 1));
+        }
     }
 
     #[test]
