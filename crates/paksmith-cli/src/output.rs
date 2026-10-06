@@ -431,10 +431,10 @@ fn build_entries_table(entries: &[EntryRowData], style: bool) -> Table {
 /// characters.
 ///
 /// Consumers: the `pak:` group header and the list/search entries
-/// table (both here), plus extract's "extracted from" and summary
-/// FAILED lines. THREE same-class surfaces remain, all tracked
-/// as issue #708 (many call sites; their own pass): inspect's table
-/// tree renderer; the top-level error print in `main`, which renders a
+/// table (both here), extract's "extracted from" and summary FAILED
+/// lines, and every line of inspect's table tree (`inspect::tree`).
+/// TWO same-class surfaces remain, both tracked as issue #708: the
+/// top-level error print in `main`, which renders a
 /// `PaksmithError` whose `Display` can embed registry-authored ids and
 /// hex (measured: two raw ESC bytes from a hostile registry document);
 /// and the `profile` command family — `show`, `list`
