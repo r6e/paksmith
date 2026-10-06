@@ -690,7 +690,8 @@ impl FByteBulkData {
                 context: format!(
                     "FObjectDataResource cooked_index={} ({asset_path}); numbered \
                      .NNN.ubulk sidecar payloads are not yet supported",
-                    entry.cooked_index
+                    entry.cooked_index,
+                    asset_path = crate::untrusted::clamp_path(asset_path)
                 ),
             });
         }
@@ -1267,7 +1268,12 @@ impl BulkDataResolver {
         clippy::too_many_lines,
         reason = "sequential dispatch + cap chain + side-effect-free budget reservation; splitting hurts the line-by-line auditability of the cap chain that the security panel reviewed"
     )]
-    #[tracing::instrument(level = "debug", name = "bulk_resolve", skip_all, fields(asset_path = asset_path))]
+    #[tracing::instrument(
+        level = "debug",
+        name = "bulk_resolve",
+        skip_all,
+        fields(asset_path = &*crate::untrusted::clamp_path(asset_path))
+    )]
     fn resolve_inner(
         &self,
         record: &FByteBulkData,
@@ -2160,6 +2166,10 @@ mod tests {
             matches!(err, crate::PaksmithError::UnsupportedFeature { .. }),
             "cooked_index != 0 must fail closed, got {err:?}"
         );
+        let long = crate::untrusted::test_support::long_path();
+        let err = FByteBulkData::read_from_ctx(&mut std::io::Cursor::new(&wire[..]), &ctx, &long)
+            .unwrap_err();
+        crate::untrusted::test_support::assert_message_clamps_long_path(&err);
     }
 
     /// With an EMPTY table, `read_from_ctx` is exactly the classic read
@@ -3087,14 +3097,42 @@ mod tests {
         FByteBulkData::read_from(&mut cur, "test.uasset").expect("record parses")
     }
 
+    /// A resolver over a 300-byte package and an end-of-file record it
+    /// resolves.
+    #[cfg(feature = "__test_utils")]
+    fn tail_record_resolver() -> (BulkDataResolver, FByteBulkData) {
+        let mut uasset = vec![0xAA; 100];
+        uasset.extend_from_slice(&[0xBB; 200]);
+        let record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 16, 32);
+        (BulkDataResolver::new_for_test(uasset, 100, 0), record)
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn resolve_span_clamps_a_long_asset_path() {
+        use crate::untrusted::test_support::{long_path, long_path_cut};
+
+        let (resolver, record) = tail_record_resolver();
+        let path = long_path();
+
+        let rec = crate::test_spans::SpanRecorder::capture_until(
+            || {
+                let _ = resolver.resolve(&record, &path).expect("resolve");
+            },
+            |r| r.count("bulk_resolve") == 1,
+        );
+
+        assert_eq!(
+            rec.field("bulk_resolve", "asset_path").as_deref(),
+            Some(long_path_cut().as_str())
+        );
+    }
+
     #[cfg(feature = "__test_utils")]
     #[test]
     fn resolve_emits_a_bulk_resolve_span() {
         // #665: bulk-data resolution is an operation boundary.
-        let mut uasset = vec![0xAA; 100];
-        uasset.extend_from_slice(&[0xBB; 200]);
-        let record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 16, 32);
-        let resolver = BulkDataResolver::new_for_test(uasset, 100, 0);
+        let (resolver, record) = tail_record_resolver();
         let uncharged = || {
             let _ = resolver.resolve(&record, "test.uasset").expect("resolve");
         };
@@ -3127,10 +3165,7 @@ mod tests {
     fn resolve_inline_tier_returns_uasset_slice() {
         // 100-byte header (offsets < 100 → inline), 200 bytes of
         // uexp-resident payload. BulkDataStartOffset = 0.
-        let mut uasset = vec![0xAA; 100];
-        uasset.extend_from_slice(&[0xBB; 200]);
-        let record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 16, 32);
-        let resolver = BulkDataResolver::new_for_test(uasset, 100, 0);
+        let (resolver, record) = tail_record_resolver();
         let data = resolver.resolve(&record, "test.uasset").expect("resolve");
         assert_eq!(data.tier, BulkDataTier::Inline);
         assert_eq!(data.bytes.len(), 16);

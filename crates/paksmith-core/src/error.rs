@@ -42,19 +42,22 @@ use std::io;
 //   - The `compression` module grows a non-trivial dep that would
 //     transitively pollute consumers of `error::DecompressionFault`.
 use crate::container::pak::index::CompressionMethod;
-use crate::untrusted::clamp;
+use crate::untrusted::{clamp, clamp_path};
 
 /// Render the optional path on `Decryption`. `Some(p)` → ` for `<p>``;
 /// `None` → empty string (so the message reads "decryption failed:
 /// invalid or missing AES key" without a stray `for `<...>` `).
 fn path_for_display(path: Option<&String>) -> String {
     match path {
-        Some(p) => format!(" for `{p}`"),
+        Some(p) => format!(" for `{p}`", p = clamp_path(p)),
         None => String::new(),
     }
 }
 
 /// Top-level error type for all paksmith-core operations.
+///
+/// A message shows at most the first 1,024 characters of a path it names; a
+/// variant's path field keeps it whole.
 ///
 /// Marked `#[non_exhaustive]` so adding new variants (Phase 3+
 /// format-handler / extraction / profile faults) does not break
@@ -99,7 +102,7 @@ pub enum PaksmithError {
     /// preserves the wire-stable operator-facing token shapes from
     /// the prior `reason` form, so log greps + monitoring rules
     /// keep working.
-    #[error("decompression failed for `{path}` at offset {offset}: {fault}")]
+    #[error("decompression failed for `{}` at offset {offset}: {fault}", clamp_path(.path))]
     Decompression {
         /// Path of the entry whose data could not be decompressed.
         path: String,
@@ -125,7 +128,7 @@ pub enum PaksmithError {
     /// (issue #64).
     ///
     /// [`Display`]: std::fmt::Display
-    #[error("asset deserialization failed for `{asset_path}`: {fault}")]
+    #[error("asset deserialization failed for `{}`: {fault}", clamp_path(.asset_path))]
     AssetParse {
         /// Structured category + payload for the parse fault.
         fault: AssetParseFault,
@@ -199,7 +202,7 @@ pub enum PaksmithError {
     },
 
     /// A requested entry was not found in the archive.
-    #[error("entry not found: `{path}`")]
+    #[error("entry not found: `{}`", clamp_path(.path))]
     EntryNotFound {
         /// Path that was looked up.
         path: String,
@@ -2098,7 +2101,8 @@ impl std::fmt::Display for IndexParseFault {
                 if let Some(p) = path {
                     write!(
                         f,
-                        "entry `{p}` {field} {value} exceeds maximum {limit} {unit}"
+                        "entry `{p}` {field} {value} exceeds maximum {limit} {unit}",
+                        p = clamp_path(p)
                     )
                 } else {
                     write!(f, "{field} {value} exceeds maximum {limit} {unit}")
@@ -2119,6 +2123,7 @@ impl std::fmt::Display for IndexParseFault {
                         f,
                         "could not reserve {requested} {unit} for {context} for entry `{p}`: {source}",
                         unit = context.unit(),
+                        p = clamp_path(p)
                     )
                 } else {
                     write!(
@@ -2130,7 +2135,11 @@ impl std::fmt::Display for IndexParseFault {
             }
             Self::U64ExceedsPlatformUsize { field, value, path } => {
                 if let Some(p) = path {
-                    write!(f, "entry `{p}` {field} {value} exceeds platform usize")
+                    write!(
+                        f,
+                        "entry `{p}` {field} {value} exceeds platform usize",
+                        p = clamp_path(p)
+                    )
                 } else {
                     write!(f, "{field} {value} exceeds platform usize")
                 }
@@ -2143,7 +2152,8 @@ impl std::fmt::Display for IndexParseFault {
             } => {
                 write!(
                     f,
-                    "in-data header mismatch for `{path}`: {field} index={index_value} data={payload_value}"
+                    "in-data header mismatch for `{path}`: {field} index={index_value} data={payload_value}",
+                    path = clamp_path(path)
                 )
             }
             Self::FStringMalformed { kind } => write!(f, "{kind}"),
@@ -2152,7 +2162,11 @@ impl std::fmt::Display for IndexParseFault {
                 write!(f, "v10+ archive must have a full directory index")
             }
             Self::U64ArithmeticOverflow { path, operation } => match path {
-                Some(p) => write!(f, "entry `{p}` {operation} overflows u64"),
+                Some(p) => write!(
+                    f,
+                    "entry `{p}` {operation} overflows u64",
+                    p = clamp_path(p)
+                ),
                 None => write!(f, "{operation} overflows u64"),
             },
             Self::ShortEntryRead {
@@ -2162,7 +2176,8 @@ impl std::fmt::Display for IndexParseFault {
             } => {
                 write!(
                     f,
-                    "entry `{path}` short read: wrote {written} of {expected} expected bytes"
+                    "entry `{path}` short read: wrote {written} of {expected} expected bytes",
+                    path = clamp_path(path)
                 )
             }
             Self::CompressionBlockInvalid { start, end } => {
@@ -2211,7 +2226,8 @@ impl std::fmt::Display for IndexParseFault {
                 };
                 write!(
                     f,
-                    "entry `{path}` {kind}: observed={observed} limit={limit}"
+                    "entry `{path}` {kind}: observed={observed} limit={limit}",
+                    path = clamp_path(path)
                 )
             }
             Self::BlockBoundsViolation {
@@ -2245,7 +2261,8 @@ impl std::fmt::Display for IndexParseFault {
                 };
                 write!(
                     f,
-                    "entry `{path}` block {block_index} {kind}: observed={observed} limit={limit}"
+                    "entry `{path}` block {block_index} {kind}: observed={observed} limit={limit}",
+                    path = clamp_path(path)
                 )
             }
             Self::RegionPastFileSize {
@@ -2274,7 +2291,8 @@ impl std::fmt::Display for IndexParseFault {
                 // kinds, making it obvious no path is implicated).
                 write!(
                     f,
-                    "{kind} at path \"{path}\" (hash=0x{expected_hash:016x} fdi_offset={fdi_offset} phi_offset={phi_offset})"
+                    "{kind} at path \"{path}\" (hash=0x{expected_hash:016x} fdi_offset={fdi_offset} phi_offset={phi_offset})",
+                    path = clamp_path(path)
                 )
             }
         }
@@ -2294,19 +2312,22 @@ impl std::fmt::Display for EncodedFault {
             } => {
                 write!(
                     f,
-                    "entry `{path}` v10+ encoded_offset {offset} >= encoded_entries_size {blob_size}"
+                    "entry `{path}` v10+ encoded_offset {offset} >= encoded_entries_size {blob_size}",
+                    path = clamp_path(path)
                 )
             }
             Self::NonEncodedIndexOob { path, index, count } => {
                 write!(
                     f,
-                    "entry `{path}` v10+ non-encoded index {index} >= count {count}"
+                    "entry `{path}` v10+ non-encoded index {index} >= count {count}",
+                    path = clamp_path(path)
                 )
             }
             Self::OffsetUsizeOverflow { path, offset } => {
                 write!(
                     f,
-                    "entry `{path}` v10+ encoded_offset {offset} doesn't fit in usize"
+                    "entry `{path}` v10+ encoded_offset {offset} doesn't fit in usize",
+                    path = clamp_path(path)
                 )
             }
             Self::CompressedSizeMismatch {
@@ -2318,7 +2339,8 @@ impl std::fmt::Display for EncodedFault {
                     write!(
                         f,
                         "entry `{p}` encoded compressed_size mismatch: \
-                         wire claim {claimed} != sum of per-block sizes {computed}"
+                         wire claim {claimed} != sum of per-block sizes {computed}",
+                        p = clamp_path(p)
                     )
                 } else {
                     write!(
@@ -2384,7 +2406,7 @@ impl std::fmt::Display for HashTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Index => f.write_str("index"),
-            Self::Entry { path } => write!(f, "entry `{path}`"),
+            Self::Entry { path } => write!(f, "entry `{path}`", path = clamp_path(path)),
             Self::Fdi => f.write_str("v10+ full directory index"),
             Self::Phi => f.write_str("v10+ path hash index"),
         }
@@ -6168,6 +6190,140 @@ mod tests {
             format!("{err}")
                 .starts_with("asset deserialization failed for `Game/Maps/Demo.uasset`:")
         );
+    }
+
+    /// A long archive path is clamped in every top-level error message, and
+    /// the hash target, that renders one.
+    #[test]
+    fn path_bearing_displays_bound_a_long_path() {
+        use crate::untrusted::test_support::{assert_message_clamps_long_path, long_path};
+
+        let shown = [
+            PaksmithError::AssetParse {
+                asset_path: long_path(),
+                fault: AssetParseFault::UnversionedWithoutMappings,
+            }
+            .to_string(),
+            PaksmithError::Decompression {
+                path: long_path(),
+                offset: 0,
+                fault: DecompressionFault::UnsupportedMethod {
+                    method: CompressionMethod::Oodle,
+                },
+            }
+            .to_string(),
+            PaksmithError::EntryNotFound { path: long_path() }.to_string(),
+            PaksmithError::Decryption {
+                path: Some(long_path()),
+            }
+            .to_string(),
+            IndexParseFault::FieldMismatch {
+                path: long_path(),
+                field: WireField::UncompressedSize,
+                index_value: "1".into(),
+                payload_value: "2".into(),
+            }
+            .to_string(),
+            IndexParseFault::U64ArithmeticOverflow {
+                path: Some(long_path()),
+                operation: OverflowSite::EncodedBlockEnd,
+            }
+            .to_string(),
+            HashTarget::Entry { path: long_path() }.to_string(),
+        ];
+
+        for message in shown {
+            assert_message_clamps_long_path(&message);
+        }
+    }
+
+    /// A long entry path is clamped in every pak index fault message that
+    /// renders one.
+    #[test]
+    fn index_fault_displays_bound_a_long_path() {
+        use crate::untrusted::test_support::{assert_message_clamps_long_path, long_path};
+
+        let shown = [
+            IndexParseFault::BoundsExceeded {
+                field: WireField::UncompressedSize,
+                value: 2,
+                limit: 1,
+                unit: BoundsUnit::Bytes,
+                path: Some(long_path()),
+            }
+            .to_string(),
+            IndexParseFault::AllocationFailed {
+                context: AllocationContext::FStringUtf8Bytes,
+                requested: 1,
+                source: refused_reservation(),
+                path: Some(long_path()),
+            }
+            .to_string(),
+            IndexParseFault::U64ExceedsPlatformUsize {
+                field: WireField::UncompressedSize,
+                value: 1,
+                path: Some(long_path()),
+            }
+            .to_string(),
+            IndexParseFault::ShortEntryRead {
+                path: long_path(),
+                written: 1,
+                expected: 2,
+            }
+            .to_string(),
+            IndexParseFault::OffsetPastFileSize {
+                path: long_path(),
+                kind: OffsetPastFileSizeKind::EntryHeaderOffset {
+                    entry_offset: 2,
+                    file_size_max: 1,
+                },
+            }
+            .to_string(),
+            IndexParseFault::BlockBoundsViolation {
+                path: long_path(),
+                block_index: 0,
+                kind: BlockBoundsKind::StartOverlapsHeader {
+                    block_start: 0,
+                    payload_start_min: 1,
+                },
+            }
+            .to_string(),
+            IndexParseFault::PhiFdiInconsistency {
+                path: long_path(),
+                kind: PhiFdiInconsistencyKind::MissingPhiEntry,
+                expected_hash: 0,
+                fdi_offset: 0,
+                phi_offset: 0,
+            }
+            .to_string(),
+            EncodedFault::OffsetOob {
+                path: long_path(),
+                offset: 2,
+                blob_size: 1,
+            }
+            .to_string(),
+            EncodedFault::NonEncodedIndexOob {
+                path: long_path(),
+                index: 2,
+                count: 1,
+            }
+            .to_string(),
+            EncodedFault::OffsetUsizeOverflow {
+                path: long_path(),
+                offset: -1,
+            }
+            .to_string(),
+            EncodedFault::CompressedSizeMismatch {
+                claimed: 1,
+                computed: 2,
+                path: Some(long_path()),
+            }
+            .to_string(),
+        ];
+
+        for message in shown {
+            assert_message_clamps_long_path(&message);
+        }
     }
 
     #[test]

@@ -895,7 +895,9 @@ pub(crate) enum DecodeWarning {
     Silent,
 }
 
-/// `tracing::warn!` with `asset = $asset_path` and the given arguments,
+/// `tracing::warn!` with `asset = $asset_path` (clamped to
+/// [`MAX_UNTRUSTED_PATH_CHARS`](crate::untrusted::MAX_UNTRUSTED_PATH_CHARS))
+/// and the given arguments,
 /// drawn on `$ctx`'s budget of [`MAX_DECODE_WARNINGS`]: the first warning
 /// past it logs one notice that the rest are suppressed instead, and later
 /// ones log nothing. Both events
@@ -906,10 +908,13 @@ macro_rules! decode_warn {
     ($ctx:expr, $asset_path:expr, $($warning:tt)+) => {
         match $ctx.admit_decode_warning() {
             $crate::asset::DecodeWarning::Log => {
-                ::tracing::warn!(asset = $asset_path, $($warning)+)
+                ::tracing::warn!(
+                    asset = &*$crate::untrusted::clamp_path($asset_path),
+                    $($warning)+
+                )
             }
             $crate::asset::DecodeWarning::Notice => ::tracing::warn!(
-                asset = $asset_path,
+                asset = &*$crate::untrusted::clamp_path($asset_path),
                 limit = $crate::asset::MAX_DECODE_WARNINGS,
                 "further decode-time warnings for this package suppressed"
             ),
@@ -1446,6 +1451,26 @@ mod decode_warning_budget_tests {
                 .then_some(())
                 .ok_or_else(|| format!("no notice with {limit}"))
         });
+    }
+
+    /// The warning arm and the notice arm both carry a long asset path
+    /// clamped.
+    #[tracing_test::traced_test]
+    #[test]
+    fn decode_warn_clamps_a_long_asset_path_in_both_arms() {
+        use crate::untrusted::test_support::{long_path, long_path_cut};
+
+        let ctx = make_ctx(&[]);
+        let path = long_path();
+        for _ in 0..=MAX_DECODE_WARNINGS {
+            decode_warn!(ctx, &path, "probe warning");
+        }
+
+        let field = format!("asset=\"{}\"", long_path_cut());
+        let both = usize::try_from(MAX_DECODE_WARNINGS).unwrap() + 1;
+        logs_assert(lines_counted(&field, both));
+        logs_assert(lines_counted("for this package suppressed", 1));
+        assert!(!logs_contain("TAIL"));
     }
 
     #[test]

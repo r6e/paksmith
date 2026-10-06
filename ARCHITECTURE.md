@@ -89,10 +89,10 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
 - `staged_replace.rs` — `StagedReplace`: replaces a file through an
   exclusively created sibling temp and a rename, carrying the destination's
   Unix access bits.
-- `untrusted.rs` — crate-private `clamp`: bounds untrusted text (archive-,
-  mappings-, registry- and store-derived strings) to 64 chars plus an
-  ellipsis before it reaches a log field or a fault message. Length only;
-  control characters pass through.
+- `untrusted.rs` — crate-private `clamp` and `clamp_path`: bound untrusted
+  text (archive-, mappings-, registry- and store-derived strings) to 64
+  chars, and an archive path to 1,024, plus an ellipsis before it reaches a log
+  field or a fault message. Length only; control characters pass through.
 - `testing/` — `__test_utils`-feature-gated test infrastructure: `v10` (v10+
   fixture builder), `oom` (RAII-guarded thread-local OOM injection seams used
   by integration tests in `tests/oom_pak.rs` and `tests/oom_asset.rs`).
