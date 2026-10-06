@@ -260,3 +260,36 @@ fn search_max_size_filters_out_large_entries() {
     assert_eq!(arr.len(), 1, "--max-size 14 should match exactly 1 entry");
     assert_eq!(arr[0]["path"].as_str().unwrap(), "Content/a.uasset");
 }
+
+/// A multi-line error message, here regex's caret diagnostic, keeps its
+/// lines: each continuation line is indented under the first, with none of
+/// its line breaks replaced.
+#[test]
+fn a_multi_line_error_keeps_its_lines() {
+    let cfg = tempfile::tempdir().unwrap();
+
+    let out = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env("NO_COLOR", "1")
+        .env_remove("RUST_LOG")
+        .arg("search")
+        .arg(fixture("minimal_v6.pak"))
+        .args(["--regex", "a("])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(!stderr.contains('\u{FFFD}'), "{stderr:?}");
+    let mut lines = stderr.lines();
+    let first = lines.next().unwrap();
+    assert!(first.starts_with("paksmith: error: "), "{stderr:?}");
+    let rest: Vec<&str> = lines.collect();
+    assert!(rest.len() >= 2, "{stderr:?}");
+    assert!(rest.iter().all(|l| l.starts_with("  ")), "{stderr:?}");
+    assert!(
+        rest.iter().any(|l| l.trim_end().ends_with('^')),
+        "{stderr:?}"
+    );
+}

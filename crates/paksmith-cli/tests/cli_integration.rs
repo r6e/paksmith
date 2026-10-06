@@ -505,3 +505,31 @@ fn an_error_on_a_closed_stderr_keeps_exit_2() {
         "paksmith: error:",
     );
 }
+
+/// The top-level error line neutralizes control characters its message
+/// carries; here, those in the entry path the user asked for.
+#[test]
+fn error_line_neutralizes_controls_in_the_message() {
+    let cfg = tempfile::tempdir().unwrap();
+
+    let out = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env("NO_COLOR", "1")
+        .env_remove("RUST_LOG")
+        .args([
+            "inspect",
+            &fixture_path("real_v8b_uasset.pak"),
+            "Game/\u{1b}[2J\u{9b}x.uasset",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.starts_with("paksmith: error: entry not found"),
+        "{stderr:?}"
+    );
+    common::assert_neutralized(&stderr, &["Game/\u{FFFD}[2J\u{FFFD}x.uasset"]);
+}

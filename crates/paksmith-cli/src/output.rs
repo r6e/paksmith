@@ -63,12 +63,13 @@ pub(crate) enum ResolvedFormat {
 
 /// Emit an advisory `note:` line to stderr unless `--quiet` or `--log-json`
 /// (a bare line would corrupt the JSON stream). Every advisory note must
-/// route through this single guarded site. The write is best-effort: unlike
-/// `eprintln!`, a closed stderr does not panic, so the command still exits
-/// with its own code.
+/// route through this single guarded site. `msg` is one line, written through
+/// [`sanitize_for_display`]. The write is best-effort: unlike `eprintln!`, a
+/// closed stderr does not panic, so the command still exits with its own
+/// code.
 pub(crate) fn note(quiet: bool, msg: &str) {
     if !quiet && !log_json() {
-        let _ = writeln!(io::stderr(), "note: {msg}");
+        let _ = writeln!(io::stderr(), "note: {}", sanitize_for_display(msg));
     }
 }
 
@@ -135,7 +136,8 @@ pub(crate) fn print_json<T: Serialize>(value: &T) -> io::Result<()> {
     out.flush()
 }
 
-/// Write one human-readable line to stdout.
+/// Write one human-readable line to stdout, through [`sanitize_for_display`],
+/// so `line` must not hold line breaks, tabs or other controls of its own.
 ///
 /// Exists for the same reason as [`print_json`] — a bare `println!` panics
 /// with exit 101 on a closed pipe instead of routing `BrokenPipe` to
@@ -147,8 +149,18 @@ pub(crate) fn print_json<T: Serialize>(value: &T) -> io::Result<()> {
 pub(crate) fn print_line(line: &str) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
-    writeln!(out, "{line}")?;
+    writeln!(out, "{}", sanitize_for_display(line))?;
     out.flush()
+}
+
+/// The `paksmith: error:` line for `message`. Each of its lines goes through
+/// [`sanitize_for_display`] on its own, so a multi-line message such as a
+/// regex diagnostic keeps its layout, and every line after the first is
+/// indented, so a line break inside quoted archive text cannot start a line
+/// that reads as another error.
+pub(crate) fn error_line(message: &str) -> String {
+    let lines: Vec<_> = message.split('\n').map(sanitize_for_display).collect();
+    format!("paksmith: error: {}", lines.join("\n  "))
 }
 
 /// `list`/`search` JSON schema version (#652). COMMAND-SHARED on
@@ -422,43 +434,19 @@ fn build_entries_table(entries: &[EntryRowData], style: bool) -> Table {
 }
 
 /// Replace each [`is_terminal_hazard`] character (ESC, BEL, the U+009B
-/// CSI, a bidi override, ...) with U+FFFD in an untrusted pak string bound
-/// for human display. Keyed to the table FORMAT, not TTY-ness — a piped
-/// table gets paged into a terminal later. The core FString parser
-/// guarantees valid non-NUL Unicode — it does NOT strip controls, so a
-/// hostile pak can embed OSC/CSI sequences (title rewrites, screen
-/// clears, output-hiding). No legitimate virtual path contains control
-/// characters.
+/// CSI, a bidi override, ...) with U+FFFD in untrusted text bound for human
+/// display, whether or not the output is a terminal: a piped table gets
+/// paged into one later. Every line the CLI writes itself that interpolates
+/// archive-, registry- or store-derived text goes through this: the tables,
+/// [`note`], [`print_line`] and [`error_line`]. Log records do not: tracing's
+/// text format Debug-escapes plain `String` fields instead (see
+/// `paksmith_core::profile::resolve`), and `--log-json` writes through
+/// [`JsonTerminalSafe`].
 ///
-/// Consumers: the `pak:` group header and the list/search entries
-/// table (both here), extract's "extracted from" and summary FAILED
-/// lines, and every line of inspect's table tree (`inspect::tree`).
-/// TWO same-class surfaces remain, both tracked as issue #708: the
-/// top-level error print in `main`, which renders a
-/// `PaksmithError` whose `Display` can embed registry-authored ids and
-/// hex (measured: two raw ESC bytes from a hostile registry document);
-/// and the `profile` command family — `show`, `list`
-/// and `detect` render registry-authored `name`/`id`/`engine_version`,
-/// and `profile`'s not-found hints echo an id that may have been copied
-/// from a registry listing. Registry strings are length-capped
-/// (`MAX_STR`) but not character-class restricted.
-///
-/// The JSON path deliberately has no equivalent — NOT because serde
-/// escapes everything (it escapes C0 only; DEL, C1 incl. U+009B and the
-/// bidi controls pass through as raw UTF-8) but because JSON is the machine interface and
-/// machine consumers don't interpret terminal controls. Round-tripping
-/// is the reason for the fields that ARE fed back (`path` into `inspect`,
-/// `id` into `--game`); for display-only fields (`name`,
-/// `engine_version`) the reason is only the machine-interface half.
-///
-/// Since #658 the `profile` family emits JSON too, carrying the same
-/// registry-authored strings; neither its table nor its JSON arm calls this
-/// function. The TABLE arm therefore remains a #708 surface; the JSON arm is
-/// not one — it is the machine interface the paragraph above exempts, and
-/// sanitizing it would break the round-tripping contract. Under
-/// `--format auto` the piped case is now the C0-escaped JSON rather than the
-/// raw table; an explicit `--format table | less` still ships raw ESC, DEL,
-/// C1 and bidi controls.
+/// JSON on stdout does not either: JSON is the machine interface, and fields
+/// such as `path` and `id` are fed back into later commands, so they must
+/// round-trip. serde_json escapes only C0 there; DEL, C1 and the bidi
+/// controls pass through as raw UTF-8.
 pub(crate) fn sanitize_for_display(s: &str) -> std::borrow::Cow<'_, str> {
     if s.chars().any(is_terminal_hazard) {
         std::borrow::Cow::Owned(
@@ -918,6 +906,30 @@ mod resolve_tests {
                 "{format:?} with tty={is_tty}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod error_line_tests {
+    use super::error_line;
+
+    #[test]
+    fn a_one_line_message_follows_the_prefix_neutralized() {
+        assert_eq!(
+            error_line("entry not found: `a\u{1b}[2Jb`"),
+            "paksmith: error: entry not found: `a\u{FFFD}[2Jb`"
+        );
+    }
+
+    /// Each line is neutralized on its own and every continuation line is
+    /// indented by the same two spaces, so a caret under a column stays
+    /// under it.
+    #[test]
+    fn a_multi_line_message_keeps_its_lines_indented() {
+        assert_eq!(
+            error_line("bad pattern:\n    a(\x1b\n     ^\nerror: unclosed"),
+            "paksmith: error: bad pattern:\n      a(\u{FFFD}\n       ^\n  error: unclosed"
+        );
     }
 }
 

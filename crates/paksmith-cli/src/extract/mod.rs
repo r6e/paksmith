@@ -399,7 +399,7 @@ fn locres_output(
     let resource = match paksmith_core::LocresResource::parse(bytes) {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(entry = ?entry_path, error = %e, "locres parse failed, copying raw");
+            tracing::warn!(entry = ?entry_path, error = e.to_string(), "locres parse failed, copying raw");
             return None;
         }
     };
@@ -412,7 +412,7 @@ fn locres_output(
     match result {
         Ok(pair) => Some(pair),
         Err(e) => {
-            tracing::warn!(entry = ?entry_path, error = %e, "locres export failed, copying raw");
+            tracing::warn!(entry = ?entry_path, error = e.to_string(), "locres export failed, copying raw");
             None
         }
     }
@@ -716,28 +716,30 @@ mod write_output_tests {
         );
     }
 
-    /// An entry naming a DOS device is refused before any of its directories
-    /// is created, on every platform, in the real run and in a preview,
-    /// including a preview of an absent root, where containment has no root to
-    /// compare against (#811).
+    /// An entry naming a DOS device (#811) or holding a control or bidi
+    /// character is refused before any of its directories is created, on
+    /// every platform, in the real run and in a preview, including a preview
+    /// of an absent root, where containment has no root to compare against.
     #[test]
-    fn an_entry_naming_a_dos_device_is_refused() {
+    fn an_entry_naming_a_device_or_holding_a_hazard_is_refused() {
         let base = tempfile::tempdir().unwrap();
         let existing = base.path().join("existing");
         std::fs::create_dir(&existing).unwrap();
         let absent = base.path().join("absent");
-        for (root, dry_run) in [(&existing, false), (&existing, true), (&absent, true)] {
-            let c = cfg(root, false, dry_run, false);
-            let err = write_output(&c, "Game/NUL.uasset", Some("png"), b"DATA").unwrap_err();
-            let case = format!("{} dry_run={dry_run}", root.display());
-            assert!(
-                err.starts_with("entry path names a reserved device"),
-                "{case}: {err}"
-            );
-            assert!(
-                !root.join("Game").exists(),
-                "{case}: the entry's directory was created"
-            );
+        for (entry, refusal) in [
+            ("Game/NUL.uasset", "entry path names a reserved device"),
+            ("Game/a\u{1b}b.uasset", "entry path contains a control"),
+        ] {
+            for (root, dry_run) in [(&existing, false), (&existing, true), (&absent, true)] {
+                let c = cfg(root, false, dry_run, false);
+                let err = write_output(&c, entry, Some("png"), b"DATA").unwrap_err();
+                let case = format!("{entry:?} {} dry_run={dry_run}", root.display());
+                assert!(err.starts_with(refusal), "{case}: {err:?}");
+                assert!(
+                    !root.join("Game").exists(),
+                    "{case}: the entry's directory was created"
+                );
+            }
         }
     }
 
