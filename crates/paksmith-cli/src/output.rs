@@ -483,6 +483,58 @@ pub(crate) fn is_terminal_hazard(c: char) -> bool {
         )
 }
 
+/// `io::Write` over serialized JSON that rewrites DEL, C1 and the
+/// Bidi_Control characters as `\uXXXX`. Lossless: outside strings JSON holds
+/// none of them, and inside a string the escape decodes to the same
+/// character. C0 passes through, because serde_json already escapes it
+/// inside strings and outside them it is structural whitespace. Each call
+/// makes exactly one inner `write_all`, so a record written in one call is
+/// never split across inner writes. Input that is not whole UTF-8 is
+/// `InvalidData`. It must be the outermost writer: an error after a partial
+/// inner write reports nothing written, so a buffering wrapper such as
+/// `BufWriter` would send that part again.
+pub(crate) struct JsonTerminalSafe<W>(pub(crate) W);
+
+impl<W: Write> Write for JsonTerminalSafe<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let text =
+            std::str::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.0.write_all(escape_json_hazards(text).as_bytes())?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// A terminal hazard that serde_json leaves raw: DEL, C1 or a Bidi_Control
+/// character. It escapes C0 itself.
+#[must_use]
+fn is_json_hazard(c: char) -> bool {
+    is_terminal_hazard(c) && c >= '\u{7f}'
+}
+
+/// `s` with each [`is_json_hazard`] character written as `\uXXXX`.
+#[must_use]
+fn escape_json_hazards(s: &str) -> std::borrow::Cow<'_, str> {
+    use std::fmt::Write as _;
+
+    let Some(first) = s.find(is_json_hazard) else {
+        return std::borrow::Cow::Borrowed(s);
+    };
+    let mut out = String::with_capacity(s.len());
+    out.push_str(&s[..first]);
+    for c in s[first..].chars() {
+        if is_json_hazard(c) {
+            let _ = write!(out, "\\u{:04x}", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 // `bytes as f64` loses precision past 2^53, but the output is `{:.1}`
 // (one decimal place) — any precision past `f64`'s 52-bit mantissa is
 // rounded away before display. Even at TiB scale, the worst-case
@@ -891,5 +943,105 @@ mod format_size_tests {
         // Beyond TiB: stays in TiB tier (no PiB tier — wildly beyond
         // anything realistic for a single pak entry).
         assert_eq!(format_size(2 * 1024_u64.pow(4)), "2.0 TiB");
+    }
+}
+
+#[cfg(test)]
+mod json_terminal_safe_tests {
+    use std::borrow::Cow;
+
+    use super::*;
+
+    /// Records the escaper's `write` calls, taking at most `accept` bytes
+    /// from each.
+    struct RecordingWriter {
+        accept: usize,
+        writes: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl RecordingWriter {
+        fn accepting(accept: usize) -> Self {
+            Self {
+                accept,
+                writes: 0,
+                bytes: Vec::new(),
+            }
+        }
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let taken = buf.len().min(self.accept);
+            self.writes += 1;
+            self.bytes.extend_from_slice(&buf[..taken]);
+            Ok(taken)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn escape_json_hazards_escapes_del_c1_and_bidi_only() {
+        assert_eq!(
+            escape_json_hazards("a\u{7f}b\u{9b}c\u{202e}d\n\u{1b}é"),
+            "a\\u007fb\\u009bc\\u202ed\n\u{1b}é"
+        );
+        assert!(matches!(escape_json_hazards("plain é\n"), Cow::Borrowed(_)));
+    }
+
+    /// DEL, the 32 C1 controls and the 12 Bidi_Control characters, every
+    /// one inside the BMP, so the four hex digits of `\uXXXX` reach each.
+    #[test]
+    fn json_hazards_are_del_c1_and_bidi_all_in_the_bmp() {
+        let hazards: Vec<char> = (char::MIN..=char::MAX)
+            .filter(|&c| is_json_hazard(c))
+            .collect();
+        assert_eq!(hazards.len(), 1 + 32 + 12, "{hazards:?}");
+        assert!(hazards.iter().all(|&c| u32::from(c) <= 0xFFFF));
+    }
+
+    #[test]
+    fn json_terminal_safe_writes_once_and_reports_the_input_length() {
+        let line = "{\"m\":\"a\u{9b}b\"}\n";
+        let mut w = JsonTerminalSafe(RecordingWriter::accepting(usize::MAX));
+
+        assert_eq!(w.write(line.as_bytes()).unwrap(), line.len());
+        assert_eq!(w.0.writes, 1);
+        assert_eq!(w.0.bytes, b"{\"m\":\"a\\u009bb\"}\n");
+    }
+
+    /// A sink that takes a few bytes per `write` still receives the whole
+    /// escaped record from one call.
+    #[test]
+    fn json_terminal_safe_finishes_the_record_on_a_short_writing_sink() {
+        let line = "{\"m\":\"a\u{9b}b\"}\n";
+        let mut w = JsonTerminalSafe(RecordingWriter::accepting(3));
+
+        assert_eq!(w.write(line.as_bytes()).unwrap(), line.len());
+        assert_eq!(w.0.bytes, b"{\"m\":\"a\\u009bb\"}\n");
+    }
+
+    #[test]
+    fn json_terminal_safe_rejects_split_utf8() {
+        let mut w = JsonTerminalSafe(Vec::new());
+
+        let err = w.write(&[0xC2]).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(w.0, [] as [u8; 0]);
+    }
+
+    #[test]
+    fn json_terminal_safe_forwards_flush() {
+        let mut w = JsonTerminalSafe(io::BufWriter::new(Vec::new()));
+        w.write_all(b"{}\n").unwrap();
+        assert_eq!(*w.0.get_ref(), [] as [u8; 0]);
+
+        w.flush().unwrap();
+
+        assert_eq!(w.0.get_ref(), b"{}\n");
     }
 }
