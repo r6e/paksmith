@@ -48,15 +48,17 @@ thiserror = "2.0.12"
 serde = { version = "1.0.225", features = ["derive", "rc"] }
 serde_json = "1.0.150"
 byteorder = "1.5"
-tracing = "0.1.40"
+# 0.1.41: the floor tracing-subscriber 0.3.20 requires.
+tracing = "0.1.41"
 # Used by paksmith-cli (fmt subscriber) and paksmith-gui (ring-buffer Layer for
 # the debug console). `env-filter` provides EnvFilter for RUST_LOG-driven
 # capture levels. The gui's `registry()`/`SubscriberExt` use relies on the
 # default `fmt`/`registry` features being ON — do NOT set
 # `default-features = false` here without adding `"registry"` explicitly.
 # Single workspace floor keeps Minimal-versions resolution consistent across
-# both consumers.
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# both consumers. 0.3.20: escapes ANSI controls in logged values
+# (RUSTSEC-2025-0055) and has `log_internal_errors`, which the CLI sets.
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 flate2 = "1.1"
 # Raw-block LZ4 for pak entries (#636) — the same block form repak
 # writes and CUE4Parse decodes. `frame` (and its deps) excluded: UE
