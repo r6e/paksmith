@@ -9,124 +9,69 @@
 
 use std::path::{Path, PathBuf};
 
-/// `source` without its comments and string and char literals, newlines
-/// kept, so only code is left and line numbers still match.
-fn code_only(source: &str) -> String {
-    let chars: Vec<char> = source.chars().collect();
-    let mut code = String::with_capacity(source.len());
-    let mut i = 0;
-    while i < chars.len() {
-        let rest = &chars[i..];
-        let skipped = match rest {
-            ['/', '/', ..] => rest.iter().position(|&c| c == '\n').unwrap_or(rest.len()),
-            ['/', '*', ..] => block_comment_len(rest),
-            ['"', ..] => quoted_len(rest),
-            ['\'', ..] => char_literal_len(rest),
-            ['r', ..] => raw_string_len(rest),
-            _ => 0,
-        };
-        if skipped == 0 {
-            code.push(rest[0]);
-            i += 1;
-        } else {
-            code.extend(rest[..skipped].iter().filter(|&&c| c == '\n'));
-            i += skipped;
-        }
+use proc_macro2::{TokenStream, TokenTree};
+
+/// The 1-based lines of `source` that hold a `%` token whose previous token
+/// in the same group does not end an operand (see [`ends_operand`]). Rust has
+/// no unary `%`, so that `%` is a tracing sigil or a modulo the gate cannot
+/// tell from one.
+///
+/// An error where proc-macro2's tokens part from rustc's, so that the tokens
+/// after the split cannot be trusted: when proc-macro2 cannot tokenize
+/// `source`; when `source` starts with a shebang line, which rustc skips and
+/// proc-macro2 reads as code; and when proc-macro2 splits a lifetime or label
+/// from its name, reading `'r"\""` as `'` and the raw string `r"\"` where rustc
+/// reads the label `'r` and a string.
+fn sigil_lines(source: &str) -> Result<Vec<usize>, String> {
+    let code = source.strip_prefix('\u{FEFF}').unwrap_or(source);
+    if code.starts_with("#!") && !code.starts_with("#![") {
+        return Err("line 1: a shebang line".to_string());
     }
-    code
-}
-
-/// The length of the possibly nested block comment `rest` starts with.
-fn block_comment_len(rest: &[char]) -> usize {
-    let mut depth = 0;
-    let mut i = 0;
-    while i < rest.len() {
-        match rest[i..] {
-            ['/', '*', ..] => {
-                depth += 1;
-                i += 2;
-            }
-            ['*', '/', ..] => {
-                depth -= 1;
-                i += 2;
-                if depth == 0 {
-                    return i;
-                }
-            }
-            _ => i += 1,
-        }
-    }
-    rest.len()
-}
-
-/// The length of the `"`-quoted literal `rest` starts with.
-fn quoted_len(rest: &[char]) -> usize {
-    let mut i = 1;
-    while i < rest.len() {
-        match rest[i] {
-            '\\' => i += 2,
-            '"' => return i + 1,
-            _ => i += 1,
-        }
-    }
-    rest.len()
-}
-
-/// The length of the char literal `rest` starts with, or 0 for a lifetime
-/// or label such as `'a`.
-fn char_literal_len(rest: &[char]) -> usize {
-    match rest {
-        ['\'', '\\', _, tail @ ..] => tail.iter().position(|&c| c == '\'').map_or(0, |p| p + 4),
-        ['\'', _, '\'', ..] => 3,
-        _ => 0,
-    }
-}
-
-/// The length of the raw string (`r"…"`, `r#"…"#`) `rest` starts with, or 0
-/// when its `r` starts something else, such as an identifier. The `b` or `c`
-/// of `br"…"` or `cr"…"` stays code.
-fn raw_string_len(rest: &[char]) -> usize {
-    let hashes = rest[1..].iter().take_while(|&&c| c == '#').count();
-    if rest.get(1 + hashes) != Some(&'"') {
-        return 0;
-    }
-    (2 + hashes..rest.len())
-        .find(|&i| {
-            rest[i] == '"'
-                && rest[i + 1..]
-                    .iter()
-                    .take(hashes)
-                    .filter(|&&c| c == '#')
-                    .count()
-                    == hashes
-        })
-        .map_or(rest.len(), |i| i + 1 + hashes)
-}
-
-/// Whether the gate takes `c` to end an operand, which a modulo `%` follows.
-/// `?` is not one: a macro_rules `$(...)?` group can precede a sigil, so
-/// `x? % y` has to be written `(x?) % y`.
-fn ends_operand(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '_' | ')' | ']' | '}' | '>' | '.')
-}
-
-/// The 1-based lines of `source` that hold a `%` in code whose previous
-/// non-space code character is not [`ends_operand`]. Rust has no unary `%`,
-/// so that `%` is a tracing sigil or a modulo the gate cannot tell from one.
-fn sigil_lines(source: &str) -> Vec<usize> {
+    let stream = code.parse::<TokenStream>().map_err(|e| e.to_string())?;
     let mut hits = Vec::new();
+    collect_sigils(stream, &mut hits)?;
+    Ok(hits)
+}
+
+fn collect_sigils(stream: TokenStream, hits: &mut Vec<usize>) -> Result<(), String> {
     let mut prev = None;
-    for (index, line) in code_only(source).lines().enumerate() {
-        for c in line.chars() {
-            if c == '%' && !prev.is_some_and(ends_operand) {
-                hits.push(index + 1);
-            }
-            if !c.is_whitespace() {
-                prev = Some(c);
-            }
+    let mut after_operand = false;
+    for tree in stream {
+        if let Some(TokenTree::Punct(quote)) = &prev
+            && quote.as_char() == '\''
+            && !matches!(tree, TokenTree::Ident(_))
+        {
+            let line = quote.span().start().line;
+            return Err(format!(
+                "line {line}: a lifetime split from its name (put a space after it)"
+            ));
         }
+        match &tree {
+            TokenTree::Punct(p) if p.as_char() == '%' && !after_operand => {
+                hits.push(p.span().start().line);
+            }
+            TokenTree::Group(group) => collect_sigils(group.stream(), hits)?,
+            _ => {}
+        }
+        after_operand = ends_operand(&tree, prev.as_ref(), after_operand);
+        prev = Some(tree);
     }
-    hits
+    Ok(())
+}
+
+/// Whether `tree`, after `prev`, ends an operand, which a modulo `%` follows:
+/// an identifier, a literal or a bracketed group, unless a `$` before it makes
+/// it a macro_rules metavariable or repetition, or a `>` right after an
+/// operand, as when it closes generic arguments (`=>` and `->` do not).
+/// `?` does not either: a macro_rules `$(...)?` group can precede a sigil, so
+/// `x? % y` has to be written `(x?) % y`.
+fn ends_operand(tree: &TokenTree, prev: Option<&TokenTree>, after_operand: bool) -> bool {
+    match tree {
+        TokenTree::Ident(_) | TokenTree::Literal(_) | TokenTree::Group(_) => {
+            !matches!(prev, Some(TokenTree::Punct(p)) if p.as_char() == '$')
+        }
+        TokenTree::Punct(p) => p.as_char() == '>' && after_operand,
+    }
 }
 
 fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -148,39 +93,52 @@ fn gate_flags_each_sigil_shape() {
         r#"warn!(error = %e, "m");"#,
         r#"warn!({ %err }, "m");"#,
         r#"warn!($($k = $v,)? %$e, "m");"#,
-        r#"warn!(path, /* the entry */ %err, "m");"#,
-        r#"warn!(url = "http://x", %err, "m");"#,
-        r#"warn!(c = '"', %err, "m");"#,
-        r#"warn!(c = '\"', %err, "m");"#,
-        r#"warn!(s = r"\", %err, "m");"#,
-        r##"warn!(s = r#"a"b"#, %err, "m");"##,
-        "fn f(e: &'static E) { warn!(%e, c = 'x') }",
+        r#"warn!($k $eq %$e, "m");"#,
+        r#"warn!($(error =) %$e, "m");"#,
+        "warn_kv!(error => %e);",
     ] {
-        assert_eq!(sigil_lines(source), [1], "{source}");
+        assert_eq!(sigil_lines(source).unwrap(), [1], "{source}");
     }
     assert_eq!(
-        sigil_lines("warn!(\n    path, // the entry path\n    %err,\n    \"m\"\n);"),
+        sigil_lines("warn!(\n    path, // the entry path\n    %err,\n    \"m\"\n);").unwrap(),
         [3]
     );
 }
 
 #[test]
-fn gate_ignores_modulo_comments_and_literals() {
+fn gate_ignores_modulo() {
     for source in [
         "let r = a % b;",
-        "let r = n_ % 2;",
+        "let r = 7 % b;",
         "let r = (a) % b;",
-        "let r = v[0] % b;",
-        "let r = { a } % b;",
-        "let r = x as Wrapping<u32> % y;",
-        "let r = 1. % 2.;",
-        "let r = a\n    % b;",
-        "// warn!(error = %e);",
-        "/* a /* (%e */ (%e */",
-        r#"let s = "(%e \" = %e";"#,
-        "let c = ['%'];",
+        "let r = x as Wrapping<Vec<u8>> % y;",
+        "macro_rules! m { ($a:expr) => { ($a) % 2 }; }",
+        "#![allow(dead_code)]\nlet r = a % b;",
+        "fn f<'a>(x: &'a u32) -> u32 { x % 2 }",
     ] {
-        assert_eq!(sigil_lines(source), [] as [usize; 0], "{source}");
+        assert_eq!(sigil_lines(source).unwrap(), [] as [usize; 0], "{source}");
+    }
+}
+
+#[test]
+fn gate_fails_on_tokens_it_cannot_trust() {
+    for (source, error) in [
+        (r#"warn!(error = %e, "m);"#, "cannot parse"),
+        (
+            r#"let _ = 'r: { break 'r"\"" }; warn!(error = %e); // "}"#,
+            "a lifetime split",
+        ),
+        (
+            "#!x \"\nfn f() { warn!(error = %e); } // \"",
+            "a shebang line",
+        ),
+        (
+            "\u{FEFF}#!x \"\nfn f() { warn!(error = %e); } // \"",
+            "a shebang line",
+        ),
+    ] {
+        let found = sigil_lines(source).unwrap_err();
+        assert!(found.contains(error), "{source}: {found}");
     }
 }
 
@@ -200,7 +158,8 @@ fn core_has_no_display_sigil() {
         .iter()
         .flat_map(|path| {
             let source = std::fs::read_to_string(path).unwrap();
-            sigil_lines(&source)
+            let lines = sigil_lines(&source).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            lines
                 .into_iter()
                 .map(move |line| format!("{}:{line}", path.display()))
         })
@@ -209,6 +168,7 @@ fn core_has_no_display_sigil() {
     assert_eq!(
         hits,
         [] as [String; 0],
-        "log these fields as a String or a &str, not with `%`"
+        "log these fields as a String or a &str, not with `%`; parenthesize the left \
+         operand of a modulo the gate flags"
     );
 }
