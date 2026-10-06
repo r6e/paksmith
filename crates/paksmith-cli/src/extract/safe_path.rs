@@ -12,6 +12,10 @@ pub(crate) enum SafePathError {
     /// which Win32 can route to the device instead of a file. Carries
     /// the offending entry path.
     DeviceName(String),
+    /// A joined component holds an [`is_name_hazard`] character, which a tool
+    /// that prints the name raw would replay to the terminal. Carries the
+    /// offending entry path.
+    Hazard(String),
 }
 
 impl std::fmt::Display for SafePathError {
@@ -20,8 +24,21 @@ impl std::fmt::Display for SafePathError {
             Self::Escapes(p) => write!(f, "entry path escapes output directory: {p}"),
             Self::Empty => write!(f, "empty entry path"),
             Self::DeviceName(p) => write!(f, "entry path names a reserved device: {p}"),
+            Self::Hazard(p) => write!(
+                f,
+                "entry path contains a control or bidirectional-formatting character: {p}"
+            ),
         }
     }
+}
+
+/// Whether `c` must not appear in an extracted name: a control or
+/// Bidi_Control character, or one of U+F001..=U+F01F, the private-use
+/// stand-ins that Cygwin, MSYS2 and the Linux CIFS client store for the C0
+/// controls a Windows file name cannot hold, and turn back into them when
+/// they list a directory.
+fn is_name_hazard(c: char) -> bool {
+    crate::output::is_terminal_hazard(c) || matches!(c, '\u{F001}'..='\u{F01F}')
 }
 
 /// Whether Win32 would route `component` to a DOS device: its name up to
@@ -61,9 +78,10 @@ fn is_reserved_device(upper: &str) -> bool {
 /// `verify_resolves_inside_root` in `extract/mod.rs`. Backslashes are
 /// normalized to `/` so Windows-style separators can't smuggle traversal.
 /// Rejects `..`, absolute roots, and Windows drive/UNC prefixes. Also rejects,
-/// on every platform, any joined component that names a DOS device, since
-/// `create_dir_all` makes each directory the last component of its own call;
-/// under `flat` only the file name is joined.
+/// on every platform, any joined component that names a DOS device (since
+/// `create_dir_all` makes each directory the last component of its own call)
+/// or holds an [`is_name_hazard`] character; under `flat` only the file name
+/// is joined.
 pub(crate) fn safe_join(
     output_root: &Path,
     entry_path: &str,
@@ -111,6 +129,9 @@ pub(crate) fn safe_join(
     for part in chosen {
         if is_dos_device_name(part) {
             return Err(SafePathError::DeviceName(entry_path.to_string()));
+        }
+        if part.chars().any(is_name_hazard) {
+            return Err(SafePathError::Hazard(entry_path.to_string()));
         }
         // Windows-only prefix re-parse guard; the mechanism is documented on
         // `paksmith_core`'s detection `safe_join` (#658). Site-specific reason
@@ -173,6 +194,10 @@ mod tests {
             SafePathError::DeviceName("Game/NUL".to_string()).to_string(),
             "entry path names a reserved device: Game/NUL"
         );
+        assert_eq!(
+            SafePathError::Hazard("Game/a\u{1b}b".to_string()).to_string(),
+            "entry path contains a control or bidirectional-formatting character: Game/a\u{1b}b"
+        );
     }
 
     /// Every component an entry adds is checked, not only the file name (#811).
@@ -220,6 +245,56 @@ mod tests {
         ));
         let p = safe_join(&root(), "CON/Hero.uasset", true).unwrap();
         assert_eq!(p, PathBuf::from("/out/Hero.uasset"));
+    }
+
+    /// Every component an entry adds is checked for control and bidi
+    /// characters, which a tool that prints the name raw would replay to the
+    /// terminal.
+    #[test]
+    fn rejects_hazards_in_any_joined_component() {
+        for entry in [
+            "C/\u{1b}[2J.locres",
+            "a\u{9b}b/c.uasset",
+            "a/b\u{7f}.uasset",
+            "a/b\tc.uasset",
+            "a/b\u{202e}c.uasset",
+            "a/\u{F01B}b.uasset",
+            "\u{F001}d/c.uasset",
+            "a/b\u{F01F}.uasset",
+        ] {
+            assert!(
+                matches!(
+                    safe_join(&root(), entry, false),
+                    Err(SafePathError::Hazard(ref p)) if p == entry
+                ),
+                "{entry:?} must be refused"
+            );
+        }
+    }
+
+    /// `--flat` joins only the file name, so only its hazards are refused.
+    #[test]
+    fn flat_checks_only_the_file_name_for_hazards() {
+        assert!(matches!(
+            safe_join(&root(), "d/\u{1b}.uasset", true),
+            Err(SafePathError::Hazard(_))
+        ));
+        let p = safe_join(&root(), "\u{1b}d/ok.uasset", true).unwrap();
+        assert_eq!(p, PathBuf::from("/out/ok.uasset"));
+    }
+
+    /// Printable non-ASCII names extract, including the private-use
+    /// neighbours of the refused C0 stand-ins.
+    #[test]
+    fn accepts_non_ascii_names() {
+        for entry in [
+            "Game/日本/é.uasset",
+            "Game/\u{F000}.uasset",
+            "Game/\u{F020}.uasset",
+        ] {
+            let p = safe_join(&root(), entry, false).unwrap();
+            assert_eq!(p, PathBuf::from("/out").join(entry), "{entry:?}");
+        }
     }
 
     const DEVICE_LOOKALIKES: &[&str] = &[
