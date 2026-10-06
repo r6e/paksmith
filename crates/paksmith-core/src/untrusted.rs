@@ -78,6 +78,17 @@ pub(crate) mod test_support {
         )
     }
 
+    /// A `logs_assert` check: exactly `n` lines carry `message`.
+    pub(crate) fn lines_counted(
+        message: &str,
+        n: usize,
+    ) -> impl Fn(&[&str]) -> Result<(), String> + '_ {
+        move |lines: &[&str]| match lines.iter().filter(|l| l.contains(message)).count() {
+            got if got == n => Ok(()),
+            got => Err(format!("{got} `{message}` lines logged, expected {n}")),
+        }
+    }
+
     /// A control character (Cc) or one of Unicode's 12 Bidi_Control
     /// characters.
     fn is_raw_hazard(c: char) -> bool {
@@ -137,6 +148,16 @@ mod tests {
         assert!(check(&["evt a\u{202e}b"][..]).is_err());
         assert!(check(&["evt a\\u{1b}b"][..]).is_ok());
         assert!(check(&["other"][..]).is_err());
+    }
+
+    #[test]
+    fn lines_counted_requires_the_exact_count() {
+        use super::test_support::lines_counted;
+
+        let check = lines_counted("evt", 2);
+        assert!(check(&["evt a", "other", "evt b"][..]).is_ok());
+        assert!(check(&["evt a"][..]).is_err());
+        assert!(check(&["evt a", "evt b", "evt c"][..]).is_err());
     }
 
     /// A `&str` field renders a bidi override escaped; the escaped-string

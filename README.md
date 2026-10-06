@@ -113,7 +113,9 @@ table (with color; set `NO_COLOR` to disable) interactively, JSON when piped or
 redirected. Override with `--format table` or `--format json`. `--quiet` silences
 advisory notes and drops logging to error-level (errors still print). `--log-json` switches stderr
 diagnostics to line-delimited JSON records and suppresses the advisory notes.
-Execution failures (exit 2) still end with the plain `paksmith: error:` line
+Control and bidirectional-control characters in record values are written as
+JSON escapes such as `\u001b`, so they decode to the original text but never
+reach the terminal raw. Execution failures (exit 2) still end with the plain `paksmith: error:` line
 (argument errors print clap's usage text instead); exit-1 completions keep stderr
 pure JSON, with failure detail in the stdout summary. Independent of `--format`,
 which governs the stdout payload. The JSON shape is

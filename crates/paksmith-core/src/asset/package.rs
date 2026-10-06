@@ -17,15 +17,15 @@
 //! Failure handling differs by path:
 //! - **Versioned typed**: a malformed-body error falls through to the
 //!   generic tagged-property parse (a typed reader must never leave an
-//!   export worse off than the generic parse it replaces), with a
-//!   `tracing::warn!`. An allocation failure at any layer instead
-//!   **propagates** — that is an out-of-memory condition the caller must
-//!   see, not a corrupt export (libraries fail fast). So does a
+//!   export worse off than the generic parse it replaces). An
+//!   allocation failure at any layer instead **propagates** — that is an
+//!   out-of-memory condition the caller must see, not a corrupt export
+//!   (libraries fail fast). So does a
 //!   `DerivedStringBudgetExceeded`, which is package-wide.
 //! - **Versioned generic**: tagged-property iteration falls back to
 //!   [`PropertyBag::Opaque`](crate::asset::property::PropertyBag) on any
 //!   parse error other than an allocation failure or
-//!   `DerivedStringBudgetExceeded` (warn-logged), so one corrupt versioned
+//!   `DerivedStringBudgetExceeded`, so one corrupt versioned
 //!   export does not abort the package.
 //! - **Unversioned** (`PKG_UnversionedProperties` + `.usmap`): deserialize
 //!   against the schema and **propagate** on error — an unversioned parse
@@ -51,7 +51,7 @@ use crate::asset::name_table::NameTable;
 use crate::asset::property::PropertyBag;
 use crate::asset::property::unversioned::read_unversioned_properties;
 use crate::asset::summary::{PKG_UNVERSIONED_PROPERTIES, PackageSummary};
-use crate::asset::{AssetContext, ends_package_read};
+use crate::asset::{AssetContext, decode_warn, ends_package_read};
 use crate::error::{
     AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,
     CompanionFileKind, PaksmithError, try_reserve_asset,
@@ -841,6 +841,7 @@ impl Package {
             engine_version_hint: opts.engine_version_hint,
             derived_strings: Arc::default(),
             bulk_reads: Arc::default(),
+            decode_warnings: Arc::default(),
         };
 
         // Phase 2f: dispatch the unversioned (schema-driven) property
@@ -851,7 +852,7 @@ impl Package {
         // `read_unversioned_properties` and skip `read_payloads`
         // entirely — running the tagged-property decoder on
         // unversioned bytes would fall back to `PropertyBag::Opaque`
-        // and emit a spurious warn-level log per export.
+        // for every export.
         //
         // The flag lives on `summary.package_flags`, so the gate is
         // summary-scoped: a single flagged package cannot mix
@@ -951,11 +952,12 @@ impl Package {
                 // reader's record count reaches this insert's
                 // `> MAX_BULK_DATA_RECORDS_PER_EXPORT` rejection.
                 // This is a defensive backstop for a future reader; degrade
-                // like the typed-reader fallback (warn + drop this export's
+                // like the typed-reader fallback (drop this export's
                 // records, keeping its already-parsed `Asset`) rather than
                 // aborting the whole package.
-                tracing::warn!(
-                    asset = asset_path,
+                decode_warn!(
+                    ctx,
+                    asset_path,
                     export.index = export_idx,
                     error = err.to_string(),
                     "bulk-record cap exceeded; dropping this export's bulk records"
@@ -1265,7 +1267,8 @@ impl Package {
     /// refcount-shared via `Arc` (#369) and pointer-equal via
     /// [`Arc::ptr_eq`] across calls; use that as a cache key on the
     /// individual fields, not the full context struct. Each call starts
-    /// a fresh budget for copied names and a fresh bulk-read ledger.
+    /// a fresh budget for copied names, a fresh decode-time warning count
+    /// and a fresh bulk-read ledger.
     #[must_use]
     pub fn context(&self) -> AssetContext {
         AssetContext {
@@ -1281,6 +1284,7 @@ impl Package {
             engine_version_hint: self.engine_version_hint,
             derived_strings: Arc::default(),
             bulk_reads: Arc::default(),
+            decode_warnings: Arc::default(),
         }
     }
 }
@@ -1475,11 +1479,12 @@ fn read_payloads(
                 // malicious oversized-count export still degrades below.
                 Err(err) if ends_package_read(&err) => return Err(err),
                 // Anything else (malformed data, an unsupported variant,
-                // an unresolvable companion): warn and fall through to the
-                // generic parse below.
+                // an unresolvable companion): fall through to the generic
+                // parse below.
                 Err(err) => {
-                    tracing::warn!(
-                        asset = asset_path,
+                    decode_warn!(
+                        ctx,
+                        asset_path,
                         export.class = &*class_name,
                         error = err.to_string(),
                         "typed reader failed; falling back to generic property-bag parse"
@@ -1503,8 +1508,6 @@ fn read_payloads(
         // on a parse error that `ends_package_read` does not match,
         // fall back to `PropertyBag::Opaque` with the original bytes (one
         // corrupt export shouldn't lose every other export's data).
-        // The fallback is logged at warn level so operators see the
-        // version-skew signal.
         //
         // `Opaque` needs `Vec<u8>` ownership for storage in the
         // `Package` struct. The cold error path uses
@@ -1539,8 +1542,9 @@ fn read_payloads(
             }
             Err(err) if ends_package_read(&err) => return Err(err),
             Err(err) => {
-                tracing::warn!(
-                    asset = asset_path,
+                decode_warn!(
+                    ctx,
+                    asset_path,
                     export = %e.object_name,
                     error = err.to_string(),
                     "property iteration failed, falling back to Opaque"
@@ -1738,23 +1742,18 @@ mod tests {
         );
     }
 
-    /// The generic fallback's warning carries the fault's message, which
-    /// bounds the archive name it names.
-    #[tracing_test::traced_test]
-    #[test]
-    fn opaque_fallback_warning_bounds_a_long_array_name() {
-        use crate::untrusted::test_support::{
-            hostile_name, lines_clamped, lines_free_of_raw_controls,
-        };
-
+    /// A package whose one export is an `Array<Struct>` named
+    /// `array_name` with its inner-array header missing, so the tagged
+    /// parse fails and the export falls back to `Opaque`.
+    fn opaque_fallback_package(array_name: &str) -> Vec<u8> {
         let mut spec = MinimalPackageSpec::default();
         spec.names.names.extend([
-            crate::asset::FName::new(&hostile_name("ARR")),
+            crate::asset::FName::new(array_name),
             crate::asset::FName::new("ArrayProperty"),
             crate::asset::FName::new("StructProperty"),
         ]);
         let mut payload = Vec::new();
-        write_fname(&mut payload, 3, 0); // Name: the hostile array name
+        write_fname(&mut payload, 3, 0); // Name: array_name
         write_fname(&mut payload, 4, 0); // Type: ArrayProperty
         payload.extend_from_slice(&12i32.to_le_bytes()); // Size
         payload.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
@@ -1764,8 +1763,19 @@ mod tests {
         write_none_tag(&mut payload); // where the inner-array header belongs
         spec.exports.exports[0].serial_size = i64::try_from(payload.len()).unwrap();
         spec.payloads = vec![payload];
-        let MinimalPackage { bytes, .. } = build_minimal(spec);
+        build_minimal(spec).bytes
+    }
 
+    /// The generic fallback's warning carries the fault's message, which
+    /// bounds the archive name it names.
+    #[tracing_test::traced_test]
+    #[test]
+    fn opaque_fallback_warning_bounds_a_long_array_name() {
+        use crate::untrusted::test_support::{
+            hostile_name, lines_clamped, lines_free_of_raw_controls,
+        };
+
+        let bytes = opaque_fallback_package(&hostile_name("ARR"));
         let pkg = Package::read_from(&bytes, None, None, "x.uasset").unwrap();
 
         assert!(
@@ -1780,6 +1790,31 @@ mod tests {
         logs_assert(lines_free_of_raw_controls("falling back to Opaque"));
     }
 
+    /// Both fallback warnings draw on the package's decode-time warning
+    /// budget: with it spent, the exports fall back exactly as before but
+    /// log nothing.
+    #[tracing_test::traced_test]
+    #[test]
+    fn fallback_warnings_respect_a_spent_budget() {
+        use crate::asset::property::test_utils::with_decode_warnings_spent;
+        use crate::untrusted::test_support::lines_counted;
+
+        let typed = build_minimal_ue4_27_with_valid_and_corrupt_data_tables().bytes;
+        let opaque = opaque_fallback_package("Arr");
+        for (bytes, warning) in [
+            (&typed, "typed reader failed"),
+            (&opaque, "falling back to Opaque"),
+        ] {
+            let pkg = Package::read_from(bytes, None, None, "x.uasset").unwrap();
+            logs_assert(lines_counted(warning, 1));
+
+            let ctx = with_decode_warnings_spent(pkg.context());
+            let (payloads, _) = read_payloads(bytes, &pkg.exports, &ctx, "x.uasset").unwrap();
+            assert_eq!(payloads, pkg.payloads);
+            logs_assert(lines_counted(warning, 1));
+        }
+    }
+
     /// A trip inside a typed reader fails the read rather than falling
     /// through to the generic parse, which here charges nothing.
     #[test]
@@ -1792,11 +1827,16 @@ mod tests {
     }
 
     #[test]
-    fn each_context_call_starts_a_fresh_derived_string_budget() {
+    fn each_context_call_starts_fresh_budgets() {
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
         let pkg = Package::read_from(&bytes, None, None, "x.uasset").unwrap();
         let (a, b) = (pkg.context(), pkg.context());
         assert!(!Arc::ptr_eq(&a.derived_strings, &b.derived_strings));
+        assert!(!Arc::ptr_eq(&a.decode_warnings, &b.decode_warnings));
+        assert_eq!(
+            a.decode_warnings.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
         assert_eq!(
             a.derived_strings.limit,
             crate::asset::MAX_DERIVED_STRING_BYTES

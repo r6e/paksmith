@@ -852,6 +852,7 @@ mod tests {
             engine_version_hint: None,
             derived_strings: Arc::default(),
             bulk_reads: Arc::default(),
+            decode_warnings: Arc::default(),
         }
     }
 
