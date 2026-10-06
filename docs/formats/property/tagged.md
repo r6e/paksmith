@@ -201,9 +201,8 @@ See `docs/security/allocation-caps.md` for the broader policy.
   - **Parse-error → Opaque fallback.** If `read_properties` returns
     an error mid-iteration (malformed tag, unknown encoding, depth
     violation, cursor mismatch), the caller
-    (`Package::read_payloads`) catches the error, emits a
-    `tracing::warn!` event, and substitutes `PropertyBag::Opaque`
-    with the raw export bytes. CUE4Parse propagates the error; the
+    (`Package::read_payloads`) catches the error and substitutes
+    `PropertyBag::Opaque` with the raw export bytes. CUE4Parse propagates the error; the
     paksmith design favors partial parsing because one corrupt
     export shouldn't fail the whole package. The exceptions are an
     allocation failure at any layer and `DerivedStringBudgetExceeded`,

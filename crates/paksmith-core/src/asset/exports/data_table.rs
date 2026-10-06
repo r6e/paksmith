@@ -29,7 +29,7 @@ use crate::asset::property::primitives::{Property, PropertyValue};
 use crate::asset::property::{
     MAX_ROWS_PER_DATATABLE, read_fname_pair, read_object_guid_tail, read_properties,
 };
-use crate::asset::{Asset, AssetContext, DataTableData, DataTableRow};
+use crate::asset::{Asset, AssetContext, DataTableData, DataTableRow, decode_warn};
 use crate::error::{AssetParseFault, AssetWireField, try_reserve_asset};
 use crate::seams::AssetSeam;
 
@@ -155,7 +155,7 @@ fn reserve_count(num_rows: usize, remaining_bytes: u64) -> usize {
 }
 
 /// Extract the `RowStruct` class name from the class-level properties.
-/// Returns an empty string (and warn-logs) when the `RowStruct`
+/// Returns an empty string when the `RowStruct`
 /// property is absent or isn't an `ObjectProperty` — rows still parse;
 /// they just carry no schema-type label, per the format doc's
 /// graceful-recovery clause.
@@ -178,16 +178,18 @@ fn resolve_row_struct(
             ctx.charge_derived(name.to_string(), asset_path)
         }
         Some(_) => {
-            tracing::warn!(
-                asset = asset_path,
+            decode_warn!(
+                ctx,
+                asset_path,
                 "DataTable RowStruct property is not an ObjectProperty; \
                  emitting empty row_struct (rows still parse)"
             );
             Ok(String::new())
         }
         None => {
-            tracing::warn!(
-                asset = asset_path,
+            decode_warn!(
+                ctx,
+                asset_path,
                 "DataTable has no RowStruct property; emitting empty \
                  row_struct (rows still parse)"
             );
@@ -485,13 +487,24 @@ mod tests {
         }
     }
 
+    /// Both fallbacks draw on the package's decode-time warning budget:
+    /// with it spent, they still resolve to "" but log nothing.
+    #[tracing_test::traced_test]
     #[test]
-    fn row_struct_empty_when_absent_or_non_object() {
-        let ctx = make_ctx(&["None"]);
-        let resolve = |props: &[Property]| resolve_row_struct(props, &ctx, "test.uasset").unwrap();
-        // Absent → "".
-        assert_eq!(resolve(&[prop("Other", PropertyValue::Int(1))]), "");
-        // Present but not an ObjectProperty → "" (warn-logged).
-        assert_eq!(resolve(&[prop("RowStruct", PropertyValue::Int(7))]), "");
+    fn row_struct_warnings_respect_a_spent_budget() {
+        use crate::asset::property::test_utils::with_decode_warnings_spent;
+        use crate::untrusted::test_support::lines_counted;
+
+        let absent = [prop("Other", PropertyValue::Int(1))];
+        let non_object = [prop("RowStruct", PropertyValue::Int(7))];
+        let fresh = make_ctx(&["None"]);
+        let spent = with_decode_warnings_spent(make_ctx(&["None"]));
+        for ctx in [&fresh, &spent] {
+            assert_eq!(resolve_row_struct(&absent, ctx, "t").unwrap(), "");
+            assert_eq!(resolve_row_struct(&non_object, ctx, "t").unwrap(), "");
+            // The fresh pass logs one of each; the spent pass adds none.
+            logs_assert(lines_counted("has no RowStruct property", 1));
+            logs_assert(lines_counted("is not an ObjectProperty", 1));
+        }
     }
 }

@@ -83,7 +83,7 @@ mod tests {
     }
 
     /// When the `.usmap` has no schema for the export's class, the
-    /// decoder logs a `warn` and returns an empty `PropertyBag::Tree`
+    /// decoder returns an empty `PropertyBag::Tree`
     /// rather than erroring. Drives the path through `Package::
     /// read_from` (not just `Usmap::get_all_properties`) so the
     /// outermost-frame "empty schema" branch in
@@ -452,8 +452,8 @@ mod tests {
     }
 
     /// Distinct from `unversioned_unknown_class_returns_empty_tree`:
-    /// that test exercises the depth-0 empty-schema branch (warn +
-    /// `Ok(Vec::new())`); this test exercises the depth>0
+    /// that test exercises the depth-0 empty-schema branch
+    /// (`Ok(Vec::new())`); this test exercises the depth>0
     /// error-and-propagate branch through the same catch arm.
     #[test]
     fn nested_struct_with_missing_schema_returns_partial_tree() {

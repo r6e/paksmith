@@ -32,7 +32,7 @@ user-defined (tagged-tree) case and the native-struct case (FVector).
 handled completely; native-struct bodies cause `read_properties` to
 error on the first invalid name lookup, which bubbles to the
 enclosing export and triggers the `PropertyBag::Tree → Opaque`
-fallback (with a `tracing::warn!` event). The asset still parses;
+fallback. The asset still parses;
 the property tree just isn't materialized when a native struct is
 involved.
 
@@ -135,7 +135,7 @@ See Wire layout §*Body — user-defined struct case*.
 
 ### Native-struct body (paksmith fallback)
 
-The key failure-chain pivot: an out-of-bounds FName index (`PackageIndexOob`) or `FStringMalformed` error from mis-reading native binary payload as a tag name causes `PropertyBag::Tree` to abort and collapse to `Opaque`, with a `tracing::warn!` identifying the `struct_name`.
+The key failure-chain pivot: an out-of-bounds FName index (`PackageIndexOob`) or `FStringMalformed` error from mis-reading native binary payload as a tag name causes `PropertyBag::Tree` to abort and collapse to `Opaque`.
 
 ## Caps & limits
 

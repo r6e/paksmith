@@ -116,7 +116,7 @@ fn opaque_fallback_for_corrupt_property_payload() {
     // is i32::from_le_bytes([0xAA; 4]) = 0xAAAA_AAAA as i32, which is
     // negative. resolve_fname rejects with PackageIndexUnderflow, the
     // iterator returns Err, and read_payloads falls back to
-    // PropertyBag::Opaque(buf) with a warn! event. This pins the
+    // PropertyBag::Opaque(buf). This pins the
     // fallback contract — one corrupt export must not abort the
     // package.
     use paksmith_core::testing::uasset::build_minimal_ue4_27;

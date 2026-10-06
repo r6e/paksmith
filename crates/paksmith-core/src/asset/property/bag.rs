@@ -51,8 +51,8 @@ pub(crate) const MAX_PROPERTY_DEPTH: usize = 128;
 pub enum PropertyBag {
     /// Phase 2a: raw bytes carved out of the asset's payload region.
     /// Also the fallback if Phase 2b's tagged-property iterator
-    /// errors mid-parse (the iterator's `warn!` fallback path
-    /// re-reads the export bytes verbatim); an allocation failure or
+    /// errors mid-parse (the fallback re-reads the export bytes
+    /// verbatim); an allocation failure or
     /// the package-wide name budget ends the package read instead.
     ///
     /// **Round-trip note:** serialization is intentionally lossy

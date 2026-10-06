@@ -14,9 +14,10 @@
 //! reachable from release builds.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use crate::asset::{
-    AssetContext, DerivedStringBudget,
+    AssetContext, DerivedStringBudget, MAX_DECODE_WARNINGS,
     custom_version::CustomVersionContainer,
     export_table::ExportTable,
     import_table::{ImportTable, ObjectImport},
@@ -60,6 +61,14 @@ pub fn make_ctx(names: &[&str]) -> AssetContext {
 #[must_use]
 pub fn with_derived_budget(mut ctx: AssetContext, limit: u64) -> AssetContext {
     ctx.derived_strings = Arc::new(DerivedStringBudget::new(limit));
+    ctx
+}
+
+/// Give `ctx` a spent decode-time warning budget, past its suppression
+/// notice, so a gated warning logs nothing.
+#[must_use]
+pub fn with_decode_warnings_spent(mut ctx: AssetContext) -> AssetContext {
+    ctx.decode_warnings = Arc::new(AtomicU64::new(MAX_DECODE_WARNINGS + 1));
     ctx
 }
 
