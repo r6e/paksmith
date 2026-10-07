@@ -1747,6 +1747,36 @@ mod write_output_tests {
         assert_eq!(std::fs::read_dir(victim.path()).unwrap().count(), 0);
     }
 
+    /// A socket at the destination is refused and left in place, or under
+    /// `--overwrite` replaced by a regular file. Rooted in `/tmp` so the bind
+    /// path fits `sun_path`.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_destination_is_refused_or_replaced() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let leaf = root.path().join("s.bin");
+        let _listener = std::os::unix::net::UnixListener::bind(&leaf).unwrap();
+
+        let refused = cfg(root.path(), false, false, false);
+        let err = write_output(&refused, "s.bin", None, b"PAYLOAD").unwrap_err();
+        assert!(
+            err.starts_with("output exists (use --overwrite): "),
+            "{err}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&leaf)
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+
+        let replacing = cfg(root.path(), false, false, true);
+        let _reported = write_output(&replacing, "s.bin", None, b"PAYLOAD").unwrap();
+        assert_eq!(std::fs::read(&leaf).unwrap(), b"PAYLOAD");
+    }
+
     /// Only an OCCUPIED destination goes to the replace. Any other open failure
     /// is reported as the create it was, not as a temp or rename failure.
     #[test]
