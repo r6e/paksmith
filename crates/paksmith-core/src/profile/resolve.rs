@@ -48,32 +48,6 @@ pub fn load_cache_lenient() -> Option<RegistryCache> {
     match RegistryCache::load() {
         Ok(c) => c,
         Err(e) => {
-            // A plain-`String` field (`e.to_string()` here, `id.clone()` at
-            // the dedupe warn) and NOT the `%` sigil, at every warn in this
-            // file. CANONICAL statement of the mechanism, which other sites
-            // reference: `%` is `field::display()`, which the default `fmt`
-            // subscriber writes RAW, while a plain `String` field arrives at
-            // `record_str`. Escaping is the SUBSCRIBER's choice rather than a
-            // property of `record_str` — `fmt`'s visitor Debug-renders the
-            // value and so escapes it, and this workspace ships a
-            // counter-example in `paksmith-gui`'s `log_buffer`, whose visitor
-            // deliberately captures a `message` field raw.
-            // These warns interpolate untrusted text — registry-supplied ids,
-            // hex and paths — so a raw ESC here retitles or clears the user's
-            // terminal (#708).
-            //
-            // Coverage, stated exactly: FOUR of this file's SIX warns are
-            // pinned. `detect_warn_escapes_an_untrusted_dir` drives the
-            // `--detect` one and `unparsable_engine_version_degrades_to_no_hint`
-            // the `engine_version` one, both in this file;
-            // `duplicate_id_warn_fires_once_and_never_for_a_local_shadow`
-            // drives `unshadowed_registry`'s dedupe warn in both polarities;
-            // and the CLI's `game_offline_degrades_to_stale_cache` drives the
-            // fetch-failure one — needing no I/O, since an `http://` URL with
-            // `PAKSMITH_ALLOW_HTTP` unset fails on scheme before any socket
-            // opens. THIS warn and the store-unreadable one bind their fault
-            // identically but are undriven; both need an injected I/O failure,
-            // and the cache one is reachable from that same CLI harness.
             tracing::warn!(error = e.to_string(), "ignoring unreadable registry cache");
             None
         }
@@ -857,10 +831,6 @@ fn unshadowed_registry<'a>(
             // NOT `list`'s total, which counts local rows too. Any gap is
             // entries collapsed by shadowing or repetition; the counts alone
             // cannot say which.
-            //
-            // `id.clone()` binds a plain `String` and NOT the `%` sigil — see
-            // `load_cache_lenient`'s canonical note at the top of this file:
-            // registry-authored text on a terminal sink (#708).
             if !store.profiles.contains_key(p.id.as_str()) && warned.insert(p.id.as_str()) {
                 tracing::warn!(
                     id = p.id.clone(),
@@ -994,9 +964,7 @@ mod tests {
         // id flooding cap, which `logs_contain` alone cannot express.
         //
         // The repeated id CARRIES A RAW ESC, making this the escaping pin for
-        // this warn: the id is registry-authored text on a terminal sink, and
-        // without it, reverting the `id = p.id.clone()` binding to the `%`
-        // sigil was caught by nothing in the workspace.
+        // this warn: the id is registry-authored text on a terminal sink.
         let esc = '\u{1b}';
         let dup_id = format!("dup{esc}[2JX");
         let cache = RegistryCache {

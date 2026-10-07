@@ -744,8 +744,8 @@ impl PakReader {
                 let expected = self.footer.index_hash().to_string();
                 let actual_hex = actual.to_string();
                 error!(
-                    expected = %expected,
-                    actual = %actual_hex,
+                    expected = expected.as_str(),
+                    actual = actual_hex.as_str(),
                     "encrypted index hash mismatch — archive may be tampered"
                 );
                 return Err(PaksmithError::HashMismatch {
@@ -765,8 +765,8 @@ impl PakReader {
             let expected = self.footer.index_hash().to_string();
             let actual_hex = actual.to_string();
             error!(
-                expected = %expected,
-                actual = %actual_hex,
+                expected = expected.as_str(),
+                actual = actual_hex.as_str(),
                 "index hash mismatch — archive may be tampered or corrupted"
             );
             return Err(PaksmithError::HashMismatch {
@@ -855,7 +855,7 @@ impl PakReader {
         ) {
             crate::container::EntryIntegrity::Stripped => {
                 error!(
-                    region = %target,
+                    region = target.to_string(),
                     expected = "non-zero (archive-wide integrity claimed)",
                     actual = "0000000000000000000000000000000000000000",
                     "region has zero SHA1 but archive index does — \
@@ -866,7 +866,7 @@ impl PakReader {
             crate::container::EntryIntegrity::NoClaim
             | crate::container::EntryIntegrity::NotInIndex => {
                 debug!(
-                    region = %target,
+                    region = target.to_string(),
                     "region has no recorded SHA1; skipping verification"
                 );
                 return Ok(VerifyOutcome::SkippedNoHash);
@@ -898,9 +898,9 @@ impl PakReader {
             let expected = expected_hash.to_string();
             let actual_hex = actual.to_string();
             error!(
-                region = %target,
-                expected = %expected,
-                actual = %actual_hex,
+                region = target.to_string(),
+                expected = expected.as_str(),
+                actual = actual_hex.as_str(),
                 "region hash mismatch — archive may be tampered or corrupted"
             );
             return Err(PaksmithError::HashMismatch {
@@ -1226,8 +1226,8 @@ impl PakReader {
             let actual_hex = actual.to_string();
             error!(
                 path,
-                expected = %expected,
-                actual = %actual_hex,
+                expected = expected.as_str(),
+                actual = actual_hex.as_str(),
                 "entry hash mismatch — payload may be tampered or corrupted"
             );
             return Err(PaksmithError::HashMismatch {
@@ -1899,7 +1899,12 @@ impl ContainerReader for PakReader {
         // allocator abort during the streaming write.
         let mut buf: Vec<u8> = Vec::new();
         buf.try_reserve_exact(size_usize).map_err(|source| {
-            warn!(path, size = size_usize, error = %source, "output reservation failed");
+            warn!(
+                path,
+                size = size_usize,
+                error = ?source,
+                "output reservation failed"
+            );
             PaksmithError::InvalidIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::EntryPayloadBytes,
@@ -2489,7 +2494,13 @@ fn read_compressed_block<R: Read + Seek>(
         crate::testing::oom::SeamSite::Pak(PakSeam::CompressedReserve)
     );
     reserve_res.map_err(|e| {
-        warn!(path, block = block_index, block_len, error = %e, "{codec} block reservation failed");
+        warn!(
+            path,
+            block = block_index,
+            block_len,
+            error = ?e,
+            "{codec} block reservation failed"
+        );
         PaksmithError::Decompression {
             path: path.to_string(),
             offset: abs_start,
@@ -2647,14 +2658,21 @@ fn stream_zlib_to<R: Read + Seek>(
         block_out.clear();
         let written = loop {
             let n = limited.read(&mut scratch).map_err(|e| {
-                warn!(path, block = i, abs_start, error = %e, "zlib decompress failed");
+                let message = e.to_string();
+                warn!(
+                    path,
+                    block = i,
+                    abs_start,
+                    error = message.as_str(),
+                    "zlib decompress failed"
+                );
                 PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: abs_start,
                     fault: DecompressionFault::ZlibStreamError {
                         block_index: i,
                         kind: e.kind(),
-                        message: e.to_string(),
+                        message,
                     },
                 }
             })?;
@@ -2678,7 +2696,7 @@ fn stream_zlib_to<R: Read + Seek>(
                     block = i,
                     requested = n,
                     already_committed = block_out.len(),
-                    error = %e,
+                    error = ?e,
                     "zlib scratch reservation failed mid-decode"
                 );
                 PaksmithError::Decompression {
@@ -2934,7 +2952,7 @@ fn stream_lz4_to<R: Read + Seek>(
                 path,
                 block = i,
                 requested = alloc_usize,
-                error = %e,
+                error = ?e,
                 "lz4 output reservation failed"
             );
             PaksmithError::Decompression {
@@ -2953,13 +2971,20 @@ fn stream_lz4_to<R: Read + Seek>(
         // the bomb cap: over-expansion errors inside the decoder.
         let produced =
             lz4_flex::block::decompress_into(&compressed, &mut block_out).map_err(|e| {
-                warn!(path, block = i, abs_start, error = %e, "lz4 decompress failed");
+                let message = e.to_string();
+                warn!(
+                    path,
+                    block = i,
+                    abs_start,
+                    error = message.as_str(),
+                    "lz4 decompress failed"
+                );
                 PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: abs_start,
                     fault: DecompressionFault::Lz4DecodeError {
                         block_index: i,
-                        message: e.to_string(),
+                        message,
                     },
                 }
             })?;
@@ -4023,6 +4048,43 @@ mod tests {
             !logs_contain("opening pak via symbolic link"),
             "regular-file open should not emit the symlink warn"
         );
+    }
+
+    /// A failed reservation logs its `TryReserveError` with `?`, rather than
+    /// first formatting it into a new `String` on the path that just failed
+    /// to allocate.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn reservation_failures_log_the_error_lazily() {
+        use crate::testing::oom::{SeamSite, arm_at};
+        use crate::untrusted::test_support::lines_carrying;
+
+        for (seam, pak, message) in [
+            (
+                PakSeam::CompressedReserve,
+                "real_v11_compressed.pak",
+                "zlib block reservation failed",
+            ),
+            (
+                PakSeam::ScratchReserve,
+                "real_v11_compressed.pak",
+                "zlib scratch reservation failed mid-decode",
+            ),
+            (
+                PakSeam::Lz4OutputReserve,
+                "real_v11_lz4.pak",
+                "lz4 output reservation failed",
+            ),
+        ] {
+            let reader = PakReader::open(fixture(pak)).expect("open fixture");
+            let _guard = arm_at(SeamSite::Pak(seam), 0);
+            assert!(
+                reader.read_entry("Content/Compressed.uasset").is_err(),
+                "{seam:?}"
+            );
+            logs_assert(lines_carrying(message, "error=TryReserveError"));
+        }
     }
 
     /// `stream_zlib_to`'s returned `u64` must equal the decompressed

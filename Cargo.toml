@@ -79,6 +79,9 @@ tempfile = "3"
 # tracing-test-macro fails to build (`internal::global_buf`).
 tracing-test = "0.2.5"
 proptest = "1"
+# The `%`-sigil gate's tokenizer (paksmith-core dev-dep). `span-locations`
+# gives token line numbers outside a proc macro.
+proc-macro2 = { version = "1.0.106", features = ["span-locations"] }
 zstd = "0.14"
 brotli = "8"
 # Phase 3d Task 4: DataTable CSV export (RFC 4180 writer). MIT/Unlicense.

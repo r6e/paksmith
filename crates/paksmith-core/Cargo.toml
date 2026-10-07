@@ -80,6 +80,8 @@ tempfile.workspace = true
 # without hand-rolling a `Subscriber` impl (which is non-trivial
 # due to the trait's many methods).
 tracing-test.workspace = true
+# `tests/no_display_sigil.rs` tokenizes core's source to find `%` sigils.
+proc-macro2.workspace = true
 
 [features]
 # Test-only accessors gated behind this feature so they're not part

@@ -216,7 +216,7 @@ pub(crate) fn resolve_engine_gate(
             // as a degraded export, with nothing naming the cause.
             if let Some(h) = hint {
                 tracing::debug!(
-                    hint = %h,
+                    hint = h.to_string(),
                     gate_major = major,
                     gate_minor = minor,
                     fires,

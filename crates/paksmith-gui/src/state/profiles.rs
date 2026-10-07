@@ -41,16 +41,10 @@ pub fn available() -> Vec<ProfileChoice> {
             })
             .collect(),
         Err(e) => {
-            // `e.to_string()` and NOT the `%` sigil — see `load_cache_lenient`'s
-            // canonical note in core's `profile/resolve.rs`: `%` is
-            // `field::display()` written RAW by the default subscriber, while a
-            // plain `String` field is escaped. Provenance at THIS site is
-            // local-store/OS-authored text, not registry text —
-            // `available_profiles` propagates only `ProfileStore::load`
-            // errors; a bad registry cache degrades to `None` inside core and
-            // never reaches here. Escape-by-default is the convention (#708)
-            // regardless, and this crate's own `log_buffer` visitor is the
-            // workspace's counter-example for `message` capture.
+            // `e.to_string()`, not the `%` sigil: `log_buffer`'s visitor
+            // Debug-quotes a string field but writes a `%` field's Display
+            // raw, as core's `tests/no_display_sigil.rs` explains for the
+            // text format.
             tracing::warn!(
                 error = e.to_string(),
                 "failed to load profile list for toolbar selector"

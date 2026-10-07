@@ -849,7 +849,7 @@ impl Usmap {
             let name = String::from_utf8(buf).unwrap_or_else(|err| {
                 tracing::warn!(
                     offset = position_usize(&cur),
-                    error = %err,
+                    error = err.to_string(),
                     "usmap name is not valid UTF-8; using empty string \
                      (downstream lookups will miss it)"
                 );
