@@ -33,6 +33,12 @@ pub(crate) struct ExtractConfig {
     /// `None` only under `--dry-run` against a root that does not exist; an
     /// `Option` because `Path::starts_with("")` is true for every path.
     canonical_root: Option<PathBuf>,
+    /// `output_dir` absolutized once, for the guard's bound and climb only:
+    /// writes, reported paths and messages keep the caller's spelling, which
+    /// the kernel can resolve where its absolute form exceeds `PATH_MAX`. For
+    /// a relative root it assumes the cwd's path, not just the cwd, is stable
+    /// for the run.
+    absolute_root: PathBuf,
     flat: bool,
     dry_run: bool,
     overwrite: bool,
@@ -76,15 +82,24 @@ impl ExtractConfig {
         // root. Write permission is not consulted: an absent root under an
         // unwritable parent previews and then fails the run, and an existing
         // unwritable root previews clean and fails per entry in the run.
-        let canonical_root = resolve_root(&output_dir, flags.dry_run)?;
+        let absolute_root = absolute_root(&output_dir)?;
+        let canonical_root = resolve_root(&output_dir, &absolute_root, flags.dry_run)?;
         Ok(Self {
             output_dir,
             canonical_root,
+            absolute_root,
             flat: flags.flat,
             dry_run: flags.dry_run,
             overwrite: flags.overwrite,
             prefs,
         })
+    }
+
+    /// `candidate`, a path under `output_dir`, spelled from `absolute_root`.
+    /// `None` for a path outside it, which `safe_join` never produces.
+    fn absolute_of(&self, candidate: &Path) -> Option<PathBuf> {
+        let tail = candidate.strip_prefix(&self.output_dir).ok()?;
+        Some(self.absolute_root.join(tail))
     }
 }
 
@@ -92,13 +107,16 @@ impl ExtractConfig {
 /// leaves absent. Decided by its deepest existing ancestor as the kernel sees
 /// the spelling: darwin's `realpath` pops a `..` that follows a regular file,
 /// and Windows reports a file in the chain as an absent path.
-fn resolve_root(output_dir: &Path, dry_run: bool) -> std::io::Result<Option<PathBuf>> {
-    // Absolutized so a RELATIVE root's climb reaches something that exists
-    // (`out` -> `""` -> `None` otherwise). Bounded like an entry's parent:
-    // `safe_join` appends only `Normal` components, so a root past either bound
-    // would fail every entry, in both modes and under `--flat`.
-    let absolute = std::path::absolute(output_dir)?;
-    let bounded = BoundedAbsolute::check(&absolute)
+fn resolve_root(
+    output_dir: &Path,
+    absolute: &Path,
+    dry_run: bool,
+) -> std::io::Result<Option<PathBuf>> {
+    // Climbed from the ABSOLUTE root so a relative one reaches something that
+    // exists (`out` -> `""` -> `None` otherwise). Bounded like an entry's
+    // parent: `safe_join` appends only `Normal` components, so a root past
+    // either bound would fail every entry, in both modes and under `--flat`.
+    let bounded = BoundedAbsolute::check(absolute)
         .map_err(|e| std::io::Error::new(ErrorKind::InvalidInput, e))?;
     let Some(found) = deepest_existing(bounded) else {
         return Err(std::io::Error::from(ErrorKind::NotFound));
@@ -106,7 +124,7 @@ fn resolve_root(output_dir: &Path, dry_run: bool) -> std::io::Result<Option<Path
     // POSIX resolves the missing component before applying the `..`, so
     // `create_dir_all` would build it and the root would then name something
     // that already existed.
-    if has_parent_dir_below(&absolute, found) {
+    if has_parent_dir_below(absolute, found) {
         return Err(std::io::Error::new(
             ErrorKind::InvalidInput,
             "`..` follows a directory that does not exist",
@@ -135,6 +153,27 @@ fn resolve_root(output_dir: &Path, dry_run: bool) -> std::io::Result<Option<Path
     }
     fs::create_dir_all(output_dir)?;
     Ok(Some(output_dir.canonicalize()?))
+}
+
+/// `output_dir` absolutized as a segment with more below it, so every path
+/// the guard builds under it is spelled as the writes traverse it: Windows
+/// normalizes a path's last segment differently from the others (see
+/// Microsoft's "File path formats on Windows systems"). A syscall on the root
+/// itself still sees it as a last segment. An empty path keeps
+/// `std::path::absolute`'s refusal (clap refuses `-o ""` first), and a spelling
+/// that absorbs the child into its prefix (`\\server`) is refused.
+fn absolute_root(output_dir: &Path) -> std::io::Result<PathBuf> {
+    if output_dir.as_os_str().is_empty() {
+        return std::path::absolute(output_dir);
+    }
+    let mut absolute = std::path::absolute(output_dir.join("x"))?;
+    if !absolute.pop() {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "not a path a directory can be created under",
+        ));
+    }
+    Ok(absolute)
 }
 
 /// Bounds the path the guard walks and resolves. An entry path is untrusted
@@ -224,6 +263,9 @@ const DANGLING_LINK: &str = "resolves through a symlink whose target does not ex
 /// Reported for a regular file where an entry needs a directory.
 const NOT_A_DIRECTORY: &str = "a component of the parent path is not a directory";
 
+/// Reported for a candidate that resolves, or is spelled, outside the root.
+const OUTSIDE_ROOT: &str = "resolves outside the output directory";
+
 /// Whether a `..` appears in the part of `absolute` below `found`, its deepest
 /// existing ancestor.
 fn has_parent_dir_below(absolute: &Path, found: &Path) -> bool {
@@ -240,26 +282,29 @@ fn has_parent_dir_below(absolute: &Path, found: &Path) -> bool {
 /// is `O_EXCL`, and `rename` replaces the entry. Judged on the canonical spelling, so a
 /// second spelling of the root — a bind mount, or macOS's
 /// `/System/Volumes/Data` — counts as outside it.
-fn verify_resolves_inside_root(path: &Path, canonical_root: Option<&Path>) -> Result<(), String> {
+fn verify_resolves_inside_root(cfg: &ExtractConfig, path: &Path) -> Result<(), String> {
+    // Spelled from the root `prepare` absolutized, so no entry pays a `getcwd`.
+    let Some(absolute) = cfg.absolute_of(path) else {
+        return Err(format!("{OUTSIDE_ROOT}: {}", path.display()));
+    };
     // Bounded BEFORE the walk and before the root check, so a preview and the
     // run it previews agree on a path over the bound.
-    let absolute = std::path::absolute(path.parent().unwrap_or(path))
-        .map_err(|e| format!("resolve ancestor of {}: {e}", path.display()))?;
-    let absolute =
-        BoundedAbsolute::check(&absolute).map_err(|e| format!("{e}: {}", path.display()))?;
+    let parent = BoundedAbsolute::check(absolute.parent().unwrap_or(&absolute))
+        .map_err(|e| format!("{e}: {}", path.display()))?;
 
     // Nothing to compare against — `--dry-run` on a root that does not exist —
     // so the walk is not paid for.
-    let Some(canonical_root) = canonical_root else {
+    let Some(canonical_root) = cfg.canonical_root.as_deref() else {
         return Ok(());
     };
 
-    let Some(ancestor) = deepest_existing(absolute) else {
+    let Some(ancestor) = deepest_existing(parent) else {
         return Err(format!("no resolvable ancestor: {}", path.display()));
     };
 
     // Rejected, never skipped, and named by the CANDIDATE: the ancestor is
-    // absolutized against a symlink-resolved `getcwd`.
+    // spelled from `absolute_root`, absolutized against a symlink-resolved
+    // `getcwd`.
     let resolved = ancestor.canonicalize().map_err(|e| match e.kind() {
         ErrorKind::NotFound if ancestor.is_symlink() => {
             format!("{DANGLING_LINK}: {}", path.display())
@@ -271,10 +316,7 @@ fn verify_resolves_inside_root(path: &Path, canonical_root: Option<&Path>) -> Re
     // `Path::starts_with` is component-wise; a string comparison would accept
     // a sibling whose name merely extends the root's (`out` vs `outside`).
     if !resolved.starts_with(canonical_root) {
-        return Err(format!(
-            "resolves outside the output directory: {}",
-            path.display()
-        ));
+        return Err(format!("{OUTSIDE_ROOT}: {}", path.display()));
     }
     // `canonicalize` resolves a regular file happily; a file higher up has
     // already failed it with ENOTDIR above.
@@ -488,7 +530,7 @@ fn write_output(
 
     // Above the dry-run return, and before any directory is created: creating
     // them outside the root is part of the vulnerability, not just the write.
-    verify_resolves_inside_root(&path, cfg.canonical_root.as_deref())?;
+    verify_resolves_inside_root(cfg, &path)?;
     if cfg.dry_run {
         return Ok(display);
     }
@@ -929,7 +971,7 @@ mod write_output_tests {
         assert!(parent.is_dir());
 
         assert_eq!(
-            verify_resolves_inside_root(&parent.join("x.bin"), Some(&base)),
+            verify_resolves_inside_root(&cfg(&base, false, true, false), &parent.join("x.bin")),
             Ok(())
         );
     }
@@ -1018,6 +1060,85 @@ mod write_output_tests {
         let long = PathBuf::from("x".repeat(MAX_CLIMB_PATH_BYTES - cwd.as_os_str().len()));
         for dry_run in [true, false] {
             assert_root_past_bound(&long, dry_run);
+        }
+    }
+
+    /// The guard climbs from the root `prepare` absolutized, not from each
+    /// candidate absolutized again: pointed elsewhere, that root moves both
+    /// the bound and the climb, while messages keep the caller's spelling.
+    #[test]
+    fn the_guard_climbs_from_the_root_prepare_absolutized() {
+        let base = tempfile::tempdir().unwrap();
+        let absent = base.path().join("absent");
+        let preview = cfg(&absent, false, true, false);
+        assert_eq!(preview.absolute_root, std::path::absolute(&absent).unwrap());
+        let stray = base.path().join("elsewhere/x.bin");
+        assert_eq!(
+            verify_resolves_inside_root(&preview, &stray),
+            Err(format!("{OUTSIDE_ROOT}: {}", stray.display()))
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("x.bin");
+        let deep = std::path::absolute(dir.path())
+            .unwrap()
+            .join("d/".repeat(MAX_CLIMB_STEPS));
+        let mut c = cfg(dir.path(), false, false, false);
+        c.absolute_root = deep;
+        assert_eq!(
+            write_output(&c, "x.bin", None, b"X"),
+            Err(format!("{TooDeepOrLong}: {}", candidate.display()))
+        );
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        c.absolute_root = std::path::absolute(elsewhere.path()).unwrap();
+        assert_eq!(
+            write_output(&c, "x.bin", None, b"X"),
+            Err(format!("{OUTSIDE_ROOT}: {}", candidate.display()))
+        );
+    }
+
+    /// An empty root stays refused in both modes, rather than taken as the
+    /// cwd. clap refuses `-o ""` before `prepare`; this is the layer below.
+    #[test]
+    fn an_empty_output_is_refused() {
+        for dry_run in [true, false] {
+            let err = try_cfg(Path::new(""), false, dry_run, false).err().unwrap();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
+        }
+    }
+
+    /// The root is absolutized the way the writes traverse it, as a segment
+    /// with more below it. Windows trims trailing spaces and dots from a
+    /// path's LAST segment, so on Windows absolutizing the root alone would
+    /// store `out` for both of these.
+    #[test]
+    fn the_root_is_absolutized_as_the_writes_traverse_it() {
+        let base = tempfile::tempdir().unwrap();
+        for name in ["out ", "out.."] {
+            let c = cfg(&base.path().join(name), false, true, false);
+            assert_eq!(
+                c.absolute_root.file_name(),
+                Some(std::ffi::OsStr::new(name))
+            );
+        }
+    }
+
+    /// A root whose prefix would absorb the probe child is refused up front
+    /// rather than classified as that child: on Windows `\\server\x` parses
+    /// as a share. Preview only, since elsewhere it is an ordinary relative
+    /// name.
+    #[test]
+    fn a_root_that_absorbs_the_probe_child_is_refused() {
+        let root = Path::new(r"\\paksmith-no-such-server");
+        let previewed = try_cfg(root, false, true, false);
+        if cfg!(windows) {
+            assert_eq!(
+                previewed.err().map(|e| e.kind()),
+                Some(ErrorKind::InvalidInput)
+            );
+        } else {
+            assert!(previewed.is_ok());
         }
     }
 
