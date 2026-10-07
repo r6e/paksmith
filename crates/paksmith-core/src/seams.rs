@@ -188,13 +188,19 @@ pub enum AssetSeam {
     /// `parse_data_resource_table`'s entries-vec reservation (#642).
     /// Surfaces as `AssetAllocationContext::DataResourceTable`.
     DataResourceTable,
+    /// `BulkDataResolver`'s copy of an uncompressed record's bytes.
+    /// Surfaces as `AssetAllocationContext::BulkDataBytes`.
+    BulkDataBytes,
+    /// `decompress_zlib`'s output pre-size.
+    /// Surfaces as `AssetAllocationContext::DecompressedBulkDataBytes`.
+    DecompressedBulkDataBytes,
 }
 
 impl AssetSeam {
     /// Total number of asset-side seam sites. Pinned by the `const _`
     /// guard below and by the exhaustive `match` in
     /// [`SeamSite::slot`].
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 12;
 
     /// Map an asset seam to its paired
     /// [`crate::error::AssetAllocationContext`].
@@ -221,12 +227,14 @@ impl AssetSeam {
             Self::SplitAssetCombined => C::SplitAssetCombined,
             Self::DataTableRows => C::DataTableRows,
             Self::DataResourceTable => C::DataResourceTable,
+            Self::BulkDataBytes => C::BulkDataBytes,
+            Self::DecompressedBulkDataBytes => C::DecompressedBulkDataBytes,
         }
     }
 }
 
 // Same compile-time guard pattern as PakSeam above (see precondition).
-const _: [(); AssetSeam::COUNT] = [(); AssetSeam::DataResourceTable as usize + 1];
+const _: [(); AssetSeam::COUNT] = [(); AssetSeam::DecompressedBulkDataBytes as usize + 1];
 
 // In the feature-off LIB target `COUNT`/`slot` are dead: their only
 // production consumers live in the `__test_utils`-gated
@@ -367,6 +375,12 @@ mod tests {
                 AssetSeam::DataResourceTable => {
                     "read_asset_data_resource_table_surfaces_allocation_failed_under_oom"
                 }
+                AssetSeam::BulkDataBytes => {
+                    "resolve_bulk_data_bytes_surfaces_allocation_failed_under_oom"
+                }
+                AssetSeam::DecompressedBulkDataBytes => {
+                    "resolve_decompressed_bulk_data_bytes_surfaces_allocation_failed_under_oom"
+                }
             }
         }
         // Touch both const fns so the matches' compile-time
@@ -415,6 +429,8 @@ mod tests {
                 AssetSeam::SplitAssetCombined => PakSeam::COUNT + 7,
                 AssetSeam::DataTableRows => PakSeam::COUNT + 8,
                 AssetSeam::DataResourceTable => PakSeam::COUNT + 9,
+                AssetSeam::BulkDataBytes => PakSeam::COUNT + 10,
+                AssetSeam::DecompressedBulkDataBytes => PakSeam::COUNT + 11,
             }
         }
         let pak_all = [
@@ -450,6 +466,8 @@ mod tests {
             AssetSeam::SplitAssetCombined,
             AssetSeam::DataTableRows,
             AssetSeam::DataResourceTable,
+            AssetSeam::BulkDataBytes,
+            AssetSeam::DecompressedBulkDataBytes,
         ];
         assert_eq!(asset_all.len(), AssetSeam::COUNT);
         for site in asset_all {

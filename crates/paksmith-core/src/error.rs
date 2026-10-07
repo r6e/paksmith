@@ -4889,6 +4889,11 @@ pub enum AssetAllocationContext {
     /// `Vec<FObjectDataResource>` for the UE 5.2+ data-resource
     /// table (#642).
     DataResourceTable,
+    /// `Vec<u8>` for a resolved uncompressed bulk-data record.
+    BulkDataBytes,
+    /// `Vec<u8>` for a zlib-compressed bulk-data record's output,
+    /// pre-sized from the compressed length.
+    DecompressedBulkDataBytes,
 }
 
 impl AssetAllocationContext {
@@ -4899,7 +4904,10 @@ impl AssetAllocationContext {
     #[must_use]
     pub fn unit(&self) -> BoundsUnit {
         match self {
-            Self::ExportPayloadBytes | Self::SplitAssetCombined => BoundsUnit::Bytes,
+            Self::ExportPayloadBytes
+            | Self::SplitAssetCombined
+            | Self::BulkDataBytes
+            | Self::DecompressedBulkDataBytes => BoundsUnit::Bytes,
             Self::NameTable
             | Self::ImportTable
             | Self::ExportTable
@@ -4925,6 +4933,8 @@ impl fmt::Display for AssetAllocationContext {
             Self::SplitAssetCombined => "combined .uasset+.uexp buffer",
             Self::DataTableRows => "data table rows",
             Self::DataResourceTable => "data resource entries",
+            Self::BulkDataBytes => "bulk data bytes",
+            Self::DecompressedBulkDataBytes => "decompressed bulk data bytes",
         };
         f.write_str(s)
     }
@@ -5625,6 +5635,19 @@ pub(crate) fn try_reserve_asset<T>(
             source,
         },
     })
+}
+
+/// `src` copied into a buffer reserved by [`try_reserve_asset`] at
+/// `seam`, where `to_vec` would abort on allocation failure.
+pub(crate) fn try_copy_asset(
+    src: &[u8],
+    asset_path: &str,
+    seam: crate::seams::AssetSeam,
+) -> crate::Result<Vec<u8>> {
+    let mut copy = Vec::new();
+    try_reserve_asset(&mut copy, src.len(), asset_path, seam)?;
+    copy.extend_from_slice(src);
+    Ok(copy)
 }
 
 /// Build a [`PaksmithError::MappingsParse`] wrapping
@@ -8527,6 +8550,11 @@ mod tests {
                 AssetAllocationContext::DataResourceTable,
                 "data resource entries",
             ),
+            (AssetAllocationContext::BulkDataBytes, "bulk data bytes"),
+            (
+                AssetAllocationContext::DecompressedBulkDataBytes,
+                "decompressed bulk data bytes",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -8622,6 +8650,11 @@ mod tests {
             ),
             (AssetAllocationContext::DataTableRows, BoundsUnit::Items),
             (AssetAllocationContext::DataResourceTable, BoundsUnit::Items),
+            (AssetAllocationContext::BulkDataBytes, BoundsUnit::Bytes),
+            (
+                AssetAllocationContext::DecompressedBulkDataBytes,
+                BoundsUnit::Bytes,
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(
