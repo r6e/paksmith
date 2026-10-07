@@ -337,54 +337,53 @@ pub fn flatten_capped(pkg: &Package, expanded: &HashSet<NodeId>, cap: usize) -> 
         // Children block: guarded by both `is_exp` and the cap. The cap guard is
         // necessary here (not only inside the helpers) because the Opaque / unknown /
         // typed arms push directly to `rows` without going through a helper.
-        // Nested `if` is intentional: MSRV 1.88 does not support let-chains.
-        #[allow(clippy::collapsible_if)]
-        if is_exp && rows.len() <= cap {
-            if let Some(asset) = pkg.payloads.get(idx) {
-                match payload_bag(asset) {
-                    Some(PropertyBag::Tree { properties }) => {
-                        for prop in properties {
-                            flatten_property(prop, 1, node_id, &mut rows, expanded, cap);
-                        }
+        if is_exp
+            && rows.len() <= cap
+            && let Some(asset) = pkg.payloads.get(idx)
+        {
+            match payload_bag(asset) {
+                Some(PropertyBag::Tree { properties }) => {
+                    for prop in properties {
+                        flatten_property(prop, 1, node_id, &mut rows, expanded, cap);
                     }
-                    Some(PropertyBag::Opaque { bytes }) => {
-                        rows.push(PropRow {
-                            depth: 1,
-                            label: format!("<opaque {} bytes>", bytes.len()),
-                            value: None,
-                            color: None,
-                            node_id: child_node_id(node_id, "__opaque__", 0),
-                            is_expandable: false,
-                            expanded: false,
-                            kind: PropKind::Leaf,
-                        });
-                    }
-                    // `PropertyBag` is #[non_exhaustive].
-                    Some(_) => {
-                        rows.push(PropRow {
-                            depth: 1,
-                            label: "<unknown payload>".to_string(),
-                            value: None,
-                            color: None,
-                            node_id: child_node_id(node_id, "__unknown_payload__", 0),
-                            is_expandable: false,
-                            expanded: false,
-                            kind: PropKind::Leaf,
-                        });
-                    }
-                    None => {
-                        // Typed asset with no accessible property bag.
-                        rows.push(PropRow {
-                            depth: 1,
-                            label: "<typed asset>".to_string(),
-                            value: None,
-                            color: None,
-                            node_id: child_node_id(node_id, "__typed__", 0),
-                            is_expandable: false,
-                            expanded: false,
-                            kind: PropKind::Leaf,
-                        });
-                    }
+                }
+                Some(PropertyBag::Opaque { bytes }) => {
+                    rows.push(PropRow {
+                        depth: 1,
+                        label: format!("<opaque {} bytes>", bytes.len()),
+                        value: None,
+                        color: None,
+                        node_id: child_node_id(node_id, "__opaque__", 0),
+                        is_expandable: false,
+                        expanded: false,
+                        kind: PropKind::Leaf,
+                    });
+                }
+                // `PropertyBag` is #[non_exhaustive].
+                Some(_) => {
+                    rows.push(PropRow {
+                        depth: 1,
+                        label: "<unknown payload>".to_string(),
+                        value: None,
+                        color: None,
+                        node_id: child_node_id(node_id, "__unknown_payload__", 0),
+                        is_expandable: false,
+                        expanded: false,
+                        kind: PropKind::Leaf,
+                    });
+                }
+                None => {
+                    // Typed asset with no accessible property bag.
+                    rows.push(PropRow {
+                        depth: 1,
+                        label: "<typed asset>".to_string(),
+                        value: None,
+                        color: None,
+                        node_id: child_node_id(node_id, "__typed__", 0),
+                        is_expandable: false,
+                        expanded: false,
+                        kind: PropKind::Leaf,
+                    });
                 }
             }
         }
