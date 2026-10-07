@@ -2,7 +2,8 @@
 //! parser surface (issue #276).
 //!
 //! Mirror of `oom_pak.rs` for the asset side. Each test drives a
-//! `Package::read_from` call against an arming
+//! `Package::read_from` call (or, for the bulk-data seams,
+//! `BulkDataResolver::resolve`) against an arming
 //! `SeamSite::Asset(AssetSeam::*)` seam — synthesizing a
 //! `TryReserveError` at the targeted `try_reserve_asset` call site
 //! and asserting that
@@ -16,15 +17,18 @@
 //! `DataTableRows` seam's test was added with the Phase 3d parser).
 //!
 //! **Naming convention** matches `oom_pak.rs`:
-//! `read_<scope>_surfaces_allocation_failed_under_oom`. The input
-//! isn't malformed — it's a valid asset whose typed-error path we
-//! surface via injected allocator failure.
+//! `read_<scope>_surfaces_allocation_failed_under_oom`, or
+//! `resolve_<scope>_…` for the bulk-data seams. The input isn't
+//! malformed — it's a valid asset or bulk record whose typed-error
+//! path we surface via injected allocator failure.
 
 #![allow(missing_docs)]
 
 use paksmith_core::PaksmithError;
 use paksmith_core::asset::Package;
+use paksmith_core::asset::bulk_data::{BulkDataFlags, BulkDataResolver, FByteBulkData};
 use paksmith_core::error::{AssetAllocationContext, AssetParseFault};
+use paksmith_core::testing::bench::zlib_compress_framed;
 use paksmith_core::testing::oom::{AssetSeam, SeamSite, arm_at};
 use paksmith_core::testing::uasset::{
     build_minimal_custom_versions_populated, build_minimal_ue4_27, build_minimal_ue4_27_split,
@@ -282,5 +286,78 @@ fn read_asset_data_resource_table_surfaces_allocation_failed_under_oom() {
             }
         ),
         "expected AllocationFailed{{DataResourceTable}}; got {err:?}"
+    );
+}
+
+/// `BULKDATA_PayloadAtEndOfFile` (bit 0), private in `bulk_data.rs`.
+const PAYLOAD_AT_END_OF_FILE: u32 = 0x0000_0001;
+/// `BULKDATA_SerializeCompressedZLIB` (bit 1), private in `bulk_data.rs`.
+const SERIALIZE_COMPRESSED_ZLIB: u32 = 0x0000_0002;
+
+/// Resolve one Inline-tier record storing `stored` with `seam` armed;
+/// return the `AllocationFailed` fault's context and requested size.
+fn resolve_bulk_under_oom(
+    seam: AssetSeam,
+    flags: u32,
+    stored: &[u8],
+    element_count: i64,
+) -> (AssetAllocationContext, usize) {
+    let mut uasset = vec![0u8; 64];
+    uasset.extend_from_slice(stored);
+    let header_len = uasset.len() as u64;
+    let resolver = BulkDataResolver::new_for_test(uasset, header_len, 0);
+    let record = FByteBulkData::for_test(
+        BulkDataFlags::from(flags),
+        element_count,
+        stored.len() as u64,
+        64,
+    );
+    let _guard = arm_at(SeamSite::Asset(seam), 0);
+    match resolver.resolve(&record, "Game/Test.uasset") {
+        Err(PaksmithError::AssetParse {
+            fault:
+                AssetParseFault::AllocationFailed {
+                    context, requested, ..
+                },
+            ..
+        }) => (context, requested),
+        other => panic!("expected AllocationFailed; got {other:?}"),
+    }
+}
+
+/// Arm `AssetSeam::BulkDataBytes` → the copy of an uncompressed bulk
+/// record surfaces `AllocationFailed{BulkDataBytes}` for its full size.
+#[test]
+fn resolve_bulk_data_bytes_surfaces_allocation_failed_under_oom() {
+    let payload = [0xAB; 32];
+    assert_eq!(
+        resolve_bulk_under_oom(
+            AssetSeam::BulkDataBytes,
+            PAYLOAD_AT_END_OF_FILE,
+            &payload,
+            32
+        ),
+        (AssetAllocationContext::BulkDataBytes, payload.len())
+    );
+}
+
+/// Arm `AssetSeam::DecompressedBulkDataBytes` → a zlib record's output
+/// pre-size surfaces `AllocationFailed{DecompressedBulkDataBytes}` for
+/// the compressed length.
+#[test]
+fn resolve_decompressed_bulk_data_bytes_surfaces_allocation_failed_under_oom() {
+    let payload = [0xAB; 4096];
+    let framed = zlib_compress_framed(&payload);
+    assert_eq!(
+        resolve_bulk_under_oom(
+            AssetSeam::DecompressedBulkDataBytes,
+            PAYLOAD_AT_END_OF_FILE | SERIALIZE_COMPRESSED_ZLIB,
+            &framed,
+            4096,
+        ),
+        (
+            AssetAllocationContext::DecompressedBulkDataBytes,
+            framed.len()
+        )
     );
 }

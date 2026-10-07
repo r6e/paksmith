@@ -54,7 +54,7 @@ use crate::asset::summary::{PKG_UNVERSIONED_PROPERTIES, PackageSummary};
 use crate::asset::{AssetContext, decode_warn, ends_package_read};
 use crate::error::{
     AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,
-    CompanionFileKind, PaksmithError, try_reserve_asset,
+    CompanionFileKind, PaksmithError, try_copy_asset, try_reserve_asset,
 };
 // `SeamSite` goes unused in the no-`__test_utils` lib-test compile
 // (the seam machinery no-ops there); that build mode is exercised by
@@ -1515,7 +1515,7 @@ fn read_payloads(
         //
         // `Opaque` needs `Vec<u8>` ownership for storage in the
         // `Package` struct. The cold error path uses
-        // `try_reserve_asset` + `extend_from_slice` (NOT
+        // `try_copy_asset` (NOT
         // `to_vec()`, which routes through the infallible global
         // allocator path and would abort on OOM — violating
         // CLAUDE.md's "no panics in core" invariant). The hot
@@ -1553,15 +1553,11 @@ fn read_payloads(
                     error = err.to_string(),
                     "property iteration failed, falling back to Opaque"
                 );
-                let mut buf: Vec<u8> = Vec::new();
-                try_reserve_asset(
-                    &mut buf,
-                    export_slice.len(),
+                PropertyBag::opaque(try_copy_asset(
+                    export_slice,
                     asset_path,
                     AssetSeam::ExportPayloadBytes,
-                )?;
-                buf.extend_from_slice(export_slice);
-                PropertyBag::opaque(buf)
+                )?)
             }
         };
         payloads.push(super::Asset::Generic(bag));

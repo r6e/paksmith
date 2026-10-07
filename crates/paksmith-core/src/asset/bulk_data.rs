@@ -1064,8 +1064,8 @@ pub(crate) fn counting_loader(
 ///    refunded.
 /// 5. Per-package budget: cumulative bytes-resolved counter
 ///    incremented BEFORE allocation; fires
-///    `BulkDataPackageBudgetExceeded` if over cap (rollback on
-///    over-budget OR decode-failure paths).
+///    `BulkDataPackageBudgetExceeded` if over cap (rolled back when
+///    the budget check or step 6 fails).
 /// 6. Compression decode: chunked `FCompressedChunkInfo` framing +
 ///    zlib via flate2 (see `decompress_zlib`); the framing summary's
 ///    uncompressed total is verified against `ElementCount`
@@ -1075,6 +1075,8 @@ pub(crate) fn counting_loader(
 ///    `UnsupportedBulkCompression`; a decompressed claim over
 ///    `MAX_BULK_DATA_SIZE` fires `BulkDataSizeExceeded`; a failure to
 ///    grow the output buffer surfaces as `Io` of kind `OutOfMemory`.
+///    A failure to reserve the output buffer, or an uncompressed
+///    record's copy, fires `AllocationFailed`.
 ///
 /// # Threading
 ///
@@ -1114,7 +1116,8 @@ pub struct BulkDataResolver {
     /// Enforces `MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE` (16 GiB).
     /// Incremented BEFORE allocation against the wire-claimed size
     /// (`size_on_disk` for uncompressed, `element_count` for zlib);
-    /// rolled back on budget-exceeded OR decode-failure paths.
+    /// rolled back when the budget check or the step-6 decode or copy
+    /// fails (see the struct's defense chain).
     /// `AtomicU64::Relaxed` — pure counter with no happens-before
     /// relationship to other memory, so SeqCst's barriers are
     /// wasted (zero cost on x86, ~5-10 ns on ARM64).
@@ -1245,7 +1248,8 @@ impl BulkDataResolver {
     ///
     /// Per the defense chain documented on the struct: the
     /// `AssetParseFault` bulk-data variant for the invariant the
-    /// record violated, `Io` of kind `OutOfMemory` when inflating a zlib
+    /// record violated, `AllocationFailed` when the payload's buffer cannot
+    /// be reserved, `Io` of kind `OutOfMemory` when inflating a zlib
     /// payload cannot grow its buffer, or the companion loader's error. A
     /// companion that failed to load reports that failure again instead
     /// of loading again.
@@ -1484,14 +1488,15 @@ impl BulkDataResolver {
 
         // 6. Compression decode + materialize.
         let bytes = if record.flags.is_zlib_compressed() {
-            decompress_zlib(raw, record.element_count, asset_path).inspect_err(|_| {
-                let _ = self
-                    .bytes_resolved
-                    .fetch_sub(claimed_size, std::sync::atomic::Ordering::Relaxed);
-            })?
+            decompress_zlib(raw, record.element_count, asset_path)
         } else {
-            raw.to_vec()
-        };
+            crate::error::try_copy_asset(raw, asset_path, crate::seams::AssetSeam::BulkDataBytes)
+        }
+        .inspect_err(|_| {
+            let _ = self
+                .bytes_resolved
+                .fetch_sub(claimed_size, std::sync::atomic::Ordering::Relaxed);
+        })?;
 
         Ok(BulkData {
             bytes,
@@ -1932,7 +1937,13 @@ pub(crate) fn decompress_zlib(
     // makes an over-long stream detectable while capping a
     // decompression bomb at one byte past the table's claim, and the
     // table sums were pinned to `expected` above.
-    let mut out: Vec<u8> = Vec::with_capacity(compressed.len());
+    let mut out: Vec<u8> = Vec::new();
+    crate::error::try_reserve_asset(
+        &mut out,
+        compressed.len(),
+        asset_path,
+        crate::seams::AssetSeam::DecompressedBulkDataBytes,
+    )?;
     for (index, entry) in table_entries.iter().enumerate() {
         let mut entry_pos = 0usize;
         let (chunk_comp, chunk_unc) = read_chunk_info(entry, &mut entry_pos)
@@ -3495,6 +3506,97 @@ mod tests {
             .expect("rollback restored the headroom the follow-up needs");
     }
 
+    /// Resolve `record` with `seam` armed and the budget pre-seeded so
+    /// the record's 100-byte claim fits but a leaked claim plus an 8-byte
+    /// follow-up would not. Expects `AllocationFailed` with `expected`'s
+    /// context and requested size, then the follow-up to fit.
+    #[cfg(feature = "__test_utils")]
+    fn assert_allocation_failure_rolls_back(
+        resolver: &BulkDataResolver,
+        record: &FByteBulkData,
+        seam: crate::seams::AssetSeam,
+        expected: (crate::error::AssetAllocationContext, usize),
+    ) {
+        resolver.set_bytes_resolved_for_test(MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE - 105);
+        let guard = crate::testing::oom::arm_at(crate::seams::SeamSite::Asset(seam), 0);
+        match resolver.resolve(record, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault:
+                    crate::error::AssetParseFault::AllocationFailed {
+                        context, requested, ..
+                    },
+                ..
+            }) => assert_eq!((context, requested), expected),
+            other => panic!("expected AllocationFailed, got {other:?}"),
+        }
+        drop(guard);
+        let follow_up = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 8, 0);
+        let _data = resolver
+            .resolve(&follow_up, "test.uasset")
+            .expect("rollback restored the headroom the follow-up needs");
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn resolve_copy_allocation_failure_rolls_back_budget() {
+        let record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 100, 0);
+        let resolver = BulkDataResolver::new_for_test(vec![0xAA; 200], 200, 0);
+        assert_allocation_failure_rolls_back(
+            &resolver,
+            &record,
+            crate::seams::AssetSeam::BulkDataBytes,
+            (crate::error::AssetAllocationContext::BulkDataBytes, 100),
+        );
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn resolve_zlib_allocation_failure_rolls_back_budget() {
+        let framed = crate::testing::bench::zlib_compress_framed(&[0xAB; 100]);
+        let mut uasset = vec![0u8; 64];
+        uasset.extend_from_slice(&framed);
+        let header_len = uasset.len() as u64;
+        let resolver = BulkDataResolver::new_for_test(uasset, header_len, 0);
+        let record = FByteBulkData::for_test(
+            BulkDataFlags::from(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SERIALIZE_COMPRESSED_ZLIB),
+            100,
+            framed.len() as u64,
+            64,
+        );
+        assert_allocation_failure_rolls_back(
+            &resolver,
+            &record,
+            crate::seams::AssetSeam::DecompressedBulkDataBytes,
+            (
+                crate::error::AssetAllocationContext::DecompressedBulkDataBytes,
+                framed.len(),
+            ),
+        );
+    }
+
+    /// The budget check runs before the copy: an over-budget record
+    /// fails on the budget and never reaches the copy's armed seam.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn resolve_charges_the_budget_before_copying() {
+        let site = crate::seams::SeamSite::Asset(crate::seams::AssetSeam::BulkDataBytes);
+        let record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 100, 0);
+        let resolver = BulkDataResolver::new_for_test(vec![0xAA; 200], 200, 0);
+        resolver.set_bytes_resolved_for_test(MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE - 50);
+        let _guard = crate::testing::oom::arm_at(site, 0);
+        match resolver.resolve(&record, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BulkDataPackageBudgetExceeded { .. },
+                ..
+            }) => {}
+            other => panic!("expected BulkDataPackageBudgetExceeded, got {other:?}"),
+        }
+        assert!(
+            crate::testing::oom::maybe_fail_at(site).is_err(),
+            "the copy's seam fired before the budget check"
+        );
+    }
+
     #[cfg(feature = "__test_utils")]
     #[test]
     fn resolve_rejects_no_tier_flag() {
@@ -3548,8 +3650,8 @@ mod tests {
         // SECURITY F1 regression: the output is pre-sized from `compressed.len()`,
         // not the wire `expected`. A highly-compressible payload (256 KiB of zeros
         // → a few-hundred-byte framed input) decompresses to FAR more than the
-        // pre-size, so the decode loop must grow past
-        // `Vec::with_capacity(compressed.len())`. Pins that the proportional
+        // pre-size, so the decode loop must grow past the
+        // `compressed.len()` reservation. Pins that the proportional
         // pre-size still yields the full output (and that a tiny compressed
         // input does NOT pre-allocate from the claim). 256 KiB at the default
         // 128 KiB chunk size also exercises the two-chunk path.
