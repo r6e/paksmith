@@ -40,8 +40,9 @@ pub(crate) struct ExtractArgs {
     /// Output directory (created if absent; a path that is itself a symlink
     /// is followed, so create it yourself in shared locations). An entry
     /// whose containing directory resolves outside it through a symlink is
-    /// refused; a symlinked destination file is refused, or with
-    /// `--overwrite` replaced rather than followed.
+    /// refused; a symlink, FIFO, socket or device node at an entry's
+    /// destination is refused, or with `--overwrite` replaced rather than
+    /// written through.
     #[arg(short, long)]
     pub(crate) output: PathBuf,
 

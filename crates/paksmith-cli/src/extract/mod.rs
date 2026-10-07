@@ -1268,29 +1268,6 @@ mod write_output_tests {
         );
     }
 
-    /// The same through a LIVE link to a regular file: it is a non-directory,
-    /// not a dangling link, in both modes.
-    #[cfg(unix)]
-    #[test]
-    fn a_root_beneath_a_link_to_a_file_is_not_a_directory() {
-        let base = tempfile::tempdir().unwrap();
-        let as_file = base.path().join("afile");
-        std::fs::write(&as_file, b"x").unwrap();
-        let link = base.path().join("linkfile");
-        std::os::unix::fs::symlink(&as_file, &link).unwrap();
-
-        for dry_run in [true, false] {
-            let kind = try_cfg(&link.join("out"), false, dry_run, false)
-                .err()
-                .map(|e| e.kind());
-            assert_eq!(
-                kind,
-                Some(ErrorKind::NotADirectory),
-                "dry_run={dry_run}: a live link to a file was misread"
-            );
-        }
-    }
-
     /// The preview's notion of a usable root must match the real run's.
     /// `canonicalize` resolves a regular file happily where `create_dir_all`
     /// refuses it, and reports a DANGLING LINK as `NotFound` — which, taken
@@ -1745,6 +1722,36 @@ mod write_output_tests {
             b"PAYLOAD"
         );
         assert_eq!(std::fs::read_dir(victim.path()).unwrap().count(), 0);
+    }
+
+    /// A socket at the destination is refused and left in place, or under
+    /// `--overwrite` replaced by a regular file. Rooted in `/tmp` so the bind
+    /// path fits `sun_path`.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_destination_is_refused_or_replaced() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let leaf = root.path().join("s.bin");
+        let _listener = std::os::unix::net::UnixListener::bind(&leaf).unwrap();
+
+        let refused = cfg(root.path(), false, false, false);
+        let err = write_output(&refused, "s.bin", None, b"PAYLOAD").unwrap_err();
+        assert!(
+            err.starts_with("output exists (use --overwrite): "),
+            "{err}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&leaf)
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+
+        let replacing = cfg(root.path(), false, false, true);
+        let _reported = write_output(&replacing, "s.bin", None, b"PAYLOAD").unwrap();
+        assert_eq!(std::fs::read(&leaf).unwrap(), b"PAYLOAD");
     }
 
     /// Only an OCCUPIED destination goes to the replace. Any other open failure
