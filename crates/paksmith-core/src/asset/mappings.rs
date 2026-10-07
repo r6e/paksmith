@@ -1113,25 +1113,23 @@ impl Usmap {
                 source,
             )
         })?;
+        let graph = SchemaGraph::new(schemas);
         let mut total: u64 = 0;
-        for class_name in schemas.keys() {
-            // Cheap pre-allocation cap check: chain-walk + sum bounded
-            // by MAX_INHERITANCE_DEPTH = 64. Refuse to call
-            // compute_flattened (which would allocate the full flat
-            // vec) when the running total would exceed the cap.
+        for (index, (class_name, _)) in graph.classes.iter().enumerate() {
+            // compute_flattened refuses before allocating when this class's
+            // chain would exceed the remaining budget.
             let remaining = MAX_USMAP_FLATTENED_TOTAL_ENTRIES.saturating_sub(total);
-            let flat = Self::compute_flattened(schemas, class_name, remaining)?;
+            let flat = Self::compute_flattened(&graph, index, remaining)?;
             total = total.saturating_add(flat.len() as u64);
-            let _ = flattened.insert(class_name.clone(), flat);
+            let _ = flattened.insert((*class_name).clone(), flat);
         }
         Ok(flattened)
     }
 
-    /// Walks the super-type chain for `class_name` and returns the
-    /// flattened, sorted property list. Shared between `from_bytes`'s
-    /// cache population and any direct invocation; the caching path
-    /// is what makes [`Self::get_all_properties`] a HashMap lookup
-    /// rather than a chain walk.
+    /// Walks the super-type chain of the class at `root` in `graph` and
+    /// returns the flattened, sorted property list. The caching path in
+    /// [`Self::build_flattened_cache`] is what makes
+    /// [`Self::get_all_properties`] a HashMap lookup rather than a chain walk.
     ///
     /// Per CUE4Parse `MappingsSchema.cs::Struct.TryGetValue` the wire
     /// absolute slot indices are **child-first concatenated**:
@@ -1140,66 +1138,46 @@ impl Usmap {
     /// `Child.PropertyCount + i`, grand-parent's slot `i` occupies
     /// `Child.PropertyCount + Parent.PropertyCount + i`, and so on.
     ///
-    /// **Cycle handling:** A malicious `.usmap` can craft a cyclic
-    /// `super_type` chain (`A: B`, `B: A`). A naive walk would loop
-    /// forever — DoS. We track visited classes and break on cycle,
-    /// and additionally cap the chain at `MAX_INHERITANCE_DEPTH`.
+    /// A malicious `.usmap` can make the chain cyclic (`A: B`, `B: A`) or
+    /// deeper than `MAX_INHERITANCE_DEPTH`. Either one is warned about and
+    /// truncated rather than failing the load: the `.usmap` is
+    /// operator-supplied, and the properties collected so far still apply.
     fn compute_flattened(
-        schemas: &HashMap<String, ClassSchema>,
-        class_name: &str,
+        graph: &SchemaGraph<'_>,
+        root: usize,
         budget: u64,
     ) -> crate::Result<Vec<ResolvedProperty>> {
-        // Walk child-first so the absolute-index offset accumulates
-        // forward through the chain. `chain[0]` is `class_name`,
-        // `chain[1]` is its parent, etc.
-        let mut chain: Vec<&ClassSchema> = Vec::new();
-        let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut current = class_name;
-        let mut truncated_by_depth = true;
-        for _ in 0..MAX_INHERITANCE_DEPTH {
-            if !visited.insert(current) {
-                // Cycle: warn (the .usmap is operator-supplied — don't
-                // abort the asset extraction over a malformed file) and
-                // stop walking; caller still gets the properties
-                // collected up to this point.
+        let class_name = |index: usize| crate::untrusted::clamp(graph.classes[index].0);
+        // Child-first: `walked[0]` is `root`, `walked[1]` its parent, etc.
+        let mut walked: Vec<usize> = Vec::new();
+        let mut next = Some(root);
+        while let Some(index) = next {
+            if walked.len() == MAX_INHERITANCE_DEPTH {
                 tracing::warn!(
-                    root_class = class_name,
-                    repeated_class = current,
+                    root_class = &*class_name(root),
+                    limit = MAX_INHERITANCE_DEPTH,
+                    "inheritance chain exceeds MAX_INHERITANCE_DEPTH; truncating walk"
+                );
+                break;
+            }
+            if walked.contains(&index) {
+                tracing::warn!(
+                    root_class = &*class_name(root),
+                    repeated_class = &*class_name(index),
                     "circular super_type chain in .usmap; truncating inheritance walk"
                 );
-                truncated_by_depth = false;
                 break;
             }
-            let Some(schema) = schemas.get(current) else {
-                truncated_by_depth = false;
-                break;
-            };
-            chain.push(schema);
-            match schema.super_type.as_deref() {
-                Some(parent) if !parent.is_empty() => current = parent,
-                _ => {
-                    truncated_by_depth = false;
-                    break;
-                }
-            }
+            walked.push(index);
+            next = graph.parents[index];
         }
-        if truncated_by_depth {
-            // Loop hit `MAX_INHERITANCE_DEPTH` with the chain still
-            // continuing — `.usmap` is malformed (or absurdly deep).
-            // Warn but don't error; same operator-supplied-input
-            // posture as the cycle arm.
-            tracing::warn!(
-                root_class = class_name,
-                limit = MAX_INHERITANCE_DEPTH,
-                "inheritance chain exceeds MAX_INHERITANCE_DEPTH; truncating walk"
-            );
-        }
+        let chain = || walked.iter().map(|&index| graph.classes[index].1);
 
         // Per-class size from the chain walk above (bounded by
         // MAX_INHERITANCE_DEPTH × per-class cap). Cheap to compute
         // — at most 64 reads — and used for both the running-total
         // budget check below and the `try_reserve` pre-allocation.
-        let total: usize = chain.iter().map(|s| s.properties.len()).sum();
+        let total: usize = chain().map(|s| s.properties.len()).sum();
         // Cap check BEFORE allocating. `budget` is the remaining
         // FlattenedCacheTooLarge headroom passed by
         // `build_flattened_cache`; refusing to allocate this class
@@ -1226,7 +1204,7 @@ impl Usmap {
             mappings_alloc_failed(MappingsAllocationContext::FlattenedCache, total, source)
         })?;
         let mut offset: u32 = 0;
-        for schema in &chain {
+        for schema in chain() {
             for property in &schema.properties {
                 // u32 arithmetic: the offset can exceed u16::MAX
                 // across a deep chain (MAX_INHERITANCE_DEPTH = 64
@@ -1456,6 +1434,38 @@ fn read_mapped_type(
         27 => MappedPropertyType::Unknown(type_byte), // FieldPathProperty
         other => MappedPropertyType::Unknown(other),
     })
+}
+
+/// The schema table as a list, each class's `super_type` resolved to its
+/// parent's position once, so the inheritance walk compares positions
+/// rather than hashing class names of up to 64 KiB at every step (#821).
+struct SchemaGraph<'a> {
+    classes: Vec<(&'a String, &'a ClassSchema)>,
+    /// `parents[i]` is the position of class `i`'s parent, or `None` when its
+    /// `super_type` is absent, empty, or names a class the table lacks.
+    parents: Vec<Option<usize>>,
+}
+
+impl<'a> SchemaGraph<'a> {
+    fn new(schemas: &'a HashMap<String, ClassSchema>) -> Self {
+        let classes: Vec<(&String, &ClassSchema)> = schemas.iter().collect();
+        let positions: HashMap<&str, usize> = classes
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _))| (name.as_str(), index))
+            .collect();
+        let parents = classes
+            .iter()
+            .map(|(_, schema)| {
+                schema
+                    .super_type
+                    .as_deref()
+                    .filter(|parent| !parent.is_empty())
+                    .and_then(|parent| positions.get(parent).copied())
+            })
+            .collect();
+        Self { classes, parents }
+    }
 }
 
 /// Caps summed across a whole schema table rather than per schema.
@@ -1796,7 +1806,7 @@ mod tests {
         let mut schemas: HashMap<String, ClassSchema> = HashMap::new();
         let _ = schemas.insert(class_name.to_string(), schema);
         // budget = 1, class has 1 property → exactly at boundary.
-        let result = Usmap::compute_flattened(&schemas, class_name, 1)
+        let result = flatten(&schemas, class_name, 1)
             .expect("budget=1 with total=1 must succeed (cap is total > budget, not >=)");
         assert_eq!(result.len(), 1);
     }
@@ -1823,7 +1833,7 @@ mod tests {
         let mut schemas: HashMap<String, ClassSchema> = HashMap::new();
         let _ = schemas.insert(class_name.to_string(), schema);
         // budget = 1, class has 2 properties → `2 > 1` fires the cap.
-        let err = Usmap::compute_flattened(&schemas, class_name, 1)
+        let err = flatten(&schemas, class_name, 1)
             .expect_err("total=2 over budget=1 must fire FlattenedCacheTooLarge");
         match err {
             crate::PaksmithError::MappingsParse {
@@ -1838,6 +1848,112 @@ mod tests {
             }
             other => panic!("expected FlattenedCacheTooLarge, got {other:?}"),
         }
+    }
+
+    /// [`Usmap::compute_flattened`] for the class named `root` in `schemas`.
+    fn flatten(
+        schemas: &HashMap<String, ClassSchema>,
+        root: &str,
+        budget: u64,
+    ) -> crate::Result<Vec<ResolvedProperty>> {
+        let graph = SchemaGraph::new(schemas);
+        let root = graph
+            .classes
+            .iter()
+            .position(|(name, _)| name.as_str() == root)
+            .expect("root is in the table");
+        Usmap::compute_flattened(&graph, root, budget)
+    }
+
+    /// A class with one Int32 property named after the class, whose
+    /// super_type is `parent`.
+    fn chain_class(name: &str, parent: Option<&str>) -> (String, ClassSchema) {
+        let schema = ClassSchema {
+            name: name.to_string(),
+            super_type: parent.map(str::to_string),
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: Arc::from(name),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        (name.to_string(), schema)
+    }
+
+    /// `n` classes, each the parent of the one before it; the last one's
+    /// parent is `last_parent`.
+    fn class_chain(
+        n: usize,
+        last_parent: Option<&str>,
+    ) -> (Vec<String>, HashMap<String, ClassSchema>) {
+        let names: Vec<String> = (0..n)
+            .map(|i| format!("{}{i}", crate::untrusted::test_support::hostile_name("D")))
+            .collect();
+        let schemas = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                chain_class(name, names.get(i + 1).map(String::as_str).or(last_parent))
+            })
+            .collect();
+        (names, schemas)
+    }
+
+    /// A cyclic super_type chain stops at the repeat with every class
+    /// before it collected, and the warning names the root and the repeated
+    /// class, both clamped.
+    #[tracing_test::traced_test]
+    #[test]
+    fn cyclic_chain_stops_at_the_repeat_and_warns_with_clamped_names() {
+        use crate::untrusted::test_support::{hostile_name, lines_clamped};
+
+        let [root, a, b] = ["R", "A", "B"].map(hostile_name);
+        let schemas: HashMap<String, ClassSchema> = [
+            chain_class(&root, Some(&a)),
+            chain_class(&a, Some(&b)),
+            chain_class(&b, Some(&a)),
+        ]
+        .into_iter()
+        .collect();
+
+        let flat = flatten(&schemas, &root, u64::MAX).unwrap();
+
+        let names: Vec<&str> = flat.iter().map(|p| p.property.name.as_ref()).collect();
+        assert_eq!(names, [root.as_str(), a.as_str(), b.as_str()]);
+        logs_assert(lines_clamped("circular super_type chain", "R"));
+        logs_assert(lines_clamped("circular super_type chain", "A"));
+        assert!(!logs_contain("BKEPT"));
+    }
+
+    /// A chain longer than `MAX_INHERITANCE_DEPTH` stops at the limit, and
+    /// the warning names the root class clamped.
+    #[tracing_test::traced_test]
+    #[test]
+    fn overlong_chain_stops_at_the_depth_limit_and_warns_with_a_clamped_root() {
+        use crate::untrusted::test_support::lines_clamped;
+
+        let (names, schemas) = class_chain(MAX_INHERITANCE_DEPTH + 2, None);
+
+        let flat = flatten(&schemas, &names[0], u64::MAX).unwrap();
+
+        assert_eq!(flat.len(), MAX_INHERITANCE_DEPTH);
+        logs_assert(lines_clamped("exceeds MAX_INHERITANCE_DEPTH", "D"));
+    }
+
+    /// A chain that ends at exactly `MAX_INHERITANCE_DEPTH` classes, the
+    /// last naming a parent the table does not have, is complete: no depth
+    /// warning.
+    #[tracing_test::traced_test]
+    #[test]
+    fn chain_ending_at_a_missing_parent_on_the_depth_limit_does_not_warn() {
+        let (names, schemas) = class_chain(MAX_INHERITANCE_DEPTH, Some("Missing"));
+
+        let flat = flatten(&schemas, &names[0], u64::MAX).unwrap();
+
+        assert_eq!(flat.len(), MAX_INHERITANCE_DEPTH);
+        assert!(!logs_contain("exceeds MAX_INHERITANCE_DEPTH"));
     }
 
     #[test]
