@@ -3,6 +3,7 @@ pub(crate) mod safe_path;
 pub(crate) mod select;
 pub(crate) mod summary;
 
+use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Write};
@@ -18,6 +19,7 @@ use paksmith_core::container::ContainerReader;
 use paksmith_core::export::HandlerRegistry;
 use paksmith_core::{StagedReplace, StagedReplaceError};
 
+use self::bounded::BoundedAbsolute;
 use self::classify::{EntryClass, classify};
 use self::select::{FormatPrefs, select_export};
 use self::summary::EntryOutcome;
@@ -54,8 +56,9 @@ impl ExtractConfig {
         &self.output_dir
     }
 
-    /// Create the output directory and resolve it once, so every entry is
-    /// checked against a fixed root.
+    /// Bound the output directory, then create it and resolve it once, so
+    /// every entry is checked against a fixed root. A root past the guard's
+    /// climb bounds is refused before anything is created.
     ///
     /// Under `--dry-run` an absent root is classified but not created, since a
     /// preview that writes is not a preview.
@@ -91,10 +94,13 @@ impl ExtractConfig {
 /// and Windows reports a file in the chain as an absent path.
 fn resolve_root(output_dir: &Path, dry_run: bool) -> std::io::Result<Option<PathBuf>> {
     // Absolutized so a RELATIVE root's climb reaches something that exists
-    // (`out` -> `""` -> `None` otherwise); not bounded, because the bound is
-    // for untrusted entry paths.
+    // (`out` -> `""` -> `None` otherwise). Bounded like an entry's parent:
+    // `safe_join` appends only `Normal` components, so a root past either bound
+    // would fail every entry, in both modes and under `--flat`.
     let absolute = std::path::absolute(output_dir)?;
-    let Some(found) = deepest_existing(&absolute) else {
+    let bounded = BoundedAbsolute::check(&absolute)
+        .map_err(|e| std::io::Error::new(ErrorKind::InvalidInput, e))?;
+    let Some(found) = deepest_existing(bounded) else {
         return Err(std::io::Error::from(ErrorKind::NotFound));
     };
     // POSIX resolves the missing component before applying the `..`, so
@@ -137,9 +143,10 @@ fn resolve_root(output_dir: &Path, dry_run: bool) -> std::io::Result<Option<Path
 /// growing prefix, so an absurd entry turns an O(1) refusal into quadratic
 /// churn. One byte under `PATH_MAX`, taken as 1024 unless the platform is
 /// known to allow 4096, so it is the bound, not the walk's ENAMETOOLONG, that
-/// refuses an over-long spelling in both modes. A spelling that grows as it
-/// resolves (macOS's `/tmp`) can still fail the walk in a real run that its
-/// preview of an absent root passed.
+/// refuses an over-long spelling in both modes. The output root is held to
+/// the same bound. A spelling that grows as it resolves (macOS's `/tmp`) can
+/// still fail the walk in a real run that its preview of an absent root
+/// passed.
 const MAX_CLIMB_PATH_BYTES: usize =
     if cfg!(any(target_os = "linux", target_os = "android", windows)) {
         4095
@@ -150,24 +157,52 @@ const MAX_CLIMB_PATH_BYTES: usize =
 /// the cwd are spent from the same budget.
 const MAX_CLIMB_STEPS: usize = 256;
 
-/// `path` absolutized and bounded, or the reason it is refused — decided from
-/// the text, before the walk touches the filesystem. Lexical, so the
-/// comparison-only rule is untouched.
-fn bounded_absolute(path: &Path) -> Result<PathBuf, String> {
-    let absolute =
-        std::path::absolute(path).map_err(|e| format!("resolve {}: {e}", path.display()))?;
-    if absolute.as_os_str().len() > MAX_CLIMB_PATH_BYTES
-        || absolute.components().count() > MAX_CLIMB_STEPS
-    {
-        // Its own message, naming the ceilings: the remedy is a shorter path,
-        // not anything to do with the output directory.
-        return Err(format!(
+/// A path past either climb bound. Its own message, naming the ceilings: the
+/// remedy is a shorter path. Path-free, so each caller names the path it was
+/// asked about.
+#[derive(Debug)]
+struct TooDeepOrLong;
+
+impl fmt::Display for TooDeepOrLong {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
             "too deep or too long to check (max {MAX_CLIMB_STEPS} components, \
-             {MAX_CLIMB_PATH_BYTES} bytes): {}",
-            path.display()
-        ));
+             {MAX_CLIMB_PATH_BYTES} bytes)"
+        )
     }
-    Ok(absolute)
+}
+
+impl std::error::Error for TooDeepOrLong {}
+
+mod bounded {
+    use std::path::Path;
+
+    use super::{MAX_CLIMB_PATH_BYTES, MAX_CLIMB_STEPS, TooDeepOrLong};
+
+    /// An absolute path inside both climb bounds, decided from the text before
+    /// anything touches the filesystem. Its field is private to this module, so
+    /// [`BoundedAbsolute::check`] is the only way to build one, and a climb
+    /// that takes one is bounded. The caller absolutizes, so a relative path's
+    /// cwd is charged too.
+    #[derive(Clone, Copy)]
+    pub(super) struct BoundedAbsolute<'a>(&'a Path);
+
+    impl<'a> BoundedAbsolute<'a> {
+        pub(super) fn check(absolute: &'a Path) -> Result<Self, TooDeepOrLong> {
+            debug_assert!(absolute.is_absolute(), "{}", absolute.display());
+            if absolute.as_os_str().len() > MAX_CLIMB_PATH_BYTES
+                || absolute.components().count() > MAX_CLIMB_STEPS
+            {
+                return Err(TooDeepOrLong);
+            }
+            Ok(Self(absolute))
+        }
+
+        pub(super) fn path(self) -> &'a Path {
+            self.0
+        }
+    }
 }
 
 /// The deepest ancestor of `absolute` (itself included) that exists, or the
@@ -177,8 +212,8 @@ fn bounded_absolute(path: &Path) -> Result<PathBuf, String> {
 /// dangling one as absent. And only ABSENCE continues the climb — on macOS an
 /// ACL on a planted link can deny its `lstat` while traversal still follows
 /// it, so stepping past any other failure would step past the link.
-fn deepest_existing(absolute: &Path) -> Option<&Path> {
-    absolute.ancestors().find(|ancestor| {
+fn deepest_existing(absolute: BoundedAbsolute<'_>) -> Option<&Path> {
+    absolute.path().ancestors().find(|ancestor| {
         !matches!(fs::symlink_metadata(ancestor), Err(e) if e.kind() == ErrorKind::NotFound)
     })
 }
@@ -208,7 +243,10 @@ fn has_parent_dir_below(absolute: &Path, found: &Path) -> bool {
 fn verify_resolves_inside_root(path: &Path, canonical_root: Option<&Path>) -> Result<(), String> {
     // Bounded BEFORE the walk and before the root check, so a preview and the
     // run it previews agree on a path over the bound.
-    let absolute = bounded_absolute(path.parent().unwrap_or(path))?;
+    let absolute = std::path::absolute(path.parent().unwrap_or(path))
+        .map_err(|e| format!("resolve ancestor of {}: {e}", path.display()))?;
+    let absolute =
+        BoundedAbsolute::check(&absolute).map_err(|e| format!("{e}: {}", path.display()))?;
 
     // Nothing to compare against — `--dry-run` on a root that does not exist —
     // so the walk is not paid for.
@@ -216,7 +254,7 @@ fn verify_resolves_inside_root(path: &Path, canonical_root: Option<&Path>) -> Re
         return Ok(());
     };
 
-    let Some(ancestor) = deepest_existing(&absolute) else {
+    let Some(ancestor) = deepest_existing(absolute) else {
         return Err(format!("no resolvable ancestor: {}", path.display()));
     };
 
@@ -817,6 +855,29 @@ mod write_output_tests {
         );
     }
 
+    /// `base` extended to exactly `len` bytes by components of at most 200
+    /// bytes, inside every platform's `NAME_MAX`.
+    fn chain_of_len(base: &Path, len: usize) -> PathBuf {
+        let mut path = base.to_path_buf();
+        while path.as_os_str().len() < len {
+            let room = len - path.as_os_str().len() - 1;
+            // Never leave a single byte, which a separator alone would overrun.
+            let name = if room > 200 { room.min(202) - 2 } else { room };
+            path.push("p".repeat(name));
+        }
+        assert_eq!(path.as_os_str().len(), len);
+        path
+    }
+
+    /// `prepare` refused `root` as past a climb bound, naming no path.
+    fn assert_root_past_bound(root: &Path, dry_run: bool) {
+        let err = try_cfg(root, false, dry_run, false)
+            .err()
+            .unwrap_or_else(|| panic!("accepted a root past the bound: {}", root.display()));
+        assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
+        assert_eq!(err.to_string(), TooDeepOrLong.to_string());
+    }
+
     /// A path exactly at either bound is accepted: the bounds are ceilings,
     /// not limits one short of them.
     #[test]
@@ -832,35 +893,40 @@ mod write_output_tests {
             "fixture must isolate the step bound from the byte bound"
         );
         assert!(
-            bounded_absolute(&at_steps).is_ok(),
+            BoundedAbsolute::check(&at_steps).is_ok(),
             "refused a path at the step bound"
         );
+        assert!(try_cfg(&at_steps, false, true, false).is_ok());
+        #[cfg(unix)]
+        {
+            let _created = cfg(&at_steps, false, false, false);
+            assert!(at_steps.is_dir());
+        }
 
         let base_bytes = base.as_os_str().len();
         let at_bytes = base.join("x".repeat(MAX_CLIMB_PATH_BYTES - base_bytes - 1));
         assert_eq!(at_bytes.as_os_str().len(), MAX_CLIMB_PATH_BYTES);
         assert!(
-            bounded_absolute(&at_bytes).is_ok(),
+            BoundedAbsolute::check(&at_bytes).is_ok(),
             "refused a path at the byte bound"
         );
     }
 
     /// A parent exactly at the byte bound can still be walked and resolved, so
     /// it is the bound, not an ENAMETOOLONG from the walk, that refuses a
-    /// longer one — in a preview of an absent root too, which never walks.
+    /// longer one — in a preview of an absent root too, which never walks. A
+    /// root exactly there is accepted, and created by the real run.
     #[cfg(unix)]
     #[test]
     fn the_byte_bound_is_a_path_the_platform_can_resolve() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().canonicalize().unwrap();
+        let parent = chain_of_len(&base, MAX_CLIMB_PATH_BYTES);
 
-        let mut parent = base.clone();
-        while parent.as_os_str().len() < MAX_CLIMB_PATH_BYTES {
-            let room = MAX_CLIMB_PATH_BYTES - parent.as_os_str().len() - 1;
-            parent.push("p".repeat(room.clamp(1, 200)));
-        }
-        assert_eq!(parent.as_os_str().len(), MAX_CLIMB_PATH_BYTES);
-        std::fs::create_dir_all(&parent).unwrap();
+        assert!(try_cfg(&parent, false, true, false).is_ok());
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+        let _created = cfg(&parent, false, false, false);
+        assert!(parent.is_dir());
 
         assert_eq!(
             verify_resolves_inside_root(&parent.join("x.bin"), Some(&base)),
@@ -874,13 +940,13 @@ mod write_output_tests {
     fn the_ancestor_climb_refuses_a_path_past_its_bounds() {
         let base = tempfile::tempdir().unwrap();
         assert!(
-            bounded_absolute(base.path()).is_ok(),
+            BoundedAbsolute::check(base.path()).is_ok(),
             "an ordinary directory must be inside the bounds at all"
         );
 
         let too_long = base.path().join("x".repeat(MAX_CLIMB_PATH_BYTES));
         assert!(
-            bounded_absolute(&too_long).is_err(),
+            BoundedAbsolute::check(&too_long).is_err(),
             "accepted a path past the byte bound"
         );
 
@@ -891,7 +957,7 @@ mod write_output_tests {
             "fixture must isolate the step bound from the byte bound"
         );
         assert!(
-            bounded_absolute(&too_deep).is_err(),
+            BoundedAbsolute::check(&too_deep).is_err(),
             "accepted a path past the step bound"
         );
 
@@ -914,59 +980,45 @@ mod write_output_tests {
                 fs::symlink_metadata(&deep_but_present).is_ok(),
                 "fixture must exist, or it cannot tell the two bounds apart"
             );
-            assert!(
-                bounded_absolute(&deep_but_present).is_err(),
-                "the step bound answered from the tree rather than from the path"
-            );
+            for dry_run in [true, false] {
+                assert_root_past_bound(&deep_but_present, dry_run);
+            }
         }
     }
 
-    /// `prepare` does not apply the per-entry bound to the output root; the
-    /// root's depth is still charged to each entry's budget.
+    /// An `--output` past either bound is refused before anything is created,
+    /// in both modes.
     #[test]
-    fn the_entry_bound_does_not_reach_the_output_root() {
+    fn an_output_root_past_either_bound_is_refused_before_anything_is_created() {
         let base = tempfile::tempdir().unwrap();
-        let deep = base.path().join("d/".repeat(MAX_CLIMB_STEPS));
-        assert!(
-            deep.as_os_str().len() < MAX_CLIMB_PATH_BYTES,
-            "fixture must isolate the step bound from the byte bound"
-        );
-        assert!(
-            bounded_absolute(&deep).is_err(),
-            "fixture must be past the bound an ENTRY would trip"
-        );
+        let over_steps = base.path().join("d/".repeat(MAX_CLIMB_STEPS));
+        assert!(over_steps.as_os_str().len() < MAX_CLIMB_PATH_BYTES);
+        let over_bytes = chain_of_len(base.path(), MAX_CLIMB_PATH_BYTES + 1);
+        assert!(over_bytes.components().count() < MAX_CLIMB_STEPS);
 
-        assert!(
-            try_cfg(&deep, false, true, false).is_ok(),
-            "the per-entry bound refused an absent root the real run creates"
-        );
+        for root in [&over_steps, &over_bytes] {
+            for dry_run in [true, false] {
+                assert_root_past_bound(root, dry_run);
+                assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
+            }
+        }
     }
 
-    /// Both bounds are charged over the ABSOLUTE path, so a relative
-    /// candidate's cwd counts toward them. Reads the cwd rather than setting
-    /// it, because `set_current_dir` is process-global and this suite runs in
-    /// parallel.
+    /// A relative root is charged its cwd, as an entry is. Reads the cwd
+    /// rather than setting it, because `set_current_dir` is process-global and
+    /// this suite runs in parallel. The step shape runs as a preview only: a
+    /// regression would make a real run create it inside the source tree.
     #[test]
-    fn a_relative_candidate_is_charged_its_cwd() {
+    fn a_relative_root_is_charged_its_cwd() {
         let cwd = std::env::current_dir().unwrap();
 
-        let steps = MAX_CLIMB_STEPS.saturating_sub(cwd.components().count()) + 1;
-        let deep = std::path::PathBuf::from("d/".repeat(steps));
-        assert!(
-            deep.components().count() <= MAX_CLIMB_STEPS,
-            "fixture must be inside the step bound on its own"
-        );
-        assert!(
-            bounded_absolute(&deep).is_err(),
-            "a relative candidate was not charged its cwd depth"
-        );
+        let deep = PathBuf::from("d/".repeat(MAX_CLIMB_STEPS - cwd.components().count() + 1));
+        assert_root_past_bound(&deep, true);
 
-        let bytes = MAX_CLIMB_PATH_BYTES.saturating_sub(cwd.as_os_str().len());
-        let long = std::path::PathBuf::from("x".repeat(bytes));
-        assert!(
-            bounded_absolute(&long).is_err(),
-            "a relative candidate was not charged its cwd length"
-        );
+        let long = PathBuf::from("x".repeat(MAX_CLIMB_PATH_BYTES - cwd.as_os_str().len()));
+        for dry_run in [true, false] {
+            assert_root_past_bound(&long, dry_run);
+        }
     }
 
     /// A bound trip and a failed walk are different causes and must read as
@@ -982,15 +1034,33 @@ mod write_output_tests {
 
         let err = write_output(&c, &entry, None, b"X").unwrap_err();
 
-        assert!(
-            !err.contains("no resolvable ancestor"),
-            "a bound trip was reported as a missing ancestor: {err}"
+        let candidate = (0..MAX_CLIMB_STEPS)
+            .fold(base.path().to_path_buf(), |path, _| path.join("d"))
+            .join("x.bin");
+        assert_eq!(
+            err,
+            format!(
+                "too deep or too long to check (max {MAX_CLIMB_STEPS} components, \
+                 {MAX_CLIMB_PATH_BYTES} bytes): {}",
+                candidate.display()
+            )
         );
-        assert!(
-            err.contains(&MAX_CLIMB_STEPS.to_string())
-                && err.contains(&MAX_CLIMB_PATH_BYTES.to_string()),
-            "the refusal must name the ceilings it enforces: {err}"
-        );
+    }
+
+    /// A relative root's candidate is named as spelled, with no cwd prefix.
+    /// Preview only: the root sits exactly at the step bound once its cwd is
+    /// charged, and a real run would create it inside the source tree.
+    #[test]
+    fn a_bound_trip_under_a_relative_root_names_the_candidate_as_spelled() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = PathBuf::from("d/".repeat(MAX_CLIMB_STEPS - cwd.components().count()));
+        let c = cfg(&root, false, true, false);
+
+        let err = write_output(&c, "e/x.bin", None, b"X").unwrap_err();
+
+        let candidate = c.output_dir().join("e").join("x.bin");
+        assert_eq!(err, format!("{TooDeepOrLong}: {}", candidate.display()));
+        assert!(!root.exists());
     }
 
     /// The bound refuses in BOTH modes. `--dry-run` against a root that does
