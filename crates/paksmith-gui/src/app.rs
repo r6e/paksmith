@@ -1233,63 +1233,60 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // Look up the tab by path (not active tab) — the user may have
             // switched tabs while this load was in flight; operating on the
             // path-keyed tab is always correct.
-            // Three-guard form: can't use let-chains on MSRV 1.88.
             let mut decode_task = Task::none();
             let mut audio_task = Task::none();
-            #[allow(clippy::collapsible_if)]
-            if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path) {
-                if let TabContent::Ready {
+            if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path)
+                && let TabContent::Ready {
                     parsed: Ok(arc), ..
                 } = &tab.content
-                {
-                    if let Some(info) = paksmith_core::asset::classify_texture(arc.as_ref()) {
-                        tab.texture.export_idx = info.export_idx;
-                        tab.texture.mips = info.mips;
-                        // `set_content` above already reset the rest of the texture
-                        // state to defaults; restate the post-classify baseline here
-                        // so this block fully owns the cache it populates (decode of
-                        // mip 0 is dispatched below; `render` stays `None` until the
-                        // async `TextureDecoded` lands and rebuilds it).
-                        tab.texture.selected_mip = 0;
-                        tab.texture.decoded = None;
-                        tab.texture.error = None;
-                        // Extract Arc and path for the task closure.
+            {
+                if let Some(info) = paksmith_core::asset::classify_texture(arc.as_ref()) {
+                    tab.texture.export_idx = info.export_idx;
+                    tab.texture.mips = info.mips;
+                    // `set_content` above already reset the rest of the texture
+                    // state to defaults; restate the post-classify baseline here
+                    // so this block fully owns the cache it populates (decode of
+                    // mip 0 is dispatched below; `render` stays `None` until the
+                    // async `TextureDecoded` lands and rebuilds it).
+                    tab.texture.selected_mip = 0;
+                    tab.texture.decoded = None;
+                    tab.texture.error = None;
+                    // Extract Arc and path for the task closure.
+                    let pkg = arc.clone();
+                    let task_path = path.clone();
+                    let export_idx = info.export_idx;
+                    decode_task = Task::perform(
+                        crate::task::texture::decode(pkg, export_idx, 0),
+                        move |result| Message::TextureDecoded {
+                            path: task_path,
+                            mip: 0,
+                            result,
+                            generation,
+                        },
+                    );
+                }
+                // Audio classification — single classify_audio call per load,
+                // mirroring the classify_texture pattern above. A real asset is
+                // texture XOR sound, so at most one of these blocks fires per load.
+                // `set_content` already reset `tab.audio` to default; populate only.
+                if let Some(info) = paksmith_core::asset::classify_audio(arc.as_ref()) {
+                    // Extract the Copy scalars, then MOVE `info` (avoids
+                    // cloning its `codec_label` String).
+                    let export_idx = info.export_idx;
+                    let playable = info.playable;
+                    tab.audio.export_idx = export_idx;
+                    tab.audio.info = Some(info);
+                    if playable {
                         let pkg = arc.clone();
                         let task_path = path.clone();
-                        let export_idx = info.export_idx;
-                        decode_task = Task::perform(
-                            crate::task::texture::decode(pkg, export_idx, 0),
-                            move |result| Message::TextureDecoded {
+                        audio_task = Task::perform(
+                            crate::task::audio::decode(pkg, export_idx),
+                            move |result| Message::AudioDecoded {
                                 path: task_path,
-                                mip: 0,
                                 result,
                                 generation,
                             },
                         );
-                    }
-                    // Audio classification — single classify_audio call per load,
-                    // mirroring the classify_texture pattern above. A real asset is
-                    // texture XOR sound, so at most one of these blocks fires per load.
-                    // `set_content` already reset `tab.audio` to default; populate only.
-                    if let Some(info) = paksmith_core::asset::classify_audio(arc.as_ref()) {
-                        // Extract the Copy scalars, then MOVE `info` (avoids
-                        // cloning its `codec_label` String).
-                        let export_idx = info.export_idx;
-                        let playable = info.playable;
-                        tab.audio.export_idx = export_idx;
-                        tab.audio.info = Some(info);
-                        if playable {
-                            let pkg = arc.clone();
-                            let task_path = path.clone();
-                            audio_task = Task::perform(
-                                crate::task::audio::decode(pkg, export_idx),
-                                move |result| Message::AudioDecoded {
-                                    path: task_path,
-                                    result,
-                                    generation,
-                                },
-                            );
-                        }
                     }
                 }
             }
@@ -1325,22 +1322,18 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::HexBytePressed(i) => {
-            // Two-guard form: if-let + matches! can't be let-chained on MSRV 1.88.
-            #[allow(clippy::collapsible_if)]
-            if let Some(tab) = app.tabs.active_tab_mut() {
-                if matches!(tab.content, crate::state::tabs::TabContent::Ready { .. }) {
-                    tab.hex.press(i);
-                }
+            if let Some(tab) = app.tabs.active_tab_mut()
+                && matches!(tab.content, crate::state::tabs::TabContent::Ready { .. })
+            {
+                tab.hex.press(i);
             }
             Task::none()
         }
         Message::HexByteEntered(i) => {
-            // Two-guard form: if-let + matches! can't be let-chained on MSRV 1.88.
-            #[allow(clippy::collapsible_if)]
-            if let Some(tab) = app.tabs.active_tab_mut() {
-                if matches!(tab.content, crate::state::tabs::TabContent::Ready { .. }) {
-                    tab.hex.enter(i);
-                }
+            if let Some(tab) = app.tabs.active_tab_mut()
+                && matches!(tab.content, crate::state::tabs::TabContent::Ready { .. })
+            {
+                tab.hex.enter(i);
             }
             Task::none()
         }
@@ -1357,17 +1350,16 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             copy_from_active_hex(&mut app.tabs, crate::state::hex_view::copy_ascii)
         }
         Message::PropToggled(node_id) => {
-            // Two-guard form: if-let + matches! can't be let-chained on MSRV 1.88.
             // Guard: only act on an active tab that has a successfully-parsed asset.
-            #[allow(clippy::collapsible_if)]
-            if let Some(tab) = app.tabs.active_tab_mut() {
-                if matches!(
+            if let Some(tab) = app.tabs.active_tab_mut()
+                && matches!(
                     &tab.content,
                     crate::state::tabs::TabContent::Ready { parsed: Ok(_), .. }
-                ) {
-                    if !tab.expanded.remove(&node_id) {
-                        let _ = tab.expanded.insert(node_id);
-                    }
+                )
+            {
+                let was_expanded = tab.expanded.remove(&node_id);
+                if !was_expanded {
+                    let _ = tab.expanded.insert(node_id);
                 }
             }
             Task::none()
@@ -1402,29 +1394,28 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // is NOT distinguished here; that path doesn't exist until the Phase
             // 7c in-place reload, which will add a per-tab content generation
             // counter (mirroring `archive_generation`) as its fence.
-            // Two-guard form: can't use let-chains on MSRV 1.88.
-            #[allow(clippy::collapsible_if)]
-            if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path) {
-                if mip < tab.texture.mips.len() && tab.texture.selected_mip == mip {
-                    match result {
-                        Ok(decoded) => {
-                            tab.texture.decoded = Some(decoded);
-                            tab.texture.error = None;
-                            // `decoded` changed — rebuild the render cache. Only
-                            // the Ok arm rebuilds: the Err arm below keeps the
-                            // last-good `decoded` unchanged, so rebuilding would
-                            // mint a fresh handle Id and force a needless GPU
-                            // re-upload of the same pixels.
-                            tab.texture.recompute_render();
-                        }
-                        Err(msg) => {
-                            // C18: keep the previously decoded mip (don't blank the
-                            // last-good image on a failed re-select) and set only
-                            // the error. `decoded` is intentionally left untouched,
-                            // so the render cache stays valid and is not rebuilt
-                            // here — see `TextureState::error` for when it clears.
-                            tab.texture.error = Some(msg);
-                        }
+            if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path)
+                && mip < tab.texture.mips.len()
+                && tab.texture.selected_mip == mip
+            {
+                match result {
+                    Ok(decoded) => {
+                        tab.texture.decoded = Some(decoded);
+                        tab.texture.error = None;
+                        // `decoded` changed — rebuild the render cache. Only
+                        // the Ok arm rebuilds: the Err arm below keeps the
+                        // last-good `decoded` unchanged, so rebuilding would
+                        // mint a fresh handle Id and force a needless GPU
+                        // re-upload of the same pixels.
+                        tab.texture.recompute_render();
+                    }
+                    Err(msg) => {
+                        // C18: keep the previously decoded mip (don't blank the
+                        // last-good image on a failed re-select) and set only
+                        // the error. `decoded` is intentionally left untouched,
+                        // so the render cache stays valid and is not rebuilt
+                        // here — see `TextureState::error` for when it clears.
+                        tab.texture.error = Some(msg);
                     }
                 }
             }
@@ -1444,25 +1435,23 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // handler's `mip < mips.len()` guard: `set_content` resets `tab.audio`
             // to default (`info = None`) on a content swap, so a decode landing
             // after a reset would otherwise write onto a non-audio tab.
-            // Two-guard form: can't use let-chains on MSRV 1.88.
             let mut decoded_ok = false;
-            #[allow(clippy::collapsible_if)]
-            if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path) {
-                if tab.audio.info.is_some() {
-                    match result {
-                        Ok(decoded) => {
-                            tab.audio.waveform = crate::state::audio_view::compute_waveform(
-                                &decoded.samples,
-                                decoded.channels,
-                                WAVEFORM_COLUMNS,
-                            );
-                            tab.audio.decoded = Some(decoded);
-                            tab.audio.error = None;
-                            decoded_ok = true;
-                        }
-                        Err(msg) => {
-                            tab.audio.error = Some(msg);
-                        }
+            if let Some(tab) = app.tabs.open.iter_mut().find(|t| t.path == path)
+                && tab.audio.info.is_some()
+            {
+                match result {
+                    Ok(decoded) => {
+                        tab.audio.waveform = crate::state::audio_view::compute_waveform(
+                            &decoded.samples,
+                            decoded.channels,
+                            WAVEFORM_COLUMNS,
+                        );
+                        tab.audio.decoded = Some(decoded);
+                        tab.audio.error = None;
+                        decoded_ok = true;
+                    }
+                    Err(msg) => {
+                        tab.audio.error = Some(msg);
                     }
                 }
             }
@@ -1529,16 +1518,16 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         Message::AudioVolume(v) => {
             // Kept on the two-phase pattern (unlike the disjoint-borrow
             // Play/Stop/Seek arms) ON PURPOSE: the value forwarded to the seam is
-            // a `Copy` `f32`, so there's no PCM clone to hoist out of the borrow,
-            // and the tuple-match sidesteps `collapsible_if` (the collapse would
-            // need a let-chain, unavailable at MSRV 1.88).
+            // a `Copy` `f32`, so there's no PCM clone to hoist out of the borrow.
             let volume = if let Some(tab) = app.tabs.active_tab_mut() {
                 tab.audio.set_volume(v);
                 Some(tab.audio.volume)
             } else {
                 None
             };
-            if let (Some(vol), Some(out)) = (volume, app.audio.as_mut()) {
+            if let Some(vol) = volume
+                && let Some(out) = app.audio.as_mut()
+            {
                 out.set_volume(vol);
             }
             Task::none()
@@ -1580,8 +1569,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     let _ = tab.audio.stop();
                 }
             }
-            // Tuple-match sidesteps `collapsible_if` (let-chain not in MSRV 1.88).
-            if let (true, Some(out)) = (done, app.audio.as_mut()) {
+            if done && let Some(out) = app.audio.as_mut() {
                 out.stop();
             }
             Task::none()
@@ -1678,14 +1666,11 @@ fn copy_from_active_hex(
     tabs: &mut crate::state::tabs::Tabs,
     copy_fn: fn(&[u8], crate::state::hex_view::Selection) -> String,
 ) -> Task<Message> {
-    // Triple-nested if-let chains can't be collapsed without let-chains (MSRV 1.88).
-    #[allow(clippy::collapsible_if)]
-    if let Some(tab) = tabs.active_tab_mut() {
-        if let crate::state::tabs::TabContent::Ready { bytes, .. } = &tab.content {
-            if let Some(sel) = tab.hex.selection {
-                return iced::clipboard::write::<Message>(copy_fn(bytes, sel));
-            }
-        }
+    if let Some(tab) = tabs.active_tab_mut()
+        && let crate::state::tabs::TabContent::Ready { bytes, .. } = &tab.content
+        && let Some(sel) = tab.hex.selection
+    {
+        return iced::clipboard::write::<Message>(copy_fn(bytes, sel));
     }
     Task::none()
 }
@@ -1958,28 +1943,26 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
     // rather than a guarantee. The proportional `snap_to`
     // variant would need the total content height, which isn't available
     // here; absolute-offset is the simpler choice.
-    // Two-guard form: avoids let-chains (`&&let`) which require Rust > 1.88.
-    #[allow(clippy::collapsible_if)]
-    if app.selected_row != prev_selected {
-        if let Some(row_idx) = app.selected_row {
-            let target_y = tree_scroll_offset(row_idx);
-            // Mirror the target into the stored scroll state in this same
-            // update: the on_scroll echo of the scroll_to below arrives one
-            // frame later, and the windowed view would otherwise build a
-            // stale range for that frame (a blank viewport on any jump
-            // larger than the overscan).
-            if let Some(archive) = app.archive.as_mut() {
-                archive.tree_scroll.y = target_y;
-            }
-            let task = iced::widget::operation::scroll_to(
-                file_tree::TREE_SCROLL_ID.clone(),
-                iced::widget::scrollable::AbsoluteOffset {
-                    x: 0.0,
-                    y: target_y,
-                },
-            );
-            return Some(task);
+    if app.selected_row != prev_selected
+        && let Some(row_idx) = app.selected_row
+    {
+        let target_y = tree_scroll_offset(row_idx);
+        // Mirror the target into the stored scroll state in this same
+        // update: the on_scroll echo of the scroll_to below arrives one
+        // frame later, and the windowed view would otherwise build a
+        // stale range for that frame (a blank viewport on any jump
+        // larger than the overscan).
+        if let Some(archive) = app.archive.as_mut() {
+            archive.tree_scroll.y = target_y;
         }
+        let task = iced::widget::operation::scroll_to(
+            file_tree::TREE_SCROLL_ID.clone(),
+            iced::widget::scrollable::AbsoluteOffset {
+                x: 0.0,
+                y: target_y,
+            },
+        );
+        return Some(task);
     }
 
     None
@@ -2191,14 +2174,10 @@ fn clamp_selected_row(selected_row: &mut Option<usize>, row_count: usize) {
         *selected_row = None;
         return;
     }
-    // Two-guard form kept intentionally: the collapsed form uses let-chains
-    // (`if let Some(i) = ... && i >= ...`) which triggered MSRV failures
-    // in CI on 1.88 in prior phases.
-    #[allow(clippy::collapsible_if)]
-    if let Some(i) = *selected_row {
-        if i >= row_count {
-            *selected_row = Some(row_count - 1);
-        }
+    if let Some(i) = *selected_row
+        && i >= row_count
+    {
+        *selected_row = Some(row_count - 1);
     }
 }
 
@@ -2366,14 +2345,10 @@ fn apply_playback(
         PlaybackAction::SeekTo(_) => {
             // Re-feed only when already playing; a seek while paused/stopped just
             // updates `position_secs` in the pure state and play will read it later.
-            // `collapsible_if`: the suggested collapse would use a let-chain
-            // (`transport == … && let Some(dec) = decoded`) which is not
-            // available on MSRV 1.88.
-            #[allow(clippy::collapsible_if)]
-            if transport == crate::state::audio_view::Transport::Playing {
-                if let Some(dec) = decoded {
-                    refeed_from_position(out, dec, position_secs, volume);
-                }
+            if transport == crate::state::audio_view::Transport::Playing
+                && let Some(dec) = decoded
+            {
+                refeed_from_position(out, dec, position_secs, volume);
             }
         }
         PlaybackAction::None => {}
@@ -5590,6 +5565,52 @@ mod tests {
         let _ = update(&mut app, Message::HexBytePressed(0));
         // Selection remains None.
         assert!(app.tabs.active_tab().unwrap().hex.selection.is_none());
+    }
+
+    /// A drag begun on a Ready tab must not extend once the tab's content is
+    /// swapped out: `set_content` leaves the hex state as it was.
+    #[test]
+    fn hex_byte_entered_on_non_ready_tab_is_noop() {
+        let mut app = app_with_ready_tab(vec![0x00; 32]);
+        let _ = update(&mut app, Message::HexBytePressed(3));
+        app.tabs
+            .set_content("a.uasset", crate::state::tabs::TabContent::Loading);
+        let _ = update(&mut app, Message::HexByteEntered(10));
+        let sel = app.tabs.active_tab().unwrap().hex.selection.unwrap();
+        assert_eq!(sel.range(), (3, 3));
+    }
+
+    /// Task units of a hex copy and an ASCII copy from `app`'s active tab.
+    fn hex_copy_units(app: &mut App) -> [usize; 2] {
+        [
+            update(app, Message::HexCopyRequested).units(),
+            update(app, Message::HexCopyAsciiRequested).units(),
+        ]
+    }
+
+    #[test]
+    fn hex_copy_writes_a_selection_on_a_ready_tab() {
+        let mut app = app_with_ready_tab(vec![0x00; 32]);
+        let _ = update(&mut app, Message::HexBytePressed(2));
+        assert_eq!(hex_copy_units(&mut app), [1, 1]);
+    }
+
+    #[test]
+    fn hex_copy_without_a_tab_or_selection_writes_nothing() {
+        assert_eq!(hex_copy_units(&mut App::default()), [0, 0]);
+        assert_eq!(
+            hex_copy_units(&mut app_with_ready_tab(vec![0x00; 32])),
+            [0, 0]
+        );
+    }
+
+    #[test]
+    fn hex_copy_on_a_non_ready_tab_writes_nothing() {
+        let mut app = app_with_ready_tab(vec![0x00; 32]);
+        let _ = update(&mut app, Message::HexBytePressed(2));
+        app.tabs
+            .set_content("a.uasset", crate::state::tabs::TabContent::Loading);
+        assert_eq!(hex_copy_units(&mut app), [0, 0]);
     }
 
     #[test]

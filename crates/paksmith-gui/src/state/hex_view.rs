@@ -102,11 +102,10 @@ impl HexState {
         self.dragging = true;
     }
     pub fn enter(&mut self, i: usize) {
-        #[allow(clippy::collapsible_if)]
-        if self.dragging {
-            if let Some(s) = self.selection.as_mut() {
-                s.cursor = i;
-            }
+        if self.dragging
+            && let Some(s) = self.selection.as_mut()
+        {
+            s.cursor = i;
         }
     }
     pub fn end_drag(&mut self) {
