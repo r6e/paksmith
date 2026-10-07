@@ -419,10 +419,19 @@ impl<'a> ValueTarget<'a> {
 
     /// The value table of `enum_name`, the enum `prop`'s type names.
     fn enum_values(&self, enum_name: &str) -> Option<&'a HashMap<u64, Arc<str>>> {
-        *self
-            .enum_values
-            .get_or_init(|| self.usmap.enums.get(enum_name))
+        *self.enum_values.get_or_init(|| {
+            #[cfg(feature = "__test_utils")]
+            ENUM_TABLE_LOOKUPS.with(|lookups| lookups.update(|n| n + 1));
+            self.usmap.enums.get(enum_name)
+        })
     }
+}
+
+#[cfg(feature = "__test_utils")]
+thread_local! {
+    /// Enum value-table lookups [`ValueTarget::enum_values`] has made on this
+    /// thread, which tests read to pin how often a container makes one.
+    static ENUM_TABLE_LOOKUPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[allow(
@@ -1672,32 +1681,55 @@ mod tests {
         assert_eq!(props, [] as [Property; 0]);
     }
 
+    /// A `.usmap` naming the values of one enum, `Difficulty`: 0 is `Easy`,
+    /// 1 is `Hard`.
+    fn difficulty_usmap() -> Usmap {
+        let mut usmap = Usmap::default();
+        let _ = usmap.enums.insert(
+            Arc::from("Difficulty"),
+            HashMap::from([(0, Arc::from("Easy")), (1, Arc::from("Hard"))]),
+        );
+        usmap
+    }
+
+    /// `Difficulty` as a container's element type.
+    fn difficulty() -> Arc<MappedPropertyType> {
+        Arc::new(MappedPropertyType::Enum {
+            enum_name: Arc::from("Difficulty"),
+        })
+    }
+
+    /// `wire` read against `usmap` as a property of type `prop_type`, at
+    /// `depth`.
+    fn read_value(
+        prop_type: MappedPropertyType,
+        wire: &[u8],
+        usmap: &Usmap,
+        depth: usize,
+    ) -> crate::Result<PropertyValue> {
+        let prop = MappedProperty {
+            name: Arc::from("P"),
+            schema_index: 0,
+            array_index: 0,
+            prop_type,
+        };
+        let ctx = make_ctx(&["None"]);
+        let target = ValueTarget::new(&prop, usmap);
+        read_unversioned_value(&mut Cursor::new(wire), &target, usmap, &ctx, "t", depth)
+    }
+
+    /// `wire` decoded against `usmap` as a top-level property of type
+    /// `prop_type`.
+    fn decode_value(prop_type: MappedPropertyType, wire: &[u8], usmap: &Usmap) -> PropertyValue {
+        read_value(prop_type, wire, usmap, 0).unwrap()
+    }
+
     /// Enum elements of an Array, a Set and a Map decode to the `.usmap`'s
     /// value names.
     #[test]
     fn container_enum_elements_decode_to_their_names() {
-        let difficulty: Arc<str> = Arc::from("Difficulty");
-        let mut usmap = Usmap::default();
-        let _ = usmap.enums.insert(
-            Arc::clone(&difficulty),
-            HashMap::from([(0, Arc::from("Easy")), (1, Arc::from("Hard"))]),
-        );
-        let element = || {
-            Arc::new(MappedPropertyType::Enum {
-                enum_name: Arc::clone(&difficulty),
-            })
-        };
-        let decode = |prop_type: MappedPropertyType, wire: &[u8]| {
-            let prop = MappedProperty {
-                name: Arc::from("P"),
-                schema_index: 0,
-                array_index: 0,
-                prop_type,
-            };
-            let ctx = make_ctx(&["None"]);
-            let target = ValueTarget::new(&prop, &usmap);
-            read_unversioned_value(&mut Cursor::new(wire), &target, &usmap, &ctx, "t", 0).unwrap()
-        };
+        let usmap = difficulty_usmap();
+        let decode = |prop_type, wire: &[u8]| decode_value(prop_type, wire, &usmap);
         let named = |value: &PropertyValue| match value {
             PropertyValue::Enum {
                 value: EnumValue::Named(name),
@@ -1707,7 +1739,9 @@ mod tests {
         };
 
         let array = decode(
-            MappedPropertyType::Array { inner: element() },
+            MappedPropertyType::Array {
+                inner: difficulty(),
+            },
             &[2, 0, 0, 0, 1, 0],
         );
         let PropertyValue::Array { elements, .. } = array else {
@@ -1719,7 +1753,9 @@ mod tests {
         );
 
         let set = decode(
-            MappedPropertyType::Set { inner: element() },
+            MappedPropertyType::Set {
+                inner: difficulty(),
+            },
             &[0, 0, 0, 0, 1, 0, 0, 0, 1],
         );
         let PropertyValue::Set { elements, .. } = set else {
@@ -1729,8 +1765,8 @@ mod tests {
 
         let map = decode(
             MappedPropertyType::Map {
-                key: element(),
-                value: element(),
+                key: difficulty(),
+                value: difficulty(),
             },
             &[0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
         );
@@ -1742,6 +1778,40 @@ mod tests {
             .map(|e| (named(&e.key), named(&e.value)))
             .collect();
         assert_eq!(pairs, [("Easy".to_string(), "Hard".to_string())]);
+    }
+
+    /// A container looks its element enum's table up once for all its
+    /// elements (a Set's removed elements and a Map's removed keys included),
+    /// a Map once per side, and an empty container not at all.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn containers_look_an_enum_table_up_once() {
+        let usmap = difficulty_usmap();
+        let lookups = || ENUM_TABLE_LOOKUPS.with(std::cell::Cell::get);
+        let array = || MappedPropertyType::Array {
+            inner: difficulty(),
+        };
+        let map = || MappedPropertyType::Map {
+            key: difficulty(),
+            value: difficulty(),
+        };
+        for (prop_type, wire, expected) in [
+            (array(), &[3, 0, 0, 0, 0, 1, 0][..], 1),
+            (
+                MappedPropertyType::Set {
+                    inner: difficulty(),
+                },
+                &[1, 0, 0, 0, 0, 2, 0, 0, 0, 1, 0][..],
+                1,
+            ),
+            (map(), &[1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 1, 0][..], 2),
+            (array(), &[0, 0, 0, 0][..], 0),
+            (map(), &[0, 0, 0, 0, 0, 0, 0, 0][..], 0),
+        ] {
+            let before = lookups();
+            let _ = decode_value(prop_type, wire, &usmap);
+            assert_eq!(lookups() - before, expected, "{wire:?}");
+        }
     }
 
     /// Each recursive `read_unversioned_value(depth + 1)` in the
@@ -1757,23 +1827,7 @@ mod tests {
     fn unversioned_collection_arms_increment_depth() {
         use crate::asset::property::bag::MAX_PROPERTY_DEPTH;
         let read_at = |prop_type: MappedPropertyType, wire: &[u8], depth: usize| {
-            let prop = MappedProperty {
-                name: Arc::from("P"),
-                schema_index: 0,
-                array_index: 0,
-                prop_type,
-            };
-            let usmap = Usmap::default();
-            let ctx = make_ctx(&["None"]);
-            let mut cur = Cursor::new(wire);
-            read_unversioned_value(
-                &mut cur,
-                &ValueTarget::new(&prop, &usmap),
-                &usmap,
-                &ctx,
-                "t",
-                depth,
-            )
+            read_value(prop_type, wire, &Usmap::default(), depth)
         };
         let too_deep = |r: crate::Result<PropertyValue>| {
             matches!(
