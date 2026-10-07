@@ -381,6 +381,29 @@ fn extract_rejects_out_of_range_jobs_without_creating_the_output() {
     }
 }
 
+/// An `--output` past the guard's climb bound is a run-level error: exit 2, no
+/// summary and nothing created, in a preview and in the run it previews.
+#[test]
+fn an_output_root_past_the_bound_is_a_run_level_error() {
+    for dry_run in [true, false] {
+        let base = tempdir().unwrap();
+        let mut cmd = Command::cargo_bin("paksmith").unwrap();
+        let _ = cmd.arg("extract").arg(fixture_pak());
+        if dry_run {
+            let _ = cmd.arg("--dry-run");
+        }
+        let _ = cmd
+            .arg("-o")
+            .arg(base.path().join("d/".repeat(300)))
+            .assert()
+            .code(2)
+            .stdout("")
+            .stderr(predicates::str::contains("invalid argument `--output`"))
+            .stderr(predicates::str::contains("too deep or too long"));
+        assert!(!base.path().join("d").exists(), "dry_run={dry_run}");
+    }
+}
+
 #[test]
 fn extract_progress_goes_to_stderr_not_stdout_json() {
     let out = tempfile::tempdir().unwrap();
