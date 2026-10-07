@@ -16,6 +16,7 @@
 //! Wire format constants come from the oracle
 //! `unreal_asset_base::unversioned::header::UnversionedHeaderFragment`.
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::{Arc, LazyLock};
@@ -331,7 +332,8 @@ pub(crate) fn read_unversioned_properties(
         }
         let mapped_prop = &resolved.property;
 
-        match read_unversioned_value(cur, mapped_prop, usmap, ctx, asset_path, depth) {
+        let target = ValueTarget::new(mapped_prop, usmap);
+        match read_unversioned_value(cur, &target, usmap, ctx, asset_path, depth) {
             Ok(value) => {
                 result.push(Property {
                     // Refcount-bump clone (#365): MappedProperty.name
@@ -397,19 +399,55 @@ fn is_partial_tree_stop(e: &PaksmithError) -> bool {
     )
 }
 
+/// A property to decode, with its enum's `.usmap` value table looked up on
+/// the first value decoded through it: the elements of a container share one
+/// lookup, and an empty container makes none (#821).
+struct ValueTarget<'a> {
+    prop: &'a MappedProperty,
+    usmap: &'a Usmap,
+    enum_values: OnceCell<Option<&'a HashMap<u64, Arc<str>>>>,
+}
+
+impl<'a> ValueTarget<'a> {
+    fn new(prop: &'a MappedProperty, usmap: &'a Usmap) -> Self {
+        Self {
+            prop,
+            usmap,
+            enum_values: OnceCell::new(),
+        }
+    }
+
+    /// The value table of `enum_name`, the enum `prop`'s type names.
+    fn enum_values(&self, enum_name: &str) -> Option<&'a HashMap<u64, Arc<str>>> {
+        *self.enum_values.get_or_init(|| {
+            #[cfg(feature = "__test_utils")]
+            ENUM_TABLE_LOOKUPS.with(|lookups| lookups.update(|n| n + 1));
+            self.usmap.enums.get(enum_name)
+        })
+    }
+}
+
+#[cfg(feature = "__test_utils")]
+thread_local! {
+    /// Enum value-table lookups [`ValueTarget::enum_values`] has made on this
+    /// thread, which tests read to pin how often a container makes one.
+    static ENUM_TABLE_LOOKUPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "single match arm per MappedPropertyType variant; splitting per arm would scatter the per-type wire-format mapping across multiple files"
 )]
 fn read_unversioned_value(
     cur: &mut Cursor<&[u8]>,
-    prop: &MappedProperty,
+    target: &ValueTarget<'_>,
     usmap: &Usmap,
     ctx: &AssetContext,
     asset_path: &str,
     depth: usize,
 ) -> crate::Result<PropertyValue> {
     use MappedPropertyType as MT;
+    let prop = target.prop;
     // Depth gate for the array recursion path (struct nesting hits the
     // mirror gate at the top of `read_unversioned_properties`). Without
     // this, an adversarial `Array<Array<Array<...>>>` chain could blow
@@ -467,9 +505,8 @@ fn read_unversioned_value(
             // A name the `.usmap` has is shared; an ordinal it has no name
             // for keeps the enum's name by refcount rather than formatting a
             // copy of it per decoded value.
-            let value = usmap
-                .enums
-                .get(enum_name.as_ref())
+            let value = target
+                .enum_values(enum_name)
                 .and_then(|values| values.get(&u64::from(idx)))
                 .map_or_else(
                     || EnumValue::Ordinal {
@@ -560,13 +597,14 @@ fn read_unversioned_value(
                 AssetSeam::CollectionElements,
             )?;
             let synthetic = synthetic_element(inner);
+            let element = ValueTarget::new(&synthetic, usmap);
             // depth + 1 so MAX_PROPERTY_DEPTH is enforced for nested
             // `Array<Array<...>>` chains; without the increment the
             // recursion can grow unbounded along the array axis.
             for _ in 0..count {
                 elements.push(read_unversioned_value(
                     cur,
-                    &synthetic,
+                    &element,
                     usmap,
                     ctx,
                     asset_path,
@@ -589,6 +627,7 @@ fn read_unversioned_value(
             // via a synthetic `MappedProperty` + `read_unversioned_value`,
             // like `Array`. #639.
             let synthetic = synthetic_element(inner);
+            let element = ValueTarget::new(&synthetic, usmap);
             let removed = read_collection_count(
                 cur,
                 asset_path,
@@ -596,7 +635,7 @@ fn read_unversioned_value(
                 CollectionKind::SetNumToRemove,
             )?;
             for _ in 0..removed {
-                let _ = read_unversioned_value(cur, &synthetic, usmap, ctx, asset_path, depth + 1)?;
+                let _ = read_unversioned_value(cur, &element, usmap, ctx, asset_path, depth + 1)?;
             }
             let count = read_collection_count(
                 cur,
@@ -614,7 +653,7 @@ fn read_unversioned_value(
             for _ in 0..count {
                 elements.push(read_unversioned_value(
                     cur,
-                    &synthetic,
+                    &element,
                     usmap,
                     ctx,
                     asset_path,
@@ -632,6 +671,10 @@ fn read_unversioned_value(
             // (key body, value body). No per-element tags. #639.
             let key_synth = synthetic_element(key);
             let value_synth = synthetic_element(value);
+            let (key_target, value_target) = (
+                ValueTarget::new(&key_synth, usmap),
+                ValueTarget::new(&value_synth, usmap),
+            );
             let removed = read_collection_count(
                 cur,
                 asset_path,
@@ -639,7 +682,8 @@ fn read_unversioned_value(
                 CollectionKind::MapNumToRemove,
             )?;
             for _ in 0..removed {
-                let _ = read_unversioned_value(cur, &key_synth, usmap, ctx, asset_path, depth + 1)?;
+                let _ =
+                    read_unversioned_value(cur, &key_target, usmap, ctx, asset_path, depth + 1)?;
             }
             let count = read_collection_count(
                 cur,
@@ -656,9 +700,9 @@ fn read_unversioned_value(
             )?;
             for _ in 0..count {
                 let key_val =
-                    read_unversioned_value(cur, &key_synth, usmap, ctx, asset_path, depth + 1)?;
+                    read_unversioned_value(cur, &key_target, usmap, ctx, asset_path, depth + 1)?;
                 let value_val =
-                    read_unversioned_value(cur, &value_synth, usmap, ctx, asset_path, depth + 1)?;
+                    read_unversioned_value(cur, &value_target, usmap, ctx, asset_path, depth + 1)?;
                 entries.push(MapEntry {
                     key: key_val,
                     value: value_val,
@@ -1637,6 +1681,139 @@ mod tests {
         assert_eq!(props, [] as [Property; 0]);
     }
 
+    /// A `.usmap` naming the values of one enum, `Difficulty`: 0 is `Easy`,
+    /// 1 is `Hard`.
+    fn difficulty_usmap() -> Usmap {
+        let mut usmap = Usmap::default();
+        let _ = usmap.enums.insert(
+            Arc::from("Difficulty"),
+            HashMap::from([(0, Arc::from("Easy")), (1, Arc::from("Hard"))]),
+        );
+        usmap
+    }
+
+    /// `Difficulty` as a container's element type.
+    fn difficulty() -> Arc<MappedPropertyType> {
+        Arc::new(MappedPropertyType::Enum {
+            enum_name: Arc::from("Difficulty"),
+        })
+    }
+
+    /// `wire` read against `usmap` as a property of type `prop_type`, at
+    /// `depth`.
+    fn read_value(
+        prop_type: MappedPropertyType,
+        wire: &[u8],
+        usmap: &Usmap,
+        depth: usize,
+    ) -> crate::Result<PropertyValue> {
+        let prop = MappedProperty {
+            name: Arc::from("P"),
+            schema_index: 0,
+            array_index: 0,
+            prop_type,
+        };
+        let ctx = make_ctx(&["None"]);
+        let target = ValueTarget::new(&prop, usmap);
+        read_unversioned_value(&mut Cursor::new(wire), &target, usmap, &ctx, "t", depth)
+    }
+
+    /// `wire` decoded against `usmap` as a top-level property of type
+    /// `prop_type`.
+    fn decode_value(prop_type: MappedPropertyType, wire: &[u8], usmap: &Usmap) -> PropertyValue {
+        read_value(prop_type, wire, usmap, 0).unwrap()
+    }
+
+    /// Enum elements of an Array, a Set and a Map decode to the `.usmap`'s
+    /// value names.
+    #[test]
+    fn container_enum_elements_decode_to_their_names() {
+        let usmap = difficulty_usmap();
+        let decode = |prop_type, wire: &[u8]| decode_value(prop_type, wire, &usmap);
+        let named = |value: &PropertyValue| match value {
+            PropertyValue::Enum {
+                value: EnumValue::Named(name),
+                ..
+            } => name.to_string(),
+            other => panic!("expected a named enum, got {other:?}"),
+        };
+
+        let array = decode(
+            MappedPropertyType::Array {
+                inner: difficulty(),
+            },
+            &[2, 0, 0, 0, 1, 0],
+        );
+        let PropertyValue::Array { elements, .. } = array else {
+            panic!("expected an array, got {array:?}");
+        };
+        assert_eq!(
+            elements.iter().map(named).collect::<Vec<_>>(),
+            ["Hard", "Easy"]
+        );
+
+        let set = decode(
+            MappedPropertyType::Set {
+                inner: difficulty(),
+            },
+            &[0, 0, 0, 0, 1, 0, 0, 0, 1],
+        );
+        let PropertyValue::Set { elements, .. } = set else {
+            panic!("expected a set, got {set:?}");
+        };
+        assert_eq!(elements.iter().map(named).collect::<Vec<_>>(), ["Hard"]);
+
+        let map = decode(
+            MappedPropertyType::Map {
+                key: difficulty(),
+                value: difficulty(),
+            },
+            &[0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+        );
+        let PropertyValue::Map { entries, .. } = map else {
+            panic!("expected a map, got {map:?}");
+        };
+        let pairs: Vec<_> = entries
+            .iter()
+            .map(|e| (named(&e.key), named(&e.value)))
+            .collect();
+        assert_eq!(pairs, [("Easy".to_string(), "Hard".to_string())]);
+    }
+
+    /// A container looks its element enum's table up once for all its
+    /// elements (a Set's removed elements and a Map's removed keys included),
+    /// a Map once per side, and an empty container not at all.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn containers_look_an_enum_table_up_once() {
+        let usmap = difficulty_usmap();
+        let lookups = || ENUM_TABLE_LOOKUPS.with(std::cell::Cell::get);
+        let array = || MappedPropertyType::Array {
+            inner: difficulty(),
+        };
+        let map = || MappedPropertyType::Map {
+            key: difficulty(),
+            value: difficulty(),
+        };
+        for (prop_type, wire, expected) in [
+            (array(), &[3, 0, 0, 0, 0, 1, 0][..], 1),
+            (
+                MappedPropertyType::Set {
+                    inner: difficulty(),
+                },
+                &[1, 0, 0, 0, 0, 2, 0, 0, 0, 1, 0][..],
+                1,
+            ),
+            (map(), &[1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 1, 0][..], 2),
+            (array(), &[0, 0, 0, 0][..], 0),
+            (map(), &[0, 0, 0, 0, 0, 0, 0, 0][..], 0),
+        ] {
+            let before = lookups();
+            let _ = decode_value(prop_type, wire, &usmap);
+            assert_eq!(lookups() - before, expected, "{wire:?}");
+        }
+    }
+
     /// Each recursive `read_unversioned_value(depth + 1)` in the
     /// Array/Set/Map arms MUST increment depth, or a nested container
     /// escapes `MAX_PROPERTY_DEPTH` (stack-overflow risk). Called near the
@@ -1650,16 +1827,7 @@ mod tests {
     fn unversioned_collection_arms_increment_depth() {
         use crate::asset::property::bag::MAX_PROPERTY_DEPTH;
         let read_at = |prop_type: MappedPropertyType, wire: &[u8], depth: usize| {
-            let prop = MappedProperty {
-                name: Arc::from("P"),
-                schema_index: 0,
-                array_index: 0,
-                prop_type,
-            };
-            let usmap = Usmap::default();
-            let ctx = make_ctx(&["None"]);
-            let mut cur = Cursor::new(wire);
-            read_unversioned_value(&mut cur, &prop, &usmap, &ctx, "t", depth)
+            read_value(prop_type, wire, &Usmap::default(), depth)
         };
         let too_deep = |r: crate::Result<PropertyValue>| {
             matches!(
