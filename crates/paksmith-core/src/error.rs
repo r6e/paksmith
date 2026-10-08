@@ -4902,6 +4902,8 @@ pub enum AssetAllocationContext {
     FStringUtf8Bytes,
     /// `Vec<u16>` for an asset FString's UTF-16 code units.
     FStringUtf16CodeUnits,
+    /// `HashMap` entry for the per-read memo of resolved struct layouts.
+    StructLayoutMemo,
 }
 
 impl AssetAllocationContext {
@@ -4926,7 +4928,8 @@ impl AssetAllocationContext {
             | Self::DataTableRows
             | Self::DataResourceTable
             | Self::EnumTableMemo
-            | Self::FStringUtf16CodeUnits => BoundsUnit::Items,
+            | Self::FStringUtf16CodeUnits
+            | Self::StructLayoutMemo => BoundsUnit::Items,
         }
     }
 }
@@ -4949,6 +4952,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::EnumTableMemo => "enum table memo",
             Self::FStringUtf8Bytes => "FString UTF-8 buffer",
             Self::FStringUtf16CodeUnits => "FString UTF-16 code units",
+            Self::StructLayoutMemo => "struct layout memo",
         };
         f.write_str(s)
     }
@@ -8585,6 +8589,10 @@ mod tests {
                 AssetAllocationContext::FStringUtf16CodeUnits,
                 "FString UTF-16 code units",
             ),
+            (
+                AssetAllocationContext::StructLayoutMemo,
+                "struct layout memo",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -8691,6 +8699,7 @@ mod tests {
                 AssetAllocationContext::FStringUtf16CodeUnits,
                 BoundsUnit::Items,
             ),
+            (AssetAllocationContext::StructLayoutMemo, BoundsUnit::Items),
         ];
         for (context, expected) in cases {
             assert_eq!(

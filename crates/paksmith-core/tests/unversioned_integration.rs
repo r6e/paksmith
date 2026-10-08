@@ -526,7 +526,7 @@ mod tests {
         ) {
             // BTreeSet iteration is sorted. The wire fragments emit
             // in sorted order regardless of schema declaration order
-            // — the defensive sort in `read_unversioned_properties`
+            // — `get_all_properties`'s sort by `absolute_index`
             // handles either.
             let indices: Vec<u16> = raw_indices.into_iter().collect();
             let prop_count: u16 = indices.last().copied().unwrap_or(0).saturating_add(1);

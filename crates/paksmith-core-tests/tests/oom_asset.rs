@@ -36,7 +36,9 @@ use paksmith_core::testing::uasset::{
     build_minimal_ue4_27_unversioned, build_minimal_ue4_27_with_array_of_struct,
     build_minimal_ue4_27_with_data_table, build_minimal_ue5_1010_with_data_resources,
 };
-use paksmith_core::testing::usmap::build_hero_usmap_with_enum_speed;
+use paksmith_core::testing::usmap::{
+    build_hero_usmap_with_enum_speed, build_hero_usmap_with_struct_speed,
+};
 use paksmith_core::testing::wire::write_fstring_utf16;
 
 /// Arm `AssetSeam::NameTable` → `Package::read_from`'s name-table
@@ -394,6 +396,39 @@ fn read_asset_enum_table_memo_surfaces_allocation_failed_under_oom() {
             }
         ),
         "expected AllocationFailed{{EnumTableMemo}}; got {err:?}"
+    );
+}
+
+/// Arm `AssetSeam::StructLayoutMemo` → the per-read struct-layout memo's
+/// growth for an unversioned `Speed` struct surfaces
+/// `AllocationFailed{StructLayoutMemo}`, ending the package read.
+/// Unarmed, the same bytes read (`unversioned_integration.rs`'s
+/// `nested_struct_with_missing_schema_returns_partial_tree`).
+#[test]
+fn read_asset_struct_layout_memo_surfaces_allocation_failed_under_oom() {
+    let usmap = std::sync::Arc::new(
+        paksmith_core::asset::Usmap::from_bytes(&build_hero_usmap_with_struct_speed("StatsBlock"))
+            .unwrap(),
+    );
+    // One fragment, last, two values: Health 100, then the Speed struct.
+    let mut payload = 0x0500u16.to_le_bytes().to_vec();
+    payload.extend_from_slice(&100i32.to_le_bytes());
+    let pkg = build_minimal_ue4_27_unversioned("Hero", payload);
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::StructLayoutMemo), 0);
+    let err = Package::read_from(&pkg.bytes, None, Some(&usmap), "Game/Test.uasset").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::AllocationFailed {
+                    context: AssetAllocationContext::StructLayoutMemo,
+                    requested: 1,
+                    ..
+                },
+                ..
+            }
+        ),
+        "expected AllocationFailed{{StructLayoutMemo}}; got {err:?}"
     );
 }
 

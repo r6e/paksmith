@@ -266,13 +266,11 @@ pub fn build_hero_usmap_with_struct_speed(struct_name: &str) -> Vec<u8> {
 /// with three serializable slots at indices `[0, 2, 4]` is the common
 /// shape this builder reproduces.
 ///
-/// `properties` may be in any declaration order — the order they
-/// appear here is the order
+/// `properties` may be in any declaration order:
 /// [`crate::asset::mappings::Usmap::get_all_properties`] returns
-/// them. The decoder side defensively sorts by `absolute_index`
-/// before iterating (see `read_unversioned_properties`), so an
-/// adversarial schema with declaration order `[2, 0, 4]` must still
-/// decode the wire correctly; the
+/// them sorted by `absolute_index` (#370), so an adversarial schema
+/// with declaration order `[2, 0, 4]` must still decode the wire
+/// correctly; the
 /// `unversioned_property_with_non_increasing_index_decodes_correctly`
 /// integration test pins that contract.
 ///
