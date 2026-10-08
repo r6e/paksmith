@@ -55,6 +55,7 @@ use std::cmp::Ordering;
 use std::io::{Read, Seek};
 
 use crate::PaksmithError;
+use crate::asset::name_registry::NameRegistry;
 use crate::error::{AssetParseFault, AssetWireField};
 
 pub mod bounds;
@@ -419,9 +420,8 @@ pub(super) mod test_utils {
     }
 }
 
-fn registry() -> &'static std::collections::HashMap<&'static str, RegisteredStruct> {
-    static TABLE: std::sync::OnceLock<std::collections::HashMap<&'static str, RegisteredStruct>> =
-        std::sync::OnceLock::new();
+fn registry() -> &'static NameRegistry<RegisteredStruct> {
+    static TABLE: std::sync::OnceLock<NameRegistry<RegisteredStruct>> = std::sync::OnceLock::new();
     TABLE.get_or_init(|| {
         let mut table: std::collections::HashMap<&'static str, RegisteredStruct> =
             std::collections::HashMap::new();
@@ -465,7 +465,7 @@ fn registry() -> &'static std::collections::HashMap<&'static str, RegisteredStru
         // rationale + reference-parser provenance lives on the
         // `transform` module docs. Task 9's `FBoxSphereBounds` is the
         // same case.
-        table
+        NameRegistry::new(table)
     })
 }
 

@@ -860,21 +860,23 @@ impl Package {
                 asset_path,
                 AssetSeam::ExportPayloads,
             )?;
-            // One view for the whole read, so an enum or struct that many
-            // slots, elements or exports name resolves once.
+            // One view for the whole read, so an enum, struct or class that
+            // many slots, elements or exports name resolves once per name
+            // allocation.
             let mut view = UsmapView::new(usmap);
             for export in &exports.exports {
                 // Propagate OOB errors here rather than swallowing them
                 // with `unwrap_or_default()`. `PackageIndex::Null`
                 // resolves to an empty name, so null class refs flow
-                // through cleanly and `get_all_properties("")` returns
-                // an empty schema (handled inside the decoder).
+                // through cleanly and `class_properties` returns an
+                // empty schema (handled inside the decoder).
                 let class_name = crate::asset::property::primitives::resolve_package_index(
                     export.class_index,
                     &ctx,
                     asset_path,
                 )?;
                 let export_slice = carve_export_slice(bytes, export, asset_path)?;
+                let schema = view.class_properties(&class_name, asset_path)?;
 
                 // Typed dispatch is VERSIONED-ONLY. The registered typed
                 // readers (DataTable, Texture2D, …) parse the *tagged*
@@ -898,7 +900,7 @@ impl Package {
                 let props = read_unversioned_properties(
                     &mut export_cur,
                     &class_name,
-                    usmap.get_all_properties(&class_name),
+                    schema,
                     &mut view,
                     &ctx,
                     asset_path,
@@ -1426,12 +1428,11 @@ fn read_payloads(
         let export_slice = carve_export_slice(bytes, e, asset_path)?;
 
         // Phase 3a Task 4: resolve the export's class name and
-        // consult the typed-reader dispatch table. A HashMap hit
-        // means a typed reader exists for this class — call it
-        // and use its returned Asset directly. A miss means no
-        // typed reader is registered (the default case for Phase
-        // 3a: dispatch table is empty), so we fall through to the
-        // existing Phase 2 generic property-bag path below.
+        // consult the typed-reader dispatch table. A hit means a
+        // typed reader exists for this class — call it and use its
+        // returned Asset directly. A miss means no typed reader is
+        // registered, so we fall through to the existing Phase 2
+        // generic property-bag path below.
         //
         // The typed reader also returns `Vec<FByteBulkData>` (the
         // records it collected mid-parse). These are surfaced keyed by
@@ -1443,8 +1444,7 @@ fn read_payloads(
             ctx,
             asset_path,
         )?;
-        if let Some(read_typed) =
-            crate::asset::exports::dispatch::class_dispatch().get(&*class_name)
+        if let Some(read_typed) = crate::asset::exports::dispatch::class_dispatch().get(&class_name)
         {
             // Typed reader registered for this class (3d+ populate the
             // dispatch table). On success, push the typed Asset and move
@@ -1730,10 +1730,11 @@ mod tests {
         );
     }
 
-    /// One package read resolves an enum's value table once, however many of
-    /// its exports name the enum (#817).
+    /// One package read resolves an enum's value table and a class's schema
+    /// once per name allocation, however many of its exports share that
+    /// allocation (#817).
     #[test]
-    fn exports_of_one_read_share_an_enum_table_lookup() {
+    fn exports_of_one_read_share_their_class_and_enum_lookups() {
         let usmap = Arc::new(
             Usmap::from_bytes(&crate::testing::usmap::build_hero_usmap_with_enum_speed(
                 "Difficulty",
@@ -1757,10 +1758,15 @@ mod tests {
         let MinimalPackage { bytes, .. } = build_minimal(spec);
 
         let before = crate::asset::property::unversioned::enum_table_lookups();
+        let classes_before = crate::asset::property::unversioned::class_schema_lookups();
         let pkg = Package::read_from(&bytes, None, Some(&usmap), "x.uasset").unwrap();
 
         assert_eq!(
             crate::asset::property::unversioned::enum_table_lookups() - before,
+            1
+        );
+        assert_eq!(
+            crate::asset::property::unversioned::class_schema_lookups() - classes_before,
             1
         );
         for asset in &pkg.payloads {

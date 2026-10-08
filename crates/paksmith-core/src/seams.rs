@@ -207,13 +207,17 @@ pub enum AssetSeam {
     /// struct name a package read resolves, through `check_asset_reserve`.
     /// Surfaces as `AssetAllocationContext::StructLayoutMemo`.
     StructLayoutMemo,
+    /// `UsmapView`'s class-schema memo, a `HashMap` grown by one per
+    /// class name a package read resolves, through `check_asset_reserve`.
+    /// Surfaces as `AssetAllocationContext::ClassSchemaMemo`.
+    ClassSchemaMemo,
 }
 
 impl AssetSeam {
     /// Total number of asset-side seam sites. Pinned by the `const _`
     /// guard below and by the exhaustive `match` in
     /// [`SeamSite::slot`].
-    pub const COUNT: usize = 16;
+    pub const COUNT: usize = 17;
 
     /// Map an asset seam to its paired
     /// [`crate::error::AssetAllocationContext`].
@@ -245,12 +249,13 @@ impl AssetSeam {
             Self::FStringUtf8Bytes => C::FStringUtf8Bytes,
             Self::FStringUtf16CodeUnits => C::FStringUtf16CodeUnits,
             Self::StructLayoutMemo => C::StructLayoutMemo,
+            Self::ClassSchemaMemo => C::ClassSchemaMemo,
         }
     }
 }
 
 // Same compile-time guard pattern as PakSeam above (see precondition).
-const _: [(); AssetSeam::COUNT] = [(); AssetSeam::StructLayoutMemo as usize + 1];
+const _: [(); AssetSeam::COUNT] = [(); AssetSeam::ClassSchemaMemo as usize + 1];
 
 // In the feature-off LIB target `COUNT`/`slot` are dead: their only
 // production consumers live in the `__test_utils`-gated
@@ -409,6 +414,9 @@ mod tests {
                 AssetSeam::StructLayoutMemo => {
                     "read_asset_struct_layout_memo_surfaces_allocation_failed_under_oom"
                 }
+                AssetSeam::ClassSchemaMemo => {
+                    "read_asset_class_schema_memo_surfaces_allocation_failed_under_oom"
+                }
             }
         }
         // Touch both const fns so the matches' compile-time
@@ -463,6 +471,7 @@ mod tests {
                 AssetSeam::FStringUtf8Bytes => PakSeam::COUNT + 13,
                 AssetSeam::FStringUtf16CodeUnits => PakSeam::COUNT + 14,
                 AssetSeam::StructLayoutMemo => PakSeam::COUNT + 15,
+                AssetSeam::ClassSchemaMemo => PakSeam::COUNT + 16,
             }
         }
         let pak_all = [
@@ -504,6 +513,7 @@ mod tests {
             AssetSeam::FStringUtf8Bytes,
             AssetSeam::FStringUtf16CodeUnits,
             AssetSeam::StructLayoutMemo,
+            AssetSeam::ClassSchemaMemo,
         ];
         assert_eq!(asset_all.len(), AssetSeam::COUNT);
         for site in asset_all {
