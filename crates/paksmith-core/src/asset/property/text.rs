@@ -171,6 +171,8 @@ pub enum FTextFormatArg {
 /// - [`AssetParseFault::PropertyDepthExceeded`] past `MAX_PROPERTY_DEPTH`.
 /// - [`AssetParseFault::UnexpectedEof`] / [`PaksmithError::Io`] on short reads.
 /// - [`AssetParseFault::FStringMalformed`] for malformed text-body FStrings.
+/// - [`AssetParseFault::AllocationFailed`] if a text-body FString's
+///   buffer cannot be reserved.
 /// - [`AssetParseFault::CollectionElementCountExceeded`] for a negative
 ///   or over-cap format-argument count.
 /// - [`AssetParseFault::TextFormatArgUnsupported`] for a `Gender` or

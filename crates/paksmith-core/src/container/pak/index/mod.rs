@@ -12,7 +12,7 @@ mod flat;
 mod fstring;
 mod path_hash;
 
-pub(crate) use fstring::read_fstring;
+pub(crate) use fstring::{read_fstring, read_fstring_with};
 // Pak-scope re-export so the encrypted-index decrypt path in `pak::mod`
 // can cap `index_size` before its pre-decrypt buffer allocation. The
 // `read_positioned` flat (v3-v9) reader doesn't reject an oversized

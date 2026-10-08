@@ -205,6 +205,9 @@ policy.
 - `AssetParseFault::AllocationFailed { context: NameTable, … }`.
 - `AssetParseFault::FStringMalformed { kind }` — forwarded from each entry's
   base-name FString.
+- `AssetParseFault::AllocationFailed { context: FStringUtf8Bytes |
+  FStringUtf16CodeUnits, … }` —
+  forwarded from each entry's base-name FString.
 
 **Cap constants:**
 - `MAX_NAME_TABLE_ENTRIES: u32 = 1_048_576` (`name_table.rs:34`).

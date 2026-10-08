@@ -1,15 +1,11 @@
-//! Asset-side FString reader: thin wrapper around
-//! [`crate::container::pak::index::read_fstring`] that re-categorizes
-//! pak-side `IndexParseFault::FStringMalformed` errors as asset-side
-//! `AssetParseFault::FStringMalformed`, and relaxes the `len == 0` →
-//! malformed rejection to match CUE4Parse's UAsset FString reader.
-//!
-//! Without this wrapper, a malformed FString inside a uasset surfaces
-//! as `PaksmithError::InvalidIndex { fault: IndexParseFault::* }` —
-//! wrong category, confusing operator logs. The wrapper also accepts
-//! `len == 0` and returns the empty string, matching CUE4Parse's
-//! `FArchive.ReadFString` behavior. The pak-side reader keeps its
-//! strict rejection (issue #104) because pak-index FDI records have a
+//! Asset-side FString reader: wrapper around the pak index's decoder,
+//! [`crate::container::pak::index::read_fstring_with`], that reserves
+//! its buffer through the asset seams and re-categorizes the decoder's
+//! `IndexParseFault::FStringMalformed` errors as asset-side
+//! `AssetParseFault::FStringMalformed`, so its faults name the asset.
+//! It also accepts `len == 0` as the empty string, matching CUE4Parse's
+//! `FArchive.ReadFString`. The pak-side reader keeps its strict
+//! rejection (issue #104) because pak-index FDI records have a
 //! minimum-size invariant that depends on it.
 
 use std::io;
@@ -17,37 +13,42 @@ use std::io::Read;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::container::pak::index::read_fstring;
-use crate::error::{AssetParseFault, AssetWireField, FStringFault, IndexParseFault, PaksmithError};
+use crate::container::pak::index::read_fstring_with;
+use crate::error::{
+    AssetParseFault, AssetWireField, FStringEncoding, FStringFault, IndexParseFault, PaksmithError,
+    check_asset_reserve,
+};
+use crate::seams::AssetSeam;
 
 /// Hard cap on FString length, matching the pak-side reader's
 /// `FSTRING_MAX_LEN`. Wire i32 length envelope after `checked_abs`.
 const FSTRING_MAX_LEN: i32 = 65_536;
 
 /// Read an FString from `reader`, mapping pak-side FString errors to
-/// asset-side ones with `asset_path` context. The `len == 0` case is
-/// re-categorized as a valid empty string per CUE4Parse semantics —
-/// see the module-level comment.
-///
-/// All non-FString errors propagate unchanged (`PaksmithError::Io` for
-/// truncation, any other variant from `read_fstring` as-is).
+/// asset-side ones with `asset_path` context.
 ///
 /// # Errors
 /// - [`PaksmithError::Io`] on I/O failures.
 /// - [`PaksmithError::AssetParse`] with
 ///   [`AssetParseFault::FStringMalformed`] when the FString is malformed
 ///   (other than the `len == 0` case, which is accepted as `""`).
+/// - [`PaksmithError::AssetParse`] with
+///   [`AssetParseFault::AllocationFailed`] when its buffer cannot be
+///   reserved.
 pub(crate) fn read_asset_fstring<R: Read>(
     reader: &mut R,
     asset_path: &str,
 ) -> crate::Result<String> {
-    read_fstring(reader).or_else(|e| match e {
-        // Asset-side FString reads accept `len == 0` as the empty
-        // string. CUE4Parse's FArchive.ReadFString returns "" in this
-        // case rather than throwing — see
-        // CUE4Parse/UE4/Readers/FArchive.cs. The pak-side reader stays
-        // strict (issue #104) because FDI record-size invariants
-        // depend on the 5-byte minimum.
+    read_fstring_with(reader, |reserve, requested, encoding| {
+        let seam = match encoding {
+            FStringEncoding::Utf8 => AssetSeam::FStringUtf8Bytes,
+            FStringEncoding::Utf16 => AssetSeam::FStringUtf16CodeUnits,
+        };
+        check_asset_reserve(reserve, requested, asset_path, seam)
+    })
+    .or_else(|e| match e {
+        // CUE4Parse's FArchive.ReadFString returns "" here rather than
+        // throwing (CUE4Parse/UE4/Readers/FArchive.cs).
         PaksmithError::InvalidIndex {
             fault:
                 IndexParseFault::FStringMalformed {

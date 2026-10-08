@@ -274,6 +274,8 @@ impl PackageSummary {
     /// - [`AssetParseFault::FStringMalformed`] if any embedded FString
     ///   (`folder_name`, `localization_id`, engine-version `branch`, or
     ///   any `additional_packages_to_cook` entry) is malformed.
+    /// - [`AssetParseFault::AllocationFailed`] if an embedded FString's
+    ///   buffer cannot be reserved.
     /// - Errors from [`CustomVersionContainer::read_from`],
     ///   [`FGuid::read_from`], and [`EngineVersion::read_from`]
     ///   propagated.

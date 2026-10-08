@@ -18,11 +18,12 @@ Two paksmith readers exist for this primitive:
 - `container::pak::index::read_fstring` — strict reader used inside the pak
   index. Rejects `len == 0` because the pak FDI record-size invariant
   depends on the 5-byte minimum FString size.
-- `asset::read_asset_fstring` — wrapper around the pak reader that accepts
-  `len == 0` as the empty string, matching CUE4Parse's
-  `FArchive.ReadFString` semantics for inside-asset reads. All other error
-  cases are remapped from `IndexParseFault` to `AssetParseFault` for
-  consistent operator categorization.
+- `asset::read_asset_fstring` — wrapper around the pak reader's decoder
+  that accepts `len == 0` as the empty string, matching CUE4Parse's
+  `FArchive.ReadFString` semantics for inside-asset reads. Malformations
+  are remapped from `IndexParseFault` to `AssetParseFault`, and the buffer
+  is reserved on the asset side, so every error it reports is an asset
+  fault or an I/O error.
 
 The strict-vs-lenient split is intentional — see Variants below.
 
@@ -92,8 +93,8 @@ Rationale: paksmith's FDI bounds-check arithmetic
 (`MIN_FDI_*_RECORD_BYTES = 9`) assumes the 5-byte minimum FString
 (`length(4) + NUL(1)`). Allowing `len == 0` would shrink the per-record
 minimum to 4 bytes and let an attacker pack ~12.5% more records into a
-given FDI region than the cap predicts. See issue #104 and
-`container/pak/index/fstring.rs:54-70`.
+given FDI region than the cap predicts. See issue #104 and the
+`len == 0` check in `read_fstring_with` (`container/pak/index/fstring.rs`).
 
 ### Asset-side wrapper (lenient on `len == 0`)
 
@@ -105,6 +106,7 @@ values).
 - All other malformations remapped from `IndexParseFault::FStringMalformed`
   to `AssetParseFault::FStringMalformed` for consistent operator-facing
   error categorization.
+- A failed buffer reservation surfaces as `AssetParseFault::AllocationFailed`.
 
 Rationale: CUE4Parse's `FArchive.ReadFString` returns `""` on `len == 0`
 without throwing[^1]. Paksmith matches that semantics inside assets (no
@@ -122,7 +124,7 @@ structural integrity.
 ### Implementation hardening (recommended for any parser)
 
 - **Length cap.** `FSTRING_MAX_LEN = 65_536` bytes (UTF-8) or code units
-  (UTF-16) — `container/pak/index/fstring.rs:26`. Sized to comfortably
+  (UTF-16) — `container/pak/index/fstring.rs`. Sized to comfortably
   exceed any realistic UE virtual path while rejecting attacker-controlled
   multi-GB allocations. Surfaces as
   `FStringFault::LengthExceedsMaximum { length, maximum }`.
@@ -142,7 +144,9 @@ structural integrity.
   `FStringFault::MissingNullTerminator { encoding }`.
 - **Allocation cap.** Allocations use `try_reserve_exact` and surface as
   `IndexParseFault::AllocationFailed { context: FStringUtf8Bytes |
-  FStringUtf16CodeUnits, requested, source, path }` if reservation fails.
+  FStringUtf16CodeUnits, requested, source, path }` in the pak index, or
+  `AssetParseFault::AllocationFailed` with the same-named
+  `AssetAllocationContext` inside an asset, if reservation fails.
   At the `FSTRING_MAX_LEN` cap, the maximum allocation is 128 KiB for
   UTF-16 — well within infallible territory on a healthy machine.
 
@@ -174,8 +178,8 @@ policy.
   - **`len == 0` handling.** CUE4Parse accepts `len == 0` as `""`
     universally. Paksmith splits: pak-side strict rejection (for FDI
     invariants), asset-side lenient acceptance (matches CUE4Parse). Both
-    behaviors are intentional. See
-    `crates/paksmith-core/src/asset/fstring.rs:1-13`.
+    behaviors are intentional. See the module doc of
+    `crates/paksmith-core/src/asset/fstring.rs`.
   - **Embedded NUL rejection.** Paksmith rejects embedded NULs as a
     defense-in-depth path-traversal guard. CUE4Parse does not. The
     practical impact is nil because UE writers never emit embedded NULs.
@@ -184,7 +188,8 @@ policy.
 
 **Parser modules:**
 - `crates/paksmith-core/src/container/pak/index/fstring.rs` — strict pak-index
-  reader (`read_fstring`).
+  reader (`read_fstring`) and the decoder both readers share
+  (`read_fstring_with`).
 - `crates/paksmith-core/src/asset/fstring.rs` — asset-side wrapper
   (`read_asset_fstring`, `write_asset_fstring`).
 
@@ -193,10 +198,12 @@ policy.
 **Public surface:**
 - `pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> Result<String>`
   (re-exported as `crate::container::pak::index::read_fstring`).
+- `pub(crate) fn read_fstring_with<R: Read>(reader: &mut R, reserved: impl FnOnce(Result<(), TryReserveError>, usize, FStringEncoding) -> Result<()>) -> Result<String>`
+  (re-exported as `crate::container::pak::index::read_fstring_with`).
 - `pub(crate) fn read_asset_fstring<R: Read>(reader: &mut R, asset_path: &str) -> Result<String>`.
 - `pub(crate) fn write_asset_fstring<W: Write>(writer: &mut W, s: &str) -> io::Result<()>` (gated behind `__test_utils`).
 
-Both readers are `pub(crate)` — no external API surface for FString reading.
+All of these are `pub(crate)` — no external API surface for FString reading.
 Consumers go through the structured `NameTable`, `CustomVersion`,
 `PackageSummary`, etc. types that own the per-record context.
 
@@ -205,16 +212,25 @@ Consumers go through the structured `NameTable`, `CustomVersion`,
 - `AssetParseFault::FStringMalformed { kind: FStringFault::* }` (asset-side, remapped).
 - `FStringFault::{LengthIsZero, LengthIsI32Min, LengthExceedsMaximum, MissingNullTerminator, EmbeddedNul, InvalidEncoding}`.
 - `IndexParseFault::AllocationFailed { context: FStringUtf8Bytes |
-  FStringUtf16CodeUnits, … }`.
+  FStringUtf16CodeUnits, … }` (pak-side).
+- `AssetParseFault::AllocationFailed { context: FStringUtf8Bytes |
+  FStringUtf16CodeUnits, … }` (asset-side).
 
 **Cap constants:**
-- `FSTRING_MAX_LEN: i32 = 65_536` (`container/pak/index/fstring.rs:26`).
+- `FSTRING_MAX_LEN: i32 = 65_536` (`container/pak/index/fstring.rs`).
 
 **Test files:**
-- `crates/paksmith-core/src/container/pak/index/fstring.rs` `mod tests` (if
-  present) plus the FString-focused tests in
-  `crates/paksmith-core/src/container/pak/index/mod.rs:990-1238`.
+- `crates/paksmith-core/src/container/pak/index/fstring.rs` `mod tests`
+  (`an_armed_pak_seam_fails_the_read_as_an_index_fault`) plus the
+  FString-focused tests in `crates/paksmith-core/src/container/pak/index/mod.rs`
+  `mod tests`.
 - `crates/paksmith-core/src/asset/fstring.rs` `mod tests` (`len_zero_decodes_as_empty_string`, `non_zero_malformation_still_errors`, `embedded_nul_forwards_through_wrapper`).
+- Asset-side allocation failures: `read_asset_fstring_utf8_bytes_surfaces_allocation_failed_under_oom`
+  and `read_asset_fstring_utf16_code_units_surfaces_allocation_failed_under_oom`
+  (`crates/paksmith-core-tests/tests/oom_asset.rs`), and
+  `an_armed_pak_fstring_seam_leaves_the_package_read_alone` and
+  `generic_parse_fstring_allocation_failure_fails_the_package_read`
+  (`crates/paksmith-core/src/asset/package.rs`).
 
 **Phase plan:**
 - Pak-side strict reader: covered by Phase 1 hardening (issue #104).

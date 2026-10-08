@@ -2647,10 +2647,11 @@ pub enum AssetParseFault {
         observed: i64,
     },
     /// An FString within the asset header was malformed. Reuses the
-    /// existing [`FStringFault`] sub-enum so the FString reader
-    /// (`crate::container::pak::index::fstring::read_fstring`) can
-    /// surface its faults uniformly into either the pak-index or the
-    /// asset-parse top-level.
+    /// existing [`FStringFault`] sub-enum so the FString decoder
+    /// (`crate::container::pak::index::fstring::read_fstring_with`),
+    /// shared by the pak index and the asset reader, can surface its
+    /// faults uniformly into either the pak-index or the asset-parse
+    /// top-level.
     FStringMalformed {
         /// Sub-category of the malformation.
         kind: FStringFault,
@@ -4897,6 +4898,10 @@ pub enum AssetAllocationContext {
     /// `HashMap` entry for the per-read memo of resolved enum value
     /// tables.
     EnumTableMemo,
+    /// `Vec<u8>` for an asset FString's UTF-8 bytes.
+    FStringUtf8Bytes,
+    /// `Vec<u16>` for an asset FString's UTF-16 code units.
+    FStringUtf16CodeUnits,
 }
 
 impl AssetAllocationContext {
@@ -4910,7 +4915,8 @@ impl AssetAllocationContext {
             Self::ExportPayloadBytes
             | Self::SplitAssetCombined
             | Self::BulkDataBytes
-            | Self::DecompressedBulkDataBytes => BoundsUnit::Bytes,
+            | Self::DecompressedBulkDataBytes
+            | Self::FStringUtf8Bytes => BoundsUnit::Bytes,
             Self::NameTable
             | Self::ImportTable
             | Self::ExportTable
@@ -4919,7 +4925,8 @@ impl AssetAllocationContext {
             | Self::CollectionElements
             | Self::DataTableRows
             | Self::DataResourceTable
-            | Self::EnumTableMemo => BoundsUnit::Items,
+            | Self::EnumTableMemo
+            | Self::FStringUtf16CodeUnits => BoundsUnit::Items,
         }
     }
 }
@@ -4940,6 +4947,8 @@ impl fmt::Display for AssetAllocationContext {
             Self::BulkDataBytes => "bulk data bytes",
             Self::DecompressedBulkDataBytes => "decompressed bulk data bytes",
             Self::EnumTableMemo => "enum table memo",
+            Self::FStringUtf8Bytes => "FString UTF-8 buffer",
+            Self::FStringUtf16CodeUnits => "FString UTF-16 code units",
         };
         f.write_str(s)
     }
@@ -5548,9 +5557,10 @@ pub enum MappingsParseFault {
 /// - **Per-entry reservations** (`pak::read_entry` payload) carry
 ///   `path: Some(...)` and a `warn!()` log call alongside; kept
 ///   inline so the log macro stays at the failure site.
-/// - **`fstring.rs` UTF-8/UTF-16** use [`crate::seams::seam_check!`]
-///   inline because they don't take a [`Vec<T>`] receiver of the
-///   appropriate type.
+///
+/// The FString UTF-8/UTF-16 buffers are reserved by a decoder shared
+/// with the asset reader, which takes its check from the caller; the
+/// pak index passes [`check_index_reserve`], this helper's tail.
 ///
 /// # Asymmetry with `try_reserve_asset`
 ///
@@ -5560,9 +5570,10 @@ pub enum MappingsParseFault {
 /// variants (`CompressedReserve`, `ScratchReserve`, `Lz4OutputReserve`)
 /// surface as `DecompressionFault`, not `IndexParseFault`, so a unified
 /// `PakSeam::context() -> AllocationContext` accessor would be a
-/// partial function. Those direct-call variants (and three more
-/// — `FstringUtf16`, `FstringUtf8`, `FdiFullPath`) never reach this
-/// helper, so the remaining 9 helper-routed variants do pair 1:1
+/// partial function. Those direct-call variants never reach this
+/// helper, and neither do `FdiFullPath` (open-coded) or `FstringUtf16`
+/// and `FstringUtf8` (through [`check_index_reserve`] directly), so
+/// the remaining 9 helper-routed variants do pair 1:1
 /// with their contexts — but the structural binding lives in
 /// [`crate::seams::PakSeam`]'s per-variant doc-comments rather than
 /// a `const fn` accessor. Future cleanup path: split `PakSeam` into
@@ -5577,19 +5588,26 @@ pub(crate) fn try_reserve_index<T>(
     vec: &mut Vec<T>,
     count: usize,
     context: AllocationContext,
+    seam: crate::seams::PakSeam,
+) -> crate::Result<()> {
+    check_index_reserve(vec.try_reserve_exact(count), count, context, seam)
+}
+
+/// `reserve`, a reservation of `count` slots, run through `seam`'s OOM
+/// injection and mapped to [`IndexParseFault::AllocationFailed`] with
+/// `context` and `path: None`. [`try_reserve_index`] calls it for a
+/// `Vec`; the pak index's FString reads call it with the shared
+/// decoder's reservation.
+pub(crate) fn check_index_reserve(
+    reserve: Result<(), std::collections::TryReserveError>,
+    count: usize,
+    context: AllocationContext,
     // Underscore prefix silences the unused-parameter warning in
-    // non-`__test_utils` builds where the cfg-gated arm below is
-    // removed. The parameter name otherwise reads as `seam` at every
-    // call site.
+    // non-`__test_utils` builds, where `seam_check!` expands to nothing.
     _seam: crate::seams::PakSeam,
 ) -> crate::Result<()> {
-    let reserve_res = vec.try_reserve_exact(count);
-    #[cfg(feature = "__test_utils")]
-    let reserve_res = match reserve_res {
-        Ok(()) => crate::testing::oom::maybe_fail_at(crate::seams::SeamSite::Pak(_seam)),
-        other => other,
-    };
-    reserve_res.map_err(|source| PaksmithError::InvalidIndex {
+    crate::seams::seam_check!(reserve, crate::seams::SeamSite::Pak(_seam));
+    reserve.map_err(|source| PaksmithError::InvalidIndex {
         fault: IndexParseFault::AllocationFailed {
             context,
             requested: count,
@@ -5617,8 +5635,9 @@ pub(crate) fn try_reserve_asset<T>(
 /// `reserve`, a reservation of `count` slots on any receiver, run
 /// through `seam`'s OOM injection and mapped to
 /// [`AssetParseFault::AllocationFailed`]. Every asset-side seam is
-/// reached through here, [`try_reserve_asset`] for a `Vec` and directly
-/// for any other receiver (a `HashMap`). `seam` is mandatory and the
+/// reached through here: through [`try_reserve_asset`] for a `Vec`, or
+/// directly with a reservation made elsewhere (a `HashMap`'s, or the
+/// FString decoder's). `seam` is mandatory and the
 /// [`crate::error::AssetAllocationContext`] comes from
 /// [`crate::seams::AssetSeam::context`], so one variant sets both the
 /// OOM-injection slot and the wire-stable fault context.
@@ -8558,6 +8577,14 @@ mod tests {
                 "decompressed bulk data bytes",
             ),
             (AssetAllocationContext::EnumTableMemo, "enum table memo"),
+            (
+                AssetAllocationContext::FStringUtf8Bytes,
+                "FString UTF-8 buffer",
+            ),
+            (
+                AssetAllocationContext::FStringUtf16CodeUnits,
+                "FString UTF-16 code units",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -8659,6 +8686,11 @@ mod tests {
                 BoundsUnit::Bytes,
             ),
             (AssetAllocationContext::EnumTableMemo, BoundsUnit::Items),
+            (AssetAllocationContext::FStringUtf8Bytes, BoundsUnit::Bytes),
+            (
+                AssetAllocationContext::FStringUtf16CodeUnits,
+                BoundsUnit::Items,
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(

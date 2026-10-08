@@ -113,7 +113,7 @@ Offset  Bytes (LE)                                          Field
   inherits the parser's FString length cap; lengths beyond the cap
   MUST be rejected at the FString reader level. Paksmith caps at
   `FSTRING_MAX_LEN = 65_536`
-  (`container/pak/index/fstring.rs:26`). Real branches are typically
+  (`container/pak/index/fstring.rs`). Real branches are typically
   20-40 characters (`"++UE5+Release-5.1"`, `"++Fortnite+Release-29.40"`).
 - **Licensee-flag preservation.** A reader MUST preserve the raw
   `changelist` u32 verbatim if round-trip fidelity is required (writing
@@ -174,9 +174,13 @@ divergences for the full description.)
 - `PaksmithError::Io` on truncation.
 - `AssetParseFault::FStringMalformed { kind }` on a malformed branch FString
   (forwarded from `read_asset_fstring`).
+- `AssetParseFault::AllocationFailed { context: FStringUtf8Bytes |
+  FStringUtf16CodeUnits, … }` when
+  the branch FString's buffer cannot be reserved (forwarded from
+  `read_asset_fstring`).
 
 **Cap constants:** none specific to `EngineVersion`; the branch FString
-inherits `FSTRING_MAX_LEN = 65_536` from `container/pak/index/fstring.rs:26`.
+inherits `FSTRING_MAX_LEN = 65_536` from `container/pak/index/fstring.rs`.
 
 **Test files:** `crates/paksmith-core/src/asset/engine_version.rs` `mod tests`.
 

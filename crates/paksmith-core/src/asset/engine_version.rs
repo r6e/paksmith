@@ -97,6 +97,9 @@ impl EngineVersion {
     ///   FString is malformed (length-overflow, encoding error, missing
     ///   null terminator). Note: `len == 0` is accepted as the empty
     ///   string at the asset boundary as of commit d65909d.
+    /// - [`crate::error::PaksmithError::AssetParse`] with
+    ///   [`crate::error::AssetParseFault::AllocationFailed`] if the branch
+    ///   FString's buffer cannot be reserved
     pub fn read_from<R: Read>(reader: &mut R, asset_path: &str) -> crate::Result<Self> {
         let major = reader.read_u16::<LittleEndian>()?;
         let minor = reader.read_u16::<LittleEndian>()?;

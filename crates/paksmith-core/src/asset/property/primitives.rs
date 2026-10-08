@@ -357,6 +357,8 @@ pub enum PropertyValue {
 ///   `asset_path` passes the package's derived-string budget.
 /// - [`crate::error::AssetParseFault::FStringMalformed`] for a malformed
 ///   `sub_path` FString.
+/// - [`crate::error::AssetParseFault::AllocationFailed`] if the
+///   `sub_path` FString's buffer cannot be reserved.
 ///
 /// [`AssetContext::soft_object_paths_indexed`]: crate::asset::AssetContext
 /// [`PaksmithError::UnsupportedFeature`]: crate::PaksmithError::UnsupportedFeature
@@ -473,6 +475,8 @@ pub(super) fn read_soft_path_payload<R: Read>(
 /// - [`crate::PaksmithError::Io`] / [`crate::error::AssetParseFault::UnexpectedEof`]
 ///   on short reads.
 /// - [`crate::error::AssetParseFault::FStringMalformed`] for malformed FStrings.
+/// - [`crate::error::AssetParseFault::AllocationFailed`] if an FString's
+///   buffer cannot be reserved.
 /// - Any error from [`super::resolve_fname`] for `NameProperty` / `EnumProperty`.
 #[allow(
     clippy::too_many_lines,

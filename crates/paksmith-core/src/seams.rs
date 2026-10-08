@@ -71,13 +71,13 @@ pub enum PakSeam {
     /// the first chunk's reservation succeeds and the failure fires
     /// on a later iteration.
     ScratchReserve,
-    /// `read_fstring` UTF-16 branch (negative-length-prefixed
-    /// FStrings). Surfaces as
+    /// The pak index's `read_fstring`, UTF-16 branch
+    /// (negative-length-prefixed FStrings). Surfaces as
     /// [`crate::error::IndexParseFault::AllocationFailed`] with
     /// `context: AllocationContext::FStringUtf16CodeUnits`.
     FstringUtf16,
-    /// `read_fstring` UTF-8 branch (positive-length-prefixed
-    /// FStrings). Surfaces as
+    /// The pak index's `read_fstring`, UTF-8 branch
+    /// (positive-length-prefixed FStrings). Surfaces as
     /// [`crate::error::IndexParseFault::AllocationFailed`] with
     /// `context: AllocationContext::FStringUtf8Bytes`.
     FstringUtf8,
@@ -197,20 +197,26 @@ pub enum AssetSeam {
     /// `check_asset_reserve`.
     /// Surfaces as `AssetAllocationContext::EnumTableMemo`.
     EnumTableMemo,
+    /// `read_asset_fstring`'s UTF-8 buffer.
+    /// Surfaces as `AssetAllocationContext::FStringUtf8Bytes`.
+    FStringUtf8Bytes,
+    /// `read_asset_fstring`'s UTF-16 buffer.
+    /// Surfaces as `AssetAllocationContext::FStringUtf16CodeUnits`.
+    FStringUtf16CodeUnits,
 }
 
 impl AssetSeam {
     /// Total number of asset-side seam sites. Pinned by the `const _`
     /// guard below and by the exhaustive `match` in
     /// [`SeamSite::slot`].
-    pub const COUNT: usize = 13;
+    pub const COUNT: usize = 15;
 
     /// Map an asset seam to its paired
     /// [`crate::error::AssetAllocationContext`].
     ///
     /// The 1:1 pairing is enforced structurally by this exhaustive
     /// match — adding a variant to [`AssetSeam`] without a context
-    /// counterpart (or vice versa) fails to compile, so the binding
+    /// counterpart fails to compile, so the binding
     /// can't silently drift out of sync. `crate::error::check_asset_reserve`,
     /// which every asset-side reservation goes through, derives the
     /// context tag from the seam via this method, so no call site names
@@ -232,12 +238,14 @@ impl AssetSeam {
             Self::BulkDataBytes => C::BulkDataBytes,
             Self::DecompressedBulkDataBytes => C::DecompressedBulkDataBytes,
             Self::EnumTableMemo => C::EnumTableMemo,
+            Self::FStringUtf8Bytes => C::FStringUtf8Bytes,
+            Self::FStringUtf16CodeUnits => C::FStringUtf16CodeUnits,
         }
     }
 }
 
 // Same compile-time guard pattern as PakSeam above (see precondition).
-const _: [(); AssetSeam::COUNT] = [(); AssetSeam::EnumTableMemo as usize + 1];
+const _: [(); AssetSeam::COUNT] = [(); AssetSeam::FStringUtf16CodeUnits as usize + 1];
 
 // In the feature-off LIB target `COUNT`/`slot` are dead: their only
 // production consumers live in the `__test_utils`-gated
@@ -387,6 +395,12 @@ mod tests {
                 AssetSeam::EnumTableMemo => {
                     "read_asset_enum_table_memo_surfaces_allocation_failed_under_oom"
                 }
+                AssetSeam::FStringUtf8Bytes => {
+                    "read_asset_fstring_utf8_bytes_surfaces_allocation_failed_under_oom"
+                }
+                AssetSeam::FStringUtf16CodeUnits => {
+                    "read_asset_fstring_utf16_code_units_surfaces_allocation_failed_under_oom"
+                }
             }
         }
         // Touch both const fns so the matches' compile-time
@@ -438,6 +452,8 @@ mod tests {
                 AssetSeam::BulkDataBytes => PakSeam::COUNT + 10,
                 AssetSeam::DecompressedBulkDataBytes => PakSeam::COUNT + 11,
                 AssetSeam::EnumTableMemo => PakSeam::COUNT + 12,
+                AssetSeam::FStringUtf8Bytes => PakSeam::COUNT + 13,
+                AssetSeam::FStringUtf16CodeUnits => PakSeam::COUNT + 14,
             }
         }
         let pak_all = [
@@ -476,6 +492,8 @@ mod tests {
             AssetSeam::BulkDataBytes,
             AssetSeam::DecompressedBulkDataBytes,
             AssetSeam::EnumTableMemo,
+            AssetSeam::FStringUtf8Bytes,
+            AssetSeam::FStringUtf16CodeUnits,
         ];
         assert_eq!(asset_all.len(), AssetSeam::COUNT);
         for site in asset_all {

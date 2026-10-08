@@ -173,8 +173,8 @@ Wire layout above; the table cells call out the variants inline
   Bodies that declare a larger size are rejected before any allocation
   runs.
 - **Per-body `try_reserve_exact`** — any allocation a primitive reader
-  performs (rare; `StrProperty`'s FString reader, which reports its own
-  `IndexParseFault::AllocationFailed`) fails the package read.
+  performs (rare; `StrProperty`'s FString reader, which reports
+  `AssetParseFault::AllocationFailed`) fails the package read.
 - **No collection-cap exposure** — primitive readers don't iterate.
 
 ## Verification
@@ -218,6 +218,8 @@ Wire layout above; the table cells call out the variants inline
 - `AssetParseFault::PackageIndexUnderflow { field }`.
 - `AssetParseFault::PackageIndexOob { field, value }`.
 - `AssetParseFault::FStringMalformed { kind }` (from `StrProperty`).
+- `AssetParseFault::AllocationFailed { context: FStringUtf8Bytes |
+  FStringUtf16CodeUnits, … }` (from `StrProperty`).
 
 **Phase plan:**
 - Core primitives: `docs/plans/phase-2b-tagged-properties.md` (Tasks 1–5).
