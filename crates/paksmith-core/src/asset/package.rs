@@ -860,8 +860,8 @@ impl Package {
                 asset_path,
                 AssetSeam::ExportPayloads,
             )?;
-            // One view for the whole read, so an enum that many slots,
-            // struct elements or exports name resolves its table once.
+            // One view for the whole read, so an enum or struct that many
+            // slots, elements or exports name resolves once.
             let mut view = UsmapView::new(usmap);
             for export in &exports.exports {
                 // Propagate OOB errors here rather than swallowing them
@@ -898,6 +898,7 @@ impl Package {
                 let props = read_unversioned_properties(
                     &mut export_cur,
                     &class_name,
+                    usmap.get_all_properties(&class_name),
                     &mut view,
                     &ctx,
                     asset_path,

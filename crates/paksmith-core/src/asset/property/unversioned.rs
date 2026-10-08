@@ -30,6 +30,7 @@ use crate::asset::property::primitives::{
 use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::property::{MAX_COLLECTION_ELEMENTS, Property, read_fname_pair};
 use crate::asset::read_asset_fstring;
+use crate::asset::structs::RegisteredStruct;
 use crate::asset::{AssetContext, decode_warn, ends_package_read};
 use crate::error::{
     AssetParseFault, AssetWireField, BoundsUnit, CollectionKind, PaksmithError,
@@ -38,7 +39,7 @@ use crate::error::{
 use crate::seams::AssetSeam;
 use crate::untrusted::clamp;
 
-use super::super::mappings::{MappedProperty, MappedPropertyType, Usmap};
+use super::super::mappings::{MappedProperty, MappedPropertyType, ResolvedProperty, Usmap};
 
 // Bit masks from oracle unreal_asset_base::unversioned::header::UnversionedHeaderFragment.
 const SKIP_NUM_MASK: u16 = 0x007f;
@@ -247,8 +248,10 @@ impl UnversionedHeader {
 }
 
 /// Decode all unversioned properties for an export whose class is
-/// `class_name`, against `view`, which every export of a package read
-/// shares.
+/// `class_name`, laid out by `all_props`, against `view`, which every
+/// export of a package read shares. `all_props` is
+/// [`Usmap::get_all_properties`]'s slice for `class_name`, sorted by
+/// `absolute_index` as the header walk requires.
 ///
 /// **Partial-tree contract.** If decoding hits
 /// [`AssetParseFault::UnversionedTypeNotSupported`] at any depth (a
@@ -264,6 +267,7 @@ impl UnversionedHeader {
 pub(crate) fn read_unversioned_properties(
     cur: &mut Cursor<&[u8]>,
     class_name: &str,
+    all_props: &[ResolvedProperty],
     view: &mut UsmapView<'_>,
     ctx: &AssetContext,
     asset_path: &str,
@@ -279,8 +283,6 @@ pub(crate) fn read_unversioned_properties(
         });
     }
 
-    let usmap: &Usmap = view.usmap;
-    let all_props = usmap.get_all_properties(class_name);
     if all_props.is_empty() {
         // At depth 0 the export simply has no schema — emit an empty
         // bag (the outermost class lookup may resolve to `""` for
@@ -313,10 +315,10 @@ pub(crate) fn read_unversioned_properties(
     let header = UnversionedHeader::read(cur, asset_path)?;
 
     // `is_serialized`'s `frag_idx` cursor advances forward only and
-    // wants monotonic input. `get_all_properties` returns the cached
-    // flattened slice already pre-sorted by `absolute_index` (#370),
-    // so iteration is monotonic by construction — no per-export
-    // defensive sort is needed.
+    // wants monotonic input. Callers pass `get_all_properties`'s cached
+    // slice, pre-sorted by `absolute_index` (#370), so iteration is
+    // monotonic by construction — no per-export defensive sort is
+    // needed.
     let mut result: Vec<Property> = Vec::new();
     let mut frag_idx = 0usize;
 
@@ -401,28 +403,62 @@ fn is_partial_tree_stop(e: &PaksmithError) -> bool {
 }
 
 /// The `.usmap` one package read decodes against, resolving each enum's
-/// value table once (#817). Keyed on the enum name's allocation, which the
-/// slots, struct fields and container elements naming one `.usmap` name
-/// share, and resolved by the name's text, since a valid `.usmap` can hold
-/// equal names in separate allocations. An entry keeps a clone of its name,
-/// so the address cannot be reused while the view lives. A hit costs one
-/// probe of an address-sized key, whatever the name's length; a miss also
-/// reserves the entry, resolves the name by its text and inserts it.
-/// Scoped to one read and mutated during it: not on [`AssetContext`], which
-/// is shared and `Sync`, nor on [`Usmap`], which outlives the read.
+/// value table and each struct's layout once per name allocation (#817;
+/// see [`memoize`]). Scoped to one read and mutated during it: not on
+/// [`AssetContext`], which is shared and `Sync`, nor on [`Usmap`], which
+/// outlives the read.
 pub(crate) struct UsmapView<'u> {
     usmap: &'u Usmap,
-    enum_tables: HashMap<usize, (Arc<str>, Option<&'u EnumTable>)>,
+    enum_tables: NameMemo<Option<&'u EnumTable>>,
+    struct_layouts: NameMemo<StructLayout<'u>>,
 }
 
 /// An enum's `.usmap` value names, by ordinal.
 type EnumTable = HashMap<u64, Arc<str>>;
+
+/// Values resolved from names, held by [`memoize`].
+type NameMemo<V> = HashMap<usize, (Arc<str>, V)>;
+
+/// How a struct's value is laid out on the wire.
+#[derive(Clone, Copy)]
+enum StructLayout<'u> {
+    /// A typed engine struct's custom-binary decoder.
+    Typed(RegisteredStruct),
+    /// Any other struct's `.usmap` properties, empty when the `.usmap`
+    /// has none.
+    Schema(&'u [ResolvedProperty]),
+}
+
+/// `name`'s value in `memo`, keyed on the name's allocation, which the
+/// slots, struct fields and container elements naming one `.usmap` name
+/// share. A hit costs one probe of an address-sized key, whatever the
+/// name's length. A miss reserves the entry on `seam`, resolves the name
+/// by its text with `by_text`, since a valid `.usmap` can hold equal
+/// names in separate allocations, and inserts the result with a clone of
+/// the name, so the address cannot be reused while the memo lives.
+fn memoize<V: Copy>(
+    memo: &mut NameMemo<V>,
+    name: &Arc<str>,
+    asset_path: &str,
+    seam: AssetSeam,
+    by_text: impl FnOnce(&str) -> V,
+) -> crate::Result<V> {
+    let key = Arc::as_ptr(name).cast::<u8>().addr();
+    if let Some(&(_, value)) = memo.get(&key) {
+        return Ok(value);
+    }
+    check_asset_reserve(memo.try_reserve(1), 1, asset_path, seam)?;
+    let value = by_text(name);
+    let _ = memo.insert(key, (Arc::clone(name), value));
+    Ok(value)
+}
 
 impl<'u> UsmapView<'u> {
     pub(crate) fn new(usmap: &'u Usmap) -> Self {
         Self {
             usmap,
             enum_tables: HashMap::new(),
+            struct_layouts: HashMap::new(),
         }
     }
 
@@ -437,21 +473,49 @@ impl<'u> UsmapView<'u> {
         enum_name: &Arc<str>,
         asset_path: &str,
     ) -> crate::Result<Option<&'u EnumTable>> {
-        let key = Arc::as_ptr(enum_name).cast::<u8>().addr();
-        if let Some(&(_, table)) = self.enum_tables.get(&key) {
-            return Ok(table);
-        }
-        check_asset_reserve(
-            self.enum_tables.try_reserve(1),
-            1,
+        let usmap = self.usmap;
+        memoize(
+            &mut self.enum_tables,
+            enum_name,
             asset_path,
             AssetSeam::EnumTableMemo,
-        )?;
-        #[cfg(feature = "__test_utils")]
-        ENUM_TABLE_LOOKUPS.with(|lookups| lookups.update(|n| n + 1));
-        let table = self.usmap.enums.get(&**enum_name);
-        let _ = self.enum_tables.insert(key, (Arc::clone(enum_name), table));
-        Ok(table)
+            |name| {
+                #[cfg(feature = "__test_utils")]
+                ENUM_TABLE_LOOKUPS.with(|lookups| lookups.update(|n| n + 1));
+                usmap.enums.get(name)
+            },
+        )
+    }
+
+    /// The layout of the struct `struct_name` names: the typed registry's
+    /// decoder when it has one, otherwise the `.usmap` schema. Registered
+    /// engine structs ("Vector", "Box", …) serialize as the same custom
+    /// binary in unversioned mode as in the tagged path, since CUE4Parse's
+    /// `FScriptStruct` dispatches on struct name only (#640).
+    ///
+    /// # Errors
+    ///
+    /// [`AssetParseFault::AllocationFailed`] when the memo cannot grow.
+    fn struct_layout(
+        &mut self,
+        struct_name: &Arc<str>,
+        asset_path: &str,
+    ) -> crate::Result<StructLayout<'u>> {
+        let usmap = self.usmap;
+        memoize(
+            &mut self.struct_layouts,
+            struct_name,
+            asset_path,
+            AssetSeam::StructLayoutMemo,
+            |name| {
+                #[cfg(feature = "__test_utils")]
+                STRUCT_LAYOUT_LOOKUPS.with(|lookups| lookups.update(|n| n + 1));
+                crate::asset::structs::lookup(name).map_or_else(
+                    || StructLayout::Schema(usmap.get_all_properties(name)),
+                    StructLayout::Typed,
+                )
+            },
+        )
     }
 }
 
@@ -460,12 +524,21 @@ thread_local! {
     /// Enum value tables [`UsmapView::enum_values`] has resolved by name on
     /// this thread, which tests read to pin how often a read makes one.
     static ENUM_TABLE_LOOKUPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Struct layouts [`UsmapView::struct_layout`] has resolved by name on
+    /// this thread.
+    static STRUCT_LAYOUT_LOOKUPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Enum value-table lookups made on this thread so far.
 #[cfg(all(test, feature = "__test_utils"))]
 pub(crate) fn enum_table_lookups() -> u64 {
     ENUM_TABLE_LOOKUPS.with(std::cell::Cell::get)
+}
+
+/// Struct-layout lookups made on this thread so far.
+#[cfg(all(test, feature = "__test_utils"))]
+pub(crate) fn struct_layout_lookups() -> u64 {
+    STRUCT_LAYOUT_LOOKUPS.with(std::cell::Cell::get)
 }
 
 #[allow(
@@ -580,41 +653,42 @@ fn read_unversioned_value(
                 sub_path,
             }
         }
-        MT::Struct { struct_name } => {
-            // Registered engine structs ("Vector", "Box", …) serialize
-            // as the SAME custom-binary blob in unversioned mode as in
-            // the tagged path — CUE4Parse's `FScriptStruct` dispatches
-            // on struct name only, with no tagged/unversioned branch —
-            // so try the typed registry first (#640). The unversioned
-            // reader has no per-property `tag.size`; the decoder's
-            // `expected_end` is computed from the registry's
+        MT::Struct { struct_name } => match view.struct_layout(struct_name, asset_path)? {
+            // The unversioned reader has no per-property `tag.size`; the
+            // decoder's `expected_end` is computed from the registry's
             // version-deterministic `wire_size` (the natural width),
             // matching the 3g/3h mesh-parser pattern. This single arm
             // also serves Array/Set/Map elements, so container elements
             // typed-decode with a PER-ELEMENT boundary — sidestepping
             // the tagged path's whole-array `expected_end` hazard
             // (`containers::read_struct_property` doc).
-            if let Some(entry) = crate::asset::structs::lookup(struct_name) {
+            StructLayout::Typed(entry) => {
                 // Plain add, matching the 3g/3h callers (`FBox::read_from`,
                 // `render_data.rs`): `position()` is bounded by the
                 // in-memory slice length and `wire_size` is <= 49, so the
                 // u64 add cannot overflow.
                 let expected_end = cur.position() + (entry.wire_size)(ctx);
                 let typed = (entry.decoder)(cur, ctx, expected_end, asset_path)?;
-                return Ok(PropertyValue::TypedStruct(Box::new(typed)));
+                PropertyValue::TypedStruct(Box::new(typed))
             }
             // Unregistered struct: recurse the usmap property-list
             // schema (CUE4Parse's `FStructFallback` equivalent). A
             // missing schema fires `UnversionedSchemaMissing` →
             // partial-tree stop.
-            let nested =
-                read_unversioned_properties(cur, struct_name, view, ctx, asset_path, depth + 1)?;
-            PropertyValue::Struct {
+            StructLayout::Schema(schema) => PropertyValue::Struct {
+                properties: read_unversioned_properties(
+                    cur,
+                    struct_name,
+                    schema,
+                    view,
+                    ctx,
+                    asset_path,
+                    depth + 1,
+                )?,
                 // Refcount-bump (#365).
                 struct_name: Arc::clone(struct_name),
-                properties: nested,
-            }
-        }
+            },
+        },
         MT::Array { inner } => {
             let count = read_collection_count(
                 cur,
@@ -905,7 +979,8 @@ mod tests {
         depth: usize,
     ) -> crate::Result<Vec<Property>> {
         let view = &mut UsmapView::new(usmap);
-        super::read_unversioned_properties(cur, class_name, view, ctx, asset_path, depth)
+        let all_props = usmap.get_all_properties(class_name);
+        super::read_unversioned_properties(cur, class_name, all_props, view, ctx, asset_path, depth)
     }
 
     fn two_prop_header_bytes() -> Vec<u8> {
@@ -2059,9 +2134,123 @@ mod tests {
         assert_eq!(names, [Some("Easy"), Some("Hard"), Some("Easy")]);
     }
 
-    /// Each recursive `read_unversioned_value(depth + 1)` in the
-    /// Array/Set/Map arms MUST increment depth, or a nested container
-    /// escapes `MAX_PROPERTY_DEPTH` (stack-overflow risk). Called near the
+    /// Struct slots resolve a layout once per name allocation: an array
+    /// of three `S` and a scalar `S` sharing one allocation, a separate
+    /// allocation of "S", an array of two `Vector` and a scalar `Vector`
+    /// sharing one, and a `Missing` make 4 lookups (9 per value, 3 per
+    /// name text). The `.usmap`'s own `Vector` schema loses to the typed
+    /// registry, and the cached missing schema still stops the tree.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn struct_slots_resolve_a_layout_once_per_name_allocation() {
+        let s: Arc<str> = Arc::from("S");
+        let alias: Arc<str> = Arc::from("S");
+        let vector: Arc<str> = Arc::from("Vector");
+        let strukt = |name: &Arc<str>| MappedPropertyType::Struct {
+            struct_name: Arc::clone(name),
+        };
+        let array = |inner| MappedPropertyType::Array {
+            inner: Arc::new(inner),
+        };
+        let row = |index: u16, prop_type| MappedProperty {
+            name: Arc::from(format!("P{index}")),
+            schema_index: index,
+            array_index: 0,
+            prop_type,
+        };
+        let byte_schema = |name: &str| ClassSchema {
+            name: name.to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: Arc::from("X"),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: MappedPropertyType::UInt8,
+            }],
+        };
+        let class = ClassSchema {
+            name: "C".to_string(),
+            super_type: None,
+            prop_count: 6,
+            properties: vec![
+                row(0, array(strukt(&s))),
+                row(1, strukt(&s)),
+                row(2, strukt(&alias)),
+                row(3, array(strukt(&vector))),
+                row(4, strukt(&vector)),
+                row(5, strukt(&Arc::from("Missing"))),
+            ],
+        };
+        let schemas = HashMap::from([
+            ("C".to_string(), class),
+            ("S".to_string(), byte_schema("S")),
+            ("Vector".to_string(), byte_schema("Vector")),
+        ]);
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).unwrap();
+        let mut wire = vec![0x00, 0x0D, 3, 0, 0, 0];
+        for byte in [10, 20, 30, 40, 50] {
+            wire.extend_from_slice(&[0x00, 0x03, byte]);
+        }
+        wire.extend_from_slice(&2i32.to_le_bytes());
+        for c in 1..=9u8 {
+            wire.extend_from_slice(&f32::from(c).to_le_bytes());
+        }
+
+        let before = struct_layout_lookups();
+        let props = read_unversioned_properties(
+            &mut Cursor::new(&wire[..]),
+            "C",
+            &usmap,
+            &make_ctx(&["None"]),
+            "t",
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(struct_layout_lookups() - before, 4);
+        let byte = |value: &PropertyValue| match value {
+            PropertyValue::Struct { properties, .. } => match properties[0].value {
+                PropertyValue::Byte(b) => b,
+                ref other => panic!("expected a byte, got {other:?}"),
+            },
+            other => panic!("expected a struct, got {other:?}"),
+        };
+        let vector_of = |value: &PropertyValue| match value {
+            PropertyValue::TypedStruct(inner) => match inner.as_ref() {
+                crate::asset::structs::TypedStructValue::Vector(v) => (v.x, v.y, v.z),
+                other => panic!("expected a Vector, got {other:?}"),
+            },
+            other => panic!("expected a typed struct, got {other:?}"),
+        };
+        let elements = |value: &PropertyValue| match value {
+            PropertyValue::Array { elements, .. } => elements.clone(),
+            other => panic!("expected an array, got {other:?}"),
+        };
+        assert_eq!(props.len(), 5);
+        assert_eq!(
+            elements(&props[0].value)
+                .iter()
+                .map(byte)
+                .collect::<Vec<_>>(),
+            [10, 20, 30]
+        );
+        assert_eq!((byte(&props[1].value), byte(&props[2].value)), (40, 50));
+        assert_eq!(
+            elements(&props[3].value)
+                .iter()
+                .map(vector_of)
+                .collect::<Vec<_>>(),
+            [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)]
+        );
+        assert_eq!(vector_of(&props[4].value), (7.0, 8.0, 9.0));
+    }
+
+    /// Each recursion in the Array/Set/Map arms
+    /// (`read_unversioned_value(depth + 1)`) and the Struct arm
+    /// (`read_unversioned_properties(.., depth + 1)`) MUST increment
+    /// depth, or a nested value escapes `MAX_PROPERTY_DEPTH`
+    /// (stack-overflow risk). Called near the
     /// cap so one further level trips it, isolating each `+ 1` (kills the
     /// `+ 1 -> * 1` mutants on the recursion increments). #639.
     #[test]
@@ -2069,7 +2258,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "one table of per-arm depth-increment cases with explicit wire bytes; splitting scatters the shared `read_at`/`too_deep` closures across duplicated fixtures"
     )]
-    fn unversioned_collection_arms_increment_depth() {
+    fn unversioned_recursive_arms_increment_depth() {
         use crate::asset::property::bag::MAX_PROPERTY_DEPTH;
         let read_at = |prop_type: MappedPropertyType, wire: &[u8], depth: usize| {
             read_value(prop_type, wire, &Usmap::default(), depth)
@@ -2171,6 +2360,17 @@ mod tests {
                 cap - 1,
             )),
             "Map entry value must increment depth"
+        );
+        // A struct's properties read at depth + 1.
+        assert!(
+            too_deep(read_at(
+                MappedPropertyType::Struct {
+                    struct_name: Arc::from("S")
+                },
+                &[],
+                cap,
+            )),
+            "Struct recursion must increment depth"
         );
     }
 
