@@ -322,18 +322,20 @@ pub fn large_skeletal_mesh(num_vertices: u32, num_bones: u16) -> Asset {
 }
 
 /// Build a `UDataTable` with `rows` rows each carrying `cols` `Float` columns
-/// sharing one schema (`"Col0".."Col{cols-1}"`). Drives the CSV column-union +
-/// per-cell lookup hot path (the O(rows × cols²) surface).
+/// sharing one schema (`"Col0".."Col{cols-1}"`). Each column name is one
+/// allocation shared by every row, as a package's name table shares it.
 #[must_use]
 pub fn large_data_table(rows: usize, cols: usize) -> Asset {
-    let col_names: Vec<String> = (0..cols).map(|c| format!("Col{c}")).collect();
+    let col_names: Vec<std::sync::Arc<str>> = (0..cols)
+        .map(|c| std::sync::Arc::from(format!("Col{c}")))
+        .collect();
     let mut table_rows = Vec::with_capacity(rows);
     for r in 0..rows {
         let properties = col_names
             .iter()
             .enumerate()
             .map(|(c, name)| Property {
-                name: std::sync::Arc::from(name.as_str()),
+                name: std::sync::Arc::clone(name),
                 array_index: 0,
                 guid: None,
                 #[allow(clippy::cast_precision_loss)] // arbitrary filler value
@@ -517,6 +519,10 @@ mod tests {
         }
         assert_eq!(d.rows[0].properties[0].name(), "Col0");
         assert_eq!(d.rows[0].properties[2].name(), "Col2");
+        assert!(
+            std::sync::Arc::ptr_eq(&d.rows[0].properties[1].name, &d.rows[3].properties[1].name),
+            "rows share a column's name allocation"
+        );
         // Cell value is the column index as f32.
         assert!(matches!(
             d.rows[0].properties[2].value,

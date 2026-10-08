@@ -22,6 +22,7 @@ use std::sync::{Arc, LazyLock};
 
 use byteorder::{LE, ReadBytesExt};
 
+use crate::asset::name_table::allocation_address;
 use crate::asset::package_index::PackageIndex;
 use crate::asset::property::bag::MAX_PROPERTY_DEPTH;
 use crate::asset::property::primitives::{
@@ -445,7 +446,7 @@ fn memoize<V: Copy>(
     seam: AssetSeam,
     by_text: impl FnOnce(&str) -> V,
 ) -> crate::Result<V> {
-    let key = Arc::as_ptr(name).cast::<u8>().addr();
+    let key = allocation_address(name);
     if let Some(&(_, value)) = memo.get(&key) {
         return Ok(value);
     }
