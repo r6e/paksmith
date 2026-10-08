@@ -37,6 +37,7 @@ pub(crate) mod fstring;
 pub mod guid;
 pub mod import_table;
 pub mod mappings;
+pub(crate) mod name_registry;
 pub mod name_table;
 pub mod package;
 pub mod package_index;

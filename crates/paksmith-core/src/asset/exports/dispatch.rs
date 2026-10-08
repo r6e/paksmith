@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::asset::bulk_data::FByteBulkData;
+use crate::asset::name_registry::NameRegistry;
 use crate::asset::{Asset, AssetContext};
 
 /// Signature for a typed-export reader. Each sub-phase's reader-fn
@@ -53,9 +54,9 @@ pub(crate) type TypedReaderFn = fn(
 /// `"StaticMesh"`, `"DataTable"`). A class name absent from the map
 /// = no typed reader registered = `read_payloads` falls through to
 /// the existing Phase 2 generic property-bag path.
-pub(crate) fn class_dispatch() -> &'static HashMap<&'static str, TypedReaderFn> {
-    static TABLE: OnceLock<HashMap<&'static str, TypedReaderFn>> = OnceLock::new();
-    TABLE.get_or_init(class_dispatch_init)
+pub(crate) fn class_dispatch() -> &'static NameRegistry<TypedReaderFn> {
+    static TABLE: OnceLock<NameRegistry<TypedReaderFn>> = OnceLock::new();
+    TABLE.get_or_init(|| NameRegistry::new(class_dispatch_init()))
 }
 
 fn class_dispatch_init() -> HashMap<&'static str, TypedReaderFn> {

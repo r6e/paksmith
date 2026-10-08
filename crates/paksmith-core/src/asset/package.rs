@@ -1426,12 +1426,11 @@ fn read_payloads(
         let export_slice = carve_export_slice(bytes, e, asset_path)?;
 
         // Phase 3a Task 4: resolve the export's class name and
-        // consult the typed-reader dispatch table. A HashMap hit
-        // means a typed reader exists for this class — call it
-        // and use its returned Asset directly. A miss means no
-        // typed reader is registered (the default case for Phase
-        // 3a: dispatch table is empty), so we fall through to the
-        // existing Phase 2 generic property-bag path below.
+        // consult the typed-reader dispatch table. A hit means a
+        // typed reader exists for this class — call it and use its
+        // returned Asset directly. A miss means no typed reader is
+        // registered, so we fall through to the existing Phase 2
+        // generic property-bag path below.
         //
         // The typed reader also returns `Vec<FByteBulkData>` (the
         // records it collected mid-parse). These are surfaced keyed by
@@ -1443,8 +1442,7 @@ fn read_payloads(
             ctx,
             asset_path,
         )?;
-        if let Some(read_typed) =
-            crate::asset::exports::dispatch::class_dispatch().get(&*class_name)
+        if let Some(read_typed) = crate::asset::exports::dispatch::class_dispatch().get(&class_name)
         {
             // Typed reader registered for this class (3d+ populate the
             // dispatch table). On success, push the typed Asset and move
