@@ -88,6 +88,13 @@ impl std::fmt::Display for FName {
     }
 }
 
+/// The address of `name`'s allocation: equal for every clone, distinct
+/// between live allocations, so a key holding it is valid only while the
+/// allocation lives.
+pub(crate) fn allocation_address(name: &Arc<str>) -> usize {
+    Arc::as_ptr(name).cast::<u8>().addr()
+}
+
 /// FName pool.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -252,6 +259,14 @@ impl NameTable {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn allocation_address_is_shared_by_clones_and_distinct_between_allocations() {
+        let a: Arc<str> = Arc::from("x");
+        let b: Arc<str> = Arc::from("x");
+        assert_eq!(allocation_address(&a), allocation_address(&Arc::clone(&a)));
+        assert_ne!(allocation_address(&a), allocation_address(&b));
+    }
 
     fn make_table(names: &[&str]) -> NameTable {
         NameTable {

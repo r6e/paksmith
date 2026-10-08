@@ -14,10 +14,11 @@
 //! first (the default for `find_handler`), JSON via
 //! `find_handler_by_extension("json", …)`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::asset::Asset;
-use crate::asset::property::primitives::PropertyValue;
+use crate::asset::name_table::allocation_address;
+use crate::asset::property::primitives::{Property, PropertyValue};
 
 use super::{BulkData, FormatHandler};
 
@@ -113,23 +114,22 @@ impl FormatHandler for DataTableCsvHandler {
         // collapsing them into one cell. (Rows share a RowStruct but the
         // decoded property set can still vary, e.g. defaulted fields
         // omitted, so a row may not carry every column.)
-        // SECURITY (Phase 3 audit F2): membership via a HashSet, not
-        // `Vec::contains`. `array_index` is an unvalidated wire i32, so one
-        // property name with monotonically incrementing `array_index` yields an
-        // unbounded number of distinct columns — an O(columns²) `Vec::contains`
-        // scan (and the per-cell O(props) `.find` below) turns a ~256 MiB asset
-        // into ~10^14 string comparisons (CPU DoS). The HashSet keeps membership
-        // O(1); `columns` preserves first-seen order for stable output.
-        let mut seen: HashSet<(&str, i32)> = HashSet::new();
-        let mut columns: Vec<(&str, i32)> = Vec::new();
-        for row in &data.rows {
-            for prop in &row.properties {
-                let key = (prop.name(), prop.array_index);
-                if seen.insert(key) {
-                    columns.push(key);
-                }
-            }
-        }
+        // SECURITY (Phase 3 audit F2, #817): `array_index` is an unvalidated
+        // wire i32, so one name with incrementing indices yields an unbounded
+        // number of distinct columns; membership is a hash probe, never a scan
+        // of the columns. A suffixed name is a fresh allocation per property
+        // (`resolve_fname`), so `Columns` hashes its text once per property, a
+        // copy the package's derived-string budget already charged.
+        let mut columns = Columns::default();
+        let mut property_columns: Vec<usize> =
+            Vec::with_capacity(data.rows.iter().map(|row| row.properties.len()).sum());
+        property_columns.extend(
+            data.rows
+                .iter()
+                .flat_map(|row| &row.properties)
+                .map(|prop| columns.column_of(prop)),
+        );
+        let columns = columns.into_keys();
 
         // The row's own FName key occupies the leading "Name" column.
         // Warn (don't silently mangle) if a property is ALSO named
@@ -163,30 +163,24 @@ impl FormatHandler for DataTableCsvHandler {
                 context: format!("DataTableCsvHandler header: {e}"),
             })?;
 
+        let mut property_columns = property_columns.into_iter();
+        let mut cells: Vec<Option<&PropertyValue>> = vec![None; columns.len()];
         for row in &data.rows {
-            // Index this row's properties once: (name, array_index) -> first
-            // value. `or_insert` keeps first-wins, matching the prior per-cell
-            // `.find` (first match) — replaces the O(columns × props) inner scan
-            // with O(props) build + O(1) lookups.
-            let mut cells: HashMap<(&str, i32), &PropertyValue> =
-                HashMap::with_capacity(row.properties.len());
-            for prop in &row.properties {
-                let _ = cells
-                    .entry((prop.name(), prop.array_index))
-                    .or_insert(&prop.value);
+            cells.fill(None);
+            // `row.properties` first: `zip` stops at the row's end without
+            // taking the next row's first column.
+            for (prop, column) in row.properties.iter().zip(property_columns.by_ref()) {
+                if let Some(cell) = cells.get_mut(column) {
+                    let _ = cell.get_or_insert(&prop.value);
+                }
             }
-
-            let mut record: Vec<String> = Vec::with_capacity(columns.len() + 1);
-            record.push(row.name.clone());
-            for (name, idx) in &columns {
-                let cell = cells
-                    .get(&(*name, *idx))
-                    .map(|value| value_to_csv_cell(value))
-                    .unwrap_or_default();
-                record.push(cell);
-            }
+            let record = std::iter::once(row.name.clone()).chain(
+                cells
+                    .iter()
+                    .map(|cell| cell.map(value_to_csv_cell).unwrap_or_default()),
+            );
             writer
-                .write_record(&record)
+                .write_record(record)
                 .map_err(|e| crate::PaksmithError::Internal {
                     context: format!("DataTableCsvHandler row: {e}"),
                 })?;
@@ -253,11 +247,57 @@ fn column_header(name: &str, array_index: i32) -> String {
     }
 }
 
+/// CSV columns in first-seen order, one per distinct (name text,
+/// `array_index`). A name's text is hashed once per name allocation; later
+/// properties naming it through that allocation resolve by its address.
+/// Every address key belongs to a name borrowed for `'a`, so none is freed
+/// or reused while the columns live.
+#[derive(Default)]
+struct Columns<'a> {
+    keys: Vec<(&'a str, i32)>,
+    name_ids_by_address: HashMap<usize, usize>,
+    name_ids_by_text: HashMap<&'a str, usize>,
+    column_by_name_id: HashMap<(usize, i32), usize>,
+}
+
+impl<'a> Columns<'a> {
+    /// The position of `prop`'s column, adding the column if it is new.
+    fn column_of(&mut self, prop: &'a Property) -> usize {
+        let name_id = *self
+            .name_ids_by_address
+            .entry(allocation_address(&prop.name))
+            .or_insert_with(|| {
+                #[cfg(test)]
+                NAME_TEXT_PROBES.with(|probes| probes.update(|n| n + 1));
+                let next = self.name_ids_by_text.len();
+                *self.name_ids_by_text.entry(prop.name()).or_insert(next)
+            });
+        *self
+            .column_by_name_id
+            .entry((name_id, prop.array_index))
+            .or_insert_with(|| {
+                let position = self.keys.len();
+                self.keys.push((prop.name(), prop.array_index));
+                position
+            })
+    }
+
+    /// The columns' (name, `array_index`) keys, in first-seen order.
+    fn into_keys(self) -> Vec<(&'a str, i32)> {
+        self.keys
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Name texts [`Columns`] has hashed on this thread.
+    static NAME_TEXT_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::asset::property::bag::PropertyBag;
-    use crate::asset::property::primitives::{Property, PropertyValue};
     use crate::asset::{DataTableData, DataTableRow};
 
     fn prop(name: &str, value: PropertyValue) -> Property {
@@ -267,6 +307,43 @@ mod tests {
             guid: None,
             value,
         }
+    }
+
+    fn shared(name: &std::sync::Arc<str>, array_index: i32, value: i32) -> Property {
+        Property {
+            name: std::sync::Arc::clone(name),
+            array_index,
+            guid: None,
+            value: PropertyValue::Int(value),
+        }
+    }
+
+    fn table(rows: Vec<(&str, Vec<Property>)>) -> DataTableData {
+        DataTableData {
+            row_struct: String::new(),
+            rows: rows
+                .into_iter()
+                .map(|(name, properties)| DataTableRow {
+                    name: name.to_string(),
+                    properties,
+                })
+                .collect(),
+            class_properties: PropertyBag::tree(Vec::new()),
+        }
+    }
+
+    fn export_csv(data: DataTableData) -> String {
+        let bytes = DataTableCsvHandler
+            .export(&Asset::DataTable(data), &[])
+            .expect("export");
+        String::from_utf8(bytes).expect("utf-8")
+    }
+
+    /// The CSV and how many name texts the export hashed.
+    fn csv_and_text_probes(data: DataTableData) -> (String, u64) {
+        let before = NAME_TEXT_PROBES.with(std::cell::Cell::get);
+        let csv = export_csv(data);
+        (csv, NAME_TEXT_PROBES.with(std::cell::Cell::get) - before)
     }
 
     fn sample_data_table() -> DataTableData {
@@ -388,30 +465,21 @@ mod tests {
 
     #[test]
     fn csv_handler_column_union_fills_missing_cells_empty() {
-        // Row 1 has {A}, row 2 has {A, B}: the union is [A, B] (first-
-        // seen order), and row 1's B cell is empty.
-        let data = DataTableData {
-            row_struct: String::new(),
-            rows: vec![
-                DataTableRow {
-                    name: "r1".to_string(),
-                    properties: vec![prop("A", PropertyValue::Int(1))],
-                },
-                DataTableRow {
-                    name: "r2".to_string(),
-                    properties: vec![
-                        prop("A", PropertyValue::Int(2)),
-                        prop("B", PropertyValue::Int(3)),
-                    ],
-                },
-            ],
-            class_properties: PropertyBag::tree(Vec::new()),
-        };
-        let bytes = DataTableCsvHandler
-            .export(&Asset::DataTable(data), &[])
-            .expect("export");
-        let csv = std::str::from_utf8(&bytes).expect("utf-8");
-        assert_eq!(csv, "Name,A,B\nr1,1,\nr2,2,3\n");
+        // Row 1 has {A}, row 2 has {A, B}, row 3 has {A}: the union is
+        // [A, B] (first-seen order), and rows 1 and 3 leave B empty (row 3
+        // after row 2 filled it).
+        let data = table(vec![
+            ("r1", vec![prop("A", PropertyValue::Int(1))]),
+            (
+                "r2",
+                vec![
+                    prop("A", PropertyValue::Int(2)),
+                    prop("B", PropertyValue::Int(3)),
+                ],
+            ),
+            ("r3", vec![prop("A", PropertyValue::Int(4))]),
+        ]);
+        assert_eq!(export_csv(data), "Name,A,B\nr1,1,\nr2,2,3\nr3,4,\n");
     }
 
     #[test]
@@ -525,27 +593,18 @@ mod tests {
 
     #[test]
     fn csv_handler_duplicate_key_keeps_first_value() {
-        // SECURITY F2 regression: the per-row column index is built with
-        // `or_insert` (first-wins), matching the old per-cell `.find` (first
-        // match). Two props sharing (name, array_index) — malformed, but
-        // attacker-reachable — must render the FIRST value, not the last.
-        let data = DataTableData {
-            row_struct: String::new(),
-            rows: vec![DataTableRow {
-                name: "r".to_string(),
-                properties: vec![
-                    prop("Dup", PropertyValue::Int(10)),
-                    prop("Dup", PropertyValue::Int(20)),
-                ],
-            }],
-            class_properties: PropertyBag::tree(Vec::new()),
-        };
-        let bytes = DataTableCsvHandler
-            .export(&Asset::DataTable(data), &[])
-            .expect("export");
-        let csv = std::str::from_utf8(&bytes).expect("utf-8");
+        // SECURITY F2 regression: two props sharing (name, array_index) —
+        // malformed, but attacker-reachable — render the FIRST value, not the
+        // last.
+        let data = table(vec![(
+            "r",
+            vec![
+                prop("Dup", PropertyValue::Int(10)),
+                prop("Dup", PropertyValue::Int(20)),
+            ],
+        )]);
         // Single "Dup" column (union dedupes); cell is the first value (10).
-        assert_eq!(csv, "Name,Dup\nr,10\n");
+        assert_eq!(export_csv(data), "Name,Dup\nr,10\n");
     }
 
     #[test]
@@ -626,5 +685,65 @@ mod tests {
                 .output_extension(),
             "json"
         );
+    }
+
+    #[test]
+    fn csv_handler_places_cells_by_column_not_property_order() {
+        let (a, b, c) = (
+            std::sync::Arc::<str>::from("A"),
+            std::sync::Arc::<str>::from("B"),
+            std::sync::Arc::<str>::from("C"),
+        );
+        let data = table(vec![
+            ("r1", vec![shared(&b, 0, 1), shared(&a, 0, 2)]),
+            (
+                "r2",
+                vec![shared(&a, 0, 3), shared(&c, 0, 4), shared(&b, 0, 5)],
+            ),
+        ]);
+        assert_eq!(export_csv(data), "Name,B,A,C\nr1,1,2,\nr2,5,3,4\n");
+    }
+
+    #[test]
+    fn csv_handler_shared_static_array_name_hashes_text_once() {
+        let tiers = std::sync::Arc::<str>::from("Tiers");
+        let data = table(vec![
+            (
+                "r1",
+                vec![
+                    shared(&tiers, 0, 10),
+                    shared(&tiers, 1, 20),
+                    shared(&tiers, 2, 30),
+                ],
+            ),
+            (
+                "r2",
+                vec![
+                    shared(&tiers, 2, 50),
+                    shared(&tiers, 0, 40),
+                    shared(&tiers, 0, 99),
+                ],
+            ),
+        ]);
+        let (csv, probes) = csv_and_text_probes(data);
+        assert_eq!(
+            csv,
+            "Name,Tiers,Tiers[1],Tiers[2]\nr1,10,20,30\nr2,40,,50\n"
+        );
+        assert_eq!(probes, 1);
+    }
+
+    #[test]
+    fn csv_handler_equal_names_in_separate_allocations_share_columns() {
+        let first = std::sync::Arc::<str>::from("Tiers");
+        let second = std::sync::Arc::<str>::from("Tiers");
+        let data = table(vec![
+            ("r1", vec![shared(&first, 0, 1), shared(&first, 1, 2)]),
+            ("r2", vec![shared(&second, 0, 3), shared(&second, 1, 4)]),
+            ("r3", vec![shared(&second, 0, 7), shared(&first, 0, 8)]),
+        ]);
+        let (csv, probes) = csv_and_text_probes(data);
+        assert_eq!(csv, "Name,Tiers,Tiers[1]\nr1,1,2\nr2,3,4\nr3,7,\n");
+        assert_eq!(probes, 2);
     }
 }
