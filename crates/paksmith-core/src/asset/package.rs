@@ -49,7 +49,7 @@ use crate::asset::import_table::{ImportTable, ObjectImport};
 use crate::asset::mappings::Usmap;
 use crate::asset::name_table::NameTable;
 use crate::asset::property::PropertyBag;
-use crate::asset::property::unversioned::read_unversioned_properties;
+use crate::asset::property::unversioned::{UsmapView, read_unversioned_properties};
 use crate::asset::summary::{PKG_UNVERSIONED_PROPERTIES, PackageSummary};
 use crate::asset::{AssetContext, decode_warn, ends_package_read};
 use crate::error::{
@@ -876,6 +876,9 @@ impl Package {
                 asset_path,
                 AssetSeam::ExportPayloads,
             )?;
+            // One view for the whole read, so an enum that many slots,
+            // struct elements or exports name resolves its table once.
+            let mut view = UsmapView::new(usmap);
             for export in &exports.exports {
                 // Propagate OOB errors here rather than swallowing them
                 // with `unwrap_or_default()`. `PackageIndex::Null`
@@ -911,7 +914,7 @@ impl Package {
                 let props = read_unversioned_properties(
                     &mut export_cur,
                     &class_name,
-                    usmap,
+                    &mut view,
                     &ctx,
                     asset_path,
                     0,
@@ -1740,6 +1743,52 @@ mod tests {
             read_payloads(&bytes, &pkg.exports, &ctx, "x.uasset"),
             limit,
         );
+    }
+
+    /// One package read resolves an enum's value table once, however many of
+    /// its exports name the enum (#817).
+    #[test]
+    fn exports_of_one_read_share_an_enum_table_lookup() {
+        let usmap = Arc::new(
+            Usmap::from_bytes(&crate::testing::usmap::build_hero_usmap_with_enum_speed(
+                "Difficulty",
+                &["Easy", "Normal"],
+            ))
+            .unwrap(),
+        );
+        let mut spec = MinimalPackageSpec::default();
+        spec.package_flags |= PKG_UNVERSIONED_PROPERTIES;
+        let hero = u32::try_from(spec.names.names.len()).unwrap();
+        spec.names.names.push(crate::asset::FName::new("Hero"));
+        spec.imports.imports[0].object_name = hero;
+        // One fragment, last, two values: Health 100 and Speed 1 (Normal).
+        let mut payload = 0x0500u16.to_le_bytes().to_vec();
+        payload.extend_from_slice(&100i32.to_le_bytes());
+        payload.push(1);
+        let mut export = spec.exports.exports[0];
+        export.serial_size = i64::try_from(payload.len()).unwrap();
+        spec.exports.exports = vec![export, export];
+        spec.payloads = vec![payload.clone(), payload];
+        let MinimalPackage { bytes, .. } = build_minimal(spec);
+
+        let before = crate::asset::property::unversioned::enum_table_lookups();
+        let pkg = Package::read_from(&bytes, None, Some(&usmap), "x.uasset").unwrap();
+
+        assert_eq!(
+            crate::asset::property::unversioned::enum_table_lookups() - before,
+            1
+        );
+        for asset in &pkg.payloads {
+            let crate::asset::Asset::Generic(PropertyBag::Tree { properties }) = asset else {
+                panic!("expected a property tree, got {asset:?}");
+            };
+            let speed = properties.iter().find(|p| &*p.name == "Speed").unwrap();
+            assert!(
+                matches!(&speed.value, crate::asset::property::primitives::PropertyValue::Enum { value, .. } if value.name() == Some("Normal")),
+                "{:?}",
+                speed.value
+            );
+        }
     }
 
     /// A package whose one export is an `Array<Struct>` named
