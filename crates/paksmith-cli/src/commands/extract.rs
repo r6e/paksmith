@@ -38,8 +38,10 @@ pub(crate) struct ExtractArgs {
     pub(crate) pak: Option<PathBuf>,
 
     /// Output directory (refused if too deep or too long for the containment
-    /// check, otherwise created if absent; a path that is itself a symlink is
-    /// followed, so create it yourself in shared locations). An entry whose
+    /// check, or on Windows if its last component ends in a space or in a run
+    /// of two or more dots and spaces; otherwise created if absent; a path
+    /// that is itself a symlink is followed, so create it yourself in shared
+    /// locations). An entry whose
     /// containing directory resolves outside it through a symlink is
     /// refused; a symlink, FIFO, socket or device node at an entry's
     /// destination is refused, or with `--overwrite` replaced rather than

@@ -155,18 +155,22 @@ fn resolve_root(
     Ok(Some(output_dir.canonicalize()?))
 }
 
-/// `output_dir` absolutized as a segment with more below it, so every path
-/// the guard builds under it is spelled as the writes traverse it: Windows
-/// normalizes a path's last segment differently from the others (see
-/// Microsoft's "File path formats on Windows systems"). A syscall on the root
-/// itself still sees it as a last segment. An empty path keeps
-/// `std::path::absolute`'s refusal (clap refuses `-o ""` first), and a spelling
-/// that absorbs the child into its prefix (`\\server`) is refused.
+/// `output_dir` absolutized as a segment with more below it, the way every
+/// write traverses it. Windows normalizes a path's last segment differently
+/// from the others (see Microsoft's "File path formats on Windows systems"),
+/// so a root it resolves differently as the last segment is refused: the
+/// guard's syscalls on the root itself and the writes beneath it would name
+/// different paths. Compared through the same child, so a verbatim root that
+/// is only a prefix (`\\?\C:`) is not refused for its missing separator. An
+/// empty path keeps `std::path::absolute`'s refusal (clap refuses `-o ""`
+/// first), and a spelling that absorbs the child into its prefix
+/// (`\\server`) is refused.
 fn absolute_root(output_dir: &Path) -> std::io::Result<PathBuf> {
-    if output_dir.as_os_str().is_empty() {
-        return std::path::absolute(output_dir);
+    let child = std::path::absolute(output_dir.join("x"))?;
+    if std::path::absolute(output_dir)?.join("x") != child {
+        return Err(std::io::Error::new(ErrorKind::InvalidInput, ROOT_REWRITTEN));
     }
-    let mut absolute = std::path::absolute(output_dir.join("x"))?;
+    let mut absolute = child;
     if !absolute.pop() {
         return Err(std::io::Error::new(
             ErrorKind::InvalidInput,
@@ -175,6 +179,11 @@ fn absolute_root(output_dir: &Path) -> std::io::Result<PathBuf> {
     }
     Ok(absolute)
 }
+
+/// Reported for a root the platform resolves differently as a path's last
+/// component than with more below it.
+const ROOT_REWRITTEN: &str =
+    "resolves differently as a path's last component than with more below it";
 
 /// Bounds the path the guard walks and resolves. An entry path is untrusted
 /// index data with no depth or length limit of its own, and both the `lstat`
@@ -1108,18 +1117,51 @@ mod write_output_tests {
         }
     }
 
-    /// The root is absolutized the way the writes traverse it, as a segment
-    /// with more below it. Windows trims trailing spaces and dots from a
-    /// path's LAST segment, so on Windows absolutizing the root alone would
-    /// store `out` for both of these.
+    /// On Windows a root ending in a space, in two or more dots, or in a space
+    /// and a dot resolves differently as a final component than with more
+    /// below it, so it is refused before anything is created, even when a
+    /// directory of the untrimmed name exists. `out.` resolves the same both
+    /// ways, and so does a verbatim root, whole or only its prefix. Elsewhere
+    /// all of them are ordinary names.
     #[test]
-    fn the_root_is_absolutized_as_the_writes_traverse_it() {
+    fn a_root_windows_spells_two_ways_is_refused() {
         let base = tempfile::tempdir().unwrap();
-        for name in ["out ", "out.."] {
-            let c = cfg(&base.path().join(name), false, true, false);
-            assert_eq!(
-                c.absolute_root.file_name(),
-                Some(std::ffi::OsStr::new(name))
+        for name in ["out ", "out..", "out ."] {
+            let root = base.path().join(name);
+            if cfg!(windows) {
+                // A literal directory of the untrimmed name, created through
+                // a verbatim path, which itself names it unambiguously.
+                let verbatim = PathBuf::from(format!(r"\\?\{}", root.display()));
+                std::fs::create_dir(&verbatim).unwrap();
+                assert!(try_cfg(&verbatim, false, true, false).is_ok(), "{name:?}");
+            }
+            for dry_run in [true, false] {
+                let prepared = try_cfg(&root, false, dry_run, false);
+                if cfg!(windows) {
+                    let err = prepared
+                        .err()
+                        .unwrap_or_else(|| panic!("accepted {name:?}"));
+                    assert_eq!(err.kind(), ErrorKind::InvalidInput, "{name:?}: {err}");
+                    assert_eq!(err.to_string(), ROOT_REWRITTEN, "{name:?}");
+                } else {
+                    let c = prepared.unwrap();
+                    assert_eq!(
+                        c.absolute_root.file_name(),
+                        Some(std::ffi::OsStr::new(name))
+                    );
+                }
+            }
+        }
+        assert!(!base.path().join("out").exists());
+        assert!(try_cfg(&base.path().join("out."), false, true, false).is_ok());
+
+        let canonical = base.path().canonicalize().unwrap();
+        let prefix: PathBuf = canonical.components().take(1).collect();
+        for root in [&canonical, &prefix] {
+            assert!(
+                try_cfg(root, false, true, false).is_ok(),
+                "{}",
+                root.display()
             );
         }
     }
