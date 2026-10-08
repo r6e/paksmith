@@ -59,8 +59,9 @@ runs:
       run: |
         set -euo pipefail
         rc=0
-        sudo timeout 10m bash -c 'apt-get update && apt-get install -y --no-install-recommends libgtk-3-dev libxdo-dev libasound2-dev' || rc=$?
-        if [ "$rc" -eq 124 ]; then
+        sudo timeout --kill-after=30s 10m bash -c 'apt-get update && apt-get install -y --no-install-recommends libgtk-3-dev libxdo-dev libasound2-dev' || rc=$?
+        # 124 when SIGTERM ends it, 137 when it has to be killed 30 s later.
+        if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
           echo "::error::apt-get ran past its 10-minute cap, likely a stalled Ubuntu mirror; rerun the job"
         fi
         exit "$rc"
