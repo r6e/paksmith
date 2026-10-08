@@ -403,14 +403,15 @@ fn is_partial_tree_stop(e: &PaksmithError) -> bool {
 }
 
 /// The `.usmap` one package read decodes against, resolving each enum's
-/// value table and each struct's layout once per name allocation (#817;
-/// see [`memoize`]). Scoped to one read and mutated during it: not on
-/// [`AssetContext`], which is shared and `Sync`, nor on [`Usmap`], which
-/// outlives the read.
+/// value table, each struct's layout and each class's schema once per name
+/// allocation (#817; see [`memoize`]). Scoped to one read and mutated
+/// during it: not on [`AssetContext`], which is shared and `Sync`, nor on
+/// [`Usmap`], which outlives the read.
 pub(crate) struct UsmapView<'u> {
     usmap: &'u Usmap,
     enum_tables: NameMemo<Option<&'u EnumTable>>,
     struct_layouts: NameMemo<StructLayout<'u>>,
+    class_schemas: NameMemo<&'u [ResolvedProperty]>,
 }
 
 /// An enum's `.usmap` value names, by ordinal.
@@ -429,13 +430,14 @@ enum StructLayout<'u> {
     Schema(&'u [ResolvedProperty]),
 }
 
-/// `name`'s value in `memo`, keyed on the name's allocation, which the
-/// slots, struct fields and container elements naming one `.usmap` name
-/// share. A hit costs one probe of an address-sized key, whatever the
-/// name's length. A miss reserves the entry on `seam`, resolves the name
-/// by its text with `by_text`, since a valid `.usmap` can hold equal
-/// names in separate allocations, and inserts the result with a clone of
-/// the name, so the address cannot be reused while the memo lives.
+/// `name`'s value in `memo`, keyed on the name's allocation, which
+/// everything naming it through one name-table entry shares. A hit costs
+/// one probe of an address-sized key, whatever the name's length. A miss
+/// reserves the entry on `seam`, resolves the name by its text with
+/// `by_text`, since equal names can sit in separate allocations (a
+/// `.usmap`'s duplicates, or a package's suffixed names), and inserts the
+/// result with a clone of the name, so the address cannot be reused while
+/// the memo lives.
 fn memoize<V: Copy>(
     memo: &mut NameMemo<V>,
     name: &Arc<str>,
@@ -459,6 +461,7 @@ impl<'u> UsmapView<'u> {
             usmap,
             enum_tables: HashMap::new(),
             struct_layouts: HashMap::new(),
+            class_schemas: HashMap::new(),
         }
     }
 
@@ -483,6 +486,31 @@ impl<'u> UsmapView<'u> {
                 #[cfg(feature = "__test_utils")]
                 ENUM_TABLE_LOOKUPS.with(|lookups| lookups.update(|n| n + 1));
                 usmap.enums.get(name)
+            },
+        )
+    }
+
+    /// The `.usmap` properties of the class `class_name` names, empty when
+    /// the `.usmap` has none.
+    ///
+    /// # Errors
+    ///
+    /// [`AssetParseFault::AllocationFailed`] when the memo cannot grow.
+    pub(crate) fn class_properties(
+        &mut self,
+        class_name: &Arc<str>,
+        asset_path: &str,
+    ) -> crate::Result<&'u [ResolvedProperty]> {
+        let usmap = self.usmap;
+        memoize(
+            &mut self.class_schemas,
+            class_name,
+            asset_path,
+            AssetSeam::ClassSchemaMemo,
+            |name| {
+                #[cfg(feature = "__test_utils")]
+                CLASS_SCHEMA_LOOKUPS.with(|lookups| lookups.update(|n| n + 1));
+                usmap.get_all_properties(name)
             },
         )
     }
@@ -527,6 +555,9 @@ thread_local! {
     /// Struct layouts [`UsmapView::struct_layout`] has resolved by name on
     /// this thread.
     static STRUCT_LAYOUT_LOOKUPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Class schemas [`UsmapView::class_properties`] has resolved by name on
+    /// this thread.
+    static CLASS_SCHEMA_LOOKUPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Enum value-table lookups made on this thread so far.
@@ -539,6 +570,12 @@ pub(crate) fn enum_table_lookups() -> u64 {
 #[cfg(all(test, feature = "__test_utils"))]
 pub(crate) fn struct_layout_lookups() -> u64 {
     STRUCT_LAYOUT_LOOKUPS.with(std::cell::Cell::get)
+}
+
+/// Class-schema lookups made on this thread so far.
+#[cfg(all(test, feature = "__test_utils"))]
+pub(crate) fn class_schema_lookups() -> u64 {
+    CLASS_SCHEMA_LOOKUPS.with(std::cell::Cell::get)
 }
 
 #[allow(

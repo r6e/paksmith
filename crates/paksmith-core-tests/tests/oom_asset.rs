@@ -364,11 +364,9 @@ fn resolve_decompressed_bulk_data_bytes_surfaces_allocation_failed_under_oom() {
     );
 }
 
-/// Arm `AssetSeam::EnumTableMemo` → the per-read enum-table memo's growth
-/// for an unversioned `Speed` enum surfaces
-/// `AllocationFailed{EnumTableMemo}`, ending the package read.
-#[test]
-fn read_asset_enum_table_memo_surfaces_allocation_failed_under_oom() {
+/// The error from reading an unversioned `Hero` export whose `Speed` is a
+/// `Difficulty` enum, with `seam` armed to fail its first reservation.
+fn hero_enum_speed_read_under_oom(seam: AssetSeam) -> PaksmithError {
     let usmap = std::sync::Arc::new(
         paksmith_core::asset::Usmap::from_bytes(&build_hero_usmap_with_enum_speed(
             "Difficulty",
@@ -381,8 +379,16 @@ fn read_asset_enum_table_memo_surfaces_allocation_failed_under_oom() {
     payload.extend_from_slice(&100i32.to_le_bytes());
     payload.push(1);
     let pkg = build_minimal_ue4_27_unversioned("Hero", payload);
-    let _guard = arm_at(SeamSite::Asset(AssetSeam::EnumTableMemo), 0);
-    let err = Package::read_from(&pkg.bytes, None, Some(&usmap), "Game/Test.uasset").unwrap_err();
+    let _guard = arm_at(SeamSite::Asset(seam), 0);
+    Package::read_from(&pkg.bytes, None, Some(&usmap), "Game/Test.uasset").unwrap_err()
+}
+
+/// Arm `AssetSeam::EnumTableMemo` → the per-read enum-table memo's growth
+/// for an unversioned `Speed` enum surfaces
+/// `AllocationFailed{EnumTableMemo}`, ending the package read.
+#[test]
+fn read_asset_enum_table_memo_surfaces_allocation_failed_under_oom() {
+    let err = hero_enum_speed_read_under_oom(AssetSeam::EnumTableMemo);
     assert!(
         matches!(
             &err,
@@ -483,5 +489,29 @@ fn read_asset_fstring_utf16_code_units_surfaces_allocation_failed_under_oom() {
             } if asset_path == "Game/Test.uasset"
         ),
         "expected AllocationFailed{{FStringUtf16CodeUnits}}; got {err:?}"
+    );
+}
+
+/// Arm `AssetSeam::ClassSchemaMemo` → the per-read class-schema memo's
+/// growth for the unversioned `Hero` export surfaces
+/// `AllocationFailed{ClassSchemaMemo}`, ending the package read.
+/// Unarmed, the same shape reads (`unversioned_integration.rs`'s
+/// `enum_property_decodes_in_range_ordinal`).
+#[test]
+fn read_asset_class_schema_memo_surfaces_allocation_failed_under_oom() {
+    let err = hero_enum_speed_read_under_oom(AssetSeam::ClassSchemaMemo);
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::AllocationFailed {
+                    context: AssetAllocationContext::ClassSchemaMemo,
+                    requested: 1,
+                    ..
+                },
+                ..
+            }
+        ),
+        "expected AllocationFailed{{ClassSchemaMemo}}; got {err:?}"
     );
 }

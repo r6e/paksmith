@@ -4904,6 +4904,8 @@ pub enum AssetAllocationContext {
     FStringUtf16CodeUnits,
     /// `HashMap` entry for the per-read memo of resolved struct layouts.
     StructLayoutMemo,
+    /// `HashMap` entry for the per-read memo of resolved class schemas.
+    ClassSchemaMemo,
 }
 
 impl AssetAllocationContext {
@@ -4929,7 +4931,8 @@ impl AssetAllocationContext {
             | Self::DataResourceTable
             | Self::EnumTableMemo
             | Self::FStringUtf16CodeUnits
-            | Self::StructLayoutMemo => BoundsUnit::Items,
+            | Self::StructLayoutMemo
+            | Self::ClassSchemaMemo => BoundsUnit::Items,
         }
     }
 }
@@ -4953,6 +4956,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::FStringUtf8Bytes => "FString UTF-8 buffer",
             Self::FStringUtf16CodeUnits => "FString UTF-16 code units",
             Self::StructLayoutMemo => "struct layout memo",
+            Self::ClassSchemaMemo => "class schema memo",
         };
         f.write_str(s)
     }
@@ -8593,6 +8597,7 @@ mod tests {
                 AssetAllocationContext::StructLayoutMemo,
                 "struct layout memo",
             ),
+            (AssetAllocationContext::ClassSchemaMemo, "class schema memo"),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -8700,6 +8705,7 @@ mod tests {
                 BoundsUnit::Items,
             ),
             (AssetAllocationContext::StructLayoutMemo, BoundsUnit::Items),
+            (AssetAllocationContext::ClassSchemaMemo, BoundsUnit::Items),
         ];
         for (context, expected) in cases {
             assert_eq!(
