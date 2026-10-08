@@ -9,7 +9,7 @@
 //! [`AssetSeam`] types themselves live in the always-compiled
 //! `crate::seams` module so production helpers like
 //! `crate::error::try_reserve_index` (mandatory `PakSeam`) and
-//! `crate::error::try_reserve_asset` (mandatory `AssetSeam`) can
+//! `crate::error::check_asset_reserve` (mandatory `AssetSeam`) can
 //! accept seam parameters regardless of feature configuration; only
 //! the runtime `maybe_fail_at` / [`arm_at`] dispatch lives here. [`SeamSite`] is
 //! re-exported from this module to preserve the
@@ -28,7 +28,7 @@
 //! variant + structured fields rather than the inner `TryReserveError`'s
 //! Display or `kind()` — forward-compat insurance.
 
-// `maybe_fail_at` runs inside `try_reserve_index` / `try_reserve_asset`,
+// `maybe_fail_at` runs inside `try_reserve_index` / `check_asset_reserve`,
 // so this file is on a production call path and does not get the
 // fixture-builder allow from `testing/mod.rs`.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
@@ -106,7 +106,7 @@ pub fn arm_at(site: SeamSite, skip_count: u64) -> DisarmGuard {
 /// `crate::asset`, routed through the always-compiled
 /// `crate::seams::seam_check!` macro or the
 /// `crate::error::try_reserve_index` (pak) /
-/// `crate::error::try_reserve_asset` (asset) helpers; integration
+/// `crate::error::check_asset_reserve` (asset) helpers; integration
 /// tests drive the seams via [`arm_at`] + the production code path.
 /// `pub(crate)` makes the wrong-call boundary structural rather than
 /// docs-only.

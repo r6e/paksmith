@@ -53,14 +53,10 @@ use crate::asset::property::unversioned::{UsmapView, read_unversioned_properties
 use crate::asset::summary::{PKG_UNVERSIONED_PROPERTIES, PackageSummary};
 use crate::asset::{AssetContext, decode_warn, ends_package_read};
 use crate::error::{
-    AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,
-    CompanionFileKind, PaksmithError, try_copy_asset, try_reserve_asset,
+    AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit, CompanionFileKind,
+    PaksmithError, try_copy_asset, try_reserve_asset,
 };
-// `SeamSite` goes unused in the no-`__test_utils` lib-test compile
-// (the seam machinery no-ops there); that build mode is exercised by
-// CI's package-scoped compile guard under `-D warnings`.
-#[cfg_attr(not(feature = "__test_utils"), allow(unused_imports))]
-use crate::seams::{AssetSeam, SeamSite, seam_check};
+use crate::seams::AssetSeam;
 use crate::untrusted::{clamp, clamp_path};
 
 /// Maximum permitted per-export payload size. A single export can
@@ -664,16 +660,7 @@ impl Package {
                 },
             })?;
         let mut buf: Vec<u8> = Vec::new();
-        let reserve = buf.try_reserve_exact(total);
-        seam_check!(reserve, SeamSite::Asset(AssetSeam::SplitAssetCombined));
-        reserve.map_err(|source| PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::AllocationFailed {
-                context: AssetAllocationContext::SplitAssetCombined,
-                requested: total,
-                source,
-            },
-        })?;
+        try_reserve_asset(&mut buf, total, asset_path, AssetSeam::SplitAssetCombined)?;
         buf.extend_from_slice(uasset);
         if let Some(uexp_data) = uexp {
             buf.extend_from_slice(uexp_data);
@@ -1698,7 +1685,7 @@ mod tests {
     use crate::asset::property::test_utils::{
         assert_derived_budget_exceeded, with_derived_budget, write_fname, write_none_tag,
     };
-    use crate::error::CompanionFileKind;
+    use crate::error::{AssetAllocationContext, CompanionFileKind};
     use crate::testing::uasset::{
         MinimalPackage, MinimalPackageSpec, build_minimal, build_minimal_ue4_27,
         build_minimal_ue4_27_split, build_minimal_ue4_27_with_data_table,

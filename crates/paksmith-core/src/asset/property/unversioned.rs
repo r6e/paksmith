@@ -32,7 +32,8 @@ use crate::asset::property::{MAX_COLLECTION_ELEMENTS, Property, read_fname_pair}
 use crate::asset::read_asset_fstring;
 use crate::asset::{AssetContext, decode_warn, ends_package_read};
 use crate::error::{
-    AssetParseFault, AssetWireField, BoundsUnit, CollectionKind, PaksmithError, try_reserve_asset,
+    AssetParseFault, AssetWireField, BoundsUnit, CollectionKind, PaksmithError,
+    check_asset_reserve, try_reserve_asset,
 };
 use crate::seams::AssetSeam;
 use crate::untrusted::clamp;
@@ -404,8 +405,9 @@ fn is_partial_tree_stop(e: &PaksmithError) -> bool {
 /// slots, struct fields and container elements naming one `.usmap` name
 /// share, and resolved by the name's text, since a valid `.usmap` can hold
 /// equal names in separate allocations. An entry keeps a clone of its name,
-/// so the address cannot be reused while the view lives. Each decoded value
-/// costs one probe of an address-sized key, whatever the name's length.
+/// so the address cannot be reused while the view lives. A hit costs one
+/// probe of an address-sized key, whatever the name's length; a miss also
+/// reserves the entry, resolves the name by its text and inserts it.
 /// Scoped to one read and mutated during it: not on [`AssetContext`], which
 /// is shared and `Sync`, nor on [`Usmap`], which outlives the read.
 pub(crate) struct UsmapView<'u> {
@@ -426,16 +428,30 @@ impl<'u> UsmapView<'u> {
 
     /// The value table of the enum `enum_name` names, or `None` when the
     /// `.usmap` has no such enum.
-    fn enum_values(&mut self, enum_name: &Arc<str>) -> Option<&'u EnumTable> {
-        let usmap = self.usmap;
-        self.enum_tables
-            .entry(Arc::as_ptr(enum_name).cast::<u8>().addr())
-            .or_insert_with(|| {
-                #[cfg(feature = "__test_utils")]
-                ENUM_TABLE_LOOKUPS.with(|lookups| lookups.update(|n| n + 1));
-                (Arc::clone(enum_name), usmap.enums.get(&**enum_name))
-            })
-            .1
+    ///
+    /// # Errors
+    ///
+    /// [`AssetParseFault::AllocationFailed`] when the memo cannot grow.
+    fn enum_values(
+        &mut self,
+        enum_name: &Arc<str>,
+        asset_path: &str,
+    ) -> crate::Result<Option<&'u EnumTable>> {
+        let key = Arc::as_ptr(enum_name).cast::<u8>().addr();
+        if let Some(&(_, table)) = self.enum_tables.get(&key) {
+            return Ok(table);
+        }
+        check_asset_reserve(
+            self.enum_tables.try_reserve(1),
+            1,
+            asset_path,
+            AssetSeam::EnumTableMemo,
+        )?;
+        #[cfg(feature = "__test_utils")]
+        ENUM_TABLE_LOOKUPS.with(|lookups| lookups.update(|n| n + 1));
+        let table = self.usmap.enums.get(&**enum_name);
+        let _ = self.enum_tables.insert(key, (Arc::clone(enum_name), table));
+        Ok(table)
     }
 }
 
@@ -523,7 +539,7 @@ fn read_unversioned_value(
             // for keeps the enum's name by refcount rather than formatting a
             // copy of it per decoded value.
             let value = view
-                .enum_values(enum_name)
+                .enum_values(enum_name, asset_path)?
                 .and_then(|values| values.get(&u64::from(idx)))
                 .map_or_else(
                     || EnumValue::Ordinal {
@@ -1867,6 +1883,53 @@ mod tests {
                 other => panic!("expected an enum, got {other:?}"),
             })
             .collect()
+    }
+
+    /// The memo reserves an entry on a miss and nothing on a hit: with its
+    /// seam armed to fail the first reservation, an array of one enum fails
+    /// the read; armed to fail the second, the three elements decode.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn the_memo_reserves_on_a_miss_and_not_on_a_hit() {
+        let site = crate::seams::SeamSite::Asset(AssetSeam::EnumTableMemo);
+        let array = || MappedPropertyType::Array {
+            inner: difficulty(),
+        };
+        let wire = [3, 0, 0, 0, 0, 1, 0];
+
+        let first = crate::testing::oom::arm_at(site, 0);
+        let err = read_value(array(), &wire, &difficulty_usmap(), 0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::AllocationFailed {
+                        context: crate::error::AssetAllocationContext::EnumTableMemo,
+                        requested: 1,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        drop(first);
+
+        let _second = crate::testing::oom::arm_at(site, 1);
+        assert!(read_value(array(), &wire, &difficulty_usmap(), 0).is_ok());
+    }
+
+    /// The miss reserves the memo entry for real before the seam is
+    /// consulted: the failed miss leaves capacity behind.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn a_miss_reserves_the_memo_entry() {
+        let usmap = difficulty_usmap();
+        let mut view = UsmapView::new(&usmap);
+        let _armed =
+            crate::testing::oom::arm_at(crate::seams::SeamSite::Asset(AssetSeam::EnumTableMemo), 0);
+        assert!(view.enum_values(&Arc::from("Difficulty"), "t").is_err());
+        assert!(view.enum_tables.capacity() > view.enum_tables.len());
     }
 
     /// Scalar enum slots resolve a value table by name once per name
