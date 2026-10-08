@@ -2,7 +2,7 @@
 //!
 //! Lives outside `__test_utils`-gated `crate::testing` so [`SeamSite`]
 //! is reachable in helper signatures (`crate::error::try_reserve_index`,
-//! `crate::error::try_reserve_asset`) and so [`seam_check!`] is
+//! `crate::error::check_asset_reserve`) and so [`seam_check!`] is
 //! callable at every production site regardless of feature
 //! configuration. Runtime dispatch (`maybe_fail_at`) remains
 //! `__test_utils`-gated. See #266, #270, and #276.
@@ -140,9 +140,9 @@ const _: [(); PakSeam::COUNT] = [(); PakSeam::Lz4OutputReserve as usize + 1];
 /// Asset parser OOM seams (#276). The inner enum of [`SeamSite::Asset`].
 ///
 /// Each variant pairs 1:1 with an
-/// [`crate::error::AssetAllocationContext`] variant used at a
-/// `try_reserve_asset` call site (plus the one direct
-/// `try_reserve_exact` site in the split-asset concat buffer).
+/// [`crate::error::AssetAllocationContext`] variant, which
+/// `check_asset_reserve` derives from it at every asset-side reservation
+/// (`try_reserve_asset` for a `Vec`).
 ///
 /// `#[repr(usize)]` so the variant's discriminant maps directly to
 /// its slot in the upper portion of the `ARM_STATE` array (see
@@ -174,12 +174,10 @@ pub enum AssetSeam {
     /// `read_unversioned_value` (the `Array<T>` arm) element list
     /// reservation. Surfaces as
     /// `AssetAllocationContext::CollectionElements`. Shared across
-    /// all collection decoders — five `try_reserve_asset` call sites
-    /// route through this variant.
+    /// all collection decoders.
     CollectionElements,
     /// `Package::read_from`'s split-asset concat buffer
-    /// (uasset + uexp). Direct `try_reserve_exact` call site, NOT
-    /// helper-routed; wired via the `seam_check!` macro inline.
+    /// (uasset + uexp).
     /// Surfaces as `AssetAllocationContext::SplitAssetCombined`.
     SplitAssetCombined,
     /// `data_table::read_from`'s row-list reservation (Phase 3d).
@@ -194,13 +192,18 @@ pub enum AssetSeam {
     /// `decompress_zlib`'s output pre-size.
     /// Surfaces as `AssetAllocationContext::DecompressedBulkDataBytes`.
     DecompressedBulkDataBytes,
+    /// `UsmapView`'s enum value-table memo, a `HashMap` grown by one
+    /// per enum name a package read resolves, through
+    /// `check_asset_reserve`.
+    /// Surfaces as `AssetAllocationContext::EnumTableMemo`.
+    EnumTableMemo,
 }
 
 impl AssetSeam {
     /// Total number of asset-side seam sites. Pinned by the `const _`
     /// guard below and by the exhaustive `match` in
     /// [`SeamSite::slot`].
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 13;
 
     /// Map an asset seam to its paired
     /// [`crate::error::AssetAllocationContext`].
@@ -208,11 +211,10 @@ impl AssetSeam {
     /// The 1:1 pairing is enforced structurally by this exhaustive
     /// match — adding a variant to [`AssetSeam`] without a context
     /// counterpart (or vice versa) fails to compile, so the binding
-    /// can't silently drift out of sync. The pub(crate)
-    /// `try_reserve_asset` helper derives the context tag from the
-    /// seam via this method, removing the redundant per-call-site
-    /// `AssetAllocationContext::X` argument the previous shape
-    /// required.
+    /// can't silently drift out of sync. `crate::error::check_asset_reserve`,
+    /// which every asset-side reservation goes through, derives the
+    /// context tag from the seam via this method, so no call site names
+    /// an `AssetAllocationContext` itself.
     #[must_use]
     pub const fn context(self) -> crate::error::AssetAllocationContext {
         use crate::error::AssetAllocationContext as C;
@@ -229,12 +231,13 @@ impl AssetSeam {
             Self::DataResourceTable => C::DataResourceTable,
             Self::BulkDataBytes => C::BulkDataBytes,
             Self::DecompressedBulkDataBytes => C::DecompressedBulkDataBytes,
+            Self::EnumTableMemo => C::EnumTableMemo,
         }
     }
 }
 
 // Same compile-time guard pattern as PakSeam above (see precondition).
-const _: [(); AssetSeam::COUNT] = [(); AssetSeam::DecompressedBulkDataBytes as usize + 1];
+const _: [(); AssetSeam::COUNT] = [(); AssetSeam::EnumTableMemo as usize + 1];
 
 // In the feature-off LIB target `COUNT`/`slot` are dead: their only
 // production consumers live in the `__test_utils`-gated
@@ -381,6 +384,9 @@ mod tests {
                 AssetSeam::DecompressedBulkDataBytes => {
                     "resolve_decompressed_bulk_data_bytes_surfaces_allocation_failed_under_oom"
                 }
+                AssetSeam::EnumTableMemo => {
+                    "read_asset_enum_table_memo_surfaces_allocation_failed_under_oom"
+                }
             }
         }
         // Touch both const fns so the matches' compile-time
@@ -431,6 +437,7 @@ mod tests {
                 AssetSeam::DataResourceTable => PakSeam::COUNT + 9,
                 AssetSeam::BulkDataBytes => PakSeam::COUNT + 10,
                 AssetSeam::DecompressedBulkDataBytes => PakSeam::COUNT + 11,
+                AssetSeam::EnumTableMemo => PakSeam::COUNT + 12,
             }
         }
         let pak_all = [
@@ -468,6 +475,7 @@ mod tests {
             AssetSeam::DataResourceTable,
             AssetSeam::BulkDataBytes,
             AssetSeam::DecompressedBulkDataBytes,
+            AssetSeam::EnumTableMemo,
         ];
         assert_eq!(asset_all.len(), AssetSeam::COUNT);
         for site in asset_all {

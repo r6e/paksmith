@@ -4894,13 +4894,16 @@ pub enum AssetAllocationContext {
     /// `Vec<u8>` for a zlib-compressed bulk-data record's output,
     /// pre-sized from the compressed length.
     DecompressedBulkDataBytes,
+    /// `HashMap` entry for the per-read memo of resolved enum value
+    /// tables.
+    EnumTableMemo,
 }
 
 impl AssetAllocationContext {
     /// Unit of the `requested` field on
     /// [`AssetParseFault::AllocationFailed`]. Same derivation as
-    /// [`AllocationContext::unit`] — `*Bytes` variants reserve
-    /// byte buffers; the rest reserve item vectors.
+    /// [`AllocationContext::unit`]: byte-buffer contexts count bytes,
+    /// the rest count items.
     #[must_use]
     pub fn unit(&self) -> BoundsUnit {
         match self {
@@ -4915,7 +4918,8 @@ impl AssetAllocationContext {
             | Self::ExportPayloads
             | Self::CollectionElements
             | Self::DataTableRows
-            | Self::DataResourceTable => BoundsUnit::Items,
+            | Self::DataResourceTable
+            | Self::EnumTableMemo => BoundsUnit::Items,
         }
     }
 }
@@ -4935,6 +4939,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::DataResourceTable => "data resource entries",
             Self::BulkDataBytes => "bulk data bytes",
             Self::DecompressedBulkDataBytes => "decompressed bulk data bytes",
+            Self::EnumTableMemo => "enum table memo",
         };
         f.write_str(s)
     }
@@ -5598,39 +5603,36 @@ pub(crate) fn try_reserve_index<T>(
 /// failure through [`AssetParseFault::AllocationFailed`] wrapped in
 /// [`PaksmithError::AssetParse`] carrying the asset's source path.
 ///
-/// Asset-side counterpart to [`try_reserve_index`]. Covers the
-/// canonical asset-header allocation shape: `Vec<T>` receiver.
-/// `seam` is mandatory (no `Option`) — every asset-side allocation
-/// reservation is structurally bound to one of the variants on
-/// [`crate::seams::AssetSeam`]. The
-/// [`crate::error::AssetAllocationContext`] tag is derived from the
-/// seam via [`crate::seams::AssetSeam::context`], so the same enum
-/// variant determines both the OOM-injection slot and the wire-stable
-/// fault context. Direct (non-helper) `try_reserve_exact` sites use
-/// the `seam_check!` macro inline; the `SplitAssetCombined` site at
-/// `asset/package.rs` is the asset-side analogue of the index-side
-/// `fstring.rs` carve-out — see [`crate::seams::AssetSeam`] for the
-/// per-variant routing notes.
+/// Asset-side counterpart to [`try_reserve_index`], for the canonical
+/// `Vec<T>` receiver; see [`check_asset_reserve`].
 pub(crate) fn try_reserve_asset<T>(
     vec: &mut Vec<T>,
     count: usize,
     asset_path: &str,
-    // Underscore prefix silences the unused-parameter warning in
-    // non-`__test_utils` builds where the cfg-gated arm below is
-    // removed. The parameter name otherwise reads as `seam` at every
-    // call site.
-    _seam: crate::seams::AssetSeam,
+    seam: crate::seams::AssetSeam,
 ) -> crate::Result<()> {
-    let reserve_res = vec.try_reserve_exact(count);
-    #[cfg(feature = "__test_utils")]
-    let reserve_res = match reserve_res {
-        Ok(()) => crate::testing::oom::maybe_fail_at(crate::seams::SeamSite::Asset(_seam)),
-        other => other,
-    };
-    reserve_res.map_err(|source| PaksmithError::AssetParse {
+    check_asset_reserve(vec.try_reserve_exact(count), count, asset_path, seam)
+}
+
+/// `reserve`, a reservation of `count` slots on any receiver, run
+/// through `seam`'s OOM injection and mapped to
+/// [`AssetParseFault::AllocationFailed`]. Every asset-side seam is
+/// reached through here, [`try_reserve_asset`] for a `Vec` and directly
+/// for any other receiver (a `HashMap`). `seam` is mandatory and the
+/// [`crate::error::AssetAllocationContext`] comes from
+/// [`crate::seams::AssetSeam::context`], so one variant sets both the
+/// OOM-injection slot and the wire-stable fault context.
+pub(crate) fn check_asset_reserve(
+    reserve: Result<(), std::collections::TryReserveError>,
+    count: usize,
+    asset_path: &str,
+    seam: crate::seams::AssetSeam,
+) -> crate::Result<()> {
+    crate::seams::seam_check!(reserve, crate::seams::SeamSite::Asset(seam));
+    reserve.map_err(|source| PaksmithError::AssetParse {
         asset_path: asset_path.to_string(),
         fault: AssetParseFault::AllocationFailed {
-            context: _seam.context(),
+            context: seam.context(),
             requested: count,
             source,
         },
@@ -8555,6 +8557,7 @@ mod tests {
                 AssetAllocationContext::DecompressedBulkDataBytes,
                 "decompressed bulk data bytes",
             ),
+            (AssetAllocationContext::EnumTableMemo, "enum table memo"),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -8655,6 +8658,7 @@ mod tests {
                 AssetAllocationContext::DecompressedBulkDataBytes,
                 BoundsUnit::Bytes,
             ),
+            (AssetAllocationContext::EnumTableMemo, BoundsUnit::Items),
         ];
         for (context, expected) in cases {
             assert_eq!(

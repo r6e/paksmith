@@ -5,7 +5,7 @@
 //! `Package::read_from` call (or, for the bulk-data seams,
 //! `BulkDataResolver::resolve`) against an arming
 //! `SeamSite::Asset(AssetSeam::*)` seam — synthesizing a
-//! `TryReserveError` at the targeted `try_reserve_asset` call site
+//! `TryReserveError` at the targeted reservation
 //! and asserting that
 //! [`paksmith_core::error::AssetParseFault::AllocationFailed`]
 //! surfaces with the matching `AssetAllocationContext`.
@@ -32,9 +32,10 @@ use paksmith_core::testing::bench::zlib_compress_framed;
 use paksmith_core::testing::oom::{AssetSeam, SeamSite, arm_at};
 use paksmith_core::testing::uasset::{
     build_minimal_custom_versions_populated, build_minimal_ue4_27, build_minimal_ue4_27_split,
-    build_minimal_ue4_27_with_array_of_struct, build_minimal_ue4_27_with_data_table,
-    build_minimal_ue5_1010_with_data_resources,
+    build_minimal_ue4_27_unversioned, build_minimal_ue4_27_with_array_of_struct,
+    build_minimal_ue4_27_with_data_table, build_minimal_ue5_1010_with_data_resources,
 };
+use paksmith_core::testing::usmap::build_hero_usmap_with_enum_speed;
 
 /// Arm `AssetSeam::NameTable` → `Package::read_from`'s name-table
 /// reservation surfaces `AssetParseFault::AllocationFailed{NameTable}`.
@@ -203,10 +204,7 @@ fn read_asset_collection_elements_surfaces_allocation_failed_under_oom() {
 
 /// Arm `AssetSeam::SplitAssetCombined` → the (uasset + uexp) concat-buffer
 /// reservation surfaces
-/// `AssetParseFault::AllocationFailed{SplitAssetCombined}`. The seam
-/// is a DIRECT `try_reserve_exact` call wired via inline
-/// `seam_check!` (not the helper), so this also pins that the macro
-/// expansion path is reachable from the asset surface.
+/// `AssetParseFault::AllocationFailed{SplitAssetCombined}`.
 #[test]
 fn read_asset_split_asset_combined_surfaces_allocation_failed_under_oom() {
     let (uasset, uexp) = build_minimal_ue4_27_split();
@@ -359,5 +357,40 @@ fn resolve_decompressed_bulk_data_bytes_surfaces_allocation_failed_under_oom() {
             AssetAllocationContext::DecompressedBulkDataBytes,
             framed.len()
         )
+    );
+}
+
+/// Arm `AssetSeam::EnumTableMemo` → the per-read enum-table memo's growth
+/// for an unversioned `Speed` enum surfaces
+/// `AllocationFailed{EnumTableMemo}`, ending the package read.
+#[test]
+fn read_asset_enum_table_memo_surfaces_allocation_failed_under_oom() {
+    let usmap = std::sync::Arc::new(
+        paksmith_core::asset::Usmap::from_bytes(&build_hero_usmap_with_enum_speed(
+            "Difficulty",
+            &["Easy", "Normal"],
+        ))
+        .unwrap(),
+    );
+    // One fragment, last, two values: Health 100 and Speed 1.
+    let mut payload = 0x0500u16.to_le_bytes().to_vec();
+    payload.extend_from_slice(&100i32.to_le_bytes());
+    payload.push(1);
+    let pkg = build_minimal_ue4_27_unversioned("Hero", payload);
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::EnumTableMemo), 0);
+    let err = Package::read_from(&pkg.bytes, None, Some(&usmap), "Game/Test.uasset").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::AllocationFailed {
+                    context: AssetAllocationContext::EnumTableMemo,
+                    requested: 1,
+                    ..
+                },
+                ..
+            }
+        ),
+        "expected AllocationFailed{{EnumTableMemo}}; got {err:?}"
     );
 }
