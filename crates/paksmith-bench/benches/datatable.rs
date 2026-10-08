@@ -1,8 +1,8 @@
 //! Phase 3d DataTable export benchmarks (CSV + JSON).
 //!
 //! A 10K-row × 50-column table (uniform `Float` schema). CSV exercises the
-//! column-union + per-cell lookup hot path (the O(rows × cols²) surface the A3
-//! finding targets); JSON is the single-pass serde path for comparison.
+//! column resolution + per-row cell placement path; JSON is the single-pass
+//! serde path for comparison.
 //! Throughput reported in rows/s.
 
 #![allow(unused_results, missing_docs)]
