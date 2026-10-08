@@ -10,18 +10,19 @@
 //!
 //! This module is the single source of truth for parsing FStrings out
 //! of the pak index — all entry filenames, mount points, and FDI
-//! directory/file names go through [`read_fstring`].
+//! directory/file names go through [`read_fstring`]. The asset reader
+//! shares its decoder, [`read_fstring_with`], and reserves through its
+//! own seams.
 
+use std::collections::TryReserveError;
 use std::io::Read;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::error::{
     AllocationContext, FStringEncoding, FStringFault, IndexParseFault, PaksmithError,
+    check_index_reserve,
 };
-// Unused in the no-`__test_utils` lib-test compile (seam machinery
-// no-ops there); exercised by CI's package-scoped compile guard.
-#[cfg_attr(not(feature = "__test_utils"), allow(unused_imports))]
 use crate::seams::PakSeam;
 
 /// Maximum length (in bytes for UTF-8, code units for UTF-16) accepted
@@ -42,17 +43,51 @@ const FSTRING_MAX_LEN: i32 = 65_536;
 /// Errors out (rather than silently truncating) when the trailing null
 /// terminator is missing, when the length exceeds [`FSTRING_MAX_LEN`],
 /// or when `len == 0` / `len == i32::MIN`.
+pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
+    read_fstring_with(reader, pak_reserve)
+}
+
+fn pak_reserve(
+    reserve: Result<(), TryReserveError>,
+    requested: usize,
+    encoding: FStringEncoding,
+) -> crate::Result<()> {
+    let (context, seam) = match encoding {
+        FStringEncoding::Utf16 => (
+            AllocationContext::FStringUtf16CodeUnits,
+            PakSeam::FstringUtf16,
+        ),
+        FStringEncoding::Utf8 => (AllocationContext::FStringUtf8Bytes, PakSeam::FstringUtf8),
+    };
+    check_index_reserve(reserve, requested, context, seam)
+}
+
+/// [`read_fstring`]'s decoder, with `reserved` checking the buffer's
+/// reservation: it receives the `try_reserve_exact` result, the length
+/// reserved (bytes for UTF-8, code units for UTF-16) and the encoding.
+/// `reserved` must fail whenever the reservation did, because the
+/// buffer then grows without a check.
+///
+/// # Errors
+/// - [`PaksmithError::InvalidIndex`] with
+///   [`IndexParseFault::FStringMalformed`] for a malformed FString,
+///   whoever the caller is.
+/// - [`PaksmithError::Io`] on a short read.
+/// - `reserved`'s error, unchanged.
 // Splitting the UTF-16/UTF-8 branches into separate fns would hide
 // their structural symmetry without reducing total line count —
 // each branch carries its own length cap, allocation, terminator
 // check, NUL audit, and encoding conversion. The function is over
 // clippy's 100-line default by design, not by accretion.
 #[allow(clippy::too_many_lines)]
-// `abs_len` is produced by `checked_abs()` on the `i32` length prefix
-// (line 65), so it's in `0..=i32::MAX` and the sign-loss casts to
+// `abs_len` is produced by `checked_abs()` on the `i32` length prefix,
+// so it's in `0..=i32::MAX` and the sign-loss casts to
 // `u32` / `usize` below are bit-preserving by construction.
 #[allow(clippy::cast_sign_loss)]
-pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
+pub(crate) fn read_fstring_with<R: Read>(
+    reader: &mut R,
+    reserved: impl FnOnce(Result<(), TryReserveError>, usize, FStringEncoding) -> crate::Result<()>,
+) -> crate::Result<String> {
     let len = reader.read_i32::<LittleEndian>()?;
 
     // Issue #104: reject `len == 0` as malformed. UE's writer
@@ -101,19 +136,11 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
         // territory on a healthy machine — but if the cap ever
         // loosens, this would become an OOM-abort site.
         let mut buf: Vec<u16> = Vec::new();
-        let reserve_res = buf.try_reserve_exact(abs_len);
-        crate::seams::seam_check!(
-            reserve_res,
-            crate::testing::oom::SeamSite::Pak(PakSeam::FstringUtf16)
-        );
-        reserve_res.map_err(|source| PaksmithError::InvalidIndex {
-            fault: IndexParseFault::AllocationFailed {
-                context: AllocationContext::FStringUtf16CodeUnits,
-                requested: abs_len,
-                source,
-                path: None,
-            },
-        })?;
+        reserved(
+            buf.try_reserve_exact(abs_len),
+            abs_len,
+            FStringEncoding::Utf16,
+        )?;
         buf.resize(abs_len, 0);
         for item in &mut buf {
             *item = reader.read_u16::<LittleEndian>()?;
@@ -162,19 +189,11 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
 
     // Issue #132 item 3: fallible allocation — see UTF-16 branch above.
     let mut buf: Vec<u8> = Vec::new();
-    let reserve_res = buf.try_reserve_exact(abs_len);
-    crate::seams::seam_check!(
-        reserve_res,
-        crate::testing::oom::SeamSite::Pak(PakSeam::FstringUtf8)
-    );
-    reserve_res.map_err(|source| PaksmithError::InvalidIndex {
-        fault: IndexParseFault::AllocationFailed {
-            context: AllocationContext::FStringUtf8Bytes,
-            requested: abs_len,
-            source,
-            path: None,
-        },
-    })?;
+    reserved(
+        buf.try_reserve_exact(abs_len),
+        abs_len,
+        FStringEncoding::Utf8,
+    )?;
     buf.resize(abs_len, 0);
     reader.read_exact(&mut buf)?;
     match buf.last() {
@@ -210,4 +229,58 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
             },
         },
     })
+}
+
+#[cfg(all(test, feature = "__test_utils"))]
+mod tests {
+    use std::io::Cursor;
+
+    use super::read_fstring;
+    use crate::error::{AllocationContext, IndexParseFault, PaksmithError};
+    use crate::seams::{PakSeam, SeamSite};
+    use crate::testing::oom::arm_at;
+    use crate::testing::wire::{write_fstring, write_fstring_utf16};
+
+    /// An armed pak FString seam fails the read as a pak-index fault
+    /// naming the encoding's context and its reserved length: 4 bytes
+    /// for "abc", 6 code units for "abcde".
+    #[test]
+    fn an_armed_pak_seam_fails_the_read_as_an_index_fault() {
+        let mut utf8 = Vec::new();
+        write_fstring(&mut utf8, "abc");
+        let mut utf16 = Vec::new();
+        write_fstring_utf16(&mut utf16, "abcde");
+        let cases = [
+            (
+                PakSeam::FstringUtf8,
+                utf8,
+                AllocationContext::FStringUtf8Bytes,
+                4,
+            ),
+            (
+                PakSeam::FstringUtf16,
+                utf16,
+                AllocationContext::FStringUtf16CodeUnits,
+                6,
+            ),
+        ];
+        for (seam, bytes, context, requested) in cases {
+            let _guard = arm_at(SeamSite::Pak(seam), 0);
+            let err = read_fstring(&mut Cursor::new(bytes)).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::AllocationFailed {
+                            context: c,
+                            requested: r,
+                            path: None,
+                            ..
+                        },
+                    } if *c == context && *r == requested
+                ),
+                "{err:?}"
+            );
+        }
+    }
 }

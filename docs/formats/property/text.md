@@ -288,6 +288,7 @@ that don't carry localization context.
 **Error variants:**
 - `AssetParseFault::UnexpectedEof { field }` — short read on any binary field.
 - `AssetParseFault::FStringMalformed { kind }` — malformed FString inside any text-body field.
+- `AssetParseFault::AllocationFailed { context: FStringUtf8Bytes | FStringUtf16CodeUnits, … }` — a text-body FString's buffer cannot be reserved.
 - `AssetParseFault::PropertyDepthExceeded { depth, limit }` — recursive FText nesting past `MAX_PROPERTY_DEPTH` (128).
 - `AssetParseFault::CollectionElementCountExceeded { collection: TextFormatArguments, .. }` — negative or over-cap format-argument count.
 - `AssetParseFault::TextFormatArgUnsupported { arg_type }` — `Gender (5)` or unknown argument type (recovered to `Unknown` in the direct context; fail-closed in size-less contexts).

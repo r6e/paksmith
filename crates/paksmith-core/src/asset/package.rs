@@ -551,11 +551,8 @@ impl Package {
     ///   and paths copied while decoding the exports pass the package's
     ///   budget
     /// - an allocation failure while decoding an export:
-    ///   [`AssetParseFault::AllocationFailed`],
-    ///   [`PaksmithError::InvalidIndex`] with
-    ///   [`IndexParseFault::AllocationFailed`](crate::error::IndexParseFault::AllocationFailed)
-    ///   (an FString read), or [`PaksmithError::Io`] with
-    ///   `ErrorKind::OutOfMemory`
+    ///   [`AssetParseFault::AllocationFailed`], or [`PaksmithError::Io`]
+    ///   with `ErrorKind::OutOfMemory`
     ///
     /// See [`Self::read_from_with`] to also supply a profile's
     /// engine-version hint (#656).
@@ -2223,11 +2220,22 @@ mod tests {
     }
 
     #[test]
+    fn an_armed_pak_fstring_seam_leaves_the_package_read_alone() {
+        let pkg = crate::testing::uasset::build_minimal_ue4_27_with_properties();
+        let _guard = crate::testing::oom::arm_at(
+            crate::seams::SeamSite::Pak(crate::seams::PakSeam::FstringUtf8),
+            0,
+        );
+
+        assert!(Package::read_from(&pkg.bytes, None, None, "x.uasset").is_ok());
+    }
+
+    #[test]
     fn generic_parse_fstring_allocation_failure_fails_the_package_read() {
         let pkg = crate::testing::uasset::build_minimal_ue4_27_with_properties();
         let parsed = Package::read_from(&pkg.bytes, None, None, "x.uasset").unwrap();
         let _guard = crate::testing::oom::arm_at(
-            crate::seams::SeamSite::Pak(crate::seams::PakSeam::FstringUtf8),
+            crate::seams::SeamSite::Asset(crate::seams::AssetSeam::FStringUtf8Bytes),
             0,
         );
 
@@ -2237,12 +2245,13 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                PaksmithError::InvalidIndex {
-                    fault: crate::error::IndexParseFault::AllocationFailed {
-                        context: crate::error::AllocationContext::FStringUtf8Bytes,
+                PaksmithError::AssetParse {
+                    asset_path,
+                    fault: AssetParseFault::AllocationFailed {
+                        context: AssetAllocationContext::FStringUtf8Bytes,
                         ..
                     },
-                }
+                } if asset_path == "x.uasset"
             ),
             "{err:?}"
         );

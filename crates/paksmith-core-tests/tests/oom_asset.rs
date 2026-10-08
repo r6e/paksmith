@@ -3,7 +3,8 @@
 //!
 //! Mirror of `oom_pak.rs` for the asset side. Each test drives a
 //! `Package::read_from` call (or, for the bulk-data seams,
-//! `BulkDataResolver::resolve`) against an arming
+//! `BulkDataResolver::resolve`, and for the UTF-16 FString seam,
+//! `EngineVersion::read_from`) against an arming
 //! `SeamSite::Asset(AssetSeam::*)` seam — synthesizing a
 //! `TryReserveError` at the targeted reservation
 //! and asserting that
@@ -25,8 +26,8 @@
 #![allow(missing_docs)]
 
 use paksmith_core::PaksmithError;
-use paksmith_core::asset::Package;
 use paksmith_core::asset::bulk_data::{BulkDataFlags, BulkDataResolver, FByteBulkData};
+use paksmith_core::asset::{EngineVersion, Package};
 use paksmith_core::error::{AssetAllocationContext, AssetParseFault};
 use paksmith_core::testing::bench::zlib_compress_framed;
 use paksmith_core::testing::oom::{AssetSeam, SeamSite, arm_at};
@@ -36,6 +37,7 @@ use paksmith_core::testing::uasset::{
     build_minimal_ue4_27_with_data_table, build_minimal_ue5_1010_with_data_resources,
 };
 use paksmith_core::testing::usmap::build_hero_usmap_with_enum_speed;
+use paksmith_core::testing::wire::write_fstring_utf16;
 
 /// Arm `AssetSeam::NameTable` → `Package::read_from`'s name-table
 /// reservation surfaces `AssetParseFault::AllocationFailed{NameTable}`.
@@ -392,5 +394,59 @@ fn read_asset_enum_table_memo_surfaces_allocation_failed_under_oom() {
             }
         ),
         "expected AllocationFailed{{EnumTableMemo}}; got {err:?}"
+    );
+}
+
+/// Arm `AssetSeam::FStringUtf8Bytes` → the summary's folder name, the
+/// first asset FString, surfaces `AllocationFailed{FStringUtf8Bytes}`
+/// for its 5 bytes ("None" and the NUL).
+#[test]
+fn read_asset_fstring_utf8_bytes_surfaces_allocation_failed_under_oom() {
+    let pkg = build_minimal_ue4_27();
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::FStringUtf8Bytes), 0);
+    let err = Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::AssetParse {
+                asset_path,
+                fault: AssetParseFault::AllocationFailed {
+                    context: AssetAllocationContext::FStringUtf8Bytes,
+                    requested: 5,
+                    ..
+                },
+            } if asset_path == "Game/Test.uasset"
+        ),
+        "expected AllocationFailed{{FStringUtf8Bytes}}; got {err:?}"
+    );
+}
+
+/// Arm `AssetSeam::FStringUtf16CodeUnits` → a UTF-16 engine-version
+/// branch surfaces `AllocationFailed{FStringUtf16CodeUnits}` counting
+/// its 6 code units ("++UE5" and the NUL), not its 12 bytes.
+#[test]
+fn read_asset_fstring_utf16_code_units_surfaces_allocation_failed_under_oom() {
+    let mut bytes = [4u16, 27, 2]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect::<Vec<u8>>();
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    write_fstring_utf16(&mut bytes, "++UE5");
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::FStringUtf16CodeUnits), 0);
+    let err =
+        EngineVersion::read_from(&mut std::io::Cursor::new(bytes), "Game/Test.uasset").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::AssetParse {
+                asset_path,
+                fault: AssetParseFault::AllocationFailed {
+                    context: AssetAllocationContext::FStringUtf16CodeUnits,
+                    requested: 6,
+                    ..
+                },
+            } if asset_path == "Game/Test.uasset"
+        ),
+        "expected AllocationFailed{{FStringUtf16CodeUnits}}; got {err:?}"
     );
 }

@@ -933,9 +933,9 @@ pub fn max_decode_warnings() -> u64 {
 
 /// Whether `err` ends a package read instead of degrading one export: a
 /// reported allocation failure at any layer a package read reaches (the
-/// asset parser's own reservations; an FString read, which reports the pak
-/// reader's `IndexParseFault::AllocationFailed`; a `.ubulk`/`.uptnl` load
-/// or inflate; a std read that grows its buffer, which reports
+/// asset parser's own reservations, FString reads among them; a
+/// `.ubulk`/`.uptnl` load or inflate, which reports the pak reader's
+/// fault; a std read that grows its buffer, which reports
 /// `io::ErrorKind::OutOfMemory`), or a refused
 /// [`AssetContext::charge_derived`]. Caps that refuse before allocating,
 /// and the bulk-read budgets, degrade.
@@ -1238,7 +1238,7 @@ mod ends_package_read_tests {
             }),
             asset_parse(AssetParseFault::DerivedStringBudgetExceeded { limit: 0 }),
             index(IndexParseFault::AllocationFailed {
-                context: AllocationContext::FStringUtf8Bytes,
+                context: AllocationContext::InlineCompressionBlocks,
                 requested: 1,
                 source: refused(),
                 path: None,
