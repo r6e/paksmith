@@ -1,15 +1,17 @@
 //! Cfg-gated OOM-injection seams for the `try_reserve` sites across
-//! `container::pak`'s parser/decompression code ([`PakSeam`]) and the
-//! `asset` parser ([`AssetSeam`]). Lets integration tests exercise
-//! the typed `AllocationFailed` / `*ReserveFailed` production paths
-//! without relying on real allocator pressure.
+//! `container::pak`'s parser/decompression code ([`PakSeam`]), the
+//! `asset` parser ([`AssetSeam`]) and the `.usmap` parser
+//! ([`MappingsSeam`]). Lets tests exercise the typed `AllocationFailed`
+//! / `*ReserveFailed` production paths without relying on real allocator
+//! pressure.
 //!
 //! Gated behind the `__test_utils` feature; production builds never
-//! compile this module. The [`SeamSite`], [`PakSeam`], and
-//! [`AssetSeam`] types themselves live in the always-compiled
+//! compile this module. The [`SeamSite`], [`PakSeam`], [`AssetSeam`]
+//! and [`MappingsSeam`] types themselves live in the always-compiled
 //! `crate::seams` module so production helpers like
-//! `crate::error::try_reserve_index` (mandatory `PakSeam`) and
-//! `crate::error::check_asset_reserve` (mandatory `AssetSeam`) can
+//! `crate::error::try_reserve_index` (mandatory `PakSeam`),
+//! `crate::error::check_asset_reserve` (mandatory `AssetSeam`) and
+//! `crate::error::check_mappings_reserve` (mandatory `MappingsSeam`) can
 //! accept seam parameters regardless of feature configuration; only
 //! the runtime `maybe_fail_at` / [`arm_at`] dispatch lives here. [`SeamSite`] is
 //! re-exported from this module to preserve the
@@ -28,16 +30,16 @@
 //! variant + structured fields rather than the inner `TryReserveError`'s
 //! Display or `kind()` — forward-compat insurance.
 
-// `maybe_fail_at` runs inside `try_reserve_index` / `check_asset_reserve`,
-// so this file is on a production call path and does not get the
-// fixture-builder allow from `testing/mod.rs`.
+// `maybe_fail_at` runs inside `try_reserve_index` / `check_asset_reserve` /
+// `check_mappings_reserve`, so this file is on a production call path and
+// does not get the fixture-builder allow from `testing/mod.rs`.
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 use std::cell::Cell;
 use std::collections::TryReserveError;
 use std::marker::PhantomData;
 
-pub use crate::seams::{AssetSeam, PakSeam, SeamSite};
+pub use crate::seams::{AssetSeam, MappingsSeam, PakSeam, SeamSite};
 
 thread_local! {
     /// Per-seam arm state, one slot per [`SeamSite`] discriminant.
@@ -106,8 +108,9 @@ pub fn arm_at(site: SeamSite, skip_count: u64) -> DisarmGuard {
 /// `crate::asset`, routed through the always-compiled
 /// `crate::seams::seam_check!` macro or the
 /// `crate::error::try_reserve_index` (pak) /
-/// `crate::error::check_asset_reserve` (asset) helpers; integration
-/// tests drive the seams via [`arm_at`] + the production code path.
+/// `crate::error::check_asset_reserve` (asset) /
+/// `crate::error::check_mappings_reserve` (`.usmap`) helpers; tests
+/// drive the seams via [`arm_at`] + the production code path.
 /// `pub(crate)` makes the wrong-call boundary structural rather than
 /// docs-only.
 pub(crate) fn maybe_fail_at(site: SeamSite) -> Result<(), TryReserveError> {
