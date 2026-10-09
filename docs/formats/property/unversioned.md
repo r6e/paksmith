@@ -214,7 +214,7 @@ always uncompressed:
 |-------|------|------|-----------|
 | magic | 2 | `u16` LE | Must equal `0x30C4` (on-disk bytes `C4 30`). |
 | version | 1 | `u8` | `EUsmapVersion` discriminant (0–4; see Versions table). |
-| [versioning block] | variable | — | Present iff `version ≥ 1` AND next byte is non-zero. Reads: `has_versioning u8`, then if set: `object_version i32`, `object_version_ue5 i32`, `custom_version_count u32`, `custom_version_count × 20` bytes (GUID + i32), `net_cl u32`. |
+| [versioning block] | variable | — | Present iff `version ≥ 1`. Starts with `has_versioning`, an `FArchive` bool: an `i32` LE that must be 0 or 1. If it is 1: `object_version i32`, `object_version_ue5 i32`, `custom_version_count i32`, `custom_version_count × 20` bytes (GUID + i32), `net_cl u32`. |
 | compression | 1 | `u8` | `0` = None, `1` = Oodle (unsupported), `2` = Brotli, `3` = ZStandard. |
 | compressed_size | 4 | `u32` LE | Byte count of the compressed payload. Capped at `MAX_USMAP_COMPRESSED_SIZE = 64 MiB`. |
 | decompressed_size | 4 | `u32` LE | Expected decompressed byte count. Capped at `MAX_USMAP_DECOMPRESSED_SIZE = 256 MiB`. |

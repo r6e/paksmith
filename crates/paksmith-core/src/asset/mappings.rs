@@ -8,9 +8,8 @@
 //! reader walks the schema, advancing the cursor by each property's
 //! type-sized payload.
 //!
-//! See `docs/plans/phase-2f-unversioned-properties.md` for the full
-//! wire-format spec and the cross-validation against `unreal_asset`'s
-//! oracle parser.
+//! See `docs/formats/property/unversioned.md` (`.usmap` file format) for
+//! the wire format.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -650,7 +649,16 @@ impl Usmap {
             })
         };
         if version >= USMAP_VERSION_PACKAGE_VERSIONING {
-            let has_versioning = cur.read_u8().map_err(|_| trunc(&cur))? != 0;
+            // A bool32: CUE4Parse reads it with `ReadBoolean`, and UE4SS and
+            // Dumper-7 write an int32. The pinned unreal_asset oracle reads
+            // one byte here, and is not followed.
+            let has_versioning = match cur.read_i32::<LE>().map_err(|_| trunc(&cur))? {
+                0 => false,
+                1 => true,
+                found => {
+                    return Err(fault(MappingsParseFault::InvalidVersioningFlag { found }));
+                }
+            };
             if has_versioning {
                 // object_version + object_version_ue5 + custom_version array + net_cl
                 let _obj_ver = cur.read_i32::<LE>().map_err(|_| trunc(&cur))?;
@@ -1664,8 +1672,8 @@ mod tests {
         data.extend_from_slice(&0u32.to_le_bytes()); // 0 schemas
 
         let data_len = u32::try_from(data.len()).unwrap();
-        // Magic + version=4 + has_versioning=0 + compression None
-        let mut usmap_bytes = vec![0xC4u8, 0x30, 4, 0, 0];
+        // Magic + version=4 + has_versioning=0 (an i32) + compression None
+        let mut usmap_bytes = vec![0xC4u8, 0x30, 4, 0, 0, 0, 0, 0];
         usmap_bytes.extend_from_slice(&data_len.to_le_bytes());
         usmap_bytes.extend_from_slice(&data_len.to_le_bytes());
         usmap_bytes.extend_from_slice(&data);
@@ -2154,6 +2162,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_usmap_versioning_flag_must_be_0_or_1() {
+        for found in [2, -1] {
+            let mut usmap = vec![0xC4u8, 0x30, 1];
+            usmap.extend_from_slice(&i32::to_le_bytes(found));
+            assert_eq!(
+                parse_fault(&usmap),
+                crate::error::MappingsParseFault::InvalidVersioningFlag { found },
+                "{found}"
+            );
+        }
+    }
+
+    #[test]
     fn parse_usmap_cv_count_too_large_rejected() {
         // v1 .usmap with `has_versioning = 1`, valid obj_version /
         // obj_version_ue5, then `cv_count = MAX + 1`. The cap check
@@ -2161,11 +2182,11 @@ mod tests {
         //
         // Wire layout (no compression header needed — cap check fires
         // mid-versioning-block, before `compression_byte` is read):
-        //   magic(2) + version=1(1) + has_versioning=1(1) + obj_ver(4)
+        //   magic(2) + version=1(1) + has_versioning=1(4) + obj_ver(4)
         //   + obj_ver_ue5(4) + cv_count=cap+1(4) → CAP REJECT
         let cap = max_usmap_cv_count();
         let mut usmap: Vec<u8> = vec![0xC4u8, 0x30, 1u8]; // magic + v1
-        usmap.push(1u8); // has_versioning = true
+        usmap.extend_from_slice(&1i32.to_le_bytes()); // has_versioning = true
         usmap.extend_from_slice(&0i32.to_le_bytes()); // obj_ver
         usmap.extend_from_slice(&0i32.to_le_bytes()); // obj_ver_ue5
         usmap.extend_from_slice(&(cap + 1).to_le_bytes()); // cv_count = cap + 1
@@ -2256,7 +2277,8 @@ mod tests {
         data.extend_from_slice(&0i32.to_le_bytes()); // enum_name idx
         data.extend_from_slice(&cap_plus_one_u16.to_le_bytes()); // u16 LargeEnums width
         let data_len = u32::try_from(data.len()).unwrap();
-        let mut usmap = vec![0xC4u8, 0x30, 3, 0, 0]; // magic + v3 + has_versioning=0 + compression None
+        // magic + v3 + has_versioning=0 (an i32) + compression None
+        let mut usmap = vec![0xC4u8, 0x30, 3, 0, 0, 0, 0, 0];
         usmap.extend_from_slice(&data_len.to_le_bytes());
         usmap.extend_from_slice(&data_len.to_le_bytes());
         usmap.extend_from_slice(&data);

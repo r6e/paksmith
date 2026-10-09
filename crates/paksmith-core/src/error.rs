@@ -5464,6 +5464,13 @@ pub enum MappingsParseFault {
         limit: u32,
     },
 
+    /// The versioning flag, a bool32, is neither 0 nor 1.
+    #[error("usmap versioning flag {found} is neither 0 nor 1")]
+    InvalidVersioningFlag {
+        /// The flag's wire value.
+        found: i32,
+    },
+
     /// A schema declared `prop_count < serial_count` — fewer total
     /// per-class slots than serializable rows the same record then
     /// emits. Wire-faithful `.usmap` files always have
@@ -6692,6 +6699,17 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "usmap deserialization failed: invalid usmap magic: found 0x1234, expected 0x30c4"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_invalid_versioning_flag() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::InvalidVersioningFlag { found: 2 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap versioning flag 2 is neither 0 nor 1"
         );
     }
 
