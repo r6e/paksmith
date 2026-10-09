@@ -5295,6 +5295,10 @@ pub enum MappingsParseFault {
     )]
     BrotliLargeWindowUnsupported,
 
+    /// libzstd could not allocate a decompression context.
+    #[error("zstd could not create a decompression context")]
+    ZstdContextUnavailable,
+
     /// Decompressed output length did not match the header's declared size.
     #[error("decompressed size mismatch: expected {expected} bytes, got {found}")]
     DecompressedSizeMismatch {
@@ -6775,6 +6779,17 @@ mod tests {
             format!("{err}"),
             "usmap deserialization failed: brotli large-window streams are not supported \
              (RFC 7932 caps the window at 16 MiB)"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_zstd_context_unavailable() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::ZstdContextUnavailable,
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: zstd could not create a decompression context"
         );
     }
 

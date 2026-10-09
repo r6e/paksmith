@@ -17,6 +17,7 @@ use std::io::{Cursor, Read};
 use std::sync::Arc;
 
 use byteorder::{LE, ReadBytesExt};
+use zstd::zstd_safe::DCtx;
 
 use crate::PaksmithError;
 use crate::error::{MappingsAllocationContext, MappingsParseFault, mappings_alloc_failed};
@@ -747,8 +748,8 @@ impl Usmap {
                     return Err(undecodable());
                 }
                 let mut out = reserve_decompressed(output_len)?;
-                let _ = zstd::bulk::Decompressor::new()
-                    .and_then(|mut decoder| decoder.decompress_to_buffer(payload, &mut out))
+                let _ = zstd_context(DCtx::try_create())?
+                    .decompress(&mut out, payload)
                     .map_err(|_| undecodable())?;
                 Cow::Owned(out)
             }
@@ -1514,6 +1515,10 @@ fn reserve_decompressed(len: usize) -> crate::Result<Vec<u8>> {
         )
     })?;
     Ok(out)
+}
+
+fn zstd_context(created: Option<DCtx<'static>>) -> crate::Result<DCtx<'static>> {
+    created.ok_or_else(|| fault(MappingsParseFault::ZstdContextUnavailable))
 }
 
 /// Whether `stream` is one or more zstd v1 or skippable frames. libzstd is
@@ -2706,6 +2711,16 @@ mod tests {
                     requested: usize::MAX,
                     ..
                 },
+            })
+        ));
+    }
+
+    #[test]
+    fn a_zstd_context_libzstd_could_not_create_is_a_typed_fault() {
+        assert!(matches!(
+            zstd_context(None).err(),
+            Some(crate::PaksmithError::MappingsParse {
+                fault: crate::error::MappingsParseFault::ZstdContextUnavailable,
             })
         ));
     }
