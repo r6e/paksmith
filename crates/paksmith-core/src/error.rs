@@ -5287,20 +5287,33 @@ pub enum MappingsParseFault {
     },
 
     /// The Brotli stream uses the large-window extension. It is not part of
-    /// RFC 7932, and its header can size the decoder's ring buffer at up to
-    /// 1 GiB before any output is produced.
+    /// RFC 7932, and a decoder that accepts it may size its ring buffer from
+    /// the header, at up to 1 GiB, before any output is produced.
     #[error(
         "brotli large-window streams are not supported \
          (RFC 7932 caps the window at 16 MiB)"
     )]
     BrotliLargeWindowUnsupported,
 
+    /// The Brotli stream ended before the stored payload did.
+    #[error("brotli stream ends at offset {offset}, before the end of the usmap payload")]
+    BrotliTrailingBytes {
+        /// The file offset where the stream ended.
+        offset: usize,
+    },
+
+    /// libzstd could not allocate a decompression context.
+    #[error("zstd could not create a decompression context")]
+    ZstdContextUnavailable,
+
     /// Decompressed output length did not match the header's declared size.
     #[error("decompressed size mismatch: expected {expected} bytes, got {found}")]
     DecompressedSizeMismatch {
         /// The decompressed size declared in the header.
         expected: u32,
-        /// Bytes actually produced by the decompressor.
+        /// The output's length: the stored payload's for an uncompressed
+        /// file, otherwise the bytes decoded, counted to at most one past the
+        /// declared size.
         found: usize,
     },
 
@@ -6775,6 +6788,29 @@ mod tests {
             format!("{err}"),
             "usmap deserialization failed: brotli large-window streams are not supported \
              (RFC 7932 caps the window at 16 MiB)"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_zstd_context_unavailable() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::ZstdContextUnavailable,
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: zstd could not create a decompression context"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_brotli_trailing_bytes() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::BrotliTrailingBytes { offset: 61 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: brotli stream ends at offset 61, \
+             before the end of the usmap payload"
         );
     }
 

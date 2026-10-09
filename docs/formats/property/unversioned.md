@@ -286,6 +286,10 @@ Additional implementation hardening notes:
   decoder accepts up to 1 GiB. A decoder's ring
   buffer is sized from the declared window and may be allocated before
   any output is produced. A strict RFC 7932 decoder rejects the marker.
+- **Brotli: the stream must end where the payload ends.** Bytes after
+  the final meta-block but inside `compressed_size` are not part of the
+  stream. A decoder that stops at the stream's end leaves them unread;
+  reject them.
 - **ZStandard: accept only v1 and skippable frames.** A v1 frame starts
   with magic `0xFD2FB528` and a skippable frame with `0x184D2A50` to
   `0x184D2A5F`. Any other magic is a pre-v1 legacy frame or not zstd at
@@ -336,6 +340,7 @@ tests can read the live value without duplicating the literal.
 - **Cross-validation oracle:** CUE4Parse[^1] (primary) and `unreal_asset`[^2].
 - **Known divergences:**
   - Delegate (`6`), Interface (`12`/`13`), MulticastDelegate (same), WeakObject (`14`), LazyObject (`15`), AssetObject (`16`), and FieldPath (`27`) are decoded as `Unknown(byte)`, triggering `UnversionedTypeNotSupported`. The decoder stops the property walk at the first unsupported slot and returns the partial tree collected up to that point. (Map `24` and Set `25` are decoded as of #639.)
+  - Brotli bytes after the stream's final meta-block but inside `compressed_size` are refused as `MappingsParseFault::BrotliTrailingBytes`. `unreal_asset`'s brotli decode stops at the stream's end and accepts them.
 
 ## Paksmith implementation
 

@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
 
+use brotli::{BrotliDecompressStream, BrotliResult, BrotliState, HeapAlloc, HuffmanCode};
 use byteorder::{LE, ReadBytesExt};
+use zstd::zstd_safe::DCtx;
 
 use crate::PaksmithError;
 use crate::error::{MappingsAllocationContext, MappingsParseFault, mappings_alloc_failed};
@@ -38,6 +40,11 @@ const MAX_USMAP_VERSION: u8 = USMAP_VERSION_EXPLICIT_ENUM_VALUES; // EUsmapVersi
 /// The large-window extension's first byte, whose window code RFC 7932 §9.1
 /// leaves invalid. With its top bit set it is invalid to every decoder.
 const BROTLI_LARGE_WINDOW_MARKER: u8 = 0x11;
+
+/// The most brotli output taken per decoder call. The decoder writes into
+/// an initialized slice, so a stack chunk lets the reserved output grow only
+/// by bytes decoded, instead of zero-filling it to the declared size first.
+const BROTLI_OUTPUT_CHUNK: usize = 8192;
 
 // zstd frame magics: the v1 frame's, and the range of sixteen that mark a
 // skippable frame.
@@ -718,26 +725,24 @@ impl Usmap {
         )]
         let decompressed_size_usz = decompressed_size as usize;
         // One spare byte, so an overshoot lands in place and reads as a
-        // mismatch: without it, `read_to_end` doubles the buffer to fit one
-        // byte, and a one-shot decode has nowhere to put it.
+        // mismatch: brotli output bounded at the declared size would hide
+        // it, and a one-shot zstd decode would have no room for it.
         let output_len = decompressed_size_usz + 1;
 
         let data: Cow<'_, [u8]> = match compression_byte {
             x if x == UsmapCompression::None as u8 => Cow::Borrowed(payload),
             x if x == UsmapCompression::Brotli as u8 => {
-                // `Decompressor::new` accepts the large-window extension, and
-                // the decoder allocates its ring buffer at the window the
-                // stream header names before producing any output.
+                // The strict decoder refuses the large-window extension too,
+                // but only as a stream it cannot decode.
                 if is_large_window_brotli(payload) {
                     return Err(fault(MappingsParseFault::BrotliLargeWindowUnsupported));
                 }
-                let limit = u64::from(decompressed_size) + 1;
-                let decoder = brotli::Decompressor::new(payload, 4096);
-                let mut out = reserve_decompressed(output_len)?;
-                let _ = std::io::Read::take(decoder, limit)
-                    .read_to_end(&mut out)
-                    .map_err(|_| undecodable())?;
-                Cow::Owned(out)
+                Cow::Owned(decode_brotli(
+                    payload,
+                    payload_offset,
+                    output_len,
+                    undecodable,
+                )?)
             }
             x if x == UsmapCompression::ZStandard as u8 => {
                 // One-shot, straight into the reserved output. The streaming
@@ -747,8 +752,8 @@ impl Usmap {
                     return Err(undecodable());
                 }
                 let mut out = reserve_decompressed(output_len)?;
-                let _ = zstd::bulk::Decompressor::new()
-                    .and_then(|mut decoder| decoder.decompress_to_buffer(payload, &mut out))
+                let _ = zstd_context(DCtx::try_create())?
+                    .decompress(&mut out, payload)
                     .map_err(|_| undecodable())?;
                 Cow::Owned(out)
             }
@@ -1504,6 +1509,69 @@ fn is_large_window_brotli(stream: &[u8]) -> bool {
     stream.first() == Some(&BROTLI_LARGE_WINDOW_MARKER)
 }
 
+/// Decodes the RFC 7932 stream `payload`, stored at file offset
+/// `payload_offset`, into at most `limit` bytes, stopping once `limit` is
+/// reached; short of it, the stream must end where `payload` does.
+fn decode_brotli(
+    payload: &[u8],
+    payload_offset: usize,
+    limit: usize,
+    undecodable: impl Fn() -> PaksmithError,
+) -> crate::Result<Vec<u8>> {
+    let mut out = reserve_decompressed(limit)?;
+    let mut state = BrotliState::new_strict(
+        HeapAlloc::<u8>::default(),
+        HeapAlloc::<u32>::default(),
+        HeapAlloc::<HuffmanCode>::default(),
+    );
+    let mut chunk = [0u8; BROTLI_OUTPUT_CHUNK];
+    let mut available_in = payload.len();
+    let mut input_offset = 0;
+    let mut _total_out = 0;
+    loop {
+        let mut available_out = chunk.len();
+        let mut output_offset = 0;
+        let result = BrotliDecompressStream(
+            &mut available_in,
+            &mut input_offset,
+            payload,
+            &mut available_out,
+            &mut output_offset,
+            &mut chunk,
+            &mut _total_out,
+            &mut state,
+        );
+        let produced = &chunk[..output_offset];
+        // Every call has a whole chunk of room, so one that goes round again
+        // has produced output, and the loop ends by `limit`; output past it
+        // is dropped. A cut stream is drained of the output it decoded before
+        // it is refused, so its overshoot reads as a mismatch; a corrupt
+        // stream is refused with only the output already handed back.
+        match result {
+            BrotliResult::ResultFailure => return Err(undecodable()),
+            BrotliResult::NeedsMoreInput => {
+                if produced.is_empty() {
+                    return Err(undecodable());
+                }
+            }
+            BrotliResult::NeedsMoreOutput | BrotliResult::ResultSuccess => {}
+        }
+        let fits = produced.len().min(limit - out.len());
+        out.extend_from_slice(&produced[..fits]);
+        if out.len() == limit {
+            return Ok(out);
+        }
+        if let BrotliResult::ResultSuccess = result {
+            if available_in == 0 {
+                return Ok(out);
+            }
+            return Err(fault(MappingsParseFault::BrotliTrailingBytes {
+                offset: payload_offset + input_offset,
+            }));
+        }
+    }
+}
+
 fn reserve_decompressed(len: usize) -> crate::Result<Vec<u8>> {
     let mut out = Vec::new();
     out.try_reserve_exact(len).map_err(|source| {
@@ -1514,6 +1582,10 @@ fn reserve_decompressed(len: usize) -> crate::Result<Vec<u8>> {
         )
     })?;
     Ok(out)
+}
+
+fn zstd_context(created: Option<DCtx<'static>>) -> crate::Result<DCtx<'static>> {
+    created.ok_or_else(|| fault(MappingsParseFault::ZstdContextUnavailable))
 }
 
 /// Whether `stream` is one or more zstd v1 or skippable frames. libzstd is
@@ -2710,6 +2782,16 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_zstd_context_libzstd_could_not_create_is_a_typed_fault() {
+        assert!(matches!(
+            zstd_context(None).err(),
+            Some(crate::PaksmithError::MappingsParse {
+                fault: crate::error::MappingsParseFault::ZstdContextUnavailable,
+            })
+        ));
+    }
+
     /// File bytes after the stored payload do not stop any method decoding
     /// it.
     #[test]
@@ -2737,8 +2819,28 @@ mod tests {
         let (brotli, brotli_rest) = FROZEN_BROTLI.split_at(FROZEN_BROTLI.len() - 8);
         let (zstd, zstd_rest) = FROZEN_ZSTD.split_at(FROZEN_ZSTD.len() - 8);
         let whole_zstd = zstd_compress(&payload, false);
+        let (cut, _) = three_chunk_brotli();
+        // A meta-block header with its reserved bit set: ISLAST 0, MNIBBLES
+        // 0 (11), reserved 1.
+        let corrupt = [cut.as_slice(), &[0b1110]].concat();
         for (label, method, stored, rest, declared) in [
             ("brotli", UsmapCompression::Brotli, brotli, brotli_rest, n),
+            (
+                "brotli unterminated",
+                UsmapCompression::Brotli,
+                cut.as_slice(),
+                &[0b11][..],
+                THREE_CHUNKS,
+            ),
+            // The decoder fails before it hands back the output it decoded
+            // past the declared size.
+            (
+                "brotli corrupt past its declared size",
+                UsmapCompression::Brotli,
+                corrupt.as_slice(),
+                b"past the payload".as_slice(),
+                BROTLI_OUTPUT_CHUNK + 10,
+            ),
             ("zstd", UsmapCompression::ZStandard, zstd, zstd_rest, n),
             // A whole zstd stream with no room for its output fails in the
             // decoder, past the frame check.
@@ -2799,6 +2901,84 @@ mod tests {
         );
     }
 
+    /// The output length of [`three_chunk_brotli`]'s streams.
+    const THREE_CHUNKS: usize = 3 * BROTLI_OUTPUT_CHUNK;
+
+    /// [`THREE_CHUNKS`] of all-zero schema data, which parses as empty
+    /// tables, as one stored brotli meta-block at the 16-bit window (RFC 7932
+    /// sections 9.1 and 9.2): the stream without, and then with, the empty
+    /// last meta-block that ends it.
+    fn three_chunk_brotli() -> (Vec<u8>, Vec<u8>) {
+        let data = vec![0; THREE_CHUNKS];
+        // WBITS 16 (0), ISLAST 0, MNIBBLES 4 (00), MLEN - 1 in 16 bits,
+        // ISUNCOMPRESSED 1, then zero bits to the byte boundary.
+        let header = (u32::try_from(data.len() - 1).unwrap() << 4) + (1 << 20);
+        let cut = [&header.to_le_bytes()[..3], data.as_slice()].concat();
+        // ISLAST 1, ISLASTEMPTY 1.
+        let whole = [cut.as_slice(), &[0b11]].concat();
+        (cut, whole)
+    }
+
+    /// A brotli stream that ends before the stored payload does is refused
+    /// where it ended, whether its output fits one chunk or spans several.
+    #[test]
+    fn parse_usmap_brotli_trailing_bytes_rejected() {
+        let (_, long) = three_chunk_brotli();
+        let _ =
+            Usmap::from_bytes(&usmap_with(UsmapCompression::Brotli, &long, THREE_CHUNKS)).unwrap();
+        for (label, stream, declared) in [
+            ("one chunk", FROZEN_BROTLI, schema_payload().len()),
+            ("three chunks", long.as_slice(), THREE_CHUNKS),
+        ] {
+            let stored = [stream, &b"trailing"[..]].concat();
+            assert_eq!(
+                parse_fault(&usmap_with(UsmapCompression::Brotli, &stored, declared)),
+                crate::error::MappingsParseFault::BrotliTrailingBytes {
+                    offset: HEADER_LEN + stream.len()
+                },
+                "{label}"
+            );
+        }
+    }
+
+    /// A 1 KiB window hands output back in the same call that then fails,
+    /// and the failure still wins over the declared size.
+    #[test]
+    fn a_brotli_call_that_fails_after_handing_back_output_is_truncated() {
+        let data = vec![0; 4096];
+        // WBITS 10 (1, 000, 010), ISLAST 0, MNIBBLES 4 (00), MLEN - 1 in 16
+        // bits, ISUNCOMPRESSED 1, then zero bits to the byte boundary.
+        let header = 0x21 + (u32::try_from(data.len() - 1).unwrap() << 10) + (1 << 26);
+        let stored = [&header.to_le_bytes()[..], data.as_slice()].concat();
+        // ISLAST 1, ISLASTEMPTY 1.
+        let whole = [stored.as_slice(), &[0b11]].concat();
+        let _ =
+            Usmap::from_bytes(&usmap_with(UsmapCompression::Brotli, &whole, data.len())).unwrap();
+        // A meta-block header with its reserved bit set.
+        let corrupt = [stored.as_slice(), &[0b1110]].concat();
+        assert_eq!(
+            parse_fault(&usmap_with(UsmapCompression::Brotli, &corrupt, 100)),
+            crate::error::MappingsParseFault::Truncated {
+                offset: HEADER_LEN + corrupt.len()
+            }
+        );
+    }
+
+    /// Past the large-window check, the decoder state still refuses the
+    /// extension: it is RFC 7932 strict.
+    #[test]
+    fn the_brotli_decoder_refuses_the_large_window_extension() {
+        let payload = schema_payload();
+        let stream = brotli_compress(&payload, true, 24);
+        let refused = || fault(MappingsParseFault::Truncated { offset: 0 });
+        assert!(matches!(
+            decode_brotli(&stream, 0, payload.len() + 1, refused),
+            Err(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::Truncated { offset: 0 },
+            })
+        ));
+    }
+
     #[test]
     fn parse_usmap_zstd_decodes_with_and_without_content_size() {
         let payload = schema_payload();
@@ -2843,6 +3023,27 @@ mod tests {
             cases.push((label, ZStandard, stream.clone(), n - 1, mismatch(n - 1, n)));
             cases.push((label, ZStandard, stream, n - 2, no_room));
         }
+        // Output spanning several chunks, and a cut stream drained of the
+        // output it decoded.
+        let (cut, whole) = three_chunk_brotli();
+        let over = BROTLI_OUTPUT_CHUNK + 10;
+        cases.push((
+            "brotli chunks",
+            Brotli,
+            whole,
+            over,
+            mismatch(over, over + 1),
+        ));
+        cases.push(("brotli cut", Brotli, cut, over, mismatch(over, over + 1)));
+        // Reaching the limit wins over the bytes after the stream.
+        let trailing = [FROZEN_BROTLI, &b"trailing"[..]].concat();
+        cases.push((
+            "brotli trailing",
+            Brotli,
+            trailing,
+            n - 1,
+            mismatch(n - 1, n),
+        ));
         for (label, method, stream, declared, expected) in cases {
             let fault = parse_fault(&usmap_with(method, &stream, declared));
             assert_eq!(fault, expected, "{label} declared={declared}");
