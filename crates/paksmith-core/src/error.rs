@@ -4827,10 +4827,12 @@ pub enum MappingsAllocationContext {
     /// `Vec<MappedProperty>` for one schema's `array_size`-expanded
     /// property list.
     SchemaProperties,
-    /// `Vec<ResolvedProperty>` for one class's flattened inheritance
-    /// chain, plus the outer `HashMap<String, Vec<ResolvedProperty>>`
-    /// holding every class's flat list. See `Usmap::compute_flattened`
-    /// / `Usmap::build_flattened_cache` (#370).
+    /// The flattened-property cache build: one class's
+    /// `Vec<ResolvedProperty>` flat list, the outer
+    /// `HashMap<String, Vec<ResolvedProperty>>` holding every class's flat
+    /// list, the schema graph's class, position and parent tables, and one
+    /// class's inheritance walk. See `Usmap::compute_flattened` /
+    /// `Usmap::build_flattened_cache` (#370).
     FlattenedCache,
     /// `Vec<u8>` a Brotli or ZStandard payload decodes into: the declared
     /// decompressed size plus one spare byte.
