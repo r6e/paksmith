@@ -613,7 +613,8 @@ impl Usmap {
     ///
     /// Returns [`PaksmithError::MappingsParse`] on any wire-format fault:
     /// invalid magic, unsupported version or compression method, size
-    /// caps exceeded, decompression mismatch, or truncated data.
+    /// caps exceeded, decompression mismatch, or truncated data; and on a
+    /// refused allocation.
     #[allow(
         clippy::too_many_lines,
         reason = "single linear wire-format read: header + versioning block + three compression branches; \
@@ -723,17 +724,7 @@ impl Usmap {
         // One spare byte, so an overshoot lands in place and reads as a
         // mismatch: without it, `read_to_end` doubles the buffer to fit one
         // byte, and a one-shot decode has nowhere to put it.
-        let reserve_output = || -> crate::Result<Vec<u8>> {
-            let mut out: Vec<u8> = Vec::new();
-            out.try_reserve_exact(decompressed_size_usz + 1)
-                .map_err(|_| {
-                    fault(MappingsParseFault::DecompressedSizeTooLarge {
-                        size: decompressed_size,
-                        limit: MAX_USMAP_DECOMPRESSED_SIZE,
-                    })
-                })?;
-            Ok(out)
-        };
+        let output_len = decompressed_size_usz + 1;
 
         let data: Cow<'_, [u8]> = match compression_byte {
             x if x == UsmapCompression::None as u8 => Cow::Borrowed(payload),
@@ -746,7 +737,7 @@ impl Usmap {
                 }
                 let limit = u64::from(decompressed_size) + 1;
                 let decoder = brotli::Decompressor::new(payload, 4096);
-                let mut out = reserve_output()?;
+                let mut out = reserve_decompressed(output_len)?;
                 let _ = std::io::Read::take(decoder, limit)
                     .read_to_end(&mut out)
                     .map_err(|_| undecodable())?;
@@ -759,7 +750,7 @@ impl Usmap {
                 if !is_zstd_v1_stream(payload) {
                     return Err(undecodable());
                 }
-                let mut out = reserve_output()?;
+                let mut out = reserve_decompressed(output_len)?;
                 let _ = zstd::bulk::Decompressor::new()
                     .and_then(|mut decoder| decoder.decompress_to_buffer(payload, &mut out))
                     .map_err(|_| undecodable())?;
@@ -1514,6 +1505,18 @@ impl Tally {
 
 fn is_large_window_brotli(stream: &[u8]) -> bool {
     stream.first() == Some(&BROTLI_LARGE_WINDOW_MARKER)
+}
+
+fn reserve_decompressed(len: usize) -> crate::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|source| {
+        mappings_alloc_failed(
+            MappingsAllocationContext::DecompressedDataBytes,
+            len,
+            source,
+        )
+    })?;
+    Ok(out)
 }
 
 /// Whether `stream` is one or more zstd v1 or skippable frames. libzstd is
@@ -2646,6 +2649,20 @@ mod tests {
         0x00, 0x02, 0x02, 0x01, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x03, 0x04, 0x00, 0x28, 0x01,
         0x6a, 0xc6, 0xac, 0x04, 0x90, 0x01, 0x3c, 0x01,
     ];
+
+    #[test]
+    fn a_refused_output_buffer_is_an_allocation_fault() {
+        assert!(matches!(
+            reserve_decompressed(usize::MAX),
+            Err(crate::PaksmithError::MappingsParse {
+                fault: crate::error::MappingsParseFault::AllocationFailed {
+                    context: MappingsAllocationContext::DecompressedDataBytes,
+                    requested: usize::MAX,
+                    ..
+                },
+            })
+        ));
+    }
 
     /// File bytes after the stored payload do not stop any method decoding
     /// it.
