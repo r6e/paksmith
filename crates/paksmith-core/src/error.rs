@@ -5533,10 +5533,12 @@ pub enum MappingsParseFault {
         table_len: usize,
     },
 
-    /// The data block was truncated before the schema table was fully read.
+    /// The `.usmap` ran out of bytes, or its stored payload did not decode.
     #[error("usmap data truncated at offset {offset}")]
     Truncated {
-        /// Byte offset within the data block where the read ran out of bytes.
+        /// A file offset in the header and stored payload; in the schema
+        /// tables, the offset into the decompressed schema data where the
+        /// read that ran out began.
         offset: usize,
     },
 

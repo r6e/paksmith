@@ -811,7 +811,7 @@ impl Usmap {
         // derived from a claimed count field. Reject explicitly first;
         // the `try_reserve` below still defends against the
         // sub-cap-but-OOM case on memory-pressured platforms.
-        let name_count = cur.read_u32::<LE>()?;
+        let name_count = read_or_truncated(&mut cur, |c| c.read_u32::<LE>())?;
         if name_count > MAX_USMAP_NAME_COUNT {
             return Err(fault(MappingsParseFault::NameCountTooLarge {
                 count: name_count,
@@ -833,12 +833,12 @@ impl Usmap {
             // followed by `Ar.ReadStringUnsafe(nameLength)` which reads
             // exactly `nameLength` bytes (no trailing null, no `-1`).
             let name_length: usize = if version >= USMAP_VERSION_LONG_FNAME {
-                cur.read_u16::<LE>()? as usize
+                read_or_truncated(&mut cur, |c| c.read_u16::<LE>())? as usize
             } else {
-                cur.read_u8()? as usize
+                read_or_truncated(&mut cur, |c| c.read_u8())? as usize
             };
             let mut buf = vec![0u8; name_length];
-            cur.read_exact(&mut buf)?;
+            read_or_truncated(&mut cur, |c| c.read_exact(&mut buf))?;
             let name = String::from_utf8(buf).unwrap_or_else(|err| {
                 tracing::warn!(
                     offset = position_usize(&cur),
@@ -855,7 +855,7 @@ impl Usmap {
         // (per CUE4Parse's EnumProperty constructor for unversioned mode:
         // wire stream stores a u8 index; the resolved value name comes
         // from this table).
-        let enum_count = cur.read_u32::<LE>()?;
+        let enum_count = read_or_truncated(&mut cur, |c| c.read_u32::<LE>())?;
         if enum_count > MAX_USMAP_ENUM_COUNT {
             return Err(fault(MappingsParseFault::EnumCountTooLarge {
                 count: enum_count,
@@ -878,9 +878,9 @@ impl Usmap {
             //   `enumNamesSize = Ar.Version >= EUsmapVersion.LargeEnums
             //                    ? Ar.Read<ushort>() : Ar.Read<byte>();`
             let value_count_u32: u32 = if version >= USMAP_VERSION_LARGE_ENUMS {
-                u32::from(cur.read_u16::<LE>()?)
+                u32::from(read_or_truncated(&mut cur, |c| c.read_u16::<LE>())?)
             } else {
-                u32::from(cur.read_u8()?)
+                u32::from(read_or_truncated(&mut cur, |c| c.read_u8())?)
             };
             if value_count_u32 > MAX_USMAP_VALUES_PER_ENUM {
                 return Err(fault(MappingsParseFault::EnumValueCountTooLarge {
@@ -896,7 +896,7 @@ impl Usmap {
             if version >= USMAP_VERSION_EXPLICIT_ENUM_VALUES {
                 // CUE4Parse: `value = Ar.Read<ulong>(); name = Ar.ReadName(...)`.
                 for _ in 0..value_count {
-                    let value = cur.read_u64::<LE>()?;
+                    let value = read_or_truncated(&mut cur, |c| c.read_u64::<LE>())?;
                     let value_name = read_name_arc(&mut cur, &names)?;
                     let _ = values.insert(value, value_name);
                 }
@@ -911,7 +911,7 @@ impl Usmap {
         }
 
         // Schema table.
-        let schema_count = cur.read_u32::<LE>()?;
+        let schema_count = read_or_truncated(&mut cur, |c| c.read_u32::<LE>())?;
         if schema_count > MAX_USMAP_SCHEMA_COUNT {
             return Err(fault(MappingsParseFault::SchemaCountTooLarge {
                 count: schema_count,
@@ -949,8 +949,8 @@ impl Usmap {
             // deprecated). Required by `get_all_properties` to compute
             // the child-first-concat absolute slot indices for inherited
             // classes (issue #391).
-            let prop_count = cur.read_u16::<LE>()?;
-            let serial_count = cur.read_u16::<LE>()?;
+            let prop_count = read_or_truncated(&mut cur, |c| c.read_u16::<LE>())?;
+            let serial_count = read_or_truncated(&mut cur, |c| c.read_u16::<LE>())?;
 
             // Pre-row validation (issue #413): the wire-declared
             // `prop_count` must be at least the row-count `serial_count`
@@ -975,8 +975,8 @@ impl Usmap {
             // typed `AllocationFailed` routing (issue #397 sub-fix C).
             let mut properties: Vec<MappedProperty> = Vec::new();
             for _ in 0..serial_count {
-                let schema_index = cur.read_u16::<LE>()?;
-                let array_size = cur.read_u8()?;
+                let schema_index = read_or_truncated(&mut cur, |c| c.read_u16::<LE>())?;
+                let array_size = read_or_truncated(&mut cur, |c| c.read_u8())?;
                 // u32 arithmetic is sufficient: `properties.len()` is
                 // bounded above by `serial_count × array_size` =
                 // 65535 × 255 < u32::MAX, and `array_size` is u8.
@@ -1313,7 +1313,7 @@ pub struct ResolvedProperty {
 /// previously misnomered as `Truncated`, which implied a short read
 /// even though the wire bytes were fully readable).
 fn read_name_arc(cur: &mut Cursor<&[u8]>, names: &[Arc<str>]) -> crate::Result<Arc<str>> {
-    let idx = cur.read_i32::<LE>()?;
+    let idx = read_or_truncated(cur, |c| c.read_i32::<LE>())?;
     #[allow(
         clippy::cast_sign_loss,
         reason = "negative indices wrap to a huge usize that fails the get() bounds check, surfacing as NameIndexOutOfRange"
@@ -1353,7 +1353,7 @@ fn read_mapped_type(
         }));
     }
     nodes.charge(1)?;
-    let type_byte = cur.read_u8()?;
+    let type_byte = read_or_truncated(cur, |c| c.read_u8())?;
     // EPropertyType discriminants per the oracle's `pub enum EPropertyType`
     // at `unreal_asset_base/src/unversioned/properties/mod.rs`. Pinned
     // revision `f4df5d8e` — re-verify if the oracle pin moves.
@@ -1419,8 +1419,9 @@ fn read_mapped_type(
             }
         }
         26 => {
-            // EnumProperty: inner type byte then enum name
-            let _inner_byte = cur.read_u8()?; // always ByteProperty (0) in practice
+            // EnumProperty: inner type byte (always ByteProperty (0) in
+            // practice), then enum name
+            let _inner_byte = read_or_truncated(cur, |c| c.read_u8())?;
             let enum_name = read_name_arc(cur, names)?;
             MappedPropertyType::Enum { enum_name }
         }
@@ -1559,6 +1560,16 @@ fn fault(f: MappingsParseFault) -> PaksmithError {
     PaksmithError::MappingsParse { fault: f }
 }
 
+/// `read` from `cur`, a short read reported as
+/// [`MappingsParseFault::Truncated`] at the offset where the read began.
+fn read_or_truncated<T>(
+    cur: &mut Cursor<&[u8]>,
+    read: impl FnOnce(&mut Cursor<&[u8]>) -> std::io::Result<T>,
+) -> crate::Result<T> {
+    let start = position_usize(cur);
+    read(cur).map_err(|_| fault(MappingsParseFault::Truncated { offset: start }))
+}
+
 /// Returns the cursor's byte offset as a `usize` for use in
 /// `MappingsParseFault::*` `offset` fields. The cast is safe because
 /// the cursor is constructed over an `&[u8]` whose length is bounded
@@ -1576,8 +1587,15 @@ fn position_usize(cur: &Cursor<&[u8]>) -> usize {
 /// `Speed`, for tests outside the `__test_utils` gate.
 #[cfg(test)]
 pub(crate) fn hero_usmap_fixture() -> std::path::PathBuf {
+    usmap_fixture("external_minimal_v0.usmap")
+}
+
+/// The checked-in `.usmap` fixture `name`.
+#[cfg(test)]
+fn usmap_fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/external_minimal_v0.usmap")
+        .join("../../tests/fixtures")
+        .join(name)
 }
 
 // Tests are gated on `__test_utils` (rather than plain `#[cfg(test)]`)
@@ -2598,11 +2616,22 @@ mod tests {
         minimal_usmap_none()[HEADER_LEN..].to_vec()
     }
 
-    fn schema_fault(data: &[u8], budgets: SchemaBudgets) -> crate::error::MappingsParseFault {
-        match Usmap::parse_schema_data(data, 0, budgets) {
+    fn schema_fault(
+        data: &[u8],
+        version: u8,
+        budgets: SchemaBudgets,
+    ) -> crate::error::MappingsParseFault {
+        match Usmap::parse_schema_data(data, version, budgets) {
             Err(crate::PaksmithError::MappingsParse { fault }) => fault,
             other => panic!("expected a mappings fault, got {other:?}"),
         }
+    }
+
+    /// The checked-in v4 fixture's schema data, after its header: the v0
+    /// header plus the four-byte versioning flag.
+    fn v4_schema_data() -> Vec<u8> {
+        std::fs::read(usmap_fixture("external_minimal_v4.usmap")).unwrap()[HEADER_LEN + 4..]
+            .to_vec()
     }
 
     fn parse_fault(bytes: &[u8]) -> crate::error::MappingsParseFault {
@@ -2875,6 +2904,57 @@ mod tests {
         }
     }
 
+    /// Every cut of schema data that parses whole is a truncation, reported
+    /// no later than the cut. The three blocks reach every read in the
+    /// schema parser: v0 and v4 name lengths, enum value counts and values,
+    /// and an enum-typed property.
+    #[test]
+    fn every_cut_of_the_schema_data_is_truncated() {
+        let enum_speed = crate::testing::usmap::build_hero_usmap_with_enum_speed(
+            "Difficulty",
+            &["Easy", "Normal"],
+        );
+        for (label, version, data) in [
+            ("minimal v0", 0, schema_payload()),
+            ("enum speed v0", 0, enum_speed[HEADER_LEN..].to_vec()),
+            ("minimal v4", 4, v4_schema_data()),
+        ] {
+            assert!(
+                Usmap::parse_schema_data(&data, version, SchemaBudgets::DEFAULT).is_ok(),
+                "{label}"
+            );
+            for cut in 0..data.len() {
+                match schema_fault(&data[..cut], version, SchemaBudgets::DEFAULT) {
+                    crate::error::MappingsParseFault::Truncated { offset } => {
+                        assert!(offset <= cut, "{label} cut {cut}: offset {offset}");
+                    }
+                    other => panic!("{label} cut {cut}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// A short schema read is reported where the read began: the name
+    /// count, the first name's bytes, and the last property's type byte.
+    /// Through `from_bytes`, the offset is into the schema data, not the
+    /// file.
+    #[test]
+    fn a_short_schema_read_reports_where_it_began() {
+        let data = schema_payload();
+        let last = data.len() - 1;
+        for (cut, offset) in [(2, 0), (7, 5), (last, last)] {
+            assert_eq!(
+                schema_fault(&data[..cut], 0, SchemaBudgets::DEFAULT),
+                crate::error::MappingsParseFault::Truncated { offset },
+                "cut {cut}"
+            );
+        }
+        assert_eq!(
+            parse_fault(&usmap_with(UsmapCompression::None, &data[..7], 7)),
+            crate::error::MappingsParseFault::Truncated { offset: 5 }
+        );
+    }
+
     /// A header claiming more stored bytes than the file holds is refused at
     /// the payload's start.
     #[test]
@@ -3053,7 +3133,7 @@ mod tests {
 
         assert!(Usmap::parse_schema_data(&data, 0, budgets(6)).is_ok());
         assert_eq!(
-            schema_fault(&data, budgets(3)),
+            schema_fault(&data, 0, budgets(3)),
             crate::error::MappingsParseFault::ExpandedPropertiesTotalExceeded {
                 requested: 4,
                 limit: 3
@@ -3085,7 +3165,7 @@ mod tests {
         };
 
         assert_eq!(
-            schema_fault(&data, budgets),
+            schema_fault(&data, 0, budgets),
             crate::error::MappingsParseFault::ExpandedPropertiesTotalExceeded {
                 requested: 4,
                 limit: 3
@@ -3112,7 +3192,7 @@ mod tests {
 
         assert!(Usmap::parse_schema_data(&data, 0, budgets(10)).is_ok());
         assert_eq!(
-            schema_fault(&data, budgets(7)),
+            schema_fault(&data, 0, budgets(7)),
             crate::error::MappingsParseFault::TypeNodesExceeded {
                 requested: 8,
                 limit: 7
