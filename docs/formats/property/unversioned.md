@@ -262,7 +262,7 @@ hardening*.
 | Constant | Value | Guards |
 |----------|-------|--------|
 | `MAX_FRAGMENTS_PER_HEADER` | 65535 (`u16::MAX`) | Prevents unbounded `Vec` growth from an adversarial `is_last=0` fragment stream. Implementations SHOULD enforce a tighter cap if profiling reveals real assets never exceed a few hundred fragments. |
-| `MAX_USMAP_COMPRESSED_SIZE` | 64 MiB | Bounds pre-decompression allocation from a malicious size claim. |
+| `MAX_USMAP_COMPRESSED_SIZE` | 64 MiB | Bounds the stored payload a header may claim, and with it any buffer a reader sizes from that claim. |
 | `MAX_USMAP_DECOMPRESSED_SIZE` | 256 MiB | Bounds the output buffer reserved for the declared size. A decoder's own working memory is separate; see the Brotli and ZStandard notes below. |
 | `MAX_USMAP_ENUM_COUNT` | 4096 | Bounds the enum-table `HashMap` heap cost per `.usmap`. |
 | `MAX_USMAP_VALUES_PER_ENUM` | 1024 | Bounds per-enum `HashMap` heap cost. |

@@ -4832,17 +4832,27 @@ pub enum MappingsAllocationContext {
     /// holding every class's flat list. See `Usmap::compute_flattened`
     /// / `Usmap::build_flattened_cache` (#370).
     FlattenedCache,
+    /// `Vec<u8>` a Brotli or ZStandard payload decodes into: the declared
+    /// decompressed size plus one spare byte.
+    DecompressedDataBytes,
 }
 
 impl MappingsAllocationContext {
     /// Unit of the `requested` field on
     /// [`MappingsParseFault::AllocationFailed`]. Mirrors
-    /// [`AssetAllocationContext::unit`] — all mappings contexts
-    /// reserve item collections (vec rows / hashmap entries), not
-    /// byte buffers.
+    /// [`AssetAllocationContext::unit`]: byte-buffer contexts count bytes,
+    /// the rest count items.
     #[must_use]
     pub fn unit(&self) -> BoundsUnit {
-        BoundsUnit::Items
+        match self {
+            Self::DecompressedDataBytes => BoundsUnit::Bytes,
+            Self::NameTable
+            | Self::EnumTable
+            | Self::EnumValues
+            | Self::SchemaTable
+            | Self::SchemaProperties
+            | Self::FlattenedCache => BoundsUnit::Items,
+        }
     }
 }
 
@@ -4855,6 +4865,7 @@ impl fmt::Display for MappingsAllocationContext {
             Self::SchemaTable => "schema table",
             Self::SchemaProperties => "schema properties",
             Self::FlattenedCache => "flattened-property cache",
+            Self::DecompressedDataBytes => "decompressed data",
         };
         f.write_str(s)
     }
@@ -5293,9 +5304,8 @@ pub enum MappingsParseFault {
         found: usize,
     },
 
-    /// Wire-claimed `compressed_size` exceeds the structural cap. Defends
-    /// against a malicious header that claims a multi-GiB compressed
-    /// payload to force a large up-front allocation.
+    /// Wire-claimed `compressed_size` exceeds the structural cap, which
+    /// refuses a malicious header claiming a multi-GiB compressed payload.
     #[error("compressed size {size} exceeds cap {limit}")]
     CompressedSizeTooLarge {
         /// The wire-claimed `compressed_size`.
@@ -5528,12 +5538,15 @@ pub enum MappingsParseFault {
     /// pressure cleanly rather than collapsing it into the
     /// [`Self::Truncated`] short-read misnomer the helpers used to
     /// emit.
-    #[error("usmap allocation failed for {context} ({requested} items): {source}")]
+    #[error(
+        "usmap allocation failed for {context} ({requested} {unit}): {source}",
+        unit = .context.unit()
+    )]
     AllocationFailed {
-        /// Which table or sub-collection failed to reserve.
+        /// Which table, sub-collection or buffer failed to reserve.
         context: MappingsAllocationContext,
-        /// The reservation count that was refused (matches
-        /// [`MappingsAllocationContext::unit`] — always `Items`).
+        /// The reservation that was refused, in
+        /// [`MappingsAllocationContext::unit`]s.
         requested: usize,
         /// The underlying allocator error.
         source: std::collections::TryReserveError,
@@ -5689,9 +5702,9 @@ pub(crate) fn try_copy_asset(
 ///
 /// Open-coded constructor (rather than a generic
 /// `try_reserve_mappings<T>` helper) so the same path serves both
-/// `Vec` and `HashMap` call sites; the per-collection `try_reserve`
-/// stays inline at each site and `mappings_alloc_failed` wraps the
-/// returned `TryReserveError`.
+/// `Vec` and `HashMap` reservations: each caller makes its own
+/// `try_reserve` and `mappings_alloc_failed` wraps the returned
+/// `TryReserveError`.
 pub(crate) fn mappings_alloc_failed(
     context: MappingsAllocationContext,
     requested: usize,
@@ -8623,45 +8636,62 @@ mod tests {
                 MappingsAllocationContext::FlattenedCache,
                 "flattened-property cache",
             ),
+            (
+                MappingsAllocationContext::DecompressedDataBytes,
+                "decompressed data",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
         }
     }
 
-    /// Every `MappingsAllocationContext` variant reserves item
-    /// collections (Vec rows / HashMap entries), never byte buffers.
-    /// Pinned so a future byte-buffer site forces explicit thought
-    /// rather than silently inheriting `Items`.
     #[test]
-    fn mappings_allocation_context_unit_is_always_items() {
-        for context in [
-            MappingsAllocationContext::NameTable,
-            MappingsAllocationContext::EnumTable,
-            MappingsAllocationContext::EnumValues,
-            MappingsAllocationContext::SchemaTable,
-            MappingsAllocationContext::SchemaProperties,
-            MappingsAllocationContext::FlattenedCache,
-        ] {
-            assert_eq!(context.unit(), BoundsUnit::Items);
+    fn mappings_allocation_context_unit_mapping_is_pinned() {
+        let cases: &[(MappingsAllocationContext, BoundsUnit)] = &[
+            (MappingsAllocationContext::NameTable, BoundsUnit::Items),
+            (MappingsAllocationContext::EnumTable, BoundsUnit::Items),
+            (MappingsAllocationContext::EnumValues, BoundsUnit::Items),
+            (MappingsAllocationContext::SchemaTable, BoundsUnit::Items),
+            (
+                MappingsAllocationContext::SchemaProperties,
+                BoundsUnit::Items,
+            ),
+            (MappingsAllocationContext::FlattenedCache, BoundsUnit::Items),
+            (
+                MappingsAllocationContext::DecompressedDataBytes,
+                BoundsUnit::Bytes,
+            ),
+        ];
+        for (context, expected) in cases {
+            assert_eq!(context.unit(), *expected, "{context:?}");
         }
     }
 
     /// `MappingsParseFault::AllocationFailed` Display includes the
-    /// context, requested count, and the inner source. Pin the format
-    /// so error-parsing triage scripts stay stable.
+    /// context, the requested count in its unit, and the inner source.
+    /// Pin the format so error-parsing triage scripts stay stable.
     #[test]
     fn mappings_allocation_failed_display_format_is_stable() {
-        let source = Vec::<u8>::new()
-            .try_reserve_exact(usize::MAX)
-            .expect_err("usize::MAX byte reservation must fail");
-        let fault = MappingsParseFault::AllocationFailed {
-            context: MappingsAllocationContext::SchemaTable,
-            requested: 1234,
-            source,
-        };
-        let display = fault.to_string();
-        assert!(display.starts_with("usmap allocation failed for schema table (1234 items): "));
+        for (context, requested, prefix) in [
+            (
+                MappingsAllocationContext::SchemaTable,
+                1234,
+                "usmap allocation failed for schema table (1234 items): ",
+            ),
+            (
+                MappingsAllocationContext::DecompressedDataBytes,
+                4096,
+                "usmap allocation failed for decompressed data (4096 bytes): ",
+            ),
+        ] {
+            let fault = MappingsParseFault::AllocationFailed {
+                context,
+                requested,
+                source: refused_reservation(),
+            };
+            assert!(fault.to_string().starts_with(prefix), "{fault}");
+        }
     }
 
     /// Issue #146: asset-side sibling of
