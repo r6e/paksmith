@@ -1198,20 +1198,24 @@ impl Usmap {
                 let absolute_index = offset
                     .saturating_add(u32::from(property.schema_index))
                     .min(u32::from(u16::MAX)) as u16;
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "a flat list holds at most MAX_INHERITANCE_DEPTH x MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA entries, far below u32::MAX"
+                )]
+                let walk_position = result.len() as u32;
                 result.push(ResolvedProperty {
                     absolute_index,
+                    walk_position,
                     property: property.clone(),
                 });
             }
             offset = offset.saturating_add(u32::from(schema.prop_count));
         }
-        // Pre-sort by absolute_index so the unversioned decoder's
-        // forward-only header cursor sees monotonic input without
-        // running a defensive sort per export. Stable sort preserves
-        // relative order on ties (`a.absolute_index == b.absolute_index`
-        // is unreachable on legitimate `.usmap` inputs but possible
-        // on adversarial ones via the saturating u16 clamp).
-        result.sort_by_key(|rp| rp.absolute_index);
+        // Sorted by absolute_index for the unversioned decoder's forward-only
+        // header cursor. walk_position makes every key distinct, so the
+        // unstable sort, which does not allocate, keeps entries sharing an
+        // index in walk order, as a stable sort would.
+        result.sort_unstable_by_key(|rp| (rp.absolute_index, rp.walk_position));
         Ok(result)
     }
 
@@ -1219,7 +1223,9 @@ impl Usmap {
     /// **absolute slot index**, pre-sorted by that index. Backed by
     /// the eagerly-built cache in [`Self::from_bytes`] — a HashMap
     /// lookup, no chain walk per call. Empty slice if the class is
-    /// not in the schema table.
+    /// not in the schema table. Entries sharing an absolute index, which
+    /// only a malformed `.usmap` has, keep walk order: the child class
+    /// first, then each class's declaration order.
     #[must_use]
     pub fn get_all_properties(&self, class_name: &str) -> &[ResolvedProperty] {
         self.flattened.get(class_name).map_or(&[], Vec::as_slice)
@@ -1281,6 +1287,8 @@ pub struct ResolvedProperty {
     /// Owned per-class property entry (cloned from
     /// [`ClassSchema::properties`] during the eager flattening pass).
     pub property: MappedProperty,
+    /// The flattened sort's tiebreak: the entry's push position.
+    walk_position: u32,
 }
 
 /// Resolve a name index against the parsed name table. Shared by the
