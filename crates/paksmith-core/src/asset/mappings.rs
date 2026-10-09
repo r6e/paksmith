@@ -1077,9 +1077,9 @@ impl Usmap {
     /// and the in-source-test [`Self::from_parts`] constructor.
     ///
     /// Returns `MappingsParseFault::FlattenedCacheTooLarge` if the
-    /// accumulated entry count exceeds the cap, and routes `try_reserve`
-    /// failures via `MappingsAllocationContext::FlattenedCache`, and each
-    /// key copy's via `SchemaNameBytes`. The cap check fires BEFORE
+    /// accumulated entry count exceeds the cap, routes `try_reserve`
+    /// failures via `MappingsAllocationContext::FlattenedCache`, and routes
+    /// each key-copy failure via `SchemaNameBytes`. The cap check fires BEFORE
     /// `compute_flattened` allocates the per-class flat list — a
     /// cheap chain walk gives the per-class size up front, so the
     /// peak transient heap stays at the documented bound rather than
