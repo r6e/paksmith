@@ -13,7 +13,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read};
 use std::sync::Arc;
 
 use byteorder::{LE, ReadBytesExt};
@@ -149,12 +149,12 @@ const MAX_USMAP_TYPE_NODES: u64 = 4_194_304;
 /// block. Real-world `CustomVersionContainer`s top out in the low
 /// tens (Fortnite ships `cv_count = 3`); 1_024 leaves wide headroom.
 ///
-/// Without this cap an absurd `cv_count` would still terminate the
-/// parse via a downstream `MappingsParseFault::Truncated` fault when
-/// the post-seek `_net_cl` read overshoots the input slice — but the
+/// Without this cap, an absurd `cv_count` whose array runs past the end
+/// of the input would still end the parse as a
+/// `MappingsParseFault::Truncated` at the custom-version array, but the
 /// triage signal would be "wire stream truncated" rather than the
-/// wire-cap-specific `CvCountTooLarge`. The cap delivers the correct
-/// typed fault BEFORE the seek runs.
+/// wire-cap-specific `CvCountTooLarge`. The cap delivers the typed fault
+/// before the array is read.
 ///
 /// Exposed via [`max_usmap_cv_count`].
 const MAX_USMAP_CV_COUNT: u32 = 1_024;
@@ -622,37 +622,23 @@ impl Usmap {
     )]
     pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
         let mut cur = Cursor::new(bytes);
-        let magic = cur
-            .read_u16::<LE>()
-            .map_err(|_| fault(MappingsParseFault::Truncated { offset: 0 }))?;
+        let magic = read_or_truncated(&mut cur, |c| c.read_u16::<LE>())?;
         if magic != USMAP_MAGIC {
             return Err(fault(MappingsParseFault::InvalidMagic { found: magic }));
         }
 
-        let version = cur
-            .read_u8()
-            .map_err(|_| fault(MappingsParseFault::Truncated { offset: 2 }))?;
+        let version = read_or_truncated(&mut cur, |c| c.read_u8())?;
         if version > MAX_USMAP_VERSION {
             return Err(fault(MappingsParseFault::UnsupportedVersion {
                 found: version,
             }));
         }
 
-        // PackageVersioning block (version >= 1). Short reads here are
-        // wire-truncation errors, not generic I/O; surface as
-        // `MappingsParseFault::Truncated` with the cursor position
-        // matching the failing read, so triage lands on the right
-        // variant instead of bare `PaksmithError::Io`.
-        let trunc = |c: &Cursor<&[u8]>| {
-            fault(MappingsParseFault::Truncated {
-                offset: position_usize(c),
-            })
-        };
         if version >= USMAP_VERSION_PACKAGE_VERSIONING {
             // A bool32: CUE4Parse reads it with `ReadBoolean`, and UE4SS and
             // Dumper-7 write an int32. The pinned unreal_asset oracle reads
             // one byte here, and is not followed.
-            let has_versioning = match cur.read_i32::<LE>().map_err(|_| trunc(&cur))? {
+            let has_versioning = match read_or_truncated(&mut cur, |c| c.read_i32::<LE>())? {
                 0 => false,
                 1 => true,
                 found => {
@@ -661,26 +647,28 @@ impl Usmap {
             };
             if has_versioning {
                 // object_version + object_version_ue5 + custom_version array + net_cl
-                let _obj_ver = cur.read_i32::<LE>().map_err(|_| trunc(&cur))?;
-                let _obj_ver_ue5 = cur.read_i32::<LE>().map_err(|_| trunc(&cur))?;
-                let cv_count = cur.read_u32::<LE>().map_err(|_| trunc(&cur))?;
+                let _obj_ver = read_or_truncated(&mut cur, |c| c.read_i32::<LE>())?;
+                let _obj_ver_ue5 = read_or_truncated(&mut cur, |c| c.read_i32::<LE>())?;
+                let cv_count = read_or_truncated(&mut cur, |c| c.read_u32::<LE>())?;
                 if cv_count > MAX_USMAP_CV_COUNT {
                     return Err(fault(MappingsParseFault::CvCountTooLarge {
                         count: cv_count,
                         limit: MAX_USMAP_CV_COUNT,
                     }));
                 }
-                // Each CustomVersion = 16-byte GUID + i32 version number = 20 bytes.
-                // cv_count is u32; i64 widens losslessly via i64::from.
-                let skip = i64::from(cv_count) * 20;
-                let _ = cur.seek(SeekFrom::Current(skip)).map_err(|_| trunc(&cur))?;
-                let _net_cl = cur.read_u32::<LE>().map_err(|_| trunc(&cur))?;
+                // Each CustomVersion = 16-byte GUID + i32 version number = 20
+                // bytes, read rather than seeked past: a seek past the end
+                // would succeed.
+                read_or_truncated(&mut cur, |c| {
+                    (0..cv_count).try_for_each(|_| c.read_exact(&mut [0u8; 20]))
+                })?;
+                let _net_cl = read_or_truncated(&mut cur, |c| c.read_u32::<LE>())?;
             }
         }
 
-        let compression_byte = cur.read_u8().map_err(|_| trunc(&cur))?;
-        let compressed_size = cur.read_u32::<LE>().map_err(|_| trunc(&cur))?;
-        let decompressed_size = cur.read_u32::<LE>().map_err(|_| trunc(&cur))?;
+        let compression_byte = read_or_truncated(&mut cur, |c| c.read_u8())?;
+        let compressed_size = read_or_truncated(&mut cur, |c| c.read_u32::<LE>())?;
+        let decompressed_size = read_or_truncated(&mut cur, |c| c.read_u32::<LE>())?;
 
         // Reject pathological sizes up front, before the payload is sliced
         // or an output buffer is sized from them.
@@ -2196,7 +2184,7 @@ mod tests {
     fn parse_usmap_cv_count_too_large_rejected() {
         // v1 .usmap with `has_versioning = 1`, valid obj_version /
         // obj_version_ue5, then `cv_count = MAX + 1`. The cap check
-        // fires before the `cv_count * 20` seek skips arbitrary bytes.
+        // fires before the custom-version array is read.
         //
         // Wire layout (no compression header needed — cap check fires
         // mid-versioning-block, before `compression_byte` is read):
@@ -2634,6 +2622,13 @@ mod tests {
             .to_vec()
     }
 
+    /// A v1 file with `versioning` after its version byte, an uncompressed
+    /// payload and the minimal schema.
+    fn v1_usmap(versioning: &[u8]) -> Vec<u8> {
+        let v0 = minimal_usmap_none();
+        [&v0[..2], &[1], versioning, &v0[3..]].concat()
+    }
+
     fn parse_fault(bytes: &[u8]) -> crate::error::MappingsParseFault {
         match Usmap::from_bytes(bytes) {
             Err(crate::PaksmithError::MappingsParse { fault }) => fault,
@@ -2901,6 +2896,51 @@ mod tests {
                 },
                 "{label}"
             );
+        }
+    }
+
+    /// A header cut anywhere is truncated at the start of the field that
+    /// ran out; a cut anywhere in the custom-version array, at the array's
+    /// start. Each layout lists where its header fields start, then the
+    /// payload's.
+    #[test]
+    fn every_cut_of_the_header_is_truncated_at_its_field() {
+        // has_versioning = 1, two object versions, two custom versions, net_cl
+        let versioning = [
+            &1i32.to_le_bytes()[..],
+            &[0; 8],
+            &2u32.to_le_bytes(),
+            &[0; 40],
+            &[0; 4],
+        ]
+        .concat();
+        for (label, bytes, fields) in [
+            // magic, version, compression, two sizes
+            ("v0", minimal_usmap_none(), &[0, 2, 3, 4, 8, 12][..]),
+            // magic, version, has_versioning = 0, compression, two sizes
+            (
+                "unversioned v1",
+                v1_usmap(&0i32.to_le_bytes()),
+                &[0, 2, 3, 7, 8, 12, 16][..],
+            ),
+            // magic, version, the versioning block's six fields, compression,
+            // two sizes
+            (
+                "versioned",
+                v1_usmap(&versioning),
+                &[0, 2, 3, 7, 11, 15, 19, 59, 63, 64, 68, 72][..],
+            ),
+        ] {
+            assert_matches_uncompressed(&Usmap::from_bytes(&bytes).unwrap());
+            let header_len = fields[fields.len() - 1];
+            for cut in 0..header_len {
+                let field = fields.iter().rev().find(|&&start| start <= cut).unwrap();
+                assert_eq!(
+                    parse_fault(&bytes[..cut]),
+                    crate::error::MappingsParseFault::Truncated { offset: *field },
+                    "{label} cut {cut}"
+                );
+            }
         }
     }
 

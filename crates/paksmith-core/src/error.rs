@@ -5454,8 +5454,8 @@ pub enum MappingsParseFault {
 
     /// Wire-claimed `cv_count` (in the versioning block) exceeds the
     /// structural cap. Real `CustomVersionContainer`s top out in the
-    /// low tens; capping at 1024 prevents the `cv_count * 20` seek
-    /// from advancing the cursor past sane bounds.
+    /// low tens; the cap refuses an absurd count before the array is
+    /// read.
     #[error("usmap cv_count {count} exceeds cap {limit}")]
     CvCountTooLarge {
         /// The wire-claimed `cv_count`.
@@ -5536,9 +5536,10 @@ pub enum MappingsParseFault {
     /// The `.usmap` ran out of bytes, or its stored payload did not decode.
     #[error("usmap data truncated at offset {offset}")]
     Truncated {
-        /// A file offset in the header and stored payload; in the schema
-        /// tables, the offset into the decompressed schema data where the
-        /// read that ran out began.
+        /// Where the read that ran out began: a file offset in the header,
+        /// an offset into the decompressed schema data in the tables. For
+        /// the stored payload, a file offset: its start when the file is
+        /// shorter than its size claims, its end when it does not decode.
         offset: usize,
     },
 
