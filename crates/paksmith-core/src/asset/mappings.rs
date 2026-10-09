@@ -21,7 +21,10 @@ use byteorder::{LE, ReadBytesExt};
 use zstd::zstd_safe::DCtx;
 
 use crate::PaksmithError;
-use crate::error::{MappingsAllocationContext, MappingsParseFault, mappings_alloc_failed};
+use crate::error::{
+    MappingsAllocationContext, MappingsParseFault, check_mappings_reserve, mappings_alloc_failed,
+};
+use crate::seams::MappingsSeam;
 
 // `.usmap` file magic, per CUE4Parse `UsmapParser.cs`:
 // `private const ushort FileMagic = 0x30C4;` read via the archive's
@@ -620,7 +623,8 @@ impl Usmap {
     /// Returns [`PaksmithError::MappingsParse`] on any wire-format fault:
     /// invalid magic, unsupported version or compression method, size
     /// caps exceeded, decompression mismatch, or truncated data; and on a
-    /// refused allocation.
+    /// refused reservation, as [`MappingsParseFault::AllocationFailed`]
+    /// with its [`MappingsAllocationContext`].
     #[allow(
         clippy::too_many_lines,
         reason = "single linear wire-format read: header + versioning block + three compression branches; \
@@ -917,16 +921,16 @@ impl Usmap {
         let mut expanded = Tally::expanded_properties(budgets.expanded_properties);
         let mut type_nodes = Tally::type_nodes(budgets.type_nodes);
         for _ in 0..schema_count {
-            let name = read_name(&mut cur, &names)?;
-            let super_type_str = read_name(&mut cur, &names)?;
+            let name = copy_name(&read_name_arc(&mut cur, &names)?)?;
+            let super_name = read_name_arc(&mut cur, &names)?;
             // UE's sentinel for "no superclass" is the literal name "None".
             // Empty strings are preserved as `Some("")` per the wire format —
             // the inheritance walk's `!parent.is_empty()` guard handles them
             // identically to `None` for traversal purposes.
-            let super_type = if super_type_str == "None" {
+            let super_type = if &*super_name == "None" {
                 None
             } else {
-                Some(super_type_str)
+                Some(copy_name(&super_name)?)
             };
 
             // `prop_count` is the wire-declared total property count
@@ -947,7 +951,7 @@ impl Usmap {
             // per-row allocation runs.
             if prop_count < serial_count {
                 return Err(fault(MappingsParseFault::PropCountBelowSerialCount {
-                    schema: name.clone(),
+                    schema: name,
                     prop_count,
                     serial_count,
                 }));
@@ -973,7 +977,7 @@ impl Usmap {
                 let new_total = current.saturating_add(u32::from(array_size));
                 if new_total > MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA {
                     return Err(fault(MappingsParseFault::ExpandedPropertiesExceeded {
-                        schema: name.clone(),
+                        schema: name,
                         requested: new_total,
                         limit: MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA,
                     }));
@@ -1023,14 +1027,14 @@ impl Usmap {
                 && prop_count <= max_schema_index
             {
                 return Err(fault(MappingsParseFault::PropCountBelowMaxSchemaIndex {
-                    schema: name.clone(),
+                    schema: name,
                     prop_count,
                     max_schema_index,
                 }));
             }
 
             let _ = schemas.insert(
-                name.clone(),
+                copy_name(&name)?,
                 ClassSchema {
                     name,
                     super_type,
@@ -1048,12 +1052,12 @@ impl Usmap {
         //
         // Fallible: returns `MappingsParseFault::FlattenedCacheTooLarge`
         // if the total entries summed across every class's flat list
-        // would exceed `MAX_USMAP_FLATTENED_TOTAL_ENTRIES`, and routes
-        // try_reserve failures through `MappingsAllocationContext::
-        // FlattenedCache`. Without these guards the wire's per-class
-        // cap × `MAX_INHERITANCE_DEPTH` × `MAX_USMAP_SCHEMA_COUNT`
-        // permits a ~17 G-entry cache (~1 TB heap) before any wire
-        // input exceeds the 256 MiB `MAX_USMAP_DECOMPRESSED_SIZE`.
+        // would exceed `MAX_USMAP_FLATTENED_TOTAL_ENTRIES`;
+        // `build_flattened_cache` documents its allocation faults. Without
+        // the cap the wire's per-class cap × `MAX_INHERITANCE_DEPTH` ×
+        // `MAX_USMAP_SCHEMA_COUNT` permits a ~17 G-entry cache (~1 TB heap)
+        // before any wire input exceeds the 256 MiB
+        // `MAX_USMAP_DECOMPRESSED_SIZE`.
         // Surfaced by security-review on PR #444.
         //
         // Cycle / depth-cap warnings emit here at parse time (once
@@ -1073,9 +1077,9 @@ impl Usmap {
     /// and the in-source-test [`Self::from_parts`] constructor.
     ///
     /// Returns `MappingsParseFault::FlattenedCacheTooLarge` if the
-    /// accumulated entry count exceeds the cap, and routes
-    /// `try_reserve` failures via `MappingsAllocationContext::
-    /// FlattenedCache`. The cap check fires BEFORE
+    /// accumulated entry count exceeds the cap, routes `try_reserve`
+    /// failures via `MappingsAllocationContext::FlattenedCache`, and routes
+    /// each key-copy failure via `SchemaNameBytes`. The cap check fires BEFORE
     /// `compute_flattened` allocates the per-class flat list — a
     /// cheap chain walk gives the per-class size up front, so the
     /// peak transient heap stays at the documented bound rather than
@@ -1099,7 +1103,7 @@ impl Usmap {
             let remaining = MAX_USMAP_FLATTENED_TOTAL_ENTRIES.saturating_sub(total);
             let flat = Self::compute_flattened(&graph, index, remaining)?;
             total = total.saturating_add(flat.len() as u64);
-            let _ = flattened.insert((*class_name).clone(), flat);
+            let _ = flattened.insert(copy_name(class_name)?, flat);
         }
         Ok(flattened)
     }
@@ -1312,10 +1316,16 @@ fn read_name_arc(cur: &mut Cursor<&[u8]>, names: &[Arc<str>]) -> crate::Result<A
     })
 }
 
-/// [`read_name_arc`] as an owned `String`, for [`ClassSchema`]'s public
-/// `String` fields.
-fn read_name(cur: &mut Cursor<&[u8]>, names: &[Arc<str>]) -> crate::Result<String> {
-    Ok(read_name_arc(cur, names)?.to_string())
+/// `name` copied into a fallibly reserved `String`.
+fn copy_name(name: &str) -> crate::Result<String> {
+    let mut copy = String::new();
+    check_mappings_reserve(
+        copy.try_reserve_exact(name.len()),
+        name.len(),
+        MappingsSeam::SchemaNameBytes,
+    )?;
+    copy.push_str(name);
+    Ok(copy)
 }
 
 #[allow(
@@ -1337,6 +1347,8 @@ fn read_mapped_type(
             limit: MAX_USMAP_ARRAY_NESTING_DEPTH,
         }));
     }
+    // The `Arc::new` container nodes below cannot be made fallible on
+    // stable Rust; MAX_USMAP_TYPE_NODES bounds them.
     nodes.charge(1)?;
     let type_byte = read_or_truncated(cur, |c| c.read_u8())?;
     // EPropertyType discriminants per the oracle's `pub enum EPropertyType`
@@ -3232,6 +3244,45 @@ mod tests {
         assert_eq!(cur.position(), 4);
         cur.set_position(5);
         assert_eq!(read_slice(&mut cur, 0).unwrap(), [0u8; 0]);
+    }
+
+    /// Every `String` copy of a schema name the allocator refuses is an
+    /// allocation fault for that copy's size: the class name, the super
+    /// type's unless it is `None`, then the class name again for the
+    /// schema-table and flattened-cache keys. Past the last copy the parse
+    /// succeeds.
+    #[test]
+    fn every_schema_name_copy_the_allocator_refuses_is_an_allocation_fault() {
+        let site = crate::seams::SeamSite::Mappings(crate::seams::MappingsSeam::SchemaNameBytes);
+        for (names, copies, super_type) in [
+            (&[&b"Hero"[..], b"None"], &[4, 4, 4][..], None),
+            (
+                &[&b"Hero"[..], b"Parent"],
+                &[4, 6, 4, 4][..],
+                Some("Parent"),
+            ),
+        ] {
+            let data = single_schema_data(names);
+            for (skip, &copy) in copies.iter().enumerate() {
+                let _armed = crate::testing::oom::arm_at(site, u64::try_from(skip).unwrap());
+                let fault = schema_fault(&data, 0, SchemaBudgets::DEFAULT);
+                assert!(
+                    matches!(
+                        fault,
+                        MappingsParseFault::AllocationFailed {
+                            context: MappingsAllocationContext::SchemaNameBytes,
+                            requested,
+                            ..
+                        } if requested == copy
+                    ),
+                    "skip {skip}: {fault:?}"
+                );
+            }
+            let _armed = crate::testing::oom::arm_at(site, u64::try_from(copies.len()).unwrap());
+            let usmap = Usmap::parse_schema_data(&data, 0, SchemaBudgets::DEFAULT).unwrap();
+            assert_eq!(usmap.schemas["Hero"].super_type.as_deref(), super_type);
+            assert!(usmap.flattened.contains_key("Hero"));
+        }
     }
 
     /// A name that is not UTF-8 reads as the empty string, with a warning.

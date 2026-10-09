@@ -2,27 +2,29 @@
 //!
 //! Lives outside `__test_utils`-gated `crate::testing` so [`SeamSite`]
 //! is reachable in helper signatures (`crate::error::try_reserve_index`,
-//! `crate::error::check_asset_reserve`) and so [`seam_check!`] is
+//! `crate::error::check_asset_reserve`,
+//! `crate::error::check_mappings_reserve`) and so [`seam_check!`] is
 //! callable at every production site regardless of feature
 //! configuration. Runtime dispatch (`maybe_fail_at`) remains
 //! `__test_utils`-gated. See #266, #270, and #276.
 
 /// Identifier for an OOM-injection seam. Each variant maps 1:1 to a
 /// `try_reserve*` site in production code, gated behind
-/// `#[cfg(feature = "__test_utils")]` so integration tests can force
-/// the failure path.
+/// `#[cfg(feature = "__test_utils")]` so tests can force the failure
+/// path.
 ///
-/// **Grouped structure** (#276): two inner enums — [`PakSeam`] for
+/// **Grouped structure** (#276): inner enums — [`PakSeam`] for
 /// container/index/decompression seams, [`AssetSeam`] for asset
-/// parser seams — wrapped in this outer discriminator. The grouping
-/// makes the cross-domain distinction structural rather than
-/// naming-convention; the flat 22-variant form that preceded it
+/// parser seams, [`MappingsSeam`] for `.usmap` parser seams — wrapped
+/// in this outer discriminator. The grouping makes the cross-domain
+/// distinction structural rather than naming-convention; the flat
+/// 22-variant form that preceded it
 /// (PR #452) mixed pak and asset variants in one namespace and
 /// became increasingly incoherent as the asset side grew.
 ///
 /// Adding a new seam: append a variant to the relevant inner enum
-/// ([`PakSeam`] or [`AssetSeam`]), bump that inner enum's `COUNT`,
-/// and slot the variant into the exhaustive matches in
+/// ([`PakSeam`], [`AssetSeam`] or [`MappingsSeam`]), bump that inner
+/// enum's `COUNT`, and slot the variant into the exhaustive matches in
 /// [`Self::slot`] and `tests::*`. The `const _` compile-time guards
 /// after each inner enum refuse to build when `COUNT` and the
 /// largest declared discriminant disagree.
@@ -45,6 +47,8 @@ pub enum SeamSite {
     Pak(PakSeam),
     /// Asset parser seams (#276). See [`AssetSeam`].
     Asset(AssetSeam),
+    /// `.usmap` parser seams. See [`MappingsSeam`].
+    Mappings(MappingsSeam),
 }
 
 /// Container / index / decompression OOM seams. The inner enum of
@@ -145,7 +149,7 @@ const _: [(); PakSeam::COUNT] = [(); PakSeam::Lz4OutputReserve as usize + 1];
 /// (`try_reserve_asset` for a `Vec`).
 ///
 /// `#[repr(usize)]` so the variant's discriminant maps directly to
-/// its slot in the upper portion of the `ARM_STATE` array (see
+/// its slot after the pak slots of the `ARM_STATE` array (see
 /// [`SeamSite::slot`]).
 #[cfg_attr(not(feature = "__test_utils"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +261,47 @@ impl AssetSeam {
 // Same compile-time guard pattern as PakSeam above (see precondition).
 const _: [(); AssetSeam::COUNT] = [(); AssetSeam::ClassSchemaMemo as usize + 1];
 
+/// `.usmap` parser OOM seams. The inner enum of [`SeamSite::Mappings`].
+///
+/// Each variant pairs 1:1 with a
+/// [`crate::error::MappingsAllocationContext`] variant, which
+/// `check_mappings_reserve` derives from it. The family is partial: every
+/// other reservation in the parser maps a refusal with
+/// `mappings_alloc_failed` directly and has no seam.
+///
+/// `#[repr(usize)]` so the variant's discriminant maps directly to its
+/// slot after the pak and asset slots of the `ARM_STATE` array (see
+/// [`SeamSite::slot`]).
+#[cfg_attr(not(feature = "__test_utils"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum MappingsSeam {
+    /// `copy_name`'s reservation. Surfaces as
+    /// [`crate::error::MappingsParseFault::AllocationFailed`] with
+    /// `context: MappingsAllocationContext::SchemaNameBytes`.
+    SchemaNameBytes,
+}
+
+impl MappingsSeam {
+    /// Total number of `.usmap` seam sites. Pinned by the `const _` guard
+    /// below and by `tests::seam_site_discriminants_match_slot_indices`.
+    pub const COUNT: usize = 1;
+
+    /// Map a `.usmap` seam to its paired
+    /// [`crate::error::MappingsAllocationContext`], as
+    /// [`AssetSeam::context`] does for the asset family.
+    #[must_use]
+    pub const fn context(self) -> crate::error::MappingsAllocationContext {
+        use crate::error::MappingsAllocationContext as C;
+        match self {
+            Self::SchemaNameBytes => C::SchemaNameBytes,
+        }
+    }
+}
+
+// Same compile-time guard pattern as PakSeam above (see precondition).
+const _: [(); MappingsSeam::COUNT] = [(); MappingsSeam::SchemaNameBytes as usize + 1];
+
 // In the feature-off LIB target `COUNT`/`slot` are dead: their only
 // production consumers live in the `__test_utils`-gated
 // `testing::oom` module. (The ungated seam test below keeps them
@@ -267,11 +312,12 @@ const _: [(); AssetSeam::COUNT] = [(); AssetSeam::ClassSchemaMemo as usize + 1];
 impl SeamSite {
     /// Total number of seam sites across all domains. Used to size
     /// the `ARM_STATE` array in [`crate::testing::oom`].
-    pub const COUNT: usize = PakSeam::COUNT + AssetSeam::COUNT;
+    pub const COUNT: usize = PakSeam::COUNT + AssetSeam::COUNT + MappingsSeam::COUNT;
 
     /// Flatten the grouped enum to a global slot index in
-    /// `0..SeamSite::COUNT`. Pak variants occupy `0..PakSeam::COUNT`;
-    /// asset variants occupy `PakSeam::COUNT..SeamSite::COUNT`.
+    /// `0..SeamSite::COUNT`. Pak variants occupy `0..PakSeam::COUNT`,
+    /// asset variants the next `AssetSeam::COUNT` slots, and `.usmap`
+    /// variants the rest.
     /// Used by [`crate::testing::oom::arm_at`] and the production-side
     /// `maybe_fail_at` dispatch for array indexing.
     ///
@@ -282,6 +328,7 @@ impl SeamSite {
         match self {
             Self::Pak(s) => s as usize,
             Self::Asset(s) => PakSeam::COUNT + s as usize,
+            Self::Mappings(s) => s as usize + PakSeam::COUNT + AssetSeam::COUNT,
         }
     }
 }
@@ -316,14 +363,19 @@ mod tests {
     /// Every [`SeamSite`] variant names its end-to-end coverage test.
     /// Pak/index/decompression variants are tested in
     /// `paksmith-core-tests/tests/oom_pak.rs`; asset-side variants
-    /// are tested in `paksmith-core-tests/tests/oom_asset.rs`. The
-    /// exhaustive `match` is the load-bearing guard: adding a
-    /// variant without a match arm fails to compile, so a new seam
-    /// can't slip in production-wired-but-test-uncovered (#275,
-    /// #276). The named string is documentary — the contributor's
+    /// are tested in `paksmith-core-tests/tests/oom_asset.rs`; `.usmap`
+    /// variants are tested in `asset/mappings.rs`, since cargo-mutants
+    /// credits only a crate's own tests. The exhaustive `match` is the
+    /// load-bearing guard: adding a variant without a match arm fails to
+    /// compile, so a new seam can't slip in
+    /// production-wired-but-test-uncovered (#275, #276). The named string is documentary — the contributor's
     /// commitment to name the integration test exactly that, not a
     /// runtime check the function exists.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one match arm per seam variant, across every family"
+    )]
     fn every_seamsite_variant_has_named_integration_coverage() {
         const fn pak_integration_test_name(site: PakSeam) -> &'static str {
             match site {
@@ -419,20 +471,31 @@ mod tests {
                 }
             }
         }
-        // Touch both const fns so the matches' compile-time
+        const fn mappings_test_name(site: MappingsSeam) -> &'static str {
+            match site {
+                MappingsSeam::SchemaNameBytes => {
+                    "every_schema_name_copy_the_allocator_refuses_is_an_allocation_fault"
+                }
+            }
+        }
+        // Touch the const fns so the matches' compile-time
         // exhaustiveness is anchored to live calls.
         let _ = pak_integration_test_name(PakSeam::CompressedReserve);
         let _ = asset_integration_test_name(AssetSeam::NameTable);
+        let _ = mappings_test_name(MappingsSeam::SchemaNameBytes);
     }
 
-    /// Every [`PakSeam`] / [`AssetSeam`] discriminant lines up with
-    /// its slot index. The exhaustive `match`es are the load-bearing
-    /// guards — adding a variant without updating them fails to
-    /// compile here, forcing the contributor to slot the new site
-    /// in. Paired with the `const _` `COUNT` guards on each inner
+    /// Every [`PakSeam`] / [`AssetSeam`] / [`MappingsSeam`] discriminant
+    /// lines up with its slot index. The exhaustive `match`es are the
+    /// load-bearing guards — adding a variant without updating them fails
+    /// to compile here, forcing the contributor to slot the new site in. Paired with the `const _` `COUNT` guards on each inner
     /// enum, this pins both the counts AND the contiguous
     /// `0..COUNT` ordering that `ARM_STATE`'s array indexing assumes.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one match arm per seam variant, across every family"
+    )]
     fn seam_site_discriminants_match_slot_indices() {
         const fn expected_pak_slot(site: PakSeam) -> usize {
             match site {
@@ -472,6 +535,11 @@ mod tests {
                 AssetSeam::FStringUtf16CodeUnits => PakSeam::COUNT + 14,
                 AssetSeam::StructLayoutMemo => PakSeam::COUNT + 15,
                 AssetSeam::ClassSchemaMemo => PakSeam::COUNT + 16,
+            }
+        }
+        const fn expected_mappings_slot(site: MappingsSeam) -> usize {
+            match site {
+                MappingsSeam::SchemaNameBytes => PakSeam::COUNT + AssetSeam::COUNT,
             }
         }
         let pak_all = [
@@ -523,7 +591,19 @@ mod tests {
                 "asset slot index mismatch for {site:?}"
             );
         }
-        assert_eq!(SeamSite::COUNT, PakSeam::COUNT + AssetSeam::COUNT);
+        let mappings_all = [MappingsSeam::SchemaNameBytes];
+        assert_eq!(mappings_all.len(), MappingsSeam::COUNT);
+        for site in mappings_all {
+            assert_eq!(
+                SeamSite::Mappings(site).slot(),
+                expected_mappings_slot(site),
+                "mappings slot index mismatch for {site:?}"
+            );
+        }
+        assert_eq!(
+            SeamSite::COUNT,
+            PakSeam::COUNT + AssetSeam::COUNT + MappingsSeam::COUNT
+        );
     }
 }
 
@@ -588,9 +668,8 @@ mod macro_tests {
         );
     }
 
-    /// Asset-side seam firing exercises the upper-half slot indices
-    /// (>= PakSeam::COUNT). Pins that the slot() function correctly
-    /// routes asset variants past the pak block.
+    /// Asset-side seam firing exercises slot indices >= PakSeam::COUNT,
+    /// pinning that slot() routes asset variants past the pak block.
     #[test]
     fn asset_seam_fires_at_upper_slot() {
         let _guard = arm_at(SeamSite::Asset(AssetSeam::SplitAssetCombined), 0);

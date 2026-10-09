@@ -4835,6 +4835,9 @@ pub enum MappingsAllocationContext {
     /// `Vec<u8>` a Brotli or ZStandard payload decodes into: the declared
     /// decompressed size plus one spare byte.
     DecompressedDataBytes,
+    /// `String` copy of a class or super-type name, for a `ClassSchema`
+    /// and the schema-table and flattened-cache keys.
+    SchemaNameBytes,
 }
 
 impl MappingsAllocationContext {
@@ -4845,7 +4848,7 @@ impl MappingsAllocationContext {
     #[must_use]
     pub fn unit(&self) -> BoundsUnit {
         match self {
-            Self::DecompressedDataBytes => BoundsUnit::Bytes,
+            Self::DecompressedDataBytes | Self::SchemaNameBytes => BoundsUnit::Bytes,
             Self::NameTable
             | Self::EnumTable
             | Self::EnumValues
@@ -4866,6 +4869,7 @@ impl fmt::Display for MappingsAllocationContext {
             Self::SchemaProperties => "schema properties",
             Self::FlattenedCache => "flattened-property cache",
             Self::DecompressedDataBytes => "decompressed data",
+            Self::SchemaNameBytes => "schema name",
         };
         f.write_str(s)
     }
@@ -5718,10 +5722,11 @@ pub(crate) fn try_copy_asset(
 /// Build a [`PaksmithError::MappingsParse`] wrapping
 /// [`MappingsParseFault::AllocationFailed`] for an OOM site in the
 /// `.usmap` parser. Used by every `try_reserve` call site in
-/// `asset/mappings.rs` to route allocator-refused reservations
-/// through the typed fault variant rather than collapsing them into
-/// the [`MappingsParseFault::Truncated`] short-read misnomer the
-/// helpers historically emitted.
+/// `asset/mappings.rs`, directly or through [`check_mappings_reserve`],
+/// to route allocator-refused reservations through the typed fault
+/// variant rather than collapsing them into the
+/// [`MappingsParseFault::Truncated`] short-read misnomer the helpers
+/// historically emitted.
 ///
 /// Open-coded constructor (rather than a generic
 /// `try_reserve_mappings<T>` helper) so the same path serves both
@@ -5740,6 +5745,18 @@ pub(crate) fn mappings_alloc_failed(
             source,
         },
     }
+}
+
+/// `reserve`, a reservation of `requested` units, run through `seam`'s
+/// OOM injection and mapped to [`MappingsParseFault::AllocationFailed`]
+/// with the context [`crate::seams::MappingsSeam::context`] pairs it with.
+pub(crate) fn check_mappings_reserve(
+    reserve: Result<(), TryReserveError>,
+    requested: usize,
+    seam: crate::seams::MappingsSeam,
+) -> crate::Result<()> {
+    crate::seams::seam_check!(reserve, crate::seams::SeamSite::Mappings(seam));
+    reserve.map_err(|source| mappings_alloc_failed(seam.context(), requested, source))
 }
 
 /// A real refused reservation, for tests that build an allocation fault.
@@ -8697,6 +8714,7 @@ mod tests {
                 MappingsAllocationContext::DecompressedDataBytes,
                 "decompressed data",
             ),
+            (MappingsAllocationContext::SchemaNameBytes, "schema name"),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -8717,6 +8735,10 @@ mod tests {
             (MappingsAllocationContext::FlattenedCache, BoundsUnit::Items),
             (
                 MappingsAllocationContext::DecompressedDataBytes,
+                BoundsUnit::Bytes,
+            ),
+            (
+                MappingsAllocationContext::SchemaNameBytes,
                 BoundsUnit::Bytes,
             ),
         ];
@@ -8741,6 +8763,11 @@ mod tests {
                 4096,
                 "usmap allocation failed for decompressed data (4096 bytes): ",
             ),
+            (
+                MappingsAllocationContext::SchemaNameBytes,
+                7,
+                "usmap allocation failed for schema name (7 bytes): ",
+            ),
         ] {
             let fault = MappingsParseFault::AllocationFailed {
                 context,
@@ -8749,6 +8776,24 @@ mod tests {
             };
             assert!(fault.to_string().starts_with(prefix), "{fault}");
         }
+    }
+
+    /// A refusal is the seam's context with the requested size; a granted
+    /// reservation passes.
+    #[test]
+    fn check_mappings_reserve_maps_a_refusal_to_its_seams_context() {
+        use crate::seams::MappingsSeam;
+        assert!(matches!(
+            check_mappings_reserve(Err(refused_reservation()), 7, MappingsSeam::SchemaNameBytes),
+            Err(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::AllocationFailed {
+                    context: MappingsAllocationContext::SchemaNameBytes,
+                    requested: 7,
+                    ..
+                },
+            })
+        ));
+        assert!(check_mappings_reserve(Ok(()), 7, MappingsSeam::SchemaNameBytes).is_ok());
     }
 
     /// Issue #146: asset-side sibling of
