@@ -280,12 +280,17 @@ pub enum MappingsSeam {
     /// [`crate::error::MappingsParseFault::AllocationFailed`] with
     /// `context: MappingsAllocationContext::SchemaNameBytes`.
     SchemaNameBytes,
+    /// `DecoderAlloc::alloc_cell`'s reservation, for each block of the
+    /// Brotli decoder's working memory. Surfaces as
+    /// [`crate::error::MappingsParseFault::AllocationFailed`] with
+    /// `context: MappingsAllocationContext::BrotliDecoderBytes`.
+    BrotliDecoderBytes,
 }
 
 impl MappingsSeam {
     /// Total number of `.usmap` seam sites. Pinned by the `const _` guard
     /// below and by `tests::seam_site_discriminants_match_slot_indices`.
-    pub const COUNT: usize = 1;
+    pub const COUNT: usize = 2;
 
     /// Map a `.usmap` seam to its paired
     /// [`crate::error::MappingsAllocationContext`], as
@@ -295,12 +300,13 @@ impl MappingsSeam {
         use crate::error::MappingsAllocationContext as C;
         match self {
             Self::SchemaNameBytes => C::SchemaNameBytes,
+            Self::BrotliDecoderBytes => C::BrotliDecoderBytes,
         }
     }
 }
 
 // Same compile-time guard pattern as PakSeam above (see precondition).
-const _: [(); MappingsSeam::COUNT] = [(); MappingsSeam::SchemaNameBytes as usize + 1];
+const _: [(); MappingsSeam::COUNT] = [(); MappingsSeam::BrotliDecoderBytes as usize + 1];
 
 // In the feature-off LIB target `COUNT`/`slot` are dead: their only
 // production consumers live in the `__test_utils`-gated
@@ -476,6 +482,9 @@ mod tests {
                 MappingsSeam::SchemaNameBytes => {
                     "every_schema_name_copy_the_allocator_refuses_is_an_allocation_fault"
                 }
+                MappingsSeam::BrotliDecoderBytes => {
+                    "every_brotli_decoder_allocation_the_allocator_refuses_is_an_allocation_fault"
+                }
             }
         }
         // Touch the const fns so the matches' compile-time
@@ -540,6 +549,7 @@ mod tests {
         const fn expected_mappings_slot(site: MappingsSeam) -> usize {
             match site {
                 MappingsSeam::SchemaNameBytes => PakSeam::COUNT + AssetSeam::COUNT,
+                MappingsSeam::BrotliDecoderBytes => PakSeam::COUNT + AssetSeam::COUNT + 1,
             }
         }
         let pak_all = [
@@ -591,7 +601,10 @@ mod tests {
                 "asset slot index mismatch for {site:?}"
             );
         }
-        let mappings_all = [MappingsSeam::SchemaNameBytes];
+        let mappings_all = [
+            MappingsSeam::SchemaNameBytes,
+            MappingsSeam::BrotliDecoderBytes,
+        ];
         assert_eq!(mappings_all.len(), MappingsSeam::COUNT);
         for site in mappings_all {
             assert_eq!(

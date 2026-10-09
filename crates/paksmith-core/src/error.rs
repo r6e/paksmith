@@ -4838,6 +4838,9 @@ pub enum MappingsAllocationContext {
     /// `String` copy of a class or super-type name, for a `ClassSchema`
     /// and the schema-table and flattened-cache keys.
     SchemaNameBytes,
+    /// A block of a Brotli decoder's working memory: its ring buffer,
+    /// Huffman tables, context maps or context modes.
+    BrotliDecoderBytes,
 }
 
 impl MappingsAllocationContext {
@@ -4848,7 +4851,9 @@ impl MappingsAllocationContext {
     #[must_use]
     pub fn unit(&self) -> BoundsUnit {
         match self {
-            Self::DecompressedDataBytes | Self::SchemaNameBytes => BoundsUnit::Bytes,
+            Self::DecompressedDataBytes | Self::SchemaNameBytes | Self::BrotliDecoderBytes => {
+                BoundsUnit::Bytes
+            }
             Self::NameTable
             | Self::EnumTable
             | Self::EnumValues
@@ -4870,6 +4875,7 @@ impl fmt::Display for MappingsAllocationContext {
             Self::FlattenedCache => "flattened-property cache",
             Self::DecompressedDataBytes => "decompressed data",
             Self::SchemaNameBytes => "schema name",
+            Self::BrotliDecoderBytes => "brotli decoder",
         };
         f.write_str(s)
     }
@@ -8715,6 +8721,10 @@ mod tests {
                 "decompressed data",
             ),
             (MappingsAllocationContext::SchemaNameBytes, "schema name"),
+            (
+                MappingsAllocationContext::BrotliDecoderBytes,
+                "brotli decoder",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -8739,6 +8749,10 @@ mod tests {
             ),
             (
                 MappingsAllocationContext::SchemaNameBytes,
+                BoundsUnit::Bytes,
+            ),
+            (
+                MappingsAllocationContext::BrotliDecoderBytes,
                 BoundsUnit::Bytes,
             ),
         ];
@@ -8767,6 +8781,11 @@ mod tests {
                 MappingsAllocationContext::SchemaNameBytes,
                 7,
                 "usmap allocation failed for schema name (7 bytes): ",
+            ),
+            (
+                MappingsAllocationContext::BrotliDecoderBytes,
+                694,
+                "usmap allocation failed for brotli decoder (694 bytes): ",
             ),
         ] {
             let fault = MappingsParseFault::AllocationFailed {

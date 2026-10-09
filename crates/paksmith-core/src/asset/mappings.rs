@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, Cursor};
 use std::sync::Arc;
 
-use brotli::{BrotliDecompressStream, BrotliResult, BrotliState, HeapAlloc, HuffmanCode};
+use brotli::{
+    Allocator, BrotliDecompressStream, BrotliResult, BrotliState, SliceWrapper, SliceWrapperMut,
+};
 use byteorder::{LE, ReadBytesExt};
 use zstd::zstd_safe::DCtx;
 
@@ -1523,11 +1525,7 @@ fn decode_brotli(
     undecodable: impl Fn() -> PaksmithError,
 ) -> crate::Result<Vec<u8>> {
     let mut out = reserve_decompressed(limit)?;
-    let mut state = BrotliState::new_strict(
-        HeapAlloc::<u8>::default(),
-        HeapAlloc::<u32>::default(),
-        HeapAlloc::<HuffmanCode>::default(),
-    );
+    let mut state = strict_brotli_decoder()?;
     let mut chunk = [0u8; BROTLI_OUTPUT_CHUNK];
     let mut available_in = payload.len();
     let mut input_offset = 0;
@@ -1545,6 +1543,7 @@ fn decode_brotli(
             &mut _total_out,
             &mut state,
         );
+        check_refusal(&mut state)?;
         let produced = &chunk[..output_offset];
         // Every call has a whole chunk of room, so one that goes round again
         // has produced output, and the loop ends by `limit`; output past it
@@ -1574,6 +1573,83 @@ fn decode_brotli(
             }));
         }
     }
+}
+
+/// One block of a brotli decoder's working memory.
+#[derive(Default)]
+struct DecoderCells<T>(Vec<T>);
+
+impl<T> SliceWrapper<T> for DecoderCells<T> {
+    fn slice(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<T> SliceWrapperMut<T> for DecoderCells<T> {
+    fn slice_mut(&mut self) -> &mut [T] {
+        &mut self.0
+    }
+}
+
+/// A brotli decoder allocator that reserves each block fallibly. Its
+/// `Allocator` trait cannot fail, so a refused block comes back empty, which
+/// the decoder treats as an allocation failure for every block it allocates
+/// while decoding ([`strict_brotli_decoder`] checks the one its constructor
+/// allocates), and the first refusal is kept for [`check_refusal`].
+#[derive(Default)]
+struct DecoderAlloc {
+    refused: Option<PaksmithError>,
+}
+
+impl<T: Clone + Default> Allocator<T> for DecoderAlloc {
+    type AllocatedMemory = DecoderCells<T>;
+
+    fn alloc_cell(&mut self, len: usize) -> DecoderCells<T> {
+        let mut cells = Vec::new();
+        let reserved = check_mappings_reserve(
+            cells.try_reserve_exact(len),
+            len.saturating_mul(size_of::<T>()),
+            MappingsSeam::BrotliDecoderBytes,
+        );
+        match reserved {
+            Ok(()) => {
+                cells.resize(len, T::default());
+                DecoderCells(cells)
+            }
+            Err(refusal) => {
+                let _ = self.refused.get_or_insert(refusal);
+                DecoderCells::default()
+            }
+        }
+    }
+
+    fn free_cell(&mut self, _cells: DecoderCells<T>) {}
+}
+
+type DecoderState = BrotliState<DecoderAlloc, DecoderAlloc, DecoderAlloc>;
+
+/// Takes a refusal one of `state`'s allocators kept, if any, as an error.
+fn check_refusal(state: &mut DecoderState) -> crate::Result<()> {
+    state
+        .alloc_u8
+        .refused
+        .take()
+        .or_else(|| state.alloc_u32.refused.take())
+        .or_else(|| state.alloc_hc.refused.take())
+        .map_or(Ok(()), Err)
+}
+
+/// A strict RFC 7932 decoder state. The decoder never treats an empty
+/// context-map table, the block its constructor allocates, as an allocation
+/// failure, so a refusal there is reported here, before any decoding.
+fn strict_brotli_decoder() -> crate::Result<DecoderState> {
+    let mut state = BrotliState::new_strict(
+        DecoderAlloc::default(),
+        DecoderAlloc::default(),
+        DecoderAlloc::default(),
+    );
+    check_refusal(&mut state)?;
+    Ok(state)
 }
 
 fn reserve_decompressed(len: usize) -> crate::Result<Vec<u8>> {
@@ -2981,6 +3057,114 @@ mod tests {
         );
     }
 
+    /// Arms `seam` to refuse each reservation in turn and asserts `fault()`
+    /// reports it as an `AllocationFailed` of `sizes[skip]`, then arms it past
+    /// the last one and returns that guard.
+    fn refuse_each_reservation(
+        seam: crate::seams::MappingsSeam,
+        sizes: &[usize],
+        fault: impl Fn() -> MappingsParseFault,
+    ) -> crate::testing::oom::DisarmGuard {
+        let site = crate::seams::SeamSite::Mappings(seam);
+        for (skip, &size) in sizes.iter().enumerate() {
+            let _armed = crate::testing::oom::arm_at(site, u64::try_from(skip).unwrap());
+            let fault = fault();
+            let MappingsParseFault::AllocationFailed {
+                context, requested, ..
+            } = fault
+            else {
+                panic!("skip {skip}: {fault:?}");
+            };
+            assert_eq!((context, requested), (seam.context(), size), "skip {skip}");
+        }
+        crate::testing::oom::arm_at(site, u64::try_from(sizes.len()).unwrap())
+    }
+
+    /// Every block of brotli decoder memory the allocator refuses is an
+    /// allocation fault for that block's size, in the order the decoder
+    /// allocates them; past the last block the stream decodes. The compressed
+    /// stream allocates the construction-time context-map table, the
+    /// block-type and block-length trees, the ring buffer, the context modes,
+    /// the literal and distance context maps, then each tree group's htrees
+    /// and codes; the stored stream stops after its ring buffer.
+    #[test]
+    fn every_brotli_decoder_allocation_the_allocator_refuses_is_an_allocation_fault() {
+        let (_, whole) = three_chunk_brotli();
+        for (label, stream, declared, blocks) in [
+            (
+                "compressed",
+                FROZEN_BROTLI,
+                schema_payload().len(),
+                &[4320, 12960, 12960, 694, 1, 64, 4, 4, 4320, 4, 4320, 4, 4320][..],
+            ),
+            (
+                "stored",
+                whole.as_slice(),
+                THREE_CHUNKS,
+                &[4320, 12960, 12960, 33334][..],
+            ),
+        ] {
+            let bytes = usmap_with(UsmapCompression::Brotli, stream, declared);
+            let _armed = refuse_each_reservation(MappingsSeam::BrotliDecoderBytes, blocks, || {
+                parse_fault(&bytes)
+            });
+            assert!(Usmap::from_bytes(&bytes).is_ok(), "{label}");
+        }
+    }
+
+    /// A granted block holds `len` defaults; a refused one comes back empty
+    /// with its refusal kept, and a later refusal does not replace it.
+    #[test]
+    fn a_refused_decoder_block_is_empty_and_the_first_refusal_is_kept() {
+        let mut alloc = DecoderAlloc::default();
+        assert_eq!(
+            Allocator::<u8>::alloc_cell(&mut alloc, 3).slice(),
+            [0, 0, 0]
+        );
+        assert!(alloc.refused.is_none());
+        assert_eq!(
+            Allocator::<u8>::alloc_cell(&mut alloc, usize::MAX).slice(),
+            [0u8; 0]
+        );
+        assert_eq!(
+            Allocator::<u8>::alloc_cell(&mut alloc, usize::MAX / 2 + 1).slice(),
+            [0u8; 0]
+        );
+        assert!(matches!(
+            alloc.refused,
+            Some(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::AllocationFailed {
+                    context: MappingsAllocationContext::BrotliDecoderBytes,
+                    requested: usize::MAX,
+                    ..
+                },
+            })
+        ));
+        let codes = Allocator::<brotli::HuffmanCode>::alloc_cell(&mut DecoderAlloc::default(), 2);
+        assert_eq!(codes.slice(), [brotli::HuffmanCode::default(); 2]);
+    }
+
+    /// A refused context-map table, which the decoder never treats as an
+    /// allocation failure, fails the decoder's construction; unrefused,
+    /// construction succeeds.
+    #[test]
+    fn a_refused_construction_table_fails_the_strict_decoder() {
+        let site = crate::seams::SeamSite::Mappings(crate::seams::MappingsSeam::BrotliDecoderBytes);
+        let armed = crate::testing::oom::arm_at(site, 0);
+        assert!(matches!(
+            strict_brotli_decoder(),
+            Err(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::AllocationFailed {
+                    context: MappingsAllocationContext::BrotliDecoderBytes,
+                    requested: 4320,
+                    ..
+                },
+            })
+        ));
+        drop(armed);
+        assert!(strict_brotli_decoder().is_ok());
+    }
+
     /// Past the large-window check, the decoder state still refuses the
     /// extension: it is RFC 7932 strict.
     #[test]
@@ -3253,7 +3437,6 @@ mod tests {
     /// succeeds.
     #[test]
     fn every_schema_name_copy_the_allocator_refuses_is_an_allocation_fault() {
-        let site = crate::seams::SeamSite::Mappings(crate::seams::MappingsSeam::SchemaNameBytes);
         for (names, copies, super_type) in [
             (&[&b"Hero"[..], b"None"], &[4, 4, 4][..], None),
             (
@@ -3263,22 +3446,9 @@ mod tests {
             ),
         ] {
             let data = single_schema_data(names);
-            for (skip, &copy) in copies.iter().enumerate() {
-                let _armed = crate::testing::oom::arm_at(site, u64::try_from(skip).unwrap());
-                let fault = schema_fault(&data, 0, SchemaBudgets::DEFAULT);
-                assert!(
-                    matches!(
-                        fault,
-                        MappingsParseFault::AllocationFailed {
-                            context: MappingsAllocationContext::SchemaNameBytes,
-                            requested,
-                            ..
-                        } if requested == copy
-                    ),
-                    "skip {skip}: {fault:?}"
-                );
-            }
-            let _armed = crate::testing::oom::arm_at(site, u64::try_from(copies.len()).unwrap());
+            let _armed = refuse_each_reservation(MappingsSeam::SchemaNameBytes, copies, || {
+                schema_fault(&data, 0, SchemaBudgets::DEFAULT)
+            });
             let usmap = Usmap::parse_schema_data(&data, 0, SchemaBudgets::DEFAULT).unwrap();
             assert_eq!(usmap.schemas["Hero"].super_type.as_deref(), super_type);
             assert!(usmap.flattened.contains_key("Hero"));
