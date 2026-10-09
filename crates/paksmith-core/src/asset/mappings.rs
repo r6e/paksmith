@@ -3807,6 +3807,80 @@ mod tests {
         assert_eq!(max_usmap_type_nodes(), 4_194_304);
     }
 
+    /// Entries sharing an absolute index, which only a malformed `.usmap`
+    /// has, keep the walk's order: the child class first, then each class's
+    /// declaration order. The child's rows share 50 slots four to a slot, in
+    /// scrambled order, and every parent and grandparent slot clamps to
+    /// `u16::MAX`. std's unstable sort leaves ties in order on short or
+    /// already sorted slices, so the fixture is big and scrambled enough
+    /// that a plain unstable sort on the index reorders them.
+    #[test]
+    fn entries_sharing_a_slot_keep_chain_then_declaration_order() {
+        const CHILD_ROWS: usize = 200;
+        const CHILD_SLOTS: usize = 50;
+        const PARENT_ROWS: usize = 30;
+        const GRAND_ROWS: usize = 10;
+        let row_name = |prefix: char, row: usize| format!("{prefix}{row}");
+        // 37 is coprime to CHILD_SLOTS, so each slot gets an equal share.
+        let child_slot = |row: usize| (row * 37) % CHILD_SLOTS;
+        // (row name prefix, prop_count, each row's slot), chain order
+        let classes = [
+            (
+                'c',
+                u16::MAX,
+                (0..CHILD_ROWS).map(child_slot).collect::<Vec<_>>(),
+            ),
+            (
+                'p',
+                u16::try_from(PARENT_ROWS).unwrap(),
+                (0..PARENT_ROWS).rev().collect(),
+            ),
+            (
+                'g',
+                u16::try_from(GRAND_ROWS).unwrap(),
+                (0..GRAND_ROWS).collect(),
+            ),
+        ];
+        let mut names: Vec<String> = ["Child", "Parent", "Grand", "None"]
+            .map(String::from)
+            .into();
+        let mut schemas = Vec::new();
+        for (class, (prefix, prop_count, slots)) in (0i32..).zip(&classes) {
+            schemas.extend_from_slice(&class.to_le_bytes());
+            schemas.extend_from_slice(&(class + 1).to_le_bytes()); // super type
+            schemas.extend_from_slice(&prop_count.to_le_bytes());
+            schemas.extend_from_slice(&u16::try_from(slots.len()).unwrap().to_le_bytes());
+            for (row, &slot) in slots.iter().enumerate() {
+                schemas.extend_from_slice(&u16::try_from(slot).unwrap().to_le_bytes());
+                schemas.push(1); // array_size
+                schemas.extend_from_slice(&i32::try_from(names.len()).unwrap().to_le_bytes());
+                schemas.push(2); // Int32
+                names.push(row_name(*prefix, row));
+            }
+        }
+        let mut data = Vec::new();
+        push_names(&mut data, &names);
+        data.extend_from_slice(&0u32.to_le_bytes()); // enums
+        data.extend_from_slice(&u32::try_from(classes.len()).unwrap().to_le_bytes());
+        data.extend_from_slice(&schemas);
+        let usmap = Usmap::parse_schema_data(&data, 0, SchemaBudgets::DEFAULT).unwrap();
+        let got: Vec<(u16, String)> = usmap
+            .get_all_properties("Child")
+            .iter()
+            .map(|rp| (rp.absolute_index, rp.property.name.to_string()))
+            .collect();
+        let want: Vec<(u16, String)> = (0..CHILD_SLOTS)
+            .flat_map(|slot| {
+                (0..CHILD_ROWS)
+                    .filter(move |&row| child_slot(row) == slot)
+                    .map(move |row| (u16::try_from(slot).unwrap(), row_name('c', row)))
+            })
+            .chain((0..PARENT_ROWS).map(|row| (u16::MAX, row_name('p', row))))
+            .chain((0..GRAND_ROWS).map(|row| (u16::MAX, row_name('g', row))))
+            .collect();
+        assert_eq!(got, want);
+    }
+
     #[test]
     fn get_all_properties_with_inheritance() {
         // Build a usmap with `Parent(x: Int)` and `Child extends Parent(y: Float)`.
