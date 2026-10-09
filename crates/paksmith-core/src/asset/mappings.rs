@@ -12,7 +12,7 @@
 //! the wire format.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, TryReserveError};
 use std::io::{BufRead, Cursor};
 use std::sync::Arc;
 
@@ -1090,13 +1090,7 @@ impl Usmap {
         schemas: &HashMap<String, ClassSchema>,
     ) -> crate::Result<HashMap<String, Vec<ResolvedProperty>>> {
         let mut flattened: HashMap<String, Vec<ResolvedProperty>> = HashMap::new();
-        flattened.try_reserve(schemas.len()).map_err(|source| {
-            mappings_alloc_failed(
-                MappingsAllocationContext::FlattenedCache,
-                schemas.len(),
-                source,
-            )
-        })?;
+        check_flattened_reserve(flattened.try_reserve(schemas.len()), schemas.len())?;
         let graph = SchemaGraph::new(schemas);
         let mut total: u64 = 0;
         for (index, (class_name, _)) in graph.classes.iter().enumerate() {
@@ -1179,14 +1173,8 @@ impl Usmap {
                 },
             });
         }
-        // Pre-reserve the result vec via `try_reserve` so an allocator
-        // refusal under adversarial inputs surfaces as a typed
-        // `MappingsAllocationContext::FlattenedCache` fault rather
-        // than an `abort` from `Vec::push`'s infallible reserve.
         let mut result: Vec<ResolvedProperty> = Vec::new();
-        result.try_reserve(total).map_err(|source| {
-            mappings_alloc_failed(MappingsAllocationContext::FlattenedCache, total, source)
-        })?;
+        check_flattened_reserve(result.try_reserve(total), total)?;
         let mut offset: u32 = 0;
         for schema in chain() {
             for property in &schema.properties {
@@ -1316,6 +1304,15 @@ fn read_name_arc(cur: &mut Cursor<&[u8]>, names: &[Arc<str>]) -> crate::Result<A
             table_len: names.len(),
         })
     })
+}
+
+/// `reserve`, a reservation of `requested` items for the flattened-cache
+/// build, through [`MappingsSeam::FlattenedCache`].
+fn check_flattened_reserve(
+    reserve: Result<(), TryReserveError>,
+    requested: usize,
+) -> crate::Result<()> {
+    check_mappings_reserve(reserve, requested, MappingsSeam::FlattenedCache)
 }
 
 /// `name` copied into a fallibly reserved `String`.
@@ -3080,6 +3077,24 @@ mod tests {
         crate::testing::oom::arm_at(site, u64::try_from(sizes.len()).unwrap())
     }
 
+    /// Every `FlattenedCache` reservation the flattened-cache build makes,
+    /// refused in turn, is an allocation fault for its size: the cache map,
+    /// then the class's flat list. Past the last one the parse succeeds. One
+    /// class only, since the build visits classes in `HashMap` order.
+    #[test]
+    fn every_flattened_cache_reservation_the_allocator_refuses_is_an_allocation_fault() {
+        assert_eq!(
+            MappingsSeam::FlattenedCache.context(),
+            MappingsAllocationContext::FlattenedCache
+        );
+        let data = single_schema_data(&[b"Hero", b"None", b"x"], &[2], &[2]);
+        let _armed = refuse_each_reservation(MappingsSeam::FlattenedCache, &[1, 2], || {
+            schema_fault(&data, 0, SchemaBudgets::DEFAULT)
+        });
+        let usmap = Usmap::parse_schema_data(&data, 0, SchemaBudgets::DEFAULT).unwrap();
+        assert_eq!(usmap.get_all_properties("Hero").len(), 2);
+    }
+
     /// Every block of brotli decoder memory the allocator refuses is an
     /// allocation fault for that block's size, in the order the decoder
     /// allocates them; past the last block the stream decodes. The compressed
@@ -3398,13 +3413,14 @@ mod tests {
     }
 
     /// v0 schema data with `names`, no enums, and one schema named by name 0
-    /// whose super type is name 1, with no rows.
-    fn single_schema_data(names: &[&[u8]]) -> Vec<u8> {
+    /// whose super type is name 1, its rows as [`push_repeated_schema`]
+    /// writes them.
+    fn single_schema_data(names: &[&[u8]], array_sizes: &[u8], row_type: &[u8]) -> Vec<u8> {
         let mut data = Vec::new();
         push_names(&mut data, names);
         data.extend_from_slice(&0u32.to_le_bytes()); // enums
         data.extend_from_slice(&1u32.to_le_bytes()); // schemas
-        push_repeated_schema(&mut data, &[], &[]);
+        push_repeated_schema(&mut data, array_sizes, row_type);
         data
     }
 
@@ -3445,7 +3461,7 @@ mod tests {
                 Some("Parent"),
             ),
         ] {
-            let data = single_schema_data(names);
+            let data = single_schema_data(names, &[], &[]);
             let _armed = refuse_each_reservation(MappingsSeam::SchemaNameBytes, copies, || {
                 schema_fault(&data, 0, SchemaBudgets::DEFAULT)
             });
@@ -3459,7 +3475,7 @@ mod tests {
     #[tracing_test::traced_test]
     #[test]
     fn an_invalid_utf8_name_reads_as_empty() {
-        let data = single_schema_data(&[b"\xFF", b"None"]);
+        let data = single_schema_data(&[b"\xFF", b"None"], &[], &[]);
         let usmap = Usmap::parse_schema_data(&data, 0, SchemaBudgets::DEFAULT).unwrap();
         assert_eq!(usmap.schemas[""].super_type, None);
         assert!(logs_contain("not valid UTF-8"));
