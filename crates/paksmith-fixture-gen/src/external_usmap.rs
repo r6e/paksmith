@@ -97,7 +97,7 @@ pub fn write_external_minimal_v0_usmap(path: &Path) -> io::Result<()> {
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(&FILE_MAGIC_BYTES);
     out.push(VERSION_INITIAL);
-    // v0 < PackageVersioning, so no has_versioning byte is read by CUE4Parse.
+    // v0 < PackageVersioning, so CUE4Parse reads no has_versioning flag.
     out.push(COMPRESSION_NONE);
     let payload_len = u32::try_from(payload.len()).expect("payload fits in u32");
     push_u32_le(&mut out, payload_len); // compressed_size
@@ -172,12 +172,13 @@ pub fn write_external_minimal_v4_usmap(path: &Path) -> io::Result<()> {
     payload.push(EPROP_BYTE); // inner = ByteProperty
     push_i32_le(&mut payload, 4); // enum_name idx = "EColor"
 
-    // -- Wrap. v4 ≥ PackageVersioning so has_versioning byte IS read; we
+    // -- Wrap. v4 ≥ PackageVersioning so the has_versioning flag IS read: a
+    //    bool32 (`Ar.ReadBoolean()`). We
     //    write it as 0 (no embedded versioning).
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(&FILE_MAGIC_BYTES);
     out.push(VERSION_EXPLICIT_ENUM_VALUES);
-    out.push(0); // has_versioning = false
+    push_i32_le(&mut out, 0); // has_versioning = false
     out.push(COMPRESSION_NONE);
     let payload_len = u32::try_from(payload.len()).expect("payload fits in u32");
     push_u32_le(&mut out, payload_len); // compressed_size

@@ -287,7 +287,7 @@ fn anchor_external_minimal_v4_usmap_fixture_bytes() {
     // `shasum tests/fixtures/external_minimal_v4.usmap` and paste below.
     anchor_fixture_sha1(
         "external_minimal_v4.usmap",
-        "5c07aabc85815f17bf1b06b3afe62053a5e2b8f0",
+        "cb8681aa129a10776463f4f7ae679531f13c52b7",
     );
 }
 
