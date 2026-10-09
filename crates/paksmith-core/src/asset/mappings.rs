@@ -13,7 +13,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use std::io::{BufRead, Cursor};
 use std::sync::Arc;
 
 use brotli::{BrotliDecompressStream, BrotliResult, BrotliState, HeapAlloc, HuffmanCode};
@@ -666,9 +666,7 @@ impl Usmap {
                 // Each CustomVersion = 16-byte GUID + i32 version number = 20
                 // bytes, read rather than seeked past: a seek past the end
                 // would succeed.
-                read_or_truncated(&mut cur, |c| {
-                    (0..cv_count).try_for_each(|_| c.read_exact(&mut [0u8; 20]))
-                })?;
+                let _custom_versions = read_slice(&mut cur, cv_count as usize * 20)?;
                 let _net_cl = read_or_truncated(&mut cur, |c| c.read_u32::<LE>())?;
             }
         }
@@ -702,14 +700,7 @@ impl Usmap {
         )]
         let compressed_size_usz = compressed_size as usize;
         let payload_offset = position_usize(&cur);
-        let payload = bytes
-            .get(payload_offset..)
-            .and_then(|rest| rest.get(..compressed_size_usz))
-            .ok_or_else(|| {
-                fault(MappingsParseFault::Truncated {
-                    offset: payload_offset,
-                })
-            })?;
+        let payload = read_slice(&mut cur, compressed_size_usz)?;
         let payload_end = payload_offset + payload.len();
         let undecodable = || {
             fault(MappingsParseFault::Truncated {
@@ -830,17 +821,18 @@ impl Usmap {
             } else {
                 read_or_truncated(&mut cur, |c| c.read_u8())? as usize
             };
-            let mut buf = vec![0u8; name_length];
-            read_or_truncated(&mut cur, |c| c.read_exact(&mut buf))?;
-            let name = String::from_utf8(buf).unwrap_or_else(|err| {
+            let bytes = read_slice(&mut cur, name_length)?;
+            let name = std::str::from_utf8(bytes).unwrap_or_else(|err| {
                 tracing::warn!(
                     offset = position_usize(&cur),
                     error = err.to_string(),
                     "usmap name is not valid UTF-8; using empty string \
                      (downstream lookups will miss it)"
                 );
-                String::new()
+                ""
             });
+            // Arc has no stable fallible constructor; MAX_USMAP_NAME_COUNT
+            // bounds how many, and the schema data their bytes.
             names.push(Arc::from(name));
         }
 
@@ -1628,6 +1620,19 @@ fn read_or_truncated<T>(
 ) -> crate::Result<T> {
     let start = position_usize(cur);
     read(cur).map_err(|_| fault(MappingsParseFault::Truncated { offset: start }))
+}
+
+/// The next `len` bytes of `cur`'s data, borrowed; a short read is
+/// [`MappingsParseFault::Truncated`] at the offset where it began.
+fn read_slice<'a>(cur: &mut Cursor<&'a [u8]>, len: usize) -> crate::Result<&'a [u8]> {
+    let start = position_usize(cur);
+    let data: &'a [u8] = cur.get_ref();
+    let bytes = data
+        .get(start..)
+        .and_then(|rest| rest.get(..len))
+        .ok_or_else(|| fault(MappingsParseFault::Truncated { offset: start }))?;
+    cur.consume(len);
+    Ok(bytes)
 }
 
 /// Returns the cursor's byte offset as a `usize` for use in
@@ -3196,6 +3201,49 @@ mod tests {
         );
     }
 
+    /// v0 schema data with `names`, no enums, and one schema named by name 0
+    /// whose super type is name 1, with no rows.
+    fn single_schema_data(names: &[&[u8]]) -> Vec<u8> {
+        let mut data = Vec::new();
+        push_names(&mut data, names);
+        data.extend_from_slice(&0u32.to_le_bytes()); // enums
+        data.extend_from_slice(&1u32.to_le_bytes()); // schemas
+        push_repeated_schema(&mut data, &[], &[]);
+        data
+    }
+
+    /// `read_slice` lends the data's own bytes and moves past them; a short
+    /// read is truncated where it began and moves nothing.
+    #[test]
+    fn read_slice_borrows_the_data_and_advances() {
+        let data = [1u8, 2, 3, 4, 5];
+        let mut cur = Cursor::new(&data[..]);
+        cur.set_position(1);
+        let bytes = read_slice(&mut cur, 3).unwrap();
+        assert_eq!(bytes, [2, 3, 4]);
+        assert!(std::ptr::eq(bytes.as_ptr(), data[1..].as_ptr()));
+        assert_eq!(cur.position(), 4);
+        assert!(matches!(
+            read_slice(&mut cur, 2),
+            Err(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::Truncated { offset: 4 },
+            })
+        ));
+        assert_eq!(cur.position(), 4);
+        cur.set_position(5);
+        assert_eq!(read_slice(&mut cur, 0).unwrap(), [0u8; 0]);
+    }
+
+    /// A name that is not UTF-8 reads as the empty string, with a warning.
+    #[tracing_test::traced_test]
+    #[test]
+    fn an_invalid_utf8_name_reads_as_empty() {
+        let data = single_schema_data(&[b"\xFF", b"None"]);
+        let usmap = Usmap::parse_schema_data(&data, 0, SchemaBudgets::DEFAULT).unwrap();
+        assert_eq!(usmap.schemas[""].super_type, None);
+        assert!(logs_contain("not valid UTF-8"));
+    }
+
     /// A header claiming more stored bytes than the file holds is refused at
     /// the payload's start.
     #[test]
@@ -3281,11 +3329,12 @@ mod tests {
         );
     }
 
-    fn push_names(data: &mut Vec<u8>, names: &[&str]) {
+    fn push_names(data: &mut Vec<u8>, names: &[impl AsRef<[u8]>]) {
         data.extend_from_slice(&u32::try_from(names.len()).unwrap().to_le_bytes());
         for name in names {
+            let name = name.as_ref();
             data.push(u8::try_from(name.len()).unwrap());
-            data.extend_from_slice(name.as_bytes());
+            data.extend_from_slice(name);
         }
     }
 
