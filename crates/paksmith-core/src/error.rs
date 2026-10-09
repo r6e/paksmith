@@ -5293,9 +5293,8 @@ pub enum MappingsParseFault {
         found: usize,
     },
 
-    /// Wire-claimed `compressed_size` exceeds the structural cap. Defends
-    /// against a malicious header that claims a multi-GiB compressed
-    /// payload to force a large up-front allocation.
+    /// Wire-claimed `compressed_size` exceeds the structural cap, which
+    /// refuses a malicious header claiming a multi-GiB compressed payload.
     #[error("compressed size {size} exceeds cap {limit}")]
     CompressedSizeTooLarge {
         /// The wire-claimed `compressed_size`.
