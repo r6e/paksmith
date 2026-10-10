@@ -2877,31 +2877,38 @@ mod tests {
         );
     }
 
-    /// Header forges `encoded_entries_size > index_size` — without the
-    /// bound, parser would `Vec::resize` to a multi-GB allocation and
-    /// then `read_exact` against a truncated buffer. The bound rejects
-    /// before the alloc.
+    /// The encoded blob's size is bounded by the main index bytes after it,
+    /// here only the non-encoded count's 4, before the blob is reserved: 5
+    /// or more is refused, and 4 passes and leaves no count to read.
     #[test]
-    fn read_v10_plus_rejects_encoded_size_exceeding_index() {
-        let (buf, main_size) = build_v10_buffer(V10Fixture {
-            encoded_entries_size_override: Some(u32::MAX),
-            ..V10Fixture::default()
-        });
-        let file_size = buf.len() as u64;
-        let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(
-            &mut cursor,
-            PakVersion::PathHashIndex,
-            0,
-            main_size,
-            file_size,
-            &[],
-        )
-        .unwrap_err();
-        assert!(
-            matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains("encoded_entries_size")),
-            "got: {err:?}"
-        );
+    fn read_v10_plus_bounds_encoded_size_by_the_bytes_left() {
+        let read = |size| {
+            let (buf, main_size) = build_v10_buffer(V10Fixture {
+                encoded_entries_size_override: Some(size),
+                ..V10Fixture::default()
+            });
+            read_v10(buf, main_size)
+        };
+        for size in [5, u32::MAX] {
+            assert!(
+                matches!(
+                    read(size),
+                    Err(PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::BoundsExceeded {
+                            field: WireField::V10EncodedEntriesSize,
+                            value,
+                            limit: 4,
+                            ..
+                        }
+                    }) if value == u64::from(size)
+                ),
+                "size {size}"
+            );
+        }
+        assert!(matches!(
+            read(4),
+            Err(PaksmithError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
     }
 
     /// Header forges `fdi_size > 256 MiB` — caps the FDI alloc so a
@@ -3447,9 +3454,9 @@ mod tests {
         );
     }
 
-    /// Header forges `non_encoded_count` larger than the index byte
-    /// budget can possibly carry. Caps the non-encoded entries
-    /// pre-alloc.
+    /// Header forges `non_encoded_count` larger than the index bytes after
+    /// it can possibly carry: here none follow it. Caps the non-encoded
+    /// entries pre-alloc.
     #[test]
     fn read_v10_plus_rejects_non_encoded_count_exceeding_budget() {
         let (buf, main_size) = build_v10_buffer(V10Fixture {
@@ -3477,7 +3484,7 @@ mod tests {
                         limit,
                         ..
                     }
-                } if *value == u64::from(u32::MAX) && *limit == main_size / 53
+                } if *value == u64::from(u32::MAX) && *limit == 0
             ),
             "got: {err:?}"
         );
@@ -3485,12 +3492,14 @@ mod tests {
 
     /// A v10 main index holding `records` minimal uncompressed
     /// non-encoded entries (53 bytes each, no filename: the FDI names
-    /// them), with the header claiming `claimed` of them.
-    fn dense_non_encoded_v10(records: u32, claimed: u32) -> (Vec<u8>, u64) {
+    /// them) and then `spare` bytes, with the header claiming `claimed` of
+    /// the entries.
+    fn dense_non_encoded_v10(records: u32, claimed: u32, spare: usize) -> (Vec<u8>, u64) {
         let mut non_enc = Vec::new();
         for _ in 0..records {
             write_v10_non_encoded_uncompressed(&mut non_enc, 0, 0);
         }
+        non_enc.resize(non_enc.len() + spare, 0);
         let files = (1..=records)
             .map(|i| (format!("f{i}.uasset"), -i32::try_from(i).unwrap()))
             .collect();
@@ -3515,42 +3524,28 @@ mod tests {
         )
     }
 
-    /// Non-encoded v10+ records carry no filename, so their floor is the
-    /// 53-byte header alone. A 58-byte divisor would refuse these 25.
-    #[test]
-    fn read_v10_plus_accepts_dense_non_encoded_index_at_header_minimum() {
-        let (buf, main_size) = dense_non_encoded_v10(25, 25);
-        assert!(
-            main_size / 58 < 25,
-            "the index must be too dense for a 58-byte floor"
-        );
-        assert_eq!(read_v10(buf, main_size).unwrap().entries().len(), 25);
-    }
-
-    /// A count of exactly `main_size / 53` passes the byte budget; the
-    /// read then runs out of the 25 real records.
+    /// The count is bounded by the index bytes after it, which 52 records
+    /// fill exactly: a count of 52 is admitted, so the bound is inclusive.
+    /// Non-encoded records carry no filename, so their floor is the 53-byte
+    /// header alone; a 58-byte floor would admit only 47.
     #[test]
     fn read_v10_plus_accepts_non_encoded_count_at_budget() {
-        let (_, main_size) = dense_non_encoded_v10(25, 25);
-        let claimed = u32::try_from(main_size / 53).unwrap();
-        assert!(
-            claimed > 25,
-            "the claim must outrun the records, so the budget is what's tested"
-        );
-        let (buf, main_size) = dense_non_encoded_v10(25, claimed);
-        let err = read_v10(buf, main_size).unwrap_err();
-        assert!(
-            matches!(&err, PaksmithError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof),
-            "the budget must admit exactly main_size / 53; got: {err:?}"
-        );
+        let (buf, main_size) = dense_non_encoded_v10(52, 52, 0);
+        assert_eq!(read_v10(buf, main_size).unwrap().entries().len(), 52);
     }
 
-    /// 50 records fill a 2764-byte main index: `2764 / 53 = 52`, so 53 is
-    /// one over. A divisor of 52 would admit it and 54 would report 51.
+    /// 52 records and 49 spare bytes fill the 2805 bytes after the count:
+    /// `2805 / 53 = 52`, so 53 is one over, though the 2809 bytes from the
+    /// count on would admit it. A divisor of 52 would admit it, 54 would
+    /// report 51, and bounding the whole index would admit it and run out
+    /// of records.
     #[test]
     fn read_v10_plus_rejects_non_encoded_count_one_over_budget() {
-        let (buf, main_size) = dense_non_encoded_v10(50, 53);
-        assert_eq!(main_size, 2764);
+        let (buf, main_size) = dense_non_encoded_v10(52, 53, 49);
+        assert!(
+            main_size / 53 > 53,
+            "the whole index must hold the claim, so only the remaining bytes refuse it"
+        );
         let err = read_v10(buf, main_size).unwrap_err();
         assert!(
             matches!(
