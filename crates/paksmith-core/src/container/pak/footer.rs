@@ -390,11 +390,7 @@ fn read_compression_method_table<R: Read>(
         }
         let name = std::str::from_utf8(&buf[..end]).map_err(|e| PaksmithError::InvalidFooter {
             fault: InvalidFooterFault::OtherUnpromoted {
-                reason: format!(
-                    "compression slot {slot_index} contains non-UTF-8 bytes ({e}); \
-                     a malformed FName slot can't be silently treated as empty \
-                     because an entry referencing it would be misread as uncompressed"
-                ),
+                reason: format!("compression slot {slot_index} name is not valid UTF-8 ({e})"),
             },
         })?;
         out.push(Some(CompressionMethod::from_name(name)));
@@ -614,10 +610,8 @@ mod tests {
         assert_eq!(footer.compression_methods().len(), 5);
     }
 
-    /// `read_compression_method_table` must reject non-UTF-8 in a
-    /// non-empty slot rather than silently coercing to None — the
-    /// silent coercion was the round-1 silent-failure-hunter HIGH
-    /// finding. A malformed slot is structurally a corrupt footer.
+    /// A non-UTF-8 name in a non-empty slot is `InvalidFooter` with this
+    /// reason, never a silent `None`.
     #[test]
     fn reject_non_utf8_compression_slot() {
         let mut data = build_v8a_footer(0, 0, 100, None);
@@ -627,18 +621,19 @@ mod tests {
         // hash(20) = 161 bytes from start.
         data[161] = 0xFF;
         data[162] = b'X'; // make sure end-detection doesn't stop at 0
+        let utf8_error = std::str::from_utf8(&data[161..163]).unwrap_err();
         let mut cursor = Cursor::new(data);
         let err = PakFooter::read_from(&mut cursor).unwrap_err();
         match err {
             PaksmithError::InvalidFooter {
                 fault: InvalidFooterFault::OtherUnpromoted { reason },
             } => {
-                assert!(
-                    reason.contains("non-UTF-8") || reason.contains("UTF-8"),
-                    "got: {reason}"
+                assert_eq!(
+                    reason,
+                    format!("compression slot 0 name is not valid UTF-8 ({utf8_error})")
                 );
             }
-            other => panic!("expected InvalidFooter::Other, got {other:?}"),
+            other => panic!("expected InvalidFooter::OtherUnpromoted, got {other:?}"),
         }
     }
 
