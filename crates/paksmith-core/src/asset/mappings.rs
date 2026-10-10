@@ -159,7 +159,8 @@ const MAX_USMAP_FLATTENED_TOTAL_ENTRIES: u64 = 4_194_304;
 const MAX_USMAP_TYPE_NODES: u64 = 4_194_304;
 
 /// Hard cap on the heap estimate one load is charged: its decompressed
-/// buffer, its name table's slots and names, and its enum tables. Refused as
+/// buffer, its name table's slots and names, its enum tables, and its schema
+/// table with its name copies. Refused as
 /// [`MappingsParseFault::HeapBudgetExceeded`]. Twice
 /// [`MAX_USMAP_DECOMPRESSED_SIZE`], so what is parsed from a file at that cap
 /// can take nearly as much again as its buffer.
@@ -923,19 +924,14 @@ impl Usmap {
                 limit: MAX_USMAP_SCHEMA_COUNT,
             }));
         }
-        let mut schemas: HashMap<String, ClassSchema> = HashMap::new();
-        schemas
-            .try_reserve(schema_count as usize)
-            .map_err(|source| {
-                mappings_alloc_failed(
-                    MappingsAllocationContext::SchemaTable,
-                    schema_count as usize,
-                    source,
-                )
-            })?;
+        let mut schemas: HashMap<String, ClassSchema> = reserve_map_charged(
+            schema_count as usize,
+            ledger,
+            MappingsAllocationContext::SchemaTable,
+        )?;
 
         for _ in 0..schema_count {
-            let name = copy_name(&read_name_arc(&mut cur, &names)?)?;
+            let name = copy_name(&read_name_arc(&mut cur, &names)?, ledger)?;
             let super_name = read_name_arc(&mut cur, &names)?;
             // UE's sentinel for "no superclass" is the literal name "None".
             // Empty strings are preserved as `Some("")` per the wire format —
@@ -944,7 +940,7 @@ impl Usmap {
             let super_type = if &*super_name == "None" {
                 None
             } else {
-                Some(copy_name(&super_name)?)
+                Some(copy_name(&super_name, ledger)?)
             };
 
             // `prop_count` is the wire-declared total property count
@@ -1048,7 +1044,7 @@ impl Usmap {
             }
 
             let _ = schemas.insert(
-                copy_name(&name)?,
+                copy_name(&name, ledger)?,
                 ClassSchema {
                     name,
                     super_type,
@@ -1077,7 +1073,7 @@ impl Usmap {
         // Cycle / depth-cap warnings emit here at parse time (once
         // per class) rather than on every `get_all_properties` call;
         // the wire fault is the same.
-        let flattened = Self::build_flattened_cache(&schemas)?;
+        let flattened = Self::build_flattened_cache(&schemas, ledger)?;
 
         Ok(Usmap {
             schemas,
@@ -1093,13 +1089,15 @@ impl Usmap {
     /// Returns `MappingsParseFault::FlattenedCacheTooLarge` if the
     /// accumulated entry count exceeds the cap, routes `try_reserve`
     /// failures via `MappingsAllocationContext::FlattenedCache`, and routes
-    /// each key-copy failure via `SchemaNameBytes`. The cap check fires BEFORE
+    /// each key-copy failure via `SchemaNameBytes`; a key copy past the heap
+    /// budget is `MappingsParseFault::HeapBudgetExceeded`. The cap check fires BEFORE
     /// `compute_flattened` allocates the per-class flat list — a
     /// cheap chain walk gives the per-class size up front, so the
     /// peak transient heap stays at the documented bound rather than
     /// 2× it (R3 security review on PR #444).
     fn build_flattened_cache(
         schemas: &HashMap<String, ClassSchema>,
+        ledger: &mut Ledger,
     ) -> crate::Result<HashMap<String, Vec<ResolvedProperty>>> {
         let mut flattened: HashMap<String, Vec<ResolvedProperty>> = HashMap::new();
         check_flattened_reserve(flattened.try_reserve(schemas.len()), schemas.len())?;
@@ -1111,7 +1109,7 @@ impl Usmap {
             let remaining = MAX_USMAP_FLATTENED_TOTAL_ENTRIES.saturating_sub(total);
             let flat = Self::compute_flattened(&graph, index, remaining)?;
             total = total.saturating_add(flat.len() as u64);
-            let _ = flattened.insert(copy_name(class_name)?, flat);
+            let _ = flattened.insert(copy_name(class_name, ledger)?, flat);
         }
         Ok(flattened)
     }
@@ -1260,7 +1258,8 @@ impl Usmap {
         schemas: HashMap<String, ClassSchema>,
         enums: HashMap<Arc<str>, HashMap<u64, Arc<str>>>,
     ) -> crate::Result<Self> {
-        let flattened = Self::build_flattened_cache(&schemas)?;
+        let flattened =
+            Self::build_flattened_cache(&schemas, &mut SchemaBudgets::DEFAULT.ledger())?;
         Ok(Usmap {
             schemas,
             enums,
@@ -1339,8 +1338,10 @@ fn check_flattened_reserve(
     check_mappings_reserve(reserve, requested, MappingsSeam::FlattenedCache)
 }
 
-/// `name` copied into a fallibly reserved `String`.
-fn copy_name(name: &str) -> crate::Result<String> {
+/// `name` copied into a fallibly reserved `String`, charged to the heap
+/// budget first.
+fn copy_name(name: &str, ledger: &mut Ledger) -> crate::Result<String> {
+    ledger.heap_bytes.charge(name.len() as u64)?;
     let mut copy = String::new();
     check_mappings_reserve(
         copy.try_reserve_exact(name.len()),
@@ -4024,6 +4025,7 @@ mod tests {
         }
         check!(u64, Arc<str>, MAX_USMAP_VALUES_PER_ENUM);
         check!(Arc<str>, HashMap<u64, Arc<str>>, MAX_USMAP_ENUM_COUNT);
+        check!(String, ClassSchema, MAX_USMAP_SCHEMA_COUNT);
     }
 
     /// A map is charged before it is reserved: past the heap budget it is
@@ -4059,10 +4061,10 @@ mod tests {
         buckets * (entry as u64 + 1) + 16
     }
 
-    /// Each enum cap refuses a count past it before that count's map is
+    /// Each table cap refuses a count past it before that count's map is
     /// charged, so the count is reported as itself with no budget to spare.
     #[test]
-    fn the_enum_caps_refuse_before_the_heap_budget() {
+    fn the_table_caps_refuse_before_the_heap_budget() {
         let mut too_many_enums = 0u32.to_le_bytes().to_vec(); // no names
         too_many_enums.extend_from_slice(&(MAX_USMAP_ENUM_COUNT + 1).to_le_bytes());
         assert_eq!(
@@ -4100,14 +4102,84 @@ mod tests {
                 limit: MAX_USMAP_VALUES_PER_ENUM
             }
         );
+
+        // No names or enums.
+        let mut too_many_schemas = [0u32.to_le_bytes(), 0u32.to_le_bytes()].concat();
+        too_many_schemas.extend_from_slice(&(MAX_USMAP_SCHEMA_COUNT + 1).to_le_bytes());
+        let empty_enum_map = table_of(8, size_of::<(Arc<str>, HashMap<u64, Arc<str>>)>());
+        assert_eq!(
+            schema_fault(&too_many_schemas, 0, heap(empty_enum_map)),
+            MappingsParseFault::SchemaCountTooLarge {
+                count: MAX_USMAP_SCHEMA_COUNT + 1,
+                limit: MAX_USMAP_SCHEMA_COUNT
+            }
+        );
+    }
+
+    /// A name copy is charged before it is reserved, so one past the heap
+    /// budget is refused by the budget while the allocator stands ready to
+    /// refuse it.
+    #[test]
+    fn a_name_copy_is_charged_before_it_is_reserved() {
+        let site = crate::seams::SeamSite::Mappings(MappingsSeam::SchemaNameBytes);
+        let _armed = crate::testing::oom::arm_at(site, 0);
+        assert!(matches!(
+            copy_name("Hero", &mut heap(3).ledger()),
+            Err(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::HeapBudgetExceeded {
+                    requested: 4,
+                    limit: 3
+                },
+            })
+        ));
+        assert!(matches!(
+            copy_name("Hero", &mut heap(4).ledger()),
+            Err(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::AllocationFailed { .. },
+            })
+        ));
+    }
+
+    /// A schema walk charges, in order: the schema table, the class name's and
+    /// super type's copies, and the map key's and cache key's copies.
+    #[test]
+    fn the_schema_walk_charges_in_read_order() {
+        // The class and super type names differ in length, so their copies'
+        // order shows. Map<Array<Int>, Set<Float>> has four inner type nodes,
+        // and its row three slots.
+        let data = single_schema_data(&[b"Hero", b"Super", b"x"], &[3], &[24, 8, 2, 25, 3]);
+        let arc = size_of::<[usize; 2]>() as u64;
+        let names = 3 * size_of::<Arc<str>>() as u64 + 3 * arc + 4 + 5 + 1;
+        let enum_map = names + table_of(8, size_of::<(Arc<str>, HashMap<u64, Arc<str>>)>());
+        let schema_map = enum_map + table_of(16 / 7 + 8, size_of::<(String, ClassSchema)>());
+        let copies = schema_map + 4 + 5;
+        let total = copies + 4 + 4;
+        for charged in [
+            names,
+            enum_map,
+            schema_map,
+            schema_map + 4,
+            copies,
+            copies + 4,
+            total,
+        ] {
+            assert_eq!(
+                schema_fault(&data, 0, heap(charged - 1)),
+                MappingsParseFault::HeapBudgetExceeded {
+                    requested: charged,
+                    limit: charged - 1
+                }
+            );
+        }
+        assert!(parse_schema(&data, 0, heap(total)).is_ok());
     }
 
     /// The name table charges its slots, then each name's `Arc`; the enum
-    /// table then its map, then each enum's value map; and that is the whole
-    /// estimate of a file with nothing else. A file without enums still pays
-    /// for its empty enum map.
+    /// table then its map, then each enum's value map; then the empty schema
+    /// table; and that is the whole estimate of a file with nothing else. A
+    /// file without enums still pays for its empty enum map.
     #[test]
-    fn the_name_and_enum_tables_charge_in_read_order() {
+    fn the_tables_charge_in_read_order() {
         let mut data = Vec::new();
         push_names(&mut data, &["E", "Va", "Vb"]);
         data.extend_from_slice(&1u32.to_le_bytes()); // one enum
@@ -4121,13 +4193,15 @@ mod tests {
         let names = slots + 3 * arc + 5;
         let enum_entry = size_of::<(Arc<str>, HashMap<u64, Arc<str>>)>();
         let enum_map = names + table_of(16 / 7 + 8, enum_entry);
-        let total = enum_map + table_of(2 * 16 / 7 + 8, size_of::<(u64, Arc<str>)>());
+        let values = enum_map + table_of(2 * 16 / 7 + 8, size_of::<(u64, Arc<str>)>());
+        let total = values + table_of(8, size_of::<(String, ClassSchema)>());
         for charged in [
             slots,
             slots + arc + 1,
             slots + 2 * arc + 3,
             names,
             enum_map,
+            values,
             total,
         ] {
             assert_eq!(
