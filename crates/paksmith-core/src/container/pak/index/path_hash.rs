@@ -343,6 +343,7 @@ impl PakIndex {
             key,
         )?;
         let mut idx = Cursor::new(&index_bytes[..]);
+        let bytes_left = |idx: &Cursor<&[u8]>| index_size.saturating_sub(idx.position());
 
         let mount_point = read_fstring(&mut idx)?;
         let file_count = idx.read_u32::<LittleEndian>()?;
@@ -409,15 +410,16 @@ impl PakIndex {
                     path: None,
                 },
             })?;
-        // Bound against index_size — the encoded blob lives inside the
-        // main index region. A malicious header claiming a multi-GB blob
+        // Bound against what is left of the main index region, which holds
+        // the encoded blob. A malicious header claiming a multi-GB blob
         // would otherwise drive an unbounded `vec![0u8; N]` allocation.
-        if u64::from(encoded_entries_size) > index_size {
+        let blob_limit = bytes_left(&idx);
+        if u64::from(encoded_entries_size) > blob_limit {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
                     field: WireField::V10EncodedEntriesSize,
                     value: u64::from(encoded_entries_size),
-                    limit: index_size,
+                    limit: blob_limit,
                     unit: BoundsUnit::Bytes,
                     path: None,
                 },
@@ -437,8 +439,10 @@ impl PakIndex {
         // fit the bit-packed format. Stored as regular v8b-shape FPakEntry
         // records.
         let non_encoded_count = idx.read_u32::<LittleEndian>()?;
-        // Non-encoded records carry no filename (the FDI names them).
-        let max_non_encoded = index_size / PakEntryHeader::min_wire_size(PakVersion::PathHashIndex);
+        // Non-encoded records carry no filename (the FDI names them), and
+        // must fit in what is left of the main index.
+        let max_non_encoded =
+            bytes_left(&idx) / PakEntryHeader::min_wire_size(PakVersion::PathHashIndex);
         if u64::from(non_encoded_count) > max_non_encoded {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
