@@ -772,13 +772,13 @@ impl Usmap {
             }));
         }
 
-        Self::parse_schema_data(&data, version, SchemaBudgets::DEFAULT)
+        Self::parse_schema_data(&data, version, &mut SchemaBudgets::DEFAULT.ledger())
     }
 
-    /// `budgets` caps totals across every schema row: expanded properties,
-    /// which past [`MAX_USMAP_FLATTENED_TOTAL_ENTRIES`] cannot build the
-    /// cache unless repeated schema names overwrite each other, and
-    /// type-tree nodes. Both refuse during the walk, before the rest is
+    /// `ledger` holds the totals every schema row is charged to: expanded
+    /// properties, which past [`MAX_USMAP_FLATTENED_TOTAL_ENTRIES`] cannot
+    /// build the cache unless repeated schema names overwrite each other,
+    /// and type-tree nodes. Both refuse during the walk, before the rest is
     /// allocated.
     #[allow(
         clippy::too_many_lines,
@@ -786,7 +786,7 @@ impl Usmap {
                   version-gated branches), schema table; splitting into helpers would shred \
                   the shared `cur`/`names`/`enums` flow that each section feeds into the next"
     )]
-    fn parse_schema_data(data: &[u8], version: u8, budgets: SchemaBudgets) -> crate::Result<Self> {
+    fn parse_schema_data(data: &[u8], version: u8, ledger: &mut Ledger) -> crate::Result<Self> {
         let mut cur = Cursor::new(data);
 
         // Name table.
@@ -920,8 +920,6 @@ impl Usmap {
                 )
             })?;
 
-        let mut expanded = Tally::expanded_properties(budgets.expanded_properties);
-        let mut type_nodes = Tally::type_nodes(budgets.type_nodes);
         for _ in 0..schema_count {
             let name = copy_name(&read_name_arc(&mut cur, &names)?)?;
             let super_name = read_name_arc(&mut cur, &names)?;
@@ -984,13 +982,13 @@ impl Usmap {
                         limit: MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA,
                     }));
                 }
-                expanded.charge(u64::from(array_size))?;
+                ledger.expanded_properties.charge(u64::from(array_size))?;
                 // `prop_name`: read as `Arc<str>` ONCE per row so the
                 // inner `array_size` expansion loop clones a refcount
                 // per slot instead of a heap-allocated name buffer
                 // (issue #397 sub-fix A; see `read_name_arc`).
                 let prop_name = read_name_arc(&mut cur, &names)?;
-                let prop_type = read_mapped_type(&mut cur, &names, 0, &mut type_nodes)?;
+                let prop_type = read_mapped_type(&mut cur, &names, 0, ledger)?;
                 properties
                     .try_reserve(usize::from(array_size))
                     .map_err(|source| {
@@ -1350,7 +1348,7 @@ fn read_mapped_type(
     cur: &mut Cursor<&[u8]>,
     names: &[Arc<str>],
     depth: usize,
-    nodes: &mut Tally,
+    ledger: &mut Ledger,
 ) -> crate::Result<MappedPropertyType> {
     if depth > MAX_USMAP_ARRAY_NESTING_DEPTH {
         return Err(fault(MappingsParseFault::ArrayNestingTooDeep {
@@ -1360,7 +1358,7 @@ fn read_mapped_type(
     }
     // The `Arc::new` container nodes below cannot be made fallible on
     // stable Rust; MAX_USMAP_TYPE_NODES bounds them.
-    nodes.charge(1)?;
+    ledger.type_nodes.charge(1)?;
     let type_byte = read_or_truncated(cur, |c| c.read_u8())?;
     // EPropertyType discriminants per the oracle's `pub enum EPropertyType`
     // at `unreal_asset_base/src/unversioned/properties/mod.rs`. Pinned
@@ -1379,7 +1377,7 @@ fn read_mapped_type(
             // wire like `08 08 08 ... <leaf>` is rejected before
             // the stack-overflow danger zone (security cap added
             // for #443; see MAX_USMAP_ARRAY_NESTING_DEPTH docstring).
-            let inner = read_mapped_type(cur, names, depth + 1, nodes)?;
+            let inner = read_mapped_type(cur, names, depth + 1, ledger)?;
             MappedPropertyType::Array {
                 inner: Arc::new(inner),
             }
@@ -1411,8 +1409,8 @@ fn read_mapped_type(
             // WITHOUT consuming them desyncs the schema table for every
             // subsequent property (there is no per-property size to
             // resync on). #639.
-            let key = read_mapped_type(cur, names, depth + 1, nodes)?;
-            let value = read_mapped_type(cur, names, depth + 1, nodes)?;
+            let key = read_mapped_type(cur, names, depth + 1, ledger)?;
+            let value = read_mapped_type(cur, names, depth + 1, ledger)?;
             MappedPropertyType::Map {
                 key: Arc::new(key),
                 value: Arc::new(value),
@@ -1421,7 +1419,7 @@ fn read_mapped_type(
         25 => {
             // SetProperty — single element inner type (same recursive
             // shape as ArrayProperty). #639.
-            let inner = read_mapped_type(cur, names, depth + 1, nodes)?;
+            let inner = read_mapped_type(cur, names, depth + 1, ledger)?;
             MappedPropertyType::Set {
                 inner: Arc::new(inner),
             }
@@ -1487,6 +1485,24 @@ impl SchemaBudgets {
         expanded_properties: MAX_USMAP_FLATTENED_TOTAL_ENTRIES,
         type_nodes: MAX_USMAP_TYPE_NODES,
     };
+
+    /// A ledger charging one load against these budgets.
+    fn ledger(self) -> Ledger {
+        Ledger {
+            expanded_properties: Tally::new(self.expanded_properties, |requested, limit| {
+                MappingsParseFault::ExpandedPropertiesTotalExceeded { requested, limit }
+            }),
+            type_nodes: Tally::new(self.type_nodes, |requested, limit| {
+                MappingsParseFault::TypeNodesExceeded { requested, limit }
+            }),
+        }
+    }
+}
+
+/// One load's running totals, one [`Tally`] per [`SchemaBudgets`] field.
+struct Ledger {
+    expanded_properties: Tally,
+    type_nodes: Tally,
 }
 
 /// A total summed across the schema table, refused once it passes `limit`.
@@ -1497,22 +1513,11 @@ struct Tally {
 }
 
 impl Tally {
-    fn expanded_properties(limit: u64) -> Self {
+    fn new(limit: u64, exceeded: fn(u64, u64) -> MappingsParseFault) -> Self {
         Self {
             used: 0,
             limit,
-            exceeded: |requested, limit| MappingsParseFault::ExpandedPropertiesTotalExceeded {
-                requested,
-                limit,
-            },
-        }
-    }
-
-    fn type_nodes(limit: u64) -> Self {
-        Self {
-            used: 0,
-            limit,
-            exceeded: |requested, limit| MappingsParseFault::TypeNodesExceeded { requested, limit },
+            exceeded,
         }
     }
 
@@ -2728,7 +2733,7 @@ mod tests {
         let is_too_deep = |bytes: &[u8], depth: usize| -> bool {
             let mut cur = Cursor::new(bytes);
             matches!(
-                read_mapped_type(&mut cur, &names, depth, &mut Tally::type_nodes(u64::MAX)),
+                read_mapped_type(&mut cur, &names, depth, &mut UNLIMITED.ledger()),
                 Err(crate::PaksmithError::MappingsParse {
                     fault: MappingsParseFault::ArrayNestingTooDeep { .. },
                 })
@@ -2783,12 +2788,22 @@ mod tests {
         minimal_usmap_none()[HEADER_LEN..].to_vec()
     }
 
+    /// Budgets that never refuse.
+    const UNLIMITED: SchemaBudgets = SchemaBudgets {
+        expanded_properties: u64::MAX,
+        type_nodes: u64::MAX,
+    };
+
+    fn parse_schema(data: &[u8], version: u8, budgets: SchemaBudgets) -> crate::Result<Usmap> {
+        Usmap::parse_schema_data(data, version, &mut budgets.ledger())
+    }
+
     fn schema_fault(
         data: &[u8],
         version: u8,
         budgets: SchemaBudgets,
     ) -> crate::error::MappingsParseFault {
-        match Usmap::parse_schema_data(data, version, budgets) {
+        match parse_schema(data, version, budgets) {
             Err(crate::PaksmithError::MappingsParse { fault }) => fault,
             other => panic!("expected a mappings fault, got {other:?}"),
         }
@@ -3112,7 +3127,7 @@ mod tests {
             &[1, 1, 1, 1, MAX_INHERITANCE_DEPTH, 2],
             || schema_fault(&data, 0, SchemaBudgets::DEFAULT),
         );
-        let usmap = Usmap::parse_schema_data(&data, 0, SchemaBudgets::DEFAULT).unwrap();
+        let usmap = parse_schema(&data, 0, SchemaBudgets::DEFAULT).unwrap();
         assert_eq!(usmap.get_all_properties("Hero").len(), 2);
     }
 
@@ -3398,7 +3413,7 @@ mod tests {
             ("minimal v4", 4, v4_schema_data()),
         ] {
             assert!(
-                Usmap::parse_schema_data(&data, version, SchemaBudgets::DEFAULT).is_ok(),
+                parse_schema(&data, version, SchemaBudgets::DEFAULT).is_ok(),
                 "{label}"
             );
             for cut in 0..data.len() {
@@ -3486,7 +3501,7 @@ mod tests {
             let _armed = refuse_each_reservation(MappingsSeam::SchemaNameBytes, copies, || {
                 schema_fault(&data, 0, SchemaBudgets::DEFAULT)
             });
-            let usmap = Usmap::parse_schema_data(&data, 0, SchemaBudgets::DEFAULT).unwrap();
+            let usmap = parse_schema(&data, 0, SchemaBudgets::DEFAULT).unwrap();
             assert_eq!(usmap.schemas["Hero"].super_type.as_deref(), super_type);
             assert!(usmap.flattened.contains_key("Hero"));
         }
@@ -3497,7 +3512,7 @@ mod tests {
     #[test]
     fn an_invalid_utf8_name_reads_as_empty() {
         let data = single_schema_data(&[b"\xFF", b"None"], &[], &[]);
-        let usmap = Usmap::parse_schema_data(&data, 0, SchemaBudgets::DEFAULT).unwrap();
+        let usmap = parse_schema(&data, 0, SchemaBudgets::DEFAULT).unwrap();
         assert_eq!(usmap.schemas[""].super_type, None);
         assert!(logs_contain("not valid UTF-8"));
     }
@@ -3676,10 +3691,10 @@ mod tests {
         }
         let budgets = |expanded_properties| SchemaBudgets {
             expanded_properties,
-            type_nodes: u64::MAX,
+            ..UNLIMITED
         };
 
-        assert!(Usmap::parse_schema_data(&data, 0, budgets(6)).is_ok());
+        assert!(parse_schema(&data, 0, budgets(6)).is_ok());
         assert_eq!(
             schema_fault(&data, 0, budgets(3)),
             crate::error::MappingsParseFault::ExpandedPropertiesTotalExceeded {
@@ -3709,7 +3724,7 @@ mod tests {
         }
         let budgets = SchemaBudgets {
             expanded_properties: 3,
-            type_nodes: u64::MAX,
+            ..UNLIMITED
         };
 
         assert_eq!(
@@ -3734,11 +3749,11 @@ mod tests {
             push_map_row_schema(&mut data, class, 2, 3, 1);
         }
         let budgets = |type_nodes| SchemaBudgets {
-            expanded_properties: u64::MAX,
             type_nodes,
+            ..UNLIMITED
         };
 
-        assert!(Usmap::parse_schema_data(&data, 0, budgets(10)).is_ok());
+        assert!(parse_schema(&data, 0, budgets(10)).is_ok());
         assert_eq!(
             schema_fault(&data, 0, budgets(7)),
             crate::error::MappingsParseFault::TypeNodesExceeded {
@@ -3871,7 +3886,7 @@ mod tests {
         data.extend_from_slice(&0u32.to_le_bytes()); // enums
         data.extend_from_slice(&u32::try_from(classes.len()).unwrap().to_le_bytes());
         data.extend_from_slice(&schemas);
-        let usmap = Usmap::parse_schema_data(&data, 0, SchemaBudgets::DEFAULT).unwrap();
+        let usmap = parse_schema(&data, 0, SchemaBudgets::DEFAULT).unwrap();
         let got: Vec<(u16, String)> = usmap
             .get_all_properties("Child")
             .iter()
