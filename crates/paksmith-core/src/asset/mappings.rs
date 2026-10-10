@@ -66,7 +66,19 @@ pub const MAX_USMAP_COMPRESSED_SIZE: u32 = 64 * 1024 * 1024;
 
 /// Hard cap on the wire-claimed `decompressed_size`, and so on the output
 /// buffer reserved for it: a header claiming `u32::MAX` would otherwise
-/// reserve 4 GiB before the decoder runs.
+/// reserve 4 GiB before the decoder runs. The buffer and everything parsed
+/// from it count against one heap estimate per load, capped at 512 MiB.
+//
+// The buffer is the first charge against MAX_USMAP_HEAP_BYTES, which bounds
+// it and everything parsed from it together; an uncompressed file borrows
+// its payload and can spend the whole budget on tables. One load's worst
+// case is that budget, plus what its estimate leaves out (allocator
+// rounding, a Vec's minimum capacity, an Arc's alignment padding and a
+// growing Vec's old buffer, estimated at under 40 MiB on a 64-bit target
+// with an allocator of 16-byte size classes), plus the caller's input:
+// from_path reads up to Usmap::MAX_FILE_SIZE bytes into a buffer whose
+// growth can reserve twice that. There that is about 810 MiB in all. A new
+// section charges the budget rather than taking a cap sized alone.
 pub const MAX_USMAP_DECOMPRESSED_SIZE: u32 = 256 * 1024 * 1024;
 
 /// Hard cap on the inheritance chain length when walking
@@ -137,10 +149,10 @@ const MAX_USMAP_NAME_COUNT: u32 = 131_072;
 /// schema-table (`MAX_USMAP_SCHEMA_COUNT = 4_096`) caps permits a
 /// cache of ~17 G entries (~1 TB heap) against valid per-class wire
 /// fixtures. Real-world `.usmap` files top out around ~30 k cache
-/// entries; 4_194_304 (4 Mi) entries × ~64 bytes/`ResolvedProperty`
-/// caps the cache at ~256 MiB worst case — matching the
-/// `MAX_USMAP_DECOMPRESSED_SIZE` wire-input cap and leaving wide
-/// headroom for legitimate `.usmap` schemas.
+/// entries; 4_194_304 (4 Mi) entries of 56 bytes per `ResolvedProperty`
+/// cap the cache's lists at 224 MiB, charged to `MAX_USMAP_HEAP_BYTES` with
+/// the rest of the load, and leave wide headroom for legitimate `.usmap`
+/// schemas.
 ///
 /// Surfaces as [`MappingsParseFault::FlattenedCacheTooLarge`] when
 /// exceeded during `Usmap::from_bytes`'s cache build. Found by
@@ -159,12 +171,13 @@ const MAX_USMAP_FLATTENED_TOTAL_ENTRIES: u64 = 4_194_304;
 const MAX_USMAP_TYPE_NODES: u64 = 4_194_304;
 
 /// Hard cap on the heap estimate one load is charged: its decompressed
-/// buffer, its name table's slots and names, its enum tables, its schema
-/// table with its name copies, property slots and type nodes, and its
-/// flattened cache. Refused as
+/// buffer and every table, name copy, property slot and type node parsed
+/// from it, each charged before it is allocated and refused as
 /// [`MappingsParseFault::HeapBudgetExceeded`]. Twice
 /// [`MAX_USMAP_DECOMPRESSED_SIZE`], so what is parsed from a file at that cap
-/// can take nearly as much again as its buffer.
+/// can take nearly as much again as its buffer. Not charged: the decoders'
+/// working memory, freed before parsing; the caller's input; and
+/// constant-size scratch such as the inheritance walk's chain.
 ///
 /// Exposed via [`max_usmap_heap_bytes`].
 const MAX_USMAP_HEAP_BYTES: u64 = 536_870_912;
