@@ -1,6 +1,6 @@
 [package]
 name = "paksmith-gui"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -54,7 +54,7 @@ memory-stats = { version = "1.2", features = ["always_use_statm"] }
 # iced 0.14 window handle; Linux: blocked by muda's GTK backend).
 muda = "0.19.3"
 # Phase 6: core library for container I/O and asset parsing.
-paksmith-core = { path = "../paksmith-core", version = "0.1" }
+paksmith-core = { path = "../paksmith-core", version = "0.2.0" }
 # Phase 7d: audio-output backend for the audio player. `default-features = false`
 # drops rodio's decoder stack — paksmith-core decodes to i16 PCM, rodio only
 # plays raw samples via SamplesBuffer. See workspace Cargo.toml for the feature
@@ -91,7 +91,7 @@ tokio = { workspace = true, features = ["test-util"] }
 # Packages via paksmith_core::testing::uasset. This dev-dependency enables it
 # only when gui's test targets are built; other crates can still turn it on
 # in wider builds (see paksmith-core's Cargo.toml).
-paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
+paksmith-core = { path = "../paksmith-core", version = "0.2.0", features = ["__test_utils"] }
 tempfile.workspace = true
 
 [lints]
