@@ -5409,6 +5409,17 @@ pub enum MappingsParseFault {
         limit: u64,
     },
 
+    /// The heap estimate one load is charged would pass the cap. Each
+    /// charge comes before the allocation it pays for, so that allocation
+    /// is never made.
+    #[error("usmap heap estimate {requested} bytes exceeds cap {limit}")]
+    HeapBudgetExceeded {
+        /// The running estimate that would have been reached, in bytes.
+        requested: u64,
+        /// The cap the estimate exceeded, in bytes.
+        limit: u64,
+    },
+
     /// Wire-claimed `schema_count` exceeds the structural cap. Each
     /// schema costs a `String` key + `ClassSchema` struct (~110 bytes)
     /// in `Usmap::schemas`; without this cap the `MAX_USMAP_DECOMPRESSED_SIZE`
@@ -6787,6 +6798,20 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "usmap deserialization failed: usmap type-node total 4194305 exceeds cap 4194304"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_heap_budget() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::HeapBudgetExceeded {
+                requested: 536_870_913,
+                limit: 536_870_912,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap heap estimate 536870913 bytes exceeds cap 536870912"
         );
     }
 
