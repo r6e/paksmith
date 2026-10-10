@@ -157,6 +157,14 @@ const MAX_USMAP_FLATTENED_TOTAL_ENTRIES: u64 = 4_194_304;
 /// Exposed via [`max_usmap_type_nodes`].
 const MAX_USMAP_TYPE_NODES: u64 = 4_194_304;
 
+/// Hard cap on the heap estimate one load is charged: its decompressed
+/// buffer. Refused as [`MappingsParseFault::HeapBudgetExceeded`]. Twice
+/// [`MAX_USMAP_DECOMPRESSED_SIZE`], so what is parsed from a file at that cap
+/// can take nearly as much again as its buffer.
+///
+/// Exposed via [`max_usmap_heap_bytes`].
+const MAX_USMAP_HEAP_BYTES: u64 = 536_870_912;
+
 /// Hard cap on the wire-claimed `cv_count` in the .usmap versioning
 /// block. Real-world `CustomVersionContainer`s top out in the low
 /// tens (Fortnite ships `cv_count = 3`); 1_024 leaves wide headroom.
@@ -237,6 +245,14 @@ pub fn max_usmap_flattened_total_entries() -> u64 {
 #[must_use]
 pub fn max_usmap_type_nodes() -> u64 {
     MAX_USMAP_TYPE_NODES
+}
+
+/// Test-only accessor for `MAX_USMAP_HEAP_BYTES`. Same rationale as
+/// [`max_usmap_enum_count`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_heap_bytes() -> u64 {
+    MAX_USMAP_HEAP_BYTES
 }
 
 /// Test-only accessor for `MAX_USMAP_NAME_COUNT`. Same rationale as
@@ -624,16 +640,22 @@ impl Usmap {
     ///
     /// Returns [`PaksmithError::MappingsParse`] on any wire-format fault:
     /// invalid magic, unsupported version or compression method, size
-    /// caps exceeded, decompression mismatch, or truncated data; and on a
-    /// refused reservation, as [`MappingsParseFault::AllocationFailed`]
-    /// with its [`MappingsAllocationContext`].
+    /// caps or the heap budget exceeded, decompression mismatch, or
+    /// truncated data; and on a refused reservation, as
+    /// [`MappingsParseFault::AllocationFailed`] with its
+    /// [`MappingsAllocationContext`].
+    pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
+        Self::from_bytes_with(bytes, SchemaBudgets::DEFAULT)
+    }
+
+    /// [`Self::from_bytes`] against `budgets`.
     #[allow(
         clippy::too_many_lines,
         reason = "single linear wire-format read: header + versioning block + three compression branches; \
                   splitting into helpers would shred the byte-stream flow and the cap-rejection logic that \
                   must run inline against the raw u32 values before any allocation"
     )]
-    pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
+    fn from_bytes_with(bytes: &[u8], budgets: SchemaBudgets) -> crate::Result<Self> {
         let mut cur = Cursor::new(bytes);
         let magic = read_or_truncated(&mut cur, |c| c.read_u16::<LE>())?;
         if magic != USMAP_MAGIC {
@@ -726,6 +748,7 @@ impl Usmap {
         // it, and a one-shot zstd decode would have no room for it.
         let output_len = decompressed_size_usz + 1;
 
+        let mut ledger = budgets.ledger();
         let data: Cow<'_, [u8]> = match compression_byte {
             x if x == UsmapCompression::None as u8 => Cow::Borrowed(payload),
             x if x == UsmapCompression::Brotli as u8 => {
@@ -738,6 +761,7 @@ impl Usmap {
                     payload,
                     payload_offset,
                     output_len,
+                    &mut ledger,
                     undecodable,
                 )?)
             }
@@ -748,7 +772,7 @@ impl Usmap {
                 if !is_zstd_v1_stream(payload) {
                     return Err(undecodable());
                 }
-                let mut out = reserve_decompressed(output_len)?;
+                let mut out = reserve_decompressed(output_len, &mut ledger)?;
                 let _ = zstd_context(DCtx::try_create())?
                     .decompress(&mut out, payload)
                     .map_err(|_| undecodable())?;
@@ -772,14 +796,13 @@ impl Usmap {
             }));
         }
 
-        Self::parse_schema_data(&data, version, &mut SchemaBudgets::DEFAULT.ledger())
+        Self::parse_schema_data(&data, version, &mut ledger)
     }
 
-    /// `ledger` holds the totals every schema row is charged to: expanded
-    /// properties, which past [`MAX_USMAP_FLATTENED_TOTAL_ENTRIES`] cannot
-    /// build the cache unless repeated schema names overwrite each other,
-    /// and type-tree nodes. Both refuse during the walk, before the rest is
-    /// allocated.
+    /// `ledger` holds the load's running totals, each refused as soon as it
+    /// passes its budget. Expanded properties summed past
+    /// [`MAX_USMAP_FLATTENED_TOTAL_ENTRIES`] cannot build the cache unless
+    /// repeated schema names overwrite each other.
     #[allow(
         clippy::too_many_lines,
         reason = "single linear wire-format read: name table, enum table (with v2/v3/v4 \
@@ -1473,17 +1496,20 @@ impl<'a> SchemaGraph<'a> {
     }
 }
 
-/// Caps summed across a whole schema table rather than per schema.
+/// Caps on totals summed across one load's schema data and what is parsed
+/// from it, rather than per schema.
 #[derive(Clone, Copy)]
 struct SchemaBudgets {
     expanded_properties: u64,
     type_nodes: u64,
+    heap_bytes: u64,
 }
 
 impl SchemaBudgets {
     const DEFAULT: Self = Self {
         expanded_properties: MAX_USMAP_FLATTENED_TOTAL_ENTRIES,
         type_nodes: MAX_USMAP_TYPE_NODES,
+        heap_bytes: MAX_USMAP_HEAP_BYTES,
     };
 
     /// A ledger charging one load against these budgets.
@@ -1495,6 +1521,9 @@ impl SchemaBudgets {
             type_nodes: Tally::new(self.type_nodes, |requested, limit| {
                 MappingsParseFault::TypeNodesExceeded { requested, limit }
             }),
+            heap_bytes: Tally::new(self.heap_bytes, |requested, limit| {
+                MappingsParseFault::HeapBudgetExceeded { requested, limit }
+            }),
         }
     }
 }
@@ -1503,9 +1532,10 @@ impl SchemaBudgets {
 struct Ledger {
     expanded_properties: Tally,
     type_nodes: Tally,
+    heap_bytes: Tally,
 }
 
-/// A total summed across the schema table, refused once it passes `limit`.
+/// A total summed across one load, refused once it passes `limit`.
 struct Tally {
     used: u64,
     limit: u64,
@@ -1522,7 +1552,7 @@ impl Tally {
     }
 
     fn charge(&mut self, n: u64) -> crate::Result<()> {
-        self.used += n;
+        self.used = self.used.saturating_add(n);
         if self.used > self.limit {
             return Err(fault((self.exceeded)(self.used, self.limit)));
         }
@@ -1541,9 +1571,10 @@ fn decode_brotli(
     payload: &[u8],
     payload_offset: usize,
     limit: usize,
+    ledger: &mut Ledger,
     undecodable: impl Fn() -> PaksmithError,
 ) -> crate::Result<Vec<u8>> {
-    let mut out = reserve_decompressed(limit)?;
+    let mut out = reserve_decompressed(limit, ledger)?;
     let mut state = strict_brotli_decoder()?;
     let mut chunk = [0u8; BROTLI_OUTPUT_CHUNK];
     let mut available_in = payload.len();
@@ -1671,7 +1702,8 @@ fn strict_brotli_decoder() -> crate::Result<DecoderState> {
     Ok(state)
 }
 
-fn reserve_decompressed(len: usize) -> crate::Result<Vec<u8>> {
+fn reserve_decompressed(len: usize, ledger: &mut Ledger) -> crate::Result<Vec<u8>> {
+    ledger.heap_bytes.charge(len as u64)?;
     let mut out = Vec::new();
     out.try_reserve_exact(len).map_err(|source| {
         mappings_alloc_failed(
@@ -2792,10 +2824,26 @@ mod tests {
     const UNLIMITED: SchemaBudgets = SchemaBudgets {
         expanded_properties: u64::MAX,
         type_nodes: u64::MAX,
+        heap_bytes: u64::MAX,
     };
+
+    /// [`UNLIMITED`] but for a heap budget of `heap_bytes`.
+    fn heap(heap_bytes: u64) -> SchemaBudgets {
+        SchemaBudgets {
+            heap_bytes,
+            ..UNLIMITED
+        }
+    }
 
     fn parse_schema(data: &[u8], version: u8, budgets: SchemaBudgets) -> crate::Result<Usmap> {
         Usmap::parse_schema_data(data, version, &mut budgets.ledger())
+    }
+
+    fn fault_of(parsed: crate::Result<Usmap>) -> crate::error::MappingsParseFault {
+        match parsed {
+            Err(crate::PaksmithError::MappingsParse { fault }) => fault,
+            other => panic!("expected a mappings fault, got {other:?}"),
+        }
     }
 
     fn schema_fault(
@@ -2803,10 +2851,7 @@ mod tests {
         version: u8,
         budgets: SchemaBudgets,
     ) -> crate::error::MappingsParseFault {
-        match parse_schema(data, version, budgets) {
-            Err(crate::PaksmithError::MappingsParse { fault }) => fault,
-            other => panic!("expected a mappings fault, got {other:?}"),
-        }
+        fault_of(parse_schema(data, version, budgets))
     }
 
     /// The checked-in v4 fixture's schema data, after its header: the v0
@@ -2824,10 +2869,11 @@ mod tests {
     }
 
     fn parse_fault(bytes: &[u8]) -> crate::error::MappingsParseFault {
-        match Usmap::from_bytes(bytes) {
-            Err(crate::PaksmithError::MappingsParse { fault }) => fault,
-            other => panic!("expected a mappings fault, got {other:?}"),
-        }
+        fault_of(Usmap::from_bytes(bytes))
+    }
+
+    fn parse_fault_with(bytes: &[u8], budgets: SchemaBudgets) -> crate::error::MappingsParseFault {
+        fault_of(Usmap::from_bytes_with(bytes, budgets))
     }
 
     fn brotli_compress(payload: &[u8], large_window: bool, lgwin: i32) -> Vec<u8> {
@@ -2893,12 +2939,43 @@ mod tests {
     #[test]
     fn a_refused_output_buffer_is_an_allocation_fault() {
         assert!(matches!(
-            reserve_decompressed(usize::MAX),
+            reserve_decompressed(usize::MAX, &mut UNLIMITED.ledger()),
             Err(crate::PaksmithError::MappingsParse {
                 fault: crate::error::MappingsParseFault::AllocationFailed {
                     context: MappingsAllocationContext::DecompressedDataBytes,
                     requested: usize::MAX,
                     ..
+                },
+            })
+        ));
+    }
+
+    /// The output buffer is charged before it is reserved, so one past the
+    /// heap budget is refused by the budget, not the allocator.
+    #[test]
+    fn the_output_buffer_is_charged_before_it_is_reserved() {
+        assert!(matches!(
+            reserve_decompressed(usize::MAX, &mut heap(0).ledger()),
+            Err(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::HeapBudgetExceeded { requested, limit: 0 },
+            }) if requested == u64::try_from(usize::MAX).unwrap()
+        ));
+    }
+
+    /// A tally's total saturates, so a charge past `u64::MAX` is refused
+    /// rather than wrapping under the limit.
+    #[test]
+    fn a_tally_saturates_instead_of_wrapping() {
+        let mut tally = Tally::new(10, |requested, limit| {
+            MappingsParseFault::HeapBudgetExceeded { requested, limit }
+        });
+        tally.charge(5).unwrap();
+        assert!(matches!(
+            tally.charge(u64::MAX - 2),
+            Err(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::HeapBudgetExceeded {
+                    requested: u64::MAX,
+                    limit: 10
                 },
             })
         ));
@@ -3224,7 +3301,13 @@ mod tests {
         let stream = brotli_compress(&payload, true, 24);
         let refused = || fault(MappingsParseFault::Truncated { offset: 0 });
         assert!(matches!(
-            decode_brotli(&stream, 0, payload.len() + 1, refused),
+            decode_brotli(
+                &stream,
+                0,
+                payload.len() + 1,
+                &mut UNLIMITED.ledger(),
+                refused
+            ),
             Err(PaksmithError::MappingsParse {
                 fault: MappingsParseFault::Truncated { offset: 0 },
             })
@@ -3828,6 +3911,41 @@ mod tests {
     #[test]
     fn max_usmap_type_nodes_accessor_returns_expected_value() {
         assert_eq!(max_usmap_type_nodes(), 4_194_304);
+    }
+
+    #[test]
+    fn max_usmap_heap_bytes_accessor_returns_expected_value() {
+        assert_eq!(max_usmap_heap_bytes(), 536_870_912);
+        assert_eq!(
+            max_usmap_heap_bytes(),
+            2 * u64::from(MAX_USMAP_DECOMPRESSED_SIZE)
+        );
+        assert_eq!(SchemaBudgets::DEFAULT.heap_bytes, max_usmap_heap_bytes());
+    }
+
+    /// The decompressed buffer is the load's first heap charge. A borrowed
+    /// payload costs nothing.
+    #[test]
+    fn the_decompressed_buffer_is_the_first_heap_charge() {
+        let payload = schema_payload();
+        let n = payload.len();
+        let buffer = u64::try_from(n + 1).unwrap();
+        for (method, stored) in [
+            (UsmapCompression::Brotli, FROZEN_BROTLI),
+            (UsmapCompression::ZStandard, FROZEN_ZSTD),
+        ] {
+            let bytes = usmap_with(method, stored, n);
+            assert_eq!(
+                parse_fault_with(&bytes, heap(buffer - 1)),
+                MappingsParseFault::HeapBudgetExceeded {
+                    requested: buffer,
+                    limit: buffer - 1
+                }
+            );
+            assert!(Usmap::from_bytes_with(&bytes, heap(buffer)).is_ok());
+        }
+        let bytes = usmap_with(UsmapCompression::None, &payload, n);
+        assert!(Usmap::from_bytes_with(&bytes, heap(0)).is_ok());
     }
 
     /// Entries sharing an absolute index, which only a malformed `.usmap`
