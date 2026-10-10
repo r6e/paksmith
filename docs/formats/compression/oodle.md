@@ -26,7 +26,7 @@ bytes are an Oodle stream rather than a zlib stream.
 
 **Document status: complete (publicly-documented surface).** Wire
 format documented in full for the on-pak detection layer (the
-method-ID byte in V3-V7 archives, the `"Oodle"` FName slot in V8+
+`u32` method ID in V3-V7 archives, the `"Oodle"` FName slot in V8+
 compression-method tables) and the public-knowledge stream-header
 encoder-family dispatch byte. The Oodle *internal* stream layout
 beyond the first header byte is RAD/Epic-proprietary and is
@@ -67,20 +67,19 @@ Oodle stream. Two distinct wire layers:
 In V3-V7 archives, each entry's compression method is encoded
 directly as a `u32` ID in the entry header. The Oodle ID is `4`.
 
-In V8+ archives, the pak footer carries a 5-slot compression-method
-table where each slot is a fixed 32-byte FName-as-padded-string. The
-slot's name `"Oodle"` (5 bytes, null-padded to 32) identifies the
-Oodle codec; the entry header carries a `u8` slot index referencing
-that table.
+In V8+ archives, each entry carries an index into a table of fixed
+32-byte FName-as-padded-string slots in the pak footer.
+[`pak.md`](../container/pak.md) gives the slot count, index width and
+index resolution per version (§*V8+ footer additions*, §*Entry header
+(flat-index, v3–v9)*, §*Entry header (encoded form, v10+)*). A slot
+named `"Oodle"` (5 bytes, null-padded to 32) identifies the Oodle
+codec.
 
-| Archive era | Field in entry header | Wire shape | Oodle marker |
-|-------------|-----------------------|------------|--------------|
-| V3-V7 | `compression_method: u32` LE | 4 bytes | value `4` (LE bytes `04 00 00 00`) |
-| V8+ | `compression_method_index: u8` | 1 byte | slot index pointing at the footer's `"Oodle"` slot |
-| V8+ footer | `compression_methods: [u8; 32 × 5]` | 160 bytes (5 × 32-byte slots) | slot bytes `4F 6F 64 6C 65 00...00` (`"Oodle"` + 27 zero-pad) |
-
-The 32-byte slot is wire-fixed; longer codec names (none currently
-exceed 31 chars) would overflow.
+| Archive era | Field | Oodle marker |
+|-------------|-------|--------------|
+| V3-V7 | entry header `compression_method: u32` LE | value `4` (LE bytes `04 00 00 00`) |
+| V8+ | entry header compression index | an index that resolves to the footer's `"Oodle"` slot |
+| V8+ | footer `compression_methods`, 32-byte slots | slot bytes `4F 6F 64 6C 65 00...00` (`"Oodle"` + 27 zero-pad) |
 
 ### Per-block stream layout (proprietary internals)
 
@@ -129,8 +128,7 @@ decoder (or, if Oodle is unsupported, surface a typed
 
 ### Worked example — V8+ compression-method-table slot (32 bytes)
 
-A V8+ pak footer carries 5 × 32-byte slots; the slot holding
-`"Oodle"` looks like:
+The footer slot holding `"Oodle"` looks like:
 
 ```
 Offset (within slot)  Bytes (LE)                                       Field
@@ -141,11 +139,8 @@ Offset (within slot)  Bytes (LE)                                       Field
 +32                                                                     (end of slot)
 ```
 
-An entry header's `compression_method_index: u8` set to the slot's
-index (e.g. `01` if `"Oodle"` is the second slot) dispatches that
-entry through the Oodle decoder. Slot 0 is conventionally `"None"`
-(32 zero bytes); slots 1-4 carry whatever codec names the pak was
-written with.
+An entry whose compression index resolves to this slot dispatches
+through the Oodle decoder. An unused slot is 32 zero bytes.
 
 ## Variants
 
@@ -188,12 +183,8 @@ shipping-cooked-game blocker on paksmith adoption today).
 - **V3-V7 `compression_method`:** `u32` field. The full `0..=u32::MAX`
   range is wire-valid; only well-known IDs (`0` = None, `1` = zlib,
   `4` = Oodle, etc.) have defined semantics.
-- **V8+ compression-method table:** fixed `[u8; 32] × 5` (160 bytes
-  total). Codec names longer than 31 bytes (after null-termination)
-  cannot fit and are wire-format-invalid.
-- **V8+ `compression_method_index`:** `u8`; values `0..=4` index the
-  5-slot table. Values `5..=255` are wire-valid but reference an
-  unallocated slot and must be rejected.
+- **V8+ compression-method table:** fixed 32-byte slots, as many as
+  [`pak.md`](../container/pak.md) gives per version.
 - **Per-block Oodle stream header:** 2 bytes; high nibble selects
   the encoder family per the proprietary spec.
 
@@ -214,9 +205,12 @@ When SDK integration lands, an Oodle decompressor MUST:
 - **Pass an explicit `out_size` bound** to `OodleLZ_Decompress`;
   the library enforces this as a defense-in-depth layer on top of
   the pak-block cap.
-- **Reject out-of-range `compression_method_index`** values
-  (V8+, > 4) at parse time rather than treating them as Oodle by
-  default.
+
+Independent of the SDK, a pak parser MUST NOT read a V8+ entry as Oodle
+unless its compression index resolves to a slot named `"Oodle"`, and
+MUST report a nonzero index that reaches no codec as an error, not as
+uncompressed bytes. [`pak.md`](../container/pak.md) §*V8+ footer
+additions* covers how an index resolves.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
@@ -245,10 +239,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
   for the per-block stream layout itself.
 - **Known divergences:**
   - **Decompression unimplemented.** CUE4Parse offers a `dlopen`-style
-    runtime SDK load; paksmith currently rejects. Both projects
-    agree on the *detection* — the FName slot reads as `"Oodle"`,
-    the method byte reads as `4` — only the post-detection action
-    differs.
+    runtime SDK load; paksmith currently rejects.
 
 ## Paksmith implementation
 
