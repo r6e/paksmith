@@ -17,23 +17,27 @@ Tools (now part of Epic Games Tools) covering several encoders:
 - **LZNA** — older, replaced by Kraken in newer SDKs.
 - **BitKnit** — short-block variant.
 
-On disk in a UE pak, Oodle compression is signaled by `CompressionMethod::Oodle`
-(method ID `4` in v3-v7 archives; FName `"Oodle"` in the v8+
-compression-method table). The per-entry compression-blocks framing
-(see [`pak-block-framing.md`](pak-block-framing.md)) is identical to
+On disk in a UE pak, Oodle compression is signaled by the FName
+`"Oodle"` in the v8+ compression-method table, or in v3-v7 archives
+by a value whose codec depends on the game, such as the legacy
+`COMPRESS_Custom` flag `4` (see Wire layout). The per-entry
+compression-blocks framing (see
+[`pak-block-framing.md`](pak-block-framing.md)) is identical to
 zlib-compressed entries — what differs is the per-block compressed
 bytes are an Oodle stream rather than a zlib stream.
 
 **Document status: complete (publicly-documented surface).** Wire
 format documented in full for the on-pak detection layer (the
-`u32` method ID in V3-V7 archives, the `"Oodle"` FName slot in V8+
+`u32` compression flags in V3-V7 archives, the `"Oodle"` FName slot in V8+
 compression-method tables) and the public-knowledge stream-header
 encoder-family dispatch byte. The Oodle *internal* stream layout
 beyond the first header byte is RAD/Epic-proprietary and is
 intentionally NOT documented here (see Wire layout §*Per-block
 stream layout* for the rationale). A parser implementer can
-detect Oodle-compressed entries from this doc; actually decoding
-the per-block payload requires the licensed Oodle SDK.
+detect Oodle-compressed V8+ entries from this doc; V3-V7 entries also
+take per-game knowledge (see Wire layout §*Detection layer*).
+Actually decoding the per-block payload requires the licensed Oodle
+SDK.
 
 **Paksmith parser status: `partial`.** Paksmith detects Oodle
 archives at parse time (the entry's `CompressionMethod` resolves to
@@ -49,7 +53,7 @@ under Variants.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| Wire version 4+ (UE 4.16+, sporadically; UE 4.21+ commonly; UE 5.x universally) | Oodle introduced as `CompressionMethod::Oodle` (raw method ID 4 in v3-v7; FName `"Oodle"` in v8+). | `FabianFG/CUE4Parse/CUE4Parse/Compression/OodleHelper.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
+| Wire version 4+ (UE 4.16+, sporadically; UE 4.21+ commonly; UE 5.x universally) | Oodle introduced (FName `"Oodle"` in v8+; in v3-v7, a value whose codec depends on the game, such as the `COMPRESS_Custom` flag `4`). | v8+: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakInfo.cs@ecc4878950336126f125af0747190edf474b2a21`[^4]; v3-v7: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakEntry.cs@ecc4878950336126f125af0747190edf474b2a21`[^2] |
 | Oodle SDK 2.6 → 2.9 | Stream-format-compatible across SDK versions; a decoder built against SDK 2.6 reads streams compressed with SDK 2.9 and vice versa within the published-compatibility matrix. Encoder choices (Kraken vs Mermaid vs Selkie) are encoded in the stream header byte. | RAD Game Tools / Epic Games Tools "Oodle Data" documentation (no public URL — distributed with the licensed SDK). |
 
 Within paksmith's accepted UE range, Oodle stream format itself does
@@ -64,20 +68,28 @@ Oodle stream. Two distinct wire layers:
 
 ### Detection layer — pak entry dispatch
 
-In V3-V7 archives, each entry's compression method is encoded
-directly as a `u32` ID in the entry header. The Oodle ID is `4`.
+In V3-V7 archives, each entry header holds a `u32` of UE's legacy
+compression flags[^2]. `0` (`COMPRESS_None`) means no compression.
+The codec flags are `1` (`COMPRESS_ZLIB`), `2` (`COMPRESS_GZIP`) and
+`4` (`COMPRESS_Custom`, compression through callbacks the game
+supplies). The enum's bits from `0x10` up are option and purpose
+flags, such as `COMPRESS_BiasSpeed` (`0x20`) and
+`COMPRESS_ForPackaging` (`0x100`), and name no codec. Oodle has no
+flag of its own, so naming the codec behind `4`, or behind the other
+values some games write, takes per-game knowledge. Readers map these
+values differently (see Known divergences).
 
 In V8+ archives, each entry carries an index into a table of fixed
 32-byte FName-as-padded-string slots in the pak footer.
 [`pak.md`](../container/pak.md) gives the slot count, index width and
 index resolution per version (§*V8+ footer additions*, §*Entry header
-(flat-index, v3–v9)*, §*Entry header (encoded form, v10+)*). A slot
+(inline form)*, §*Entry header (encoded form, v10+)*). A slot
 named `"Oodle"` (5 bytes, null-padded to 32) identifies the Oodle
 codec.
 
 | Archive era | Field | Oodle marker |
 |-------------|-------|--------------|
-| V3-V7 | entry header `compression_method: u32` LE | value `4` (LE bytes `04 00 00 00`) |
+| V3-V7 | entry header `compression_method: u32` LE | none of its own; for example `4` (`04 00 00 00`, `COMPRESS_Custom`) in a game whose custom codec is Oodle |
 | V8+ | entry header compression index | an index that resolves to the footer's `"Oodle"` slot |
 | V8+ | footer `compression_methods`, 32-byte slots | slot bytes `4F 6F 64 6C 65 00...00` (`"Oodle"` + 27 zero-pad) |
 
@@ -112,19 +124,19 @@ this repo.
 
 ### Worked example — V3-V7 entry dispatch (4 bytes)
 
-The `compression_method: u32` LE field in a V3-V7 entry header,
-set to dispatch to Oodle:
+The `compression_method: u32` LE field in a V3-V7 entry header of a
+game whose custom codec is Oodle, set to dispatch to it:
 
 ```
 Offset (within entry header)  Bytes (LE)        Field
 ----------------------------  ---------------   --------------------
-+<header offset>              04 00 00 00       compression_method = 4 (Oodle)
++<header offset>              04 00 00 00       compression_method = 4 (COMPRESS_Custom)
 ```
 
-A parser fed these 4 bytes at the matching entry-header offset MUST
-identify the entry as Oodle-compressed and dispatch to the Oodle
-decoder (or, if Oodle is unsupported, surface a typed
-"Oodle unsupported" error before any decompression attempt).
+For such a game, a parser fed these 4 bytes at the matching
+entry-header offset MUST identify the entry as Oodle-compressed and
+dispatch to the Oodle decoder (or, if Oodle is unsupported, surface
+a typed "Oodle unsupported" error before any decompression attempt).
 
 ### Worked example — V8+ compression-method-table slot (32 bytes)
 
@@ -139,8 +151,11 @@ Offset (within slot)  Bytes (LE)                                       Field
 +32                                                                     (end of slot)
 ```
 
-An entry whose compression index resolves to this slot dispatches
-through the Oodle decoder. An unused slot is 32 zero bytes.
+A parser fed an entry whose compression index resolves to this slot
+MUST identify it as Oodle-compressed and dispatch it to the Oodle
+decoder (or, if Oodle is unsupported, surface a typed "Oodle
+unsupported" error before any decompression attempt). An unused slot
+is 32 zero bytes.
 
 ## Variants
 
@@ -180,9 +195,9 @@ shipping-cooked-game blocker on paksmith adoption today).
 
 ### Format-defined limits (wire-imposed)
 
-- **V3-V7 `compression_method`:** `u32` field. The full `0..=u32::MAX`
-  range is wire-valid; only well-known IDs (`0` = None, `1` = zlib,
-  `4` = Oodle, etc.) have defined semantics.
+- **V3-V7 `compression_method`:** `u32` field; the full `0..=u32::MAX`
+  range is wire-valid. Its values are UE's legacy compression flags
+  (see Wire layout §*Detection layer*).
 - **V8+ compression-method table:** fixed 32-byte slots, as many as
   [`pak.md`](../container/pak.md) gives per version.
 - **Per-block Oodle stream header:** 2 bytes; high nibble selects
@@ -207,39 +222,57 @@ When SDK integration lands, an Oodle decompressor MUST:
   the pak-block cap.
 
 Independent of the SDK, a pak parser MUST NOT read a V8+ entry as Oodle
-unless its compression index resolves to a slot named `"Oodle"`, and
-MUST report a nonzero index that reaches no codec as an error, not as
-uncompressed bytes. [`pak.md`](../container/pak.md) §*V8+ footer
-additions* covers how an index resolves.
+unless its compression index resolves to a slot named `"Oodle"`. It
+MUST report a nonzero V8+ index that reaches no codec as an error, not
+as uncompressed bytes, and the same for a nonzero V3-V7 value it cannot
+map to a codec. When it maps a nonzero V3-V7 value to a codec without
+knowing which codec the game uses for that value, it MUST report the
+entry as an error, not as uncompressed bytes, if it does not support
+that codec or the codec fails to decode the entry.
+[`pak.md`](../container/pak.md) §*V8+ footer additions* covers how an
+index resolves.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
 - **Fixture:** The two Worked examples above (V3-V7 `04 00 00 00`
-  method-ID dispatch + V8+ 32-byte `"Oodle"` table slot) are byte-
-  exact and self-contained for the *detection* surface — both can
-  be synthesized end-to-end without a licensed Oodle SDK. A
+  `COMPRESS_Custom` dispatch + V8+ 32-byte `"Oodle"` table slot) are
+  byte-exact, and both can be synthesized end-to-end without a
+  licensed Oodle SDK; the V3-V7 one identifies Oodle only with
+  per-game knowledge. A
   decompression-end fixture would require either a licensed Oodle
   SDK in the test environment or a Kraken/Mermaid/etc. encoder; both
   are deferred until the runtime-loaded SDK integration lands.
 - **Hex anchor commands:**
   ```
-  # Synthesize the V3-V7 entry-header compression_method = 4 (Oodle) field:
+  # Synthesize the V3-V7 entry-header compression_method = 4 (COMPRESS_Custom) field:
   printf '\x04\x00\x00\x00' | xxd
   # Synthesize the V8+ 32-byte compression-method-table slot holding "Oodle":
   printf 'Oodle\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' | xxd
   ```
   A conformant pak parser fed these bytes at the matching offsets
-  MUST identify the entry as Oodle-compressed and dispatch to the
-  Oodle decoder (or surface an Oodle-unsupported typed error).
+  MUST dispatch them as the Worked examples above require.
 - **Cross-validation oracle:** CUE4Parse[^1] for the loader-
-  integration code and the V8+ compression-method-table slot
-  encoding. The licensed Oodle SDK is the authoritative reference
-  for the per-block stream layout itself.
+  integration code; CUE4Parse[^2] and repak[^3] for the V3-V7 values;
+  CUE4Parse[^4] and [`pak.md`](../container/pak.md) for the V8+
+  compression-method table. The licensed Oodle SDK is the
+  authoritative reference for the per-block stream layout itself.
 - **Known divergences:**
   - **Decompression unimplemented.** CUE4Parse offers a `dlopen`-style
     runtime SDK load; paksmith currently rejects.
+  - **V3-V7 compression values.** All three read `0` as no
+    compression. Paksmith matches any other value exactly: `1` is
+    zlib, `2` gzip, `4` Oodle, and anything else an unknown method.
+    repak[^3] maps a nonzero `N` to `[Zlib, Gzip, Oodle][N - 1]`,
+    unchecked. CUE4Parse[^2] has special cases for some values and
+    games (in Sea of Thieves, for one, `4` is LZ4); otherwise it tests
+    the zlib, gzip and custom bits in that order, maps custom to Oodle,
+    and reads a nonzero value with none of them as an unknown method.
+    So, in a game CUE4Parse has no special case for, `4` is Oodle to
+    paksmith and CUE4Parse, while repak panics when it extracts the
+    entry's data; `3` is an unknown method to paksmith, zlib to
+    CUE4Parse and Oodle to repak.
 
 ## Paksmith implementation
 
@@ -283,3 +316,6 @@ use case for Oodle-compressed entries.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/Compression/OodleHelper.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the loader-integration shape. Covers the `dlopen`-equivalent runtime load and the `OodleLZ_Decompress` call signature.
+[^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakEntry.cs@ecc4878950336126f125af0747190edf474b2a21` — the pre-V8 switch from a compression value to an index into the method list `CUE4Parse/UE4/Pak/Objects/FPakInfo.cs` builds. `CUE4Parse/UE4/Objects/Core/Misc/ECompressionFlags.cs` at the same revision gives the flag values.
+[^3]: `trumank/repak/repak/src/footer.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` — `Footer::read` builds the pre-V8 `[Zlib, Gzip, Oodle]` list. At the same revision, `repak/src/entry.rs` decodes `N` as `N - 1` in `Entry::read` and indexes the list in `Entry::read_file`.
+[^4]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakInfo.cs@ecc4878950336126f125af0747190edf474b2a21` — builds the compression-method list: a fixed one before V8; from V8, no-method followed by the footer's named slots.
