@@ -221,9 +221,13 @@ bullet names; see [`../container/pak.md`](../container/pak.md)
 
 - **`MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`**
   (`crates/paksmith-core/src/container/pak/mod.rs`). Cap on the
-  total `uncompressed_size` of any single entry. The block-loop's
+  total `uncompressed_size` of any single entry, also applied to
+  `compressed_size` on compressed v10+ encoded entries and before an
+  encrypted compressed payload is decrypted. The block-loop's
   `remaining` counter is bounded by this from the start. Surfaces as
-  `IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, value, limit, unit: BoundsUnit::Bytes, path }`.
+  `IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize | WireField::CompressedSize, … }`;
+  [`../container/pak.md`](../container/pak.md) §*Implementation
+  hardening* says which check reports which.
 - **`MAX_BLOCKS_PER_ENTRY = 16_777_216`**
   (`crates/paksmith-core/src/container/pak/index/entry_header.rs`).
   Cap on the number of compression blocks per inline entry

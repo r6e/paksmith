@@ -103,7 +103,7 @@ non-encoded one) or a V10+ encoded-form header (see
 
 | field | encoding | semantics |
 |-------|----------|-----------|
-| `flags` (inline form) | `u8` bitfield after the compression-blocks array | Bit 0 set = entry payload is AES-encrypted. See [`../container/pak.md`](../container/pak.md) for the full bit layout. |
+| `flags` (inline form) | `u8` bitfield after the compression-blocks array, or after the SHA-1 hash in an uncompressed entry | Bit 0 set = entry payload is AES-encrypted. See [`../container/pak.md`](../container/pak.md) for the full bit layout. |
 | `encrypted` (V10+ encoded form) | bit 22 of the encoding's packed `bits` u32 (per `PakEntryHeader::read_encoded`) | Same semantics; bit-packed. |
 
 ### `Crypto.json` (UE 4.20+ key-file format)
@@ -199,10 +199,10 @@ Offset (within footer)  Bytes (LE)                                       Field
 ### Worked example — inline-form per-entry flags byte
 
 For an inline-form entry, the `flags` field is a single `u8`
-that follows the compression-blocks array (the SHA-1 hash, when there
-is none) per
+that follows the compression-blocks array. An uncompressed entry has
+no array, so there it follows the SHA-1 hash (per
 [`../container/pak.md`](../container/pak.md) §*Entry header
-(inline form)*. A value of `01` marks the payload encrypted;
+(inline form)*). A value of `01` marks the payload encrypted;
 per the same pak.md section, the next field on the wire is
 `compression_block_size: u32` (4 bytes LE), NOT the compression-method
 field (which lives much earlier in the header, before the SHA1 hash).

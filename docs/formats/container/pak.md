@@ -344,10 +344,15 @@ does not surface as the fault its bullet names.
 
 - **`MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`**
   (`crates/paksmith-core/src/container/pak/mod.rs`).
-  Largest single uncompressed entry paksmith will read. Checked on each
-  v10+ encoded entry while the index is parsed, and on every entry's
-  `uncompressed_size` after the parse. Surfaces as
-  `IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, value, limit, unit: BoundsUnit::Bytes, path }`.
+  Largest single uncompressed entry paksmith will read. Checked on every
+  entry's `uncompressed_size` once the index is parsed. The same ceiling
+  bounds each v10+ encoded entry's `compressed_size` (its
+  `uncompressed_size`, if it has no compression) while the index is
+  parsed, and an encrypted compressed entry's `compressed_size` before
+  paksmith decrypts its payload. Surfaces as
+  `IndexParseFault::BoundsExceeded { field, value, limit, unit: BoundsUnit::Bytes, path }`,
+  with `field` set to `WireField::CompressedSize` or
+  `WireField::UncompressedSize`, whichever size exceeded the cap.
 - **`max_flat_index_entries()`**
   (`crates/paksmith-core/src/container/pak/index/flat.rs`).
   Hard cap of 10,000,000 entries for the flat index (`MAX_FLAT_INDEX_ENTRIES`);
