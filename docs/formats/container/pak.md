@@ -344,7 +344,8 @@ the literal.
   `PakEntryHeader::min_wire_size(version)` is the smallest entry header:
   `8 (offset) + 8 (compressed_size) + 8 (uncompressed_size) + 1 or 4 (compr method: 1 byte for V8A) + 20 (sha1) + 1 (flags) + 4 (compression_block_size, present unconditionally for v3+)`,
   so 50 for V8A and 53 otherwise; it bounds the v10+ non-encoded entry
-  count, whose records carry no filename. `entry_min_record_bytes(version)`
+  count, whose records carry no filename, against the main index bytes
+  left after the count. `entry_min_record_bytes(version)`
   adds the shortest filename FString (5), so 55 for V8A and 58 otherwise;
   it bounds the flat index's `entry_count`.
 
