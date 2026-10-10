@@ -33,7 +33,7 @@ via UnrealPak command-line; consumers must somehow obtain it.
 
 **Document status: complete.** Wire format documented in full for
 the encryption metadata surface — footer encryption byte, V7+ key
-GUID, per-entry encryption flag (both V3-V9 flat form and V10+
+GUID, per-entry encryption flag (both inline form and V10+
 bit-22 encoded form), `Crypto.json` key-file shape (both hex and
 base64 conventions), and AES-256 ECB block-cipher parameters. The
 encrypted payload bytes themselves are ciphertext until decrypted;
@@ -97,12 +97,13 @@ encrypted byte, and paksmith reads both correctly.
 
 ### Per-entry encryption flag
 
-For each pak entry (in both V3–V9 flat-form headers and V10+
-encoded-form headers — see [`../container/pak.md`](../container/pak.md)):
+For each pak entry, in an inline-form header (a v3–v9 record or a v10+
+non-encoded one) or a V10+ encoded-form header (see
+[`../container/pak.md`](../container/pak.md)):
 
 | field | encoding | semantics |
 |-------|----------|-----------|
-| `flags` (V3–V9 flat form) | `u8` bitfield after the compression-blocks array | Bit 0 set = entry payload is AES-encrypted. See [`../container/pak.md`](../container/pak.md) for the full bit layout. |
+| `flags` (inline form) | `u8` bitfield after the compression-blocks array | Bit 0 set = entry payload is AES-encrypted. See [`../container/pak.md`](../container/pak.md) for the full bit layout. |
 | `encrypted` (V10+ encoded form) | bit 22 of the encoding's packed `bits` u32 (per `PakEntryHeader::read_encoded`) | Same semantics; bit-packed. |
 
 ### `Crypto.json` (UE 4.20+ key-file format)
@@ -195,16 +196,17 @@ Offset (within footer)  Bytes (LE)                                       Field
 +16                     01                                                encrypted = 1
 ```
 
-### Worked example — V3-V9 per-entry flags byte
+### Worked example — inline-form per-entry flags byte
 
-For a V3-V9 flat-form entry, the `flags` field is a single `u8`
-that appears at a fixed position in the entry header per
+For an inline-form entry, the `flags` field is a single `u8`
+that follows the compression-blocks array (the SHA-1 hash, when there
+is none) per
 [`../container/pak.md`](../container/pak.md) §*Entry header
-(flat-index, v3–v9)*. A value of `01` marks the payload encrypted;
+(inline form)*. A value of `01` marks the payload encrypted;
 per the same pak.md section, the next field on the wire is
 `compression_block_size: u32` (4 bytes LE), NOT the compression-method
 field (which lives much earlier in the header, before the SHA1 hash).
-A 6-byte fragment showing the flags-byte position and its
+A 5-byte fragment showing the flags-byte position and its
 trailing `compression_block_size`:
 
 ```
@@ -273,7 +275,7 @@ doesn't yet act on it.
   undefined. The byte itself has no overflow surface.
 - **Footer `encryption_key_guid`:** fixed `[u8; 16]` — no length to
   bound.
-- **Per-entry `flags` byte (V3-V9 flat form):** `u8` bitfield; bit 0 =
+- **Per-entry `flags` byte (inline form):** `u8` bitfield; bit 0 =
   AES-encrypted. See [`../container/pak.md`](../container/pak.md) for
   the full bit layout.
 - **Per-entry encryption (V10+ encoded form):** 1 bit (bit 22
@@ -290,10 +292,11 @@ doesn't yet act on it.
 
 A reader that performs AES decryption (as paksmith now does) MUST:
 
-- **Cap the index-region size** before allocation. paksmith already
-  enforces this via `max_index_bytes()` for the plaintext path; the
-  decryption step inherits the same cap, ensuring an attacker-
-  influenced footer cannot drive a giant pre-decrypt allocation.
+- **Cap the index-region size** before allocation. paksmith checks
+  `max_index_bytes()` against every index it decrypts before reading it
+  (see [`../container/pak.md`](../container/pak.md) §*Implementation
+  hardening*), so an attacker-influenced footer cannot drive a giant
+  pre-decrypt allocation.
 - **Cap the per-entry payload size** by `MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`
   and per-block budgets (per
   [`../compression/pak-block-framing.md`](../compression/pak-block-framing.md)).
@@ -391,8 +394,8 @@ above).
 - `crates/paksmith-core/src/container/pak/footer.rs` — `PakFooter::encryption_key_guid`,
   `PakFooter::is_encrypted`.
 - `crates/paksmith-core/src/container/pak/index/entry_header.rs` —
-  per-entry encryption, in both flat-form (V3–V9, bit 0 of the `flags`
-  byte) and encoded-form (V10+, bit 22) readers; the encoded-form
+  per-entry encryption, in both inline-form (bit 0 of the `flags` byte)
+  and encoded-form (V10+, bit 22) readers; the encoded-form
   `compressed_size` cross-check expects the aligned footprint sum for
   encrypted entries.
 - `crates/paksmith-core/src/container/pak/crypto.rs` —
@@ -423,7 +426,7 @@ V4-V6 index-encryption detection is a known gap.
   verifies like an encrypted Zlib one). It also bounds-checks the
   16-ALIGNED payload extent the read path must consume — per method,
   since the read paths align different fields:
-  `align16(uncompressed_size)` for `None` (whose inline v3-v9
+  `align16(uncompressed_size)` for `None` (whose inline
   `compressed_size`/`uncompressed_size` are independent wire fields) and
   `align16(compressed_size)` otherwise — while still hashing only
   `compressed_size` bytes. So `Verified` implies the read path's payload

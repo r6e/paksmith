@@ -29,7 +29,7 @@ decompress the blocks that overlap that range. Paksmith's
 to keep peak memory bounded.
 
 **Document status: complete.** Wire format documented in full for
-the per-block `compression_blocks` array in both wire forms (v3–v9
+the per-block `compression_blocks` array in both wire forms (inline
 explicit `(start: u64, end: u64)` 16-byte pairs + v10+ encoded
 per-block `u32` compressed sizes with cursor-based reconstruction
 and the AES-block-aligned advance for encrypted entries), the
@@ -51,22 +51,19 @@ intentionally rejected with `PaksmithError::UnsupportedVersion`.
 |------------------|---------------------|--------|
 | Wire version 3 (`CompressionEncryption`, UE 4.4) | Block framing introduced; offsets are **file-relative**. Paksmith rejects these with `UnsupportedVersion` — see Implementation note. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
 | Wire version 5+ (`RelativeChunkOffsets`, UE 4.20+) | Block offsets became **entry-record-relative** (start is from the entry's record start, not the file start). Paksmith's `stream_zlib_to` normalizes to absolute by adding the entry record's offset. | Same[^1] |
-| Wire version 8+ | Per-entry `compression` byte became a 1-based index into the footer's compression-method FName table (instead of a raw method ID). Block framing itself unchanged. | Same[^1] |
+| Wire version 8+ | Per-entry `compression` field became a 1-based index into the footer's compression-method table (instead of a raw method ID): `u8` in V8A, `u32` from V8B, 6 bits in a v10+ encoded entry. Block framing itself unchanged. | Same[^1] |
 | Wire version 10+ (`PathHashIndex`) | Encoded entry format: block boundaries move from explicit `(start: u64, end: u64)` pairs to per-block `u32` compressed sizes; synthesized into block ranges during parsing. See Variants. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/PakFileReader.cs@ecc4878950336126f125af0747190edf474b2a21`[^2] |
-
-V8A vs V8B: the per-entry compression byte width changes (u8 vs u32);
-the block-array shape is unchanged. See [`../container/pak.md`](../container/pak.md).
 
 ## Wire layout
 
-The compression-blocks array appears in two distinct wire shapes
-depending on the pak version. Both shapes produce in-memory
+The compression-blocks array appears in two distinct wire shapes, one
+for inline records and one for v10+ encoded entries. Both shapes produce in-memory
 `CompressionBlock { start: u64, end: u64 }` values after parsing.
 
-### Inline entries (v3-v9): per-block `(start: u64, end: u64)` pairs
+### Inline entries (v3-v9, v10+ non-encoded): per-block `(start: u64, end: u64)` pairs
 
-For v3-v9 archives, the `FPakEntry` record in the flat index stores
-blocks as explicit 16-byte pairs:
+The `FPakEntry` records of a v3-v9 flat index, and the non-encoded
+records of a v10+ main index, store blocks as explicit 16-byte pairs:
 
 | field | size | type | semantics |
 |-------|------|------|-----------|
@@ -80,7 +77,7 @@ Each `CompressionBlock` record on disk is two LE `u64`s: 16 bytes total.
 ### Encoded entries (v10+): per-block `u32` compressed sizes
 
 V10+ archives store entries in a bit-packed encoded form in the
-path-hash index's encoded-entries blob. Block boundaries are not
+main index's encoded-entries blob. Block boundaries are not
 stored as `(start, end)` pairs; instead, the reader reconstructs them:
 
 | field | size | type | semantics |
@@ -208,14 +205,19 @@ in practice; paksmith handles them defensively for malformed input.
 
 ### Format-defined limits (wire-imposed)
 
-- **`compression_blocks_count`** (v3-v9 inline form): `u32` LE; present only when `compression_method != None`.
-- **`CompressionBlock`** (v3-v9 inline form): 16 bytes — `start: u64 LE + end: u64 LE`. Both offsets must satisfy `start <= end`.
+- **`compression_blocks_count`** (inline form): `u32` LE; present only when `compression_method != None`.
+- **`CompressionBlock`** (inline form): 16 bytes — `start: u64 LE + end: u64 LE`. Both offsets must satisfy `start <= end`.
 - **`compression_block_size`**: `u32` LE; typically `0x10000` (64 KiB). Always present in v3+; `0` for uncompressed entries.
-- **`flags`** (v3-v9 inline form): `u8` bitfield; bit 0 = AES-encrypted. See [`container/pak.md`](../container/pak.md) for the full bit layout.
+- **`flags`** (inline form): `u8` bitfield; bit 0 = AES-encrypted. See [`container/pak.md`](../container/pak.md) for the full bit layout.
 - **V10+ encoded form**: per-block compressed size is `u32` LE (when `block_count > 1` or `is_encrypted`); single-block-non-encrypted shortcut omits the size entirely and derives it from the entry's `compressed_size`.
 - **AES-block alignment** (encrypted entries on the v10+ encoded path): cursor advances `(block_compressed_size + 15) & !15`.
 
 ### Implementation hardening (recommended for any parser)
+
+On an encrypted index, a cap below that trips while paksmith parses the
+index surfaces as `PaksmithError::Decryption`, not as the fault its
+bullet names; see [`../container/pak.md`](../container/pak.md)
+§*Implementation hardening*.
 
 - **`MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`**
   (`crates/paksmith-core/src/container/pak/mod.rs`). Cap on the
@@ -223,8 +225,8 @@ in practice; paksmith handles them defensively for malformed input.
   `remaining` counter is bounded by this from the start. Surfaces as
   `IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, value, limit, unit: BoundsUnit::Bytes, path }`.
 - **`MAX_BLOCKS_PER_ENTRY = 16_777_216`**
-  (`crates/paksmith-core/src/container/pak/index/entry_header.rs:25`).
-  Cap on the number of compression blocks per inline (v3-v9) entry
+  (`crates/paksmith-core/src/container/pak/index/entry_header.rs`).
+  Cap on the number of compression blocks per inline entry
   (~16M blocks of 64 KiB = 1 TiB entry). Surfaces as
   `IndexParseFault::BoundsExceeded { field: WireField::BlockCount, value, limit, unit: BoundsUnit::Items, path }`.
   V10+ encoded entries mask block count to 16 bits (max 65 535) so
@@ -250,7 +252,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
     anchor.
   - `tests/fixtures/real_v10_compressed.pak` — V10 counterpart.
   - `tests/fixtures/real_v8a_compressed.pak` / `real_v8b_compressed.pak`
-    — V8 family with the u8 vs u32 compression-byte width split.
+    — V8 family with the u8 vs u32 compression-field width split.
 - **Hex anchor commands:** (none yet — see [#347](https://github.com/r6e/paksmith/issues/347)).
 - **Cross-validation oracle:** repak[^1] (paksmith's primary pak
   oracle) and CUE4Parse[^2]. Every compressed fixture round-trips
