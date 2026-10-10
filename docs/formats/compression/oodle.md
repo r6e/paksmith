@@ -53,7 +53,8 @@ under Variants.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| Wire version 4+ (UE 4.16+, sporadically; UE 4.21+ commonly; UE 5.x universally) | Oodle introduced (FName `"Oodle"` in v8+; in v3-v7, a value whose codec depends on the game, such as the `COMPRESS_Custom` flag `4`). | v8+: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakInfo.cs@ecc4878950336126f125af0747190edf474b2a21`[^4]; v3-v7: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakEntry.cs@ecc4878950336126f125af0747190edf474b2a21`[^2] |
+| Wire version 1-7 | An entry names Oodle only through a value whose codec depends on the game, such as the `COMPRESS_Custom` flag `4`. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakEntry.cs@ecc4878950336126f125af0747190edf474b2a21`[^2] |
+| Wire version 8+ | An entry names Oodle through a compression index that resolves to a footer slot named `"Oodle"`. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakEntry.cs@ecc4878950336126f125af0747190edf474b2a21`[^2] (the entry's index); `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakInfo.cs@ecc4878950336126f125af0747190edf474b2a21`[^4] (the slots it selects from) |
 | Oodle SDK 2.6 → 2.9 | Stream-format-compatible across SDK versions; a decoder built against SDK 2.6 reads streams compressed with SDK 2.9 and vice versa within the published-compatibility matrix. Encoder choices (Kraken vs Mermaid vs Selkie) are encoded in the stream header byte. | RAD Game Tools / Epic Games Tools "Oodle Data" documentation (no public URL — distributed with the licensed SDK). |
 
 Within paksmith's accepted UE range, Oodle stream format itself does
@@ -316,6 +317,6 @@ use case for Oodle-compressed entries.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/Compression/OodleHelper.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the loader-integration shape. Covers the `dlopen`-equivalent runtime load and the `OodleLZ_Decompress` call signature.
-[^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakEntry.cs@ecc4878950336126f125af0747190edf474b2a21` — the pre-V8 switch from a compression value to an index into the method list `CUE4Parse/UE4/Pak/Objects/FPakInfo.cs` builds. `CUE4Parse/UE4/Objects/Core/Misc/ECompressionFlags.cs` at the same revision gives the flag values.
+[^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakEntry.cs@ecc4878950336126f125af0747190edf474b2a21` — the pre-V8 switch from a compression value to an index, and the V8+ reads of an entry's index (a `u8` in V8A, an `int` from V8B, 6 bits in an encoded entry), into the method list `CUE4Parse/UE4/Pak/Objects/FPakInfo.cs` builds. `CUE4Parse/UE4/Objects/Core/Misc/ECompressionFlags.cs` at the same revision gives the flag values.
 [^3]: `trumank/repak/repak/src/footer.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` — `Footer::read` builds the pre-V8 `[Zlib, Gzip, Oodle]` list. At the same revision, `repak/src/entry.rs` decodes `N` as `N - 1` in `Entry::read` and indexes the list in `Entry::read_file`.
 [^4]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakInfo.cs@ecc4878950336126f125af0747190edf474b2a21` — builds the compression-method list: a fixed one before V8; from V8, no-method followed by the footer's named slots.
