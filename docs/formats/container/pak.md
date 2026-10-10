@@ -37,7 +37,8 @@ remaining variance.
 the pak v1–v11 footer family (legacy v1–v6 / V7+ / V8A / V8B / V9 /
 V10+ shape variants), the flat index (v3–v9), the path-hash + encoded
 directory index (v10+), per-entry `PakEntryHeader` records in both
-the v3–v9 `Inline` and the v10+ `Encoded` forms with compression-block
+the `Inline` form (v3–v9 and v10+ non-encoded records) and the v10+
+`Encoded` form with compression-block
 framing, and the optional encryption + SHA-1 integrity surfaces.
 Per-format decompression and per-block crypto live in
 [`../compression/pak-block-framing.md`](../compression/pak-block-framing.md)
@@ -181,13 +182,25 @@ Two layouts, gated by version:
   - `u32 entry_count`
   - `entry_count` × `(FString filename + PakEntryHeader)` records
 
-- **Path-hash + encoded directory index** (v10+)[^1]. Sub-regions in order:
+- **Path-hash + encoded directory index** (v10+)[^1]. The main index holds, in order:
   - `FString mount_point`
   - `u32 file_count` (bounds the FDI entries allocation and validates that the FDI yields exactly this many entries)
   - `u64 path_hash_seed` (consumed by PHI/FDI cross-validation — see issue #131)
-  - Optional path-hash index (PHI) header + body: `FNV1a64(lowercased UTF-16 path) → encoded_offset` table
-  - **Required** full directory index (FDI) header + body: nested `FString directory → (FString filename → encoded_offset)`
+  - `u32` path-hash index (PHI) flag, a bool (`0` or `1`); if set, the PHI descriptor: `u64 offset`, `u64 size`, 20-byte SHA-1
+  - `u32` full directory index (FDI) flag, a bool; if set, the FDI descriptor, in the same shape
   - `u32 encoded_entries_size` + EntryData blob: concatenation of `EncodedPakEntry` records (variable-length, no per-entry length prefix — the encoding's bit-pattern is self-describing)
+  - `u32 non_encoded_count` + that many entry records with no filename, each in the §*Entry header (inline form)* shape
+
+  The PHI and FDI bodies are separate regions of the file, read at their
+  descriptors' offsets:
+  - PHI: `FNV1a64(lowercased UTF-16 path) → encoded_offset` table
+  - FDI: nested `FString directory → (FString filename → encoded_offset)`
+
+  An `encoded_offset` of `0` or more is a position in the EntryData blob.
+  A negative one, `-N`, selects non-encoded record `N - 1`; `i32::MIN`
+  selects none. A parser must bound the position by the blob's size and
+  `N - 1` by `non_encoded_count`; readers differ on an offset that
+  selects no record (see Known divergences).
 
 The FDI is the source of truth for paksmith's `(path → entry)` lookups. The
 PHI is consulted at `PakReader::open` time as a cross-check: any mismatch
@@ -199,7 +212,10 @@ See `docs/formats/primitive/fstring.md` for FString and
 FString reader is strict (`len == 0` rejected) per the FDI record-size
 invariant.
 
-### Entry header (flat-index, v3–v9)
+### Entry header (inline form)
+
+Every v3–v9 index record, and every v10+ non-encoded record, uses this
+form.
 
 | offset | size | endian | name | type | semantics |
 |--------|------|--------|------|------|-----------|
@@ -208,7 +224,8 @@ invariant.
 | 16 | 8 | LE | `uncompressed_size` | `u64` | Decompressed size of the payload. |
 | 24 | 4 or 1 | LE | `compression` | `u32` (V8B+: u32; V8A: u8) | Compression-method index (0 = no compression, 1+ = slot in footer's compression-method table). For v3–v7 archives that predate the FName table, this is a fixed enum identifier. |
 | 28 (V8B+) / 25 (V8A) | 20 | — | `sha1` | `Sha1Digest` | Payload SHA1. The field is fixed-width and always present; the format assigns no distinguished meaning to an all-zero value. Paksmith's interpretation of a zero here — "no claim" when the footer's `index_hash` is also zero, otherwise a strip signal — is paksmith policy, not a format rule; see [Paksmith implementation](#paksmith-implementation). |
-| `+ 20` | variable | — | `compression_blocks` | `CompressionBlock[]` | Present iff `compression != 0`. See below. |
+| `+ 20` | 4 | LE | `compression_blocks_count` | `u32` | Number of blocks. Present iff `compression != 0`. |
+| `+ 4` | `count × 16` | — | `compression_blocks` | `CompressionBlock[]` | Present iff `compression != 0`. See below. |
 | `+ blocks` | 1 | — | `flags` | `u8` | Bitfield: bit 0 = AES-encrypted, bit 1 = delete record. Paksmith decides encryption from bit 0 alone and gives bits 1–7 no meaning, no sampled writer's use of them being established. It does compare the byte whole between an entry's index and in-data copies, so those two must still agree in every bit. |
 | `+ 1` | 4 | LE | `compression_block_size` | `u32` | Block size (often `64 KiB`). |
 
@@ -308,7 +325,7 @@ variant — see Verification → Known divergences.
 - **`compression_methods`** (V8+ table): `N × 32`-byte fixed slots, NUL-padded UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11.
 - **`frozen_index`** (V9 only): `u8`; writer flag, read but not interpreted.
 - **`PakEntryHeader.compression`**: `u8` (V8A) or `u32` LE (V8B / V9+); 1-based index into the compression-method table (0 = `None`).
-- **`CompressionBlock`** (V3-V9 explicit form): 16 bytes (`u64 start + u64 end`).
+- **`CompressionBlock`** (`Inline` form): 16 bytes (`u64 start + u64 end`).
 - **Encoded-entry bit-fields** (V10+): per [`../compression/pak-block-framing.md`](../compression/pak-block-framing.md) §*Encoded entries (v10+)* — 32-bit bit-packed header with offset / size width hints + compression-method index (6 bits) + encryption flag (1 bit) + block count (16 bits) + block-size encoding (6 bits).
 
 ### Implementation hardening (recommended for any parser)
@@ -318,23 +335,43 @@ amplification. Every cap exposes a `#[cfg(feature = "__test_utils")]`
 accessor so boundary tests can read the live value rather than re-declaring
 the literal.
 
+On an encrypted index, `read_encrypted_index`
+(`crates/paksmith-core/src/container/pak/mod.rs`) reports a fault from
+parsing the index as `PaksmithError::Decryption`, unless it is an
+allocation failure, a size the platform cannot address, or an I/O error
+other than an early end of file, so a cap below that trips in that parse
+does not surface as the fault its bullet names.
+
 - **`MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`**
-  (`crates/paksmith-core/src/container/pak/mod.rs:87`).
-  Largest single uncompressed entry paksmith will read. Surfaces as
-  `IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, value, limit, unit: BoundsUnit::Bytes, path }`.
+  (`crates/paksmith-core/src/container/pak/mod.rs`).
+  Largest single uncompressed entry paksmith will read. Checked on every
+  entry's `uncompressed_size` once the index is parsed. The same ceiling
+  bounds each v10+ encoded entry's `compressed_size` (its
+  `uncompressed_size`, if it has no compression) while the index is
+  parsed, and an encrypted compressed entry's `compressed_size` before
+  paksmith decrypts its payload. Surfaces as
+  `IndexParseFault::BoundsExceeded { field, value, limit, unit: BoundsUnit::Bytes, path }`,
+  with `field` set to `WireField::CompressedSize` or
+  `WireField::UncompressedSize`, whichever size exceeded the cap.
 - **`max_flat_index_entries()`**
-  (`crates/paksmith-core/src/container/pak/index/flat.rs:55`).
+  (`crates/paksmith-core/src/container/pak/index/flat.rs`).
   Hard cap of 10,000,000 entries for the flat index (`MAX_FLAT_INDEX_ENTRIES`);
   the parser also derives a per-archive ceiling from `index_size /
   entry_min_record_bytes(version)` (55 for V8A, 58 otherwise). Surfaces as
   `IndexParseFault::BoundsExceeded { field: WireField::FlatEntryCount, … }`.
 - **`max_index_bytes()`**
-  (`crates/paksmith-core/src/container/pak/index/path_hash.rs:86`).
-  Cap on `index_size` from the footer. Surfaces as
-  `IndexParseFault::BoundsExceeded { field: WireField::IndexSize, … }`.
+  (`crates/paksmith-core/src/container/pak/index/path_hash.rs`).
+  Cap on the footer's `index_size` for a v10+ index or one paksmith
+  decrypts. Surfaces
+  as `IndexParseFault::BoundsExceeded { field: WireField::IndexSize, … }`;
+  on an encrypted flat index the check runs in `decrypt_index_region`,
+  before the parse, so it keeps this fault.
 - **`max_fdi_bytes()`**
-  (`crates/paksmith-core/src/container/pak/index/path_hash.rs:79`).
-  Cap on the FDI subregion size in v10+ archives.
+  (`crates/paksmith-core/src/container/pak/index/path_hash.rs`).
+  Cap on the FDI and PHI region sizes in v10+ archives, checked after
+  each region's `offset` and `offset + size` are checked against the file
+  size (`IndexParseFault::RegionPastFileSize`). Surfaces as
+  `IndexParseFault::BoundsExceeded { field: WireField::FdiSize | WireField::PhiSize, … }`.
 - **Entry-record minimums** (`crates/paksmith-core/src/container/pak/index/`).
   `PakEntryHeader::min_wire_size(version)` is the smallest entry header:
   `8 (offset) + 8 (compressed_size) + 8 (uncompressed_size) + 1 or 4 (compr method: 1 byte for V8A) + 20 (sha1) + 1 (flags) + 4 (compression_block_size, present unconditionally for v3+)`,
@@ -413,6 +450,20 @@ policy.
     cooked archives use ASCII-only paths, so the practical impact is nil
     — but a non-ASCII fixture would fail to open. See
     `crates/paksmith-core/src/container/pak/index/mod.rs` `fn fnv64_path`.
+  - **PHI and FDI flags.** CUE4Parse[^2] reads each flag with
+    `FArchive.ReadBoolean` (`CUE4Parse/UE4/Readers/FArchive.cs` at the
+    same revision), which throws on a value other than `0` or `1`, and it
+    refuses an index whose PHI or FDI flag is `0`. repak[^1] and paksmith
+    take any nonzero value as set and read an index without a PHI.
+    Paksmith refuses one without an FDI; repak reads it as holding no
+    files.
+  - **FDI offsets that select no record.** repak[^1] and CUE4Parse[^2]
+    skip a file whose FDI `encoded_offset` is `i32::MIN`; repak's source
+    calls it a deleted or pruned entry in the UE5 pak format. On a
+    negative offset past the last non-encoded record, CUE4Parse logs a
+    warning and skips the file, and repak's unchecked lookup panics.
+    Paksmith refuses the whole archive in both cases; it reads `i32::MIN`
+    as non-encoded record `2^31 - 1`, always out of range.
   - **Compression-slot name.** Paksmith ends the name at the first NUL
     and ignores the rest of the slot, then matches codec names
     case-insensitively. repak removes every NUL in the slot and joins the
@@ -491,7 +542,9 @@ the full enum):
 - `PaksmithError::InvalidIndex { fault: IndexParseFault::* }` —
   `BoundsExceeded { field: WireField, value, limit, unit, path }` (every
   cap-exceeded case surfaces this with a specific `WireField` discriminant
-  — `UncompressedSize` / `FlatEntryCount` / `IndexSize` / `FdiSize` / …),
+  — `UncompressedSize` / `FlatEntryCount` / `IndexSize` / `FdiSize` / … —
+  except where an encrypted index reports `Decryption`, per
+  §*Implementation hardening*),
   `FStringMalformed`, `PhiFdiInconsistency`, `AllocationFailed`, …
 - `PaksmithError::HashMismatch { target, expected, actual }` — index or
   entry SHA1 verification failure.
