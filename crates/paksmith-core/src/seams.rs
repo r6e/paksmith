@@ -285,12 +285,16 @@ pub enum MappingsSeam {
     /// [`crate::error::MappingsParseFault::AllocationFailed`] with
     /// `context: MappingsAllocationContext::BrotliDecoderBytes`.
     BrotliDecoderBytes,
+    /// `check_flattened_reserve`'s reservations, the flattened-cache build's.
+    /// Surfaces as [`crate::error::MappingsParseFault::AllocationFailed`] with
+    /// `context: MappingsAllocationContext::FlattenedCache`.
+    FlattenedCache,
 }
 
 impl MappingsSeam {
     /// Total number of `.usmap` seam sites. Pinned by the `const _` guard
     /// below and by `tests::seam_site_discriminants_match_slot_indices`.
-    pub const COUNT: usize = 2;
+    pub const COUNT: usize = 3;
 
     /// Map a `.usmap` seam to its paired
     /// [`crate::error::MappingsAllocationContext`], as
@@ -301,12 +305,13 @@ impl MappingsSeam {
         match self {
             Self::SchemaNameBytes => C::SchemaNameBytes,
             Self::BrotliDecoderBytes => C::BrotliDecoderBytes,
+            Self::FlattenedCache => C::FlattenedCache,
         }
     }
 }
 
 // Same compile-time guard pattern as PakSeam above (see precondition).
-const _: [(); MappingsSeam::COUNT] = [(); MappingsSeam::BrotliDecoderBytes as usize + 1];
+const _: [(); MappingsSeam::COUNT] = [(); MappingsSeam::FlattenedCache as usize + 1];
 
 // In the feature-off LIB target `COUNT`/`slot` are dead: their only
 // production consumers live in the `__test_utils`-gated
@@ -485,6 +490,9 @@ mod tests {
                 MappingsSeam::BrotliDecoderBytes => {
                     "every_brotli_decoder_allocation_the_allocator_refuses_is_an_allocation_fault"
                 }
+                MappingsSeam::FlattenedCache => {
+                    "every_flattened_cache_reservation_the_allocator_refuses_is_an_allocation_fault"
+                }
             }
         }
         // Touch the const fns so the matches' compile-time
@@ -550,6 +558,7 @@ mod tests {
             match site {
                 MappingsSeam::SchemaNameBytes => PakSeam::COUNT + AssetSeam::COUNT,
                 MappingsSeam::BrotliDecoderBytes => PakSeam::COUNT + AssetSeam::COUNT + 1,
+                MappingsSeam::FlattenedCache => PakSeam::COUNT + AssetSeam::COUNT + 2,
             }
         }
         let pak_all = [
@@ -604,6 +613,7 @@ mod tests {
         let mappings_all = [
             MappingsSeam::SchemaNameBytes,
             MappingsSeam::BrotliDecoderBytes,
+            MappingsSeam::FlattenedCache,
         ];
         assert_eq!(mappings_all.len(), MappingsSeam::COUNT);
         for site in mappings_all {
