@@ -266,6 +266,7 @@ hardening*.
 | `MAX_USMAP_DECOMPRESSED_SIZE` | 256 MiB | Bounds the output buffer reserved for the declared size. A decoder's own working memory is separate; see the Brotli and ZStandard notes below. |
 | `MAX_USMAP_ENUM_COUNT` | 4096 | Bounds the enum-table `HashMap` heap cost per `.usmap`. |
 | `MAX_USMAP_VALUES_PER_ENUM` | 1024 | Bounds per-enum `HashMap` heap cost. |
+| `MAX_USMAP_HEAP_BYTES` | 512 MiB | Bounds the sum the per-section caps leave open, since one file can fill several sections at once: an estimate of the decompressed buffer and of each table parsed from it, charged before each is allocated, refuses a load that would pass it. |
 | `MAX_INHERITANCE_DEPTH` | 64 | Breaks cyclic `super_type` chains in `.usmap`; a malicious cycle would otherwise loop forever in `get_all_properties`. |
 | `MAX_PROPERTY_DEPTH` | 128 | Shared with the tagged path; prevents stack overflow from adversarial `Struct<Struct<...>>` or `Array<Array<...>>` nesting. |
 | `cumulative_first` saturation | `u16::MAX` | Reader MUST accumulate via `saturating_add(skip_num + value_num)`. Adversarial input could otherwise overflow `u16` after roughly `65_535 / 254 ≈ 258` fragments — plain wrapping arithmetic would re-address slot 0 and silently corrupt the property tree. After saturation, a reader SHOULD treat any further schema-slot lookups as not-serialised (default-skip), since the saturated cursor sits beyond every legitimate schema slot index. |
