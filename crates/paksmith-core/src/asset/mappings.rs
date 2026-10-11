@@ -160,7 +160,7 @@ const MAX_USMAP_TYPE_NODES: u64 = 4_194_304;
 
 /// Hard cap on the heap estimate one load is charged: its decompressed
 /// buffer, its name table's slots and names, its enum tables, and its schema
-/// table with its name copies. Refused as
+/// table with its name copies, property slots and type nodes. Refused as
 /// [`MappingsParseFault::HeapBudgetExceeded`]. Twice
 /// [`MAX_USMAP_DECOMPRESSED_SIZE`], so what is parsed from a file at that cap
 /// can take nearly as much again as its buffer.
@@ -170,6 +170,10 @@ const MAX_USMAP_HEAP_BYTES: u64 = 536_870_912;
 
 /// An `Arc` allocation's header: its strong and weak counts.
 const ARC_HEADER_BYTES: u64 = size_of::<[usize; 2]>() as u64;
+
+/// The `Arc` a container holds its inner type node in: its header and the
+/// node.
+const ARC_TYPE_NODE_BYTES: u64 = ARC_HEADER_BYTES + size_of::<MappedPropertyType>() as u64;
 
 /// Hard cap on the wire-claimed `cv_count` in the .usmap versioning
 /// block. Real-world `CustomVersionContainer`s top out in the low
@@ -999,15 +1003,12 @@ impl Usmap {
                 // (issue #397 sub-fix A; see `read_name_arc`).
                 let prop_name = read_name_arc(&mut cur, &names)?;
                 let prop_type = read_mapped_type(&mut cur, &names, 0, ledger)?;
-                properties
-                    .try_reserve(usize::from(array_size))
-                    .map_err(|source| {
-                        mappings_alloc_failed(
-                            MappingsAllocationContext::SchemaProperties,
-                            usize::from(array_size),
-                            source,
-                        )
-                    })?;
+                grow_charged(
+                    &mut properties,
+                    usize::from(array_size),
+                    ledger,
+                    MappingsAllocationContext::SchemaProperties,
+                )?;
 
                 // Expand array_size > 1 into consecutive slots. Keep the
                 // name identical for every expanded slot; encode the C-style
@@ -1371,8 +1372,6 @@ fn read_mapped_type(
             limit: MAX_USMAP_ARRAY_NESTING_DEPTH,
         }));
     }
-    // The `Arc::new` container nodes below cannot be made fallible on
-    // stable Rust; MAX_USMAP_TYPE_NODES bounds them.
     ledger.type_nodes.charge(1)?;
     let type_byte = read_or_truncated(cur, |c| c.read_u8())?;
     // EPropertyType discriminants per the oracle's `pub enum EPropertyType`
@@ -1392,9 +1391,8 @@ fn read_mapped_type(
             // wire like `08 08 08 ... <leaf>` is rejected before
             // the stack-overflow danger zone (security cap added
             // for #443; see MAX_USMAP_ARRAY_NESTING_DEPTH docstring).
-            let inner = read_mapped_type(cur, names, depth + 1, ledger)?;
             MappedPropertyType::Array {
-                inner: Arc::new(inner),
+                inner: read_type_node(cur, names, depth + 1, ledger)?,
             }
         }
         9 => {
@@ -1424,19 +1422,15 @@ fn read_mapped_type(
             // WITHOUT consuming them desyncs the schema table for every
             // subsequent property (there is no per-property size to
             // resync on). #639.
-            let key = read_mapped_type(cur, names, depth + 1, ledger)?;
-            let value = read_mapped_type(cur, names, depth + 1, ledger)?;
-            MappedPropertyType::Map {
-                key: Arc::new(key),
-                value: Arc::new(value),
-            }
+            let key = read_type_node(cur, names, depth + 1, ledger)?;
+            let value = read_type_node(cur, names, depth + 1, ledger)?;
+            MappedPropertyType::Map { key, value }
         }
         25 => {
             // SetProperty — single element inner type (same recursive
             // shape as ArrayProperty). #639.
-            let inner = read_mapped_type(cur, names, depth + 1, ledger)?;
             MappedPropertyType::Set {
-                inner: Arc::new(inner),
+                inner: read_type_node(cur, names, depth + 1, ledger)?,
             }
         }
         26 => {
@@ -1449,6 +1443,20 @@ fn read_mapped_type(
         27 => MappedPropertyType::Unknown(type_byte), // FieldPathProperty
         other => MappedPropertyType::Unknown(other),
     })
+}
+
+/// A container's inner type, read and charged to the heap budget before it
+/// is boxed in its `Arc`. Stable Rust has no fallible `Arc` constructor;
+/// `MAX_USMAP_TYPE_NODES` bounds how many there are.
+fn read_type_node(
+    cur: &mut Cursor<&[u8]>,
+    names: &[Arc<str>],
+    depth: usize,
+    ledger: &mut Ledger,
+) -> crate::Result<Arc<MappedPropertyType>> {
+    let node = read_mapped_type(cur, names, depth, ledger)?;
+    ledger.heap_bytes.charge(ARC_TYPE_NODE_BYTES)?;
+    Ok(Arc::new(node))
 }
 
 /// The schema table as a list, each class's `super_type` resolved to its
@@ -1730,6 +1738,25 @@ fn reserve_charged<T>(
     out.try_reserve_exact(len)
         .map_err(|source| mappings_alloc_failed(context, len, source))?;
     Ok(out)
+}
+
+/// `vec` grown to hold `additional` more items, charged to the heap budget
+/// first at twice their bytes. Summed over a `Vec` grown from empty, as each
+/// schema's slots are, that covers what amortized growth reserves past the
+/// four-item minimum std gives items of 2 to 1024 bytes. A refused
+/// reservation is reported with `context`.
+fn grow_charged<T>(
+    vec: &mut Vec<T>,
+    additional: usize,
+    ledger: &mut Ledger,
+    context: MappingsAllocationContext,
+) -> crate::Result<()> {
+    const { assert!(size_of::<T>() > 1 && size_of::<T>() <= 1024) };
+    ledger
+        .heap_bytes
+        .charge(vec_bytes::<T>(additional.saturating_mul(2)))?;
+    vec.try_reserve(additional)
+        .map_err(|source| mappings_alloc_failed(context, additional, source))
 }
 
 /// An empty `HashMap` reserved for `n` entries, charged to the heap budget
@@ -3819,8 +3846,9 @@ mod tests {
         );
     }
 
-    /// A row's slots are charged as soon as its `array_size` is read, so a
-    /// row past the budget is refused before its name or type is.
+    /// A row's slots count toward the expanded-property total as soon as its
+    /// `array_size` is read, so a row past that budget is refused before its
+    /// name or type is.
     #[test]
     fn a_rows_slots_are_charged_before_its_type_is_read() {
         let mut data: Vec<u8> = Vec::new();
@@ -4140,8 +4168,64 @@ mod tests {
         ));
     }
 
+    /// Amortized growth keeps a property list's capacity within twice its
+    /// length past std's four-item minimum, which the slot charge rests on.
+    #[test]
+    fn slot_growth_stays_within_twice_the_slots() {
+        let slot = MappedProperty {
+            name: Arc::from(""),
+            schema_index: 0,
+            array_index: 0,
+            prop_type: MappedPropertyType::Int32,
+        };
+        let mut slots: Vec<MappedProperty> = Vec::new();
+        for array_size in [1, 3, 255, 255, 2, 254, 1, 255] {
+            slots.try_reserve(array_size).unwrap();
+            slots.extend(std::iter::repeat_n(slot.clone(), array_size));
+            assert!(
+                slots.capacity() <= (2 * slots.len()).max(4),
+                "{} slots",
+                slots.len()
+            );
+        }
+    }
+
+    /// A row's slots are charged before they are reserved: past the heap
+    /// budget they are refused by the budget, and a reservation std refuses,
+    /// here one whose size overflows, is an allocation fault with their
+    /// context.
+    #[test]
+    fn slots_are_charged_then_reserved() {
+        let grow = |budgets: SchemaBudgets| {
+            let context = MappingsAllocationContext::SchemaProperties;
+            grow_charged(
+                &mut Vec::<MappedProperty>::new(),
+                usize::MAX,
+                &mut budgets.ledger(),
+                context,
+            )
+        };
+        assert!(matches!(
+            grow(heap(0)),
+            Err(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::HeapBudgetExceeded { limit: 0, .. },
+            })
+        ));
+        assert!(matches!(
+            grow(UNLIMITED),
+            Err(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::AllocationFailed {
+                    context: MappingsAllocationContext::SchemaProperties,
+                    requested: usize::MAX,
+                    ..
+                },
+            })
+        ));
+    }
+
     /// A schema walk charges, in order: the schema table, the class name's and
-    /// super type's copies, and the map key's and cache key's copies.
+    /// super type's copies, each inner type node, the row's slots at twice
+    /// their bytes, and the map key's and cache key's copies.
     #[test]
     fn the_schema_walk_charges_in_read_order() {
         // The class and super type names differ in length, so their copies'
@@ -4149,18 +4233,25 @@ mod tests {
         // and its row three slots.
         let data = single_schema_data(&[b"Hero", b"Super", b"x"], &[3], &[24, 8, 2, 25, 3]);
         let arc = size_of::<[usize; 2]>() as u64;
+        let node = arc + size_of::<MappedPropertyType>() as u64;
         let names = 3 * size_of::<Arc<str>>() as u64 + 3 * arc + 4 + 5 + 1;
         let enum_map = names + table_of(8, size_of::<(Arc<str>, HashMap<u64, Arc<str>>)>());
         let schema_map = enum_map + table_of(16 / 7 + 8, size_of::<(String, ClassSchema)>());
         let copies = schema_map + 4 + 5;
-        let total = copies + 4 + 4;
+        let slots = copies + 4 * node + 2 * 3 * size_of::<MappedProperty>() as u64;
+        let total = slots + 4 + 4;
         for charged in [
             names,
             enum_map,
             schema_map,
             schema_map + 4,
             copies,
-            copies + 4,
+            copies + node,
+            copies + 2 * node,
+            copies + 3 * node,
+            copies + 4 * node,
+            slots,
+            slots + 4,
             total,
         ] {
             assert_eq!(
