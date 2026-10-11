@@ -180,7 +180,7 @@ pub struct Package {
     /// pre-5.2 / absent / empty tables. Shared into every
     /// [`AssetContext`] this package hands out (`context()`), switching
     /// bulk reads to the indexed form when non-empty (#642).
-    pub(crate) data_resources: Arc<[crate::asset::data_resource::FObjectDataResource]>,
+    pub(crate) data_resources: Arc<Vec<crate::asset::data_resource::FObjectDataResource>>,
 }
 
 impl Serialize for Package {
@@ -676,13 +676,13 @@ impl Package {
         // Empty/absent/unknown-version tables yield an empty vec —
         // classic parsing, matching CUE4Parse. Reads `bytes` directly so
         // `cursor`'s position (re-seeked per table below) is untouched.
-        let data_resources: Arc<[crate::asset::data_resource::FObjectDataResource]> =
-            Arc::from(match summary.data_resource_offset {
-                Some(offset) => crate::asset::data_resource::parse_data_resource_table(
-                    bytes, offset, asset_path,
-                )?,
-                None => Vec::new(),
-            });
+        // `Arc::new` moves the fallibly reserved table, as with `stitched`.
+        let data_resources = Arc::new(match summary.data_resource_offset {
+            Some(offset) => {
+                crate::asset::data_resource::parse_data_resource_table(bytes, offset, asset_path)?
+            }
+            None => Vec::new(),
+        });
 
         // `Arc`-wrap the tables immediately at parse time (#369).
         // The same Arc is then shared between `Package` and the

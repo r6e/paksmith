@@ -1081,7 +1081,7 @@ pub struct AssetContext {
     /// single `i32` into this table) — see
     /// [`bulk_data::FByteBulkData::read_from_ctx`]. `Arc` so context
     /// clones are refcount-cheap.
-    pub(crate) data_resources: std::sync::Arc<[crate::asset::data_resource::FObjectDataResource]>,
+    pub(crate) data_resources: Arc<Vec<data_resource::FObjectDataResource>>,
     /// Out-of-band engine version supplied by a game profile (#656).
     ///
     /// Some wire gates are ENGINE-version gates that the package's own
@@ -1138,7 +1138,7 @@ impl AssetContext {
             soft_object_paths_indexed: false,
             // Default: classic inline bulk headers. Only the real
             // `Package::read_from*` path parses a data-resource table. #642.
-            data_resources: std::sync::Arc::from(Vec::new()),
+            data_resources: Arc::default(),
             // Set from the caller's profile on the
             // `Package::read_from*` path; see the field's own doc.
             engine_version_hint: None,

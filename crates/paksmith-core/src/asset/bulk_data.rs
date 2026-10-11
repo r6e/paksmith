@@ -1981,7 +1981,7 @@ mod tests {
         entries: Vec<crate::asset::data_resource::FObjectDataResource>,
     ) -> crate::asset::AssetContext {
         let mut ctx = crate::asset::property::test_utils::make_ctx(&[]);
-        ctx.data_resources = std::sync::Arc::from(entries);
+        ctx.data_resources = std::sync::Arc::new(entries);
         ctx
     }
 
