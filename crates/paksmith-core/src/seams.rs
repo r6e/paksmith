@@ -180,8 +180,8 @@ pub enum AssetSeam {
     /// `AssetAllocationContext::CollectionElements`. Shared across
     /// all collection decoders.
     CollectionElements,
-    /// `Package::read_from`'s split-asset concat buffer
-    /// (uasset + uexp).
+    /// `Package::read_from`'s stitched buffer (the uasset, plus the
+    /// uexp when one is given).
     /// Surfaces as `AssetAllocationContext::SplitAssetCombined`.
     SplitAssetCombined,
     /// `data_table::read_from`'s row-list reservation (Phase 3d).

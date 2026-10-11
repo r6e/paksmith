@@ -510,12 +510,12 @@ impl Package {
     /// companion `.uexp` slice.
     ///
     /// For monolithic assets (all export payloads inside `uasset`), pass
-    /// `uexp = None` and the call is zero-copy on the input slice. For
-    /// split assets (UE writes `.uasset` truncated at
+    /// `uexp = None`. For split assets (UE writes `.uasset` truncated at
     /// `total_header_size` with payloads in a separate `.uexp`), pass
-    /// `Some(&uexp_bytes)`; the implementation concatenates the two
-    /// into one contiguous buffer (capped by [`MAX_UEXP_SIZE`]) and
-    /// parses the combined byte stream so the wire-encoded
+    /// `Some(&uexp_bytes)`; a `.uexp` is capped by [`MAX_UEXP_SIZE`].
+    /// Either way the bytes are copied into one contiguous buffer,
+    /// which the package keeps for bulk-data resolution, and the
+    /// combined byte stream is parsed so the wire-encoded
     /// `serial_offset` values resolve naturally.
     ///
     /// The companion need-detection runs after the export table parse:
@@ -539,6 +539,9 @@ impl Package {
     ///   `serial_size` exceeds `usize::MAX`
     /// - [`AssetParseFault::BoundsExceeded`] with
     ///   `field = AssetWireField::UexpSize` if `uexp.len() > MAX_UEXP_SIZE`
+    /// - [`AssetParseFault::AllocationFailed`] with
+    ///   `context = AssetAllocationContext::SplitAssetCombined` if the
+    ///   combined buffer cannot be reserved
     /// - [`AssetParseFault::MissingCompanionFile`] when a payload
     ///   extends past `uasset.len()` and no `.uexp` was provided
     /// - [`AssetParseFault::SplitAssetSizeMismatch`] when a `.uexp` is
@@ -635,18 +638,15 @@ impl Package {
         }
 
         // Phase 3b: ALWAYS materialize the stitched buffer into an
-        // owned `Arc<[u8]>`. The resolver field holds the same
-        // `Arc<[u8]>` for inline / uexp-resident tier resolution,
-        // and the parser uses the same backing allocation through
-        // `&[u8]` deref — one allocation, two roles. For monolithic
+        // owned `Arc<Vec<u8>>` (the resolver's `stitched` field says
+        // why not `Arc<[u8]>`). The resolver field holds the same
+        // `Arc` for inline / uexp-resident tier resolution, and the
+        // parser uses the same backing allocation through `&[u8]`
+        // deref — one allocation, two roles. For monolithic
         // assets this costs one `uasset.to_vec()`-equivalent copy
         // (no more zero-copy on the parse path); typical UE
         // monolithic assets are KB-scale, so the per-asset overhead
         // is negligible.
-        //
-        // `try_reserve_exact` + `extend_from_slice` produces a Vec
-        // with `capacity == len`, so `into_boxed_slice()` is
-        // alloc-free (no shrink-to-fit reallocation).
         let total = uasset
             .len()
             .checked_add(uexp.map_or(0, <[u8]>::len))
@@ -662,7 +662,7 @@ impl Package {
         if let Some(uexp_data) = uexp {
             buf.extend_from_slice(uexp_data);
         }
-        let stitched: Arc<[u8]> = Arc::from(buf.into_boxed_slice());
+        let stitched = Arc::new(buf);
         let bytes: &[u8] = &stitched;
         let mut cursor = Cursor::new(bytes);
         let summary = PackageSummary::read_from(&mut cursor, asset_path)?;
@@ -793,8 +793,6 @@ impl Package {
         // `AssetContext` so the context can carry it — typed readers resolve
         // a non-inlined (streamed) `FByteBulkData` payload through
         // `ctx.bulk_resolver` (e.g. a static mesh's out-of-line LOD geometry).
-        // `Arc::clone` is a refcount bump — the parser-side `&stitched` and
-        // the resolver's owned `Arc<[u8]>` share one allocation.
         #[allow(
             clippy::cast_sign_loss,
             reason = "total_header_size validated >= 0 by PackageSummary::read_from"

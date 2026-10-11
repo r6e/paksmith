@@ -4904,9 +4904,11 @@ pub enum AssetAllocationContext {
     /// `Vec<PropertyValue>` or `Vec<MapEntry>` for a decoded
     /// array/set/map element list.
     CollectionElements,
-    /// `Vec<u8>` for the concatenated `.uasset` + `.uexp` buffer built
-    /// in [`Package::read_from`](crate::asset::Package::read_from) for
-    /// split assets.
+    /// `Vec<u8>` for the buffer a package read copies the `.uasset`
+    /// into, followed by the `.uexp` when one is given (see
+    /// [`Package::read_from`](crate::asset::Package::read_from)). A
+    /// monolithic read reports it too; the name and Display string are
+    /// kept for wire stability.
     SplitAssetCombined,
     /// `Vec<DataTableRow>` for a `UDataTable`'s row list (Phase 3d).
     DataTableRows,
