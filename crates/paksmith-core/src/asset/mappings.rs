@@ -158,12 +158,16 @@ const MAX_USMAP_FLATTENED_TOTAL_ENTRIES: u64 = 4_194_304;
 const MAX_USMAP_TYPE_NODES: u64 = 4_194_304;
 
 /// Hard cap on the heap estimate one load is charged: its decompressed
-/// buffer. Refused as [`MappingsParseFault::HeapBudgetExceeded`]. Twice
+/// buffer, and its name table's slots and names. Refused as
+/// [`MappingsParseFault::HeapBudgetExceeded`]. Twice
 /// [`MAX_USMAP_DECOMPRESSED_SIZE`], so what is parsed from a file at that cap
 /// can take nearly as much again as its buffer.
 ///
 /// Exposed via [`max_usmap_heap_bytes`].
 const MAX_USMAP_HEAP_BYTES: u64 = 536_870_912;
+
+/// An `Arc` allocation's header: its strong and weak counts.
+const ARC_HEADER_BYTES: u64 = size_of::<[usize; 2]>() as u64;
 
 /// Hard cap on the wire-claimed `cv_count` in the .usmap versioning
 /// block. Real-world `CustomVersionContainer`s top out in the low
@@ -812,18 +816,9 @@ impl Usmap {
     fn parse_schema_data(data: &[u8], version: u8, ledger: &mut Ledger) -> crate::Result<Self> {
         let mut cur = Cursor::new(data);
 
-        // Name table.
-        //
-        // `name_count` is a wire-controlled u32 — without an explicit
-        // cap a malicious header could claim `u32::MAX` names; the
-        // subsequent `try_reserve` would surface as a
-        // `MappingsAllocationContext::NameTable` OOM, burying the
-        // wire-cap rejection inside an alloc-context fault. The
-        // `MAX_USMAP_DECOMPRESSED_SIZE` (256 MiB) cap only bounds the
-        // total decompressed byte stream, not the pre-allocation
-        // derived from a claimed count field. Reject explicitly first;
-        // the `try_reserve` below still defends against the
-        // sub-cap-but-OOM case on memory-pressured platforms.
+        // Name table. `name_count` is wire-controlled, so the cap rejects an
+        // absurd count with its own fault before the heap budget or the
+        // reservation sized from it could refuse it as something else.
         let name_count = read_or_truncated(&mut cur, |c| c.read_u32::<LE>())?;
         if name_count > MAX_USMAP_NAME_COUNT {
             return Err(fault(MappingsParseFault::NameCountTooLarge {
@@ -831,14 +826,11 @@ impl Usmap {
                 limit: MAX_USMAP_NAME_COUNT,
             }));
         }
-        let mut names: Vec<Arc<str>> = Vec::new();
-        names.try_reserve(name_count as usize).map_err(|source| {
-            mappings_alloc_failed(
-                MappingsAllocationContext::NameTable,
-                name_count as usize,
-                source,
-            )
-        })?;
+        let mut names: Vec<Arc<str>> = reserve_charged(
+            name_count as usize,
+            ledger,
+            MappingsAllocationContext::NameTable,
+        )?;
         for _ in 0..name_count {
             // CUE4Parse `UsmapParser.cs:95`:
             //   `var nameLength = Ar.Version >= EUsmapVersion.LongFName
@@ -860,8 +852,11 @@ impl Usmap {
                 );
                 ""
             });
-            // Arc has no stable fallible constructor; MAX_USMAP_NAME_COUNT
-            // bounds how many, and the schema data their bytes.
+            // Arc has no stable fallible constructor, so the heap budget
+            // bounds what these allocate.
+            ledger
+                .heap_bytes
+                .charge(ARC_HEADER_BYTES + name.len() as u64)?;
             names.push(Arc::from(name));
         }
 
@@ -1535,6 +1530,11 @@ struct Ledger {
     heap_bytes: Tally,
 }
 
+/// The bytes of a `Vec<T>` buffer with capacity for exactly `n` items.
+fn vec_bytes<T>(n: usize) -> u64 {
+    (n as u64).saturating_mul(size_of::<T>() as u64)
+}
+
 /// A total summed across one load, refused once it passes `limit`.
 struct Tally {
     used: u64,
@@ -1703,15 +1703,24 @@ fn strict_brotli_decoder() -> crate::Result<DecoderState> {
 }
 
 fn reserve_decompressed(len: usize, ledger: &mut Ledger) -> crate::Result<Vec<u8>> {
-    ledger.heap_bytes.charge(len as u64)?;
+    reserve_charged(
+        len,
+        ledger,
+        MappingsAllocationContext::DecompressedDataBytes,
+    )
+}
+
+/// An empty `Vec` reserved for exactly `len` items, charged to the heap
+/// budget first; a refused reservation is reported with `context`.
+fn reserve_charged<T>(
+    len: usize,
+    ledger: &mut Ledger,
+    context: MappingsAllocationContext,
+) -> crate::Result<Vec<T>> {
+    ledger.heap_bytes.charge(vec_bytes::<T>(len))?;
     let mut out = Vec::new();
-    out.try_reserve_exact(len).map_err(|source| {
-        mappings_alloc_failed(
-            MappingsAllocationContext::DecompressedDataBytes,
-            len,
-            source,
-        )
-    })?;
+    out.try_reserve_exact(len)
+        .map_err(|source| mappings_alloc_failed(context, len, source))?;
     Ok(out)
 }
 
@@ -3923,29 +3932,67 @@ mod tests {
         assert_eq!(SchemaBudgets::DEFAULT.heap_bytes, max_usmap_heap_bytes());
     }
 
-    /// The decompressed buffer is the load's first heap charge. A borrowed
-    /// payload costs nothing.
+    #[test]
+    fn vec_bytes_is_the_items_times_their_size() {
+        assert_eq!(vec_bytes::<[u8; 24]>(3), 72);
+    }
+
+    /// The decompressed buffer is the load's first heap charge, and the name
+    /// table is charged to the same total. A borrowed payload costs nothing.
     #[test]
     fn the_decompressed_buffer_is_the_first_heap_charge() {
-        let payload = schema_payload();
+        // Trailing bytes, which the schema walk ignores, keep the buffer's
+        // charge apart from the name table's slots.
+        let payload = [schema_payload(), vec![0; 8]].concat();
         let n = payload.len();
         let buffer = u64::try_from(n + 1).unwrap();
+        // The slots of the payload's four names.
+        let slots = 4 * size_of::<Arc<str>>() as u64;
+        assert_ne!(buffer, slots);
+        let exceeded =
+            |requested, limit| MappingsParseFault::HeapBudgetExceeded { requested, limit };
         for (method, stored) in [
-            (UsmapCompression::Brotli, FROZEN_BROTLI),
-            (UsmapCompression::ZStandard, FROZEN_ZSTD),
+            (
+                UsmapCompression::Brotli,
+                brotli_compress(&payload, false, 22),
+            ),
+            (UsmapCompression::ZStandard, zstd_compress(&payload, true)),
         ] {
-            let bytes = usmap_with(method, stored, n);
+            let bytes = usmap_with(method, &stored, n);
             assert_eq!(
                 parse_fault_with(&bytes, heap(buffer - 1)),
-                MappingsParseFault::HeapBudgetExceeded {
-                    requested: buffer,
-                    limit: buffer - 1
-                }
+                exceeded(buffer, buffer - 1)
             );
-            assert!(Usmap::from_bytes_with(&bytes, heap(buffer)).is_ok());
+            assert_eq!(
+                parse_fault_with(&bytes, heap(buffer)),
+                exceeded(buffer + slots, buffer)
+            );
         }
         let bytes = usmap_with(UsmapCompression::None, &payload, n);
-        assert!(Usmap::from_bytes_with(&bytes, heap(0)).is_ok());
+        assert_eq!(parse_fault_with(&bytes, heap(0)), exceeded(slots, 0));
+    }
+
+    /// The name table charges its slots, then each name's `Arc`, and is the
+    /// whole estimate of a file with nothing else.
+    #[test]
+    fn the_name_table_charges_its_slots_then_each_name() {
+        let mut data = Vec::new();
+        push_names(&mut data, &["E", "Va", "Vb"]);
+        data.extend_from_slice(&0u32.to_le_bytes()); // no enums
+        data.extend_from_slice(&0u32.to_le_bytes()); // no schemas
+        let arc = size_of::<[usize; 2]>() as u64;
+        let slots = 3 * size_of::<Arc<str>>() as u64;
+        let total = slots + 3 * arc + 5;
+        for charged in [slots, slots + arc + 1, slots + 2 * arc + 3, total] {
+            assert_eq!(
+                schema_fault(&data, 0, heap(charged - 1)),
+                MappingsParseFault::HeapBudgetExceeded {
+                    requested: charged,
+                    limit: charged - 1
+                }
+            );
+        }
+        assert!(parse_schema(&data, 0, heap(total)).is_ok());
     }
 
     /// Entries sharing an absolute index, which only a malformed `.usmap`
