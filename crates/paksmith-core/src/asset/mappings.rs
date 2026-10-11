@@ -13,6 +13,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, TryReserveError};
+use std::hash::Hash;
 use std::io::{BufRead, Cursor};
 use std::sync::Arc;
 
@@ -158,7 +159,7 @@ const MAX_USMAP_FLATTENED_TOTAL_ENTRIES: u64 = 4_194_304;
 const MAX_USMAP_TYPE_NODES: u64 = 4_194_304;
 
 /// Hard cap on the heap estimate one load is charged: its decompressed
-/// buffer, and its name table's slots and names. Refused as
+/// buffer, its name table's slots and names, and its enum tables. Refused as
 /// [`MappingsParseFault::HeapBudgetExceeded`]. Twice
 /// [`MAX_USMAP_DECOMPRESSED_SIZE`], so what is parsed from a file at that cap
 /// can take nearly as much again as its buffer.
@@ -871,14 +872,11 @@ impl Usmap {
                 limit: MAX_USMAP_ENUM_COUNT,
             }));
         }
-        let mut enums: HashMap<Arc<str>, HashMap<u64, Arc<str>>> = HashMap::new();
-        enums.try_reserve(enum_count as usize).map_err(|source| {
-            mappings_alloc_failed(
-                MappingsAllocationContext::EnumTable,
-                enum_count as usize,
-                source,
-            )
-        })?;
+        let mut enums: HashMap<Arc<str>, HashMap<u64, Arc<str>>> = reserve_map_charged(
+            enum_count as usize,
+            ledger,
+            MappingsAllocationContext::EnumTable,
+        )?;
         for _ in 0..enum_count {
             // `Arc<str>` so a future `usmap.clone()` refcount-shares
             // the enum-name buffer rather than deep-cloning (#418).
@@ -898,10 +896,8 @@ impl Usmap {
                 }));
             }
             let value_count = value_count_u32 as usize;
-            let mut values: HashMap<u64, Arc<str>> = HashMap::new();
-            values.try_reserve(value_count).map_err(|source| {
-                mappings_alloc_failed(MappingsAllocationContext::EnumValues, value_count, source)
-            })?;
+            let mut values: HashMap<u64, Arc<str>> =
+                reserve_map_charged(value_count, ledger, MappingsAllocationContext::EnumValues)?;
             if version >= USMAP_VERSION_EXPLICIT_ENUM_VALUES {
                 // CUE4Parse: `value = Ar.Read<ulong>(); name = Ar.ReadName(...)`.
                 for _ in 0..value_count {
@@ -1535,6 +1531,17 @@ fn vec_bytes<T>(n: usize) -> u64 {
     (n as u64).saturating_mul(size_of::<T>() as u64)
 }
 
+/// An upper bound on the bytes a std `HashMap` reserved for `n` entries of
+/// `T` takes, for entries of at least 16 bytes: at most `16n / 7 + 8`
+/// buckets, each an entry and a control byte, and a control group of at most
+/// 16 bytes. std sizes small tables of smaller entries past it.
+fn table_bytes<T>(n: usize) -> u64 {
+    const { assert!(size_of::<T>() >= 16) };
+    ((n as u64).saturating_mul(16) / 7 + 8)
+        .saturating_mul(size_of::<T>() as u64 + 1)
+        .saturating_add(16)
+}
+
 /// A total summed across one load, refused once it passes `limit`.
 struct Tally {
     used: u64,
@@ -1722,6 +1729,21 @@ fn reserve_charged<T>(
     out.try_reserve_exact(len)
         .map_err(|source| mappings_alloc_failed(context, len, source))?;
     Ok(out)
+}
+
+/// An empty `HashMap` reserved for `n` entries, charged to the heap budget
+/// first; a refused reservation is reported with `context`.
+fn reserve_map_charged<K: Eq + Hash, V>(
+    n: usize,
+    ledger: &mut Ledger,
+    context: MappingsAllocationContext,
+) -> crate::Result<HashMap<K, V>> {
+    ledger.heap_bytes.charge(table_bytes::<(K, V)>(n))?;
+    let mut table = HashMap::new();
+    table
+        .try_reserve(n)
+        .map_err(|source| mappings_alloc_failed(context, n, source))?;
+    Ok(table)
 }
 
 fn zstd_context(created: Option<DCtx<'static>>) -> crate::Result<DCtx<'static>> {
@@ -3972,18 +3994,142 @@ mod tests {
         assert_eq!(parse_fault_with(&bytes, heap(0)), exceeded(slots, 0));
     }
 
-    /// The name table charges its slots, then each name's `Arc`, and is the
-    /// whole estimate of a file with nothing else.
     #[test]
-    fn the_name_table_charges_its_slots_then_each_name() {
+    fn table_bytes_bounds_buckets_entries_and_control_bytes() {
+        assert_eq!(table_bytes::<[u8; 24]>(7), 616);
+    }
+
+    /// The table bound covers the capacity std's `HashMap` reserves at every
+    /// count up to the caps, read back as buckets under hashbrown's 7/8 load
+    /// factor, for each entry type a load charges.
+    #[test]
+    fn table_bytes_bounds_what_std_reserves() {
+        // A macro, not a fn: a fn's body is a mutant no test can kill.
+        macro_rules! check {
+            ($key:ty, $value:ty, $cap:expr) => {
+                for n in 1..=usize::try_from($cap).unwrap() {
+                    let mut table = HashMap::<$key, $value>::new();
+                    table.try_reserve(n).unwrap();
+                    let capacity = table.capacity();
+                    let buckets = if capacity < 8 {
+                        capacity + 1
+                    } else {
+                        (capacity * 8).div_ceil(7).next_power_of_two()
+                    };
+                    let entry = size_of::<($key, $value)>();
+                    let reserved = table_of(u64::try_from(buckets).unwrap(), entry);
+                    assert!(table_bytes::<($key, $value)>(n) >= reserved, "{n} entries");
+                }
+            };
+        }
+        check!(u64, Arc<str>, MAX_USMAP_VALUES_PER_ENUM);
+        check!(Arc<str>, HashMap<u64, Arc<str>>, MAX_USMAP_ENUM_COUNT);
+    }
+
+    /// A map is charged before it is reserved: past the heap budget it is
+    /// refused by the budget, and a reservation std refuses, here one whose
+    /// size overflows, is an allocation fault with the map's context.
+    #[test]
+    fn a_map_is_charged_then_reserved() {
+        let reserve = |budgets: SchemaBudgets| {
+            let context = MappingsAllocationContext::EnumValues;
+            reserve_map_charged::<u64, Arc<str>>(usize::MAX, &mut budgets.ledger(), context)
+        };
+        assert!(matches!(
+            reserve(heap(0)),
+            Err(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::HeapBudgetExceeded { limit: 0, .. },
+            })
+        ));
+        assert!(matches!(
+            reserve(UNLIMITED),
+            Err(PaksmithError::MappingsParse {
+                fault: MappingsParseFault::AllocationFailed {
+                    context: MappingsAllocationContext::EnumValues,
+                    requested: usize::MAX,
+                    ..
+                },
+            })
+        ));
+    }
+
+    /// The bytes of a hash table of `buckets` buckets of `entry`-byte
+    /// entries: an entry and a control byte per bucket, and a control group.
+    fn table_of(buckets: u64, entry: usize) -> u64 {
+        buckets * (entry as u64 + 1) + 16
+    }
+
+    /// Each enum cap refuses a count past it before that count's map is
+    /// charged, so the count is reported as itself with no budget to spare.
+    #[test]
+    fn the_enum_caps_refuse_before_the_heap_budget() {
+        let mut too_many_enums = 0u32.to_le_bytes().to_vec(); // no names
+        too_many_enums.extend_from_slice(&(MAX_USMAP_ENUM_COUNT + 1).to_le_bytes());
+        assert_eq!(
+            schema_fault(&too_many_enums, 0, heap(0)),
+            MappingsParseFault::EnumCountTooLarge {
+                count: MAX_USMAP_ENUM_COUNT + 1,
+                limit: MAX_USMAP_ENUM_COUNT
+            }
+        );
+
+        // LargeEnums: u16 name lengths and value counts.
+        let mut too_many_values = 1u32.to_le_bytes().to_vec(); // one name
+        too_many_values.extend_from_slice(&1u16.to_le_bytes());
+        too_many_values.push(b'E');
+        too_many_values.extend_from_slice(&1u32.to_le_bytes()); // one enum
+        too_many_values.extend_from_slice(&0i32.to_le_bytes()); // E
+        too_many_values.extend_from_slice(
+            &u16::try_from(MAX_USMAP_VALUES_PER_ENUM + 1)
+                .unwrap()
+                .to_le_bytes(),
+        );
+        // The name table, then one enum's map.
+        let through_enum_map = size_of::<Arc<str>>() as u64
+            + size_of::<[usize; 2]>() as u64
+            + 1
+            + table_of(16 / 7 + 8, size_of::<(Arc<str>, HashMap<u64, Arc<str>>)>());
+        assert_eq!(
+            schema_fault(
+                &too_many_values,
+                USMAP_VERSION_LARGE_ENUMS,
+                heap(through_enum_map)
+            ),
+            MappingsParseFault::EnumValueCountTooLarge {
+                count: MAX_USMAP_VALUES_PER_ENUM + 1,
+                limit: MAX_USMAP_VALUES_PER_ENUM
+            }
+        );
+    }
+
+    /// The name table charges its slots, then each name's `Arc`; the enum
+    /// table then its map, then each enum's value map; and that is the whole
+    /// estimate of a file with nothing else. A file without enums still pays
+    /// for its empty enum map.
+    #[test]
+    fn the_name_and_enum_tables_charge_in_read_order() {
         let mut data = Vec::new();
         push_names(&mut data, &["E", "Va", "Vb"]);
-        data.extend_from_slice(&0u32.to_le_bytes()); // no enums
+        data.extend_from_slice(&1u32.to_le_bytes()); // one enum
+        data.extend_from_slice(&0i32.to_le_bytes()); // E
+        data.push(2); // two values
+        data.extend_from_slice(&1i32.to_le_bytes()); // Va
+        data.extend_from_slice(&2i32.to_le_bytes()); // Vb
         data.extend_from_slice(&0u32.to_le_bytes()); // no schemas
         let arc = size_of::<[usize; 2]>() as u64;
         let slots = 3 * size_of::<Arc<str>>() as u64;
-        let total = slots + 3 * arc + 5;
-        for charged in [slots, slots + arc + 1, slots + 2 * arc + 3, total] {
+        let names = slots + 3 * arc + 5;
+        let enum_entry = size_of::<(Arc<str>, HashMap<u64, Arc<str>>)>();
+        let enum_map = names + table_of(16 / 7 + 8, enum_entry);
+        let total = enum_map + table_of(2 * 16 / 7 + 8, size_of::<(u64, Arc<str>)>());
+        for charged in [
+            slots,
+            slots + arc + 1,
+            slots + 2 * arc + 3,
+            names,
+            enum_map,
+            total,
+        ] {
             assert_eq!(
                 schema_fault(&data, 0, heap(charged - 1)),
                 MappingsParseFault::HeapBudgetExceeded {
@@ -3993,6 +4139,19 @@ mod tests {
             );
         }
         assert!(parse_schema(&data, 0, heap(total)).is_ok());
+
+        let mut no_enums = Vec::new();
+        push_names(&mut no_enums, &["E", "Va", "Vb"]);
+        no_enums.extend_from_slice(&0u32.to_le_bytes()); // no enums
+        no_enums.extend_from_slice(&0u32.to_le_bytes()); // no schemas
+        let empty_map = names + table_of(8, enum_entry); // 0 * 16 / 7 + 8
+        assert_eq!(
+            schema_fault(&no_enums, 0, heap(empty_map - 1)),
+            MappingsParseFault::HeapBudgetExceeded {
+                requested: empty_map,
+                limit: empty_map - 1
+            }
+        );
     }
 
     /// Entries sharing an absolute index, which only a malformed `.usmap`
