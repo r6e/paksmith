@@ -853,7 +853,7 @@ mod tests {
             mappings: None,
             bulk_resolver: None,
             soft_object_paths_indexed: false,
-            data_resources: std::sync::Arc::from(Vec::new()),
+            data_resources: Arc::default(),
             engine_version_hint: None,
             derived_strings: Arc::default(),
             bulk_reads: Arc::default(),

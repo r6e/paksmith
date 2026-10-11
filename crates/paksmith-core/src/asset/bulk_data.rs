@@ -1034,9 +1034,8 @@ pub(crate) fn counting_loader(
 /// across all four storage tiers (Inline / UexpResident / Streaming /
 /// OptionalStreaming).
 ///
-/// Construct via `BulkDataResolver::new` (`pub(crate)`) from
-/// `Package::read_from_pak`'s integration code (Task 6 wires this
-/// up); test helpers use `new_for_test` / `new_for_test_with_ubulk` /
+/// Constructed by `Package::read_from_inner` via `BulkDataResolver::new`
+/// (`pub(crate)`); test helpers use `new_for_test` / `new_for_test_with_ubulk` /
 /// `new_for_test_with_uptnl` (all `#[cfg(feature = "__test_utils")]`-gated).
 ///
 /// # Defense chain
@@ -1080,7 +1079,7 @@ pub(crate) fn counting_loader(
 ///
 /// # Threading
 ///
-/// `Send + Sync` — `Arc<[u8]>`, `AtomicU64`,
+/// `Send + Sync` — `Arc<Vec<u8>>`, `AtomicU64`,
 /// `OnceLock<crate::Result<Vec<u8>>>`, and
 /// `Box<dyn Fn() + Send + Sync + 'static>` all satisfy. Concurrent
 /// first resolves of one companion wait for its one load.
@@ -1088,13 +1087,11 @@ pub(crate) fn counting_loader(
 /// commands moving `Package` across thread boundaries).
 pub struct BulkDataResolver {
     /// Stitched `.uasset` + `.uexp` bytes; resolved offsets index
-    /// this buffer for the inline and uexp-resident tiers. `Arc<[u8]>`
-    /// because the resolver lives inside `Package`, which owns the
-    /// stitched bytes via `Arc<[u8]>` — borrowing from a sibling
-    /// field would require Pin / ouroboros / yoke. Arc clones are
-    /// one refcount bump; size is identical to `&'a [u8]` (16-byte
-    /// fat pointer on 64-bit).
-    stitched: std::sync::Arc<[u8]>,
+    /// this buffer for the inline and uexp-resident tiers. `Vec`, not
+    /// `[u8]`: `Arc::new` moves the fallibly reserved buffer, while
+    /// turning it into an `Arc<[u8]>` allocates a second stitched-size
+    /// buffer and copies into it, infallibly (#846).
+    stitched: std::sync::Arc<Vec<u8>>,
     /// `summary.total_header_size` — boundary between inline
     /// (`.uasset` body) and uexp-resident (`.uexp` body) tiers for
     /// `BULKDATA_PayloadAtEndOfFile` records.
@@ -1160,7 +1157,7 @@ impl BulkDataResolver {
     /// so it must not resolve through this resolver: `OnceLock`
     /// deadlocks or panics on re-entrant initialization.
     pub(crate) fn new<U, T>(
-        stitched: std::sync::Arc<[u8]>,
+        stitched: std::sync::Arc<Vec<u8>>,
         total_header_size: u64,
         bulk_data_start_offset: i64,
         ubulk_loader: U,
@@ -1190,7 +1187,7 @@ impl BulkDataResolver {
     #[cfg(feature = "__test_utils")]
     #[must_use]
     pub fn new_for_test(
-        stitched: impl Into<std::sync::Arc<[u8]>>,
+        stitched: impl Into<std::sync::Arc<Vec<u8>>>,
         total_header_size: u64,
         bulk_data_start_offset: i64,
     ) -> Self {
@@ -1208,7 +1205,7 @@ impl BulkDataResolver {
     #[cfg(feature = "__test_utils")]
     #[must_use]
     pub fn new_for_test_with_ubulk(
-        stitched: impl Into<std::sync::Arc<[u8]>>,
+        stitched: impl Into<std::sync::Arc<Vec<u8>>>,
         total_header_size: u64,
         bulk_data_start_offset: i64,
         ubulk: Vec<u8>,
@@ -1227,7 +1224,7 @@ impl BulkDataResolver {
     #[cfg(feature = "__test_utils")]
     #[must_use]
     pub fn new_for_test_with_uptnl(
-        stitched: impl Into<std::sync::Arc<[u8]>>,
+        stitched: impl Into<std::sync::Arc<Vec<u8>>>,
         total_header_size: u64,
         bulk_data_start_offset: i64,
         uptnl: Vec<u8>,
@@ -1984,7 +1981,7 @@ mod tests {
         entries: Vec<crate::asset::data_resource::FObjectDataResource>,
     ) -> crate::asset::AssetContext {
         let mut ctx = crate::asset::property::test_utils::make_ctx(&[]);
-        ctx.data_resources = std::sync::Arc::from(entries);
+        ctx.data_resources = std::sync::Arc::new(entries);
         ctx
     }
 
@@ -3116,6 +3113,23 @@ mod tests {
         uasset.extend_from_slice(&[0xBB; 200]);
         let record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 16, 32);
         (BulkDataResolver::new_for_test(uasset, 100, 0), record)
+    }
+
+    /// The resolver keeps the allocation of the `Vec` it is handed instead
+    /// of copying it into a fresh `Arc<[u8]>` (#846). A copy allocates its
+    /// destination while the source is live, so the addresses can never
+    /// match; non-empty because an empty `Vec`'s pointer is a sentinel.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn resolver_keeps_the_stitched_allocation() {
+        let stitched = vec![0xAA_u8; 64];
+        let data = stitched.as_ptr();
+        let resolver = BulkDataResolver::new_for_test(stitched, 64, 0);
+        assert_eq!(
+            resolver.stitched.as_ptr(),
+            data,
+            "stitched bytes were copied"
+        );
     }
 
     #[cfg(feature = "__test_utils")]
@@ -4398,7 +4412,7 @@ mod tests {
         load: impl Fn() -> crate::Result<Vec<u8>> + Send + Sync + 'static,
     ) -> BulkDataResolver {
         let missing = |kind| missing_companion_loader(kind, "test".to_string());
-        let stitched = std::sync::Arc::from(Vec::new());
+        let stitched = std::sync::Arc::default();
         if optional {
             BulkDataResolver::new(stitched, 0, 0, missing(CompanionFileKind::Ubulk), load)
         } else {
