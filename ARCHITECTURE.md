@@ -88,7 +88,7 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
   attestation).
 - `staged_replace.rs` — `StagedReplace`: replaces a file through an
   exclusively created sibling temp and a rename, carrying the destination's
-  Unix access bits.
+  Unix access bits, or giving it `0o600` through `create_owner_only`.
 - `untrusted.rs` — crate-private `clamp` and `clamp_path`: bound untrusted
   text (archive-, mappings-, registry- and store-derived strings) to 64
   chars, and an archive path to 1,024, plus an ellipsis before it reaches a log

@@ -15,6 +15,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const TEMP_PREFIX: &str = ".paksmith-";
 const TEMP_SUFFIX: &str = ".part";
 
+#[cfg(unix)]
+const OWNER_ONLY: u32 = 0o600;
+
+/// Where a temp's Unix access bits come from: [`StagedReplace::create`] or
+/// [`StagedReplace::create_owner_only`].
+#[derive(Clone, Copy)]
+enum Bits {
+    Destination,
+    OwnerOnly,
+}
+
 /// Distinguishes every in-flight temp in the process, so two replaces racing
 /// for one destination never collide on the temp itself.
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -47,7 +58,8 @@ fn temp_path_for(dest: &Path) -> PathBuf {
 /// created is ever removed. On Unix the temp is created with no more than the
 /// access bits of an existing regular-file destination, read without following
 /// a leaf link, and then given exactly those; nothing else of the old inode
-/// carries over. On Windows nothing carries, and
+/// carries over. [`create_owner_only`](Self::create_owner_only) gives it
+/// `0o600` instead, whatever the destination. On Windows nothing carries, and
 /// a read-only destination, or one held open without delete sharing, fails the
 /// commit. The rename replaces the destination entry, so a symlink there is
 /// replaced, not followed. Dropped uncommitted, or failed after the temp
@@ -94,25 +106,56 @@ impl StagedReplace {
     /// destination's metadata cannot be read for any reason but its absence,
     /// or the bits the umask stripped cannot be restored.
     pub fn create(dest: &Path) -> Result<Self, StagedReplaceError> {
+        Self::create_beside(dest, Bits::Destination)
+    }
+
+    /// [`Self::create`] for content only its owner may read, such as keys: on
+    /// Unix the temp is created with a `0o600` mode request, whatever the
+    /// destination's bits. One the filesystem creates wider is refused, not
+    /// narrowed; one created narrower is set to exactly `0o600` and checked.
+    /// On Windows this is [`Self::create`].
+    ///
+    /// # Errors
+    ///
+    /// [`StagedReplaceError::CreateTemp`] as for [`Self::create`], and on Unix
+    /// [`StagedReplaceError::PreservePermissions`] when the temp is created
+    /// wider than `0o600` or does not end with exactly `0o600`, including on a
+    /// filesystem that accepts the change without applying it.
+    pub fn create_owner_only(dest: &Path) -> Result<Self, StagedReplaceError> {
+        Self::create_beside(dest, Bits::OwnerOnly)
+    }
+
+    /// [`Self::create_at`] at a fresh temp name beside `dest`.
+    fn create_beside(dest: &Path, bits: Bits) -> Result<Self, StagedReplaceError> {
         if dest.file_name().is_none() {
             return Err(StagedReplaceError::CreateTemp(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "destination has no file name",
             )));
         }
-        Self::create_at(dest, temp_path_for(dest))
+        Self::create_at(dest, temp_path_for(dest), bits)
     }
 
-    /// [`Self::create`] with the temp at a name the caller picks.
-    fn create_at(dest: &Path, temp: PathBuf) -> Result<Self, StagedReplaceError> {
+    /// [`Self::create`] or [`Self::create_owner_only`], by `bits`, with the
+    /// temp at a name the caller picks.
+    fn create_at(
+        dest: &Path,
+        temp: PathBuf,
+        #[cfg_attr(not(unix), allow(unused_variables))] bits: Bits,
+    ) -> Result<Self, StagedReplaceError> {
         let mut options = OpenOptions::new();
         let _ = options.write(true).create_new(true);
-        // Read once, above the open: the temp is safe because its creation
+        // Decided once, above the open: the temp is safe because its creation
         // mode is a subset of what is settled on it.
         #[cfg(unix)]
-        let mode = destination_mode(dest).map_err(StagedReplaceError::PreservePermissions)?;
-        // Born with the destination's bits, not narrowed to them afterwards:
-        // an fd opened on a wider temp keeps its read rights across a chmod.
+        let mode = match bits {
+            Bits::Destination => {
+                destination_mode(dest).map_err(StagedReplaceError::PreservePermissions)?
+            }
+            Bits::OwnerOnly => Some(OWNER_ONLY),
+        };
+        // Born with those bits, not narrowed to them afterwards: an fd opened
+        // on a wider temp keeps its read rights across a chmod.
         #[cfg(unix)]
         if let Some(mode) = mode {
             let _ = options.mode(mode);
@@ -129,9 +172,11 @@ impl StagedReplace {
             dest: dest.to_path_buf(),
         };
         #[cfg(unix)]
-        if let Some(mode) = mode {
-            settle_mode(&staged.file, mode).map_err(StagedReplaceError::PreservePermissions)?;
+        match bits {
+            Bits::Destination => mode.map_or(Ok(()), |mode| settle_mode(&staged.file, mode)),
+            Bits::OwnerOnly => restrict_to_owner(&staged.file),
         }
+        .map_err(StagedReplaceError::PreservePermissions)?;
         Ok(staged)
     }
 
@@ -168,8 +213,9 @@ pub enum StagedReplaceError {
     /// The temp could not be created beside the destination.
     #[error("create temp file: {0}")]
     CreateTemp(io::Error),
-    /// The destination's access bits could not be read, or could not be
-    /// restored on the temp.
+    /// The destination's access bits could not be read, or the temp could not
+    /// be given the bits decided for it: the destination's, or `0o600` for
+    /// [`StagedReplace::create_owner_only`].
     #[error("preserve permissions: {0}")]
     PreservePermissions(io::Error),
     /// The temp could not be renamed over the destination.
@@ -211,14 +257,46 @@ fn destination_mode(dest: &Path) -> io::Result<Option<u32>> {
 
 /// Restores what `open`'s umask stripped from the temp's creation mode.
 /// Skipped where nothing was stripped: a filesystem that fixes the bits itself
-/// (FAT's `fmask`) already matches, and may refuse a chmod to anyone but the
-/// mount's owner.
+/// (FAT's `fmask`) usually already matches, and may refuse a chmod to anyone
+/// but the mount's owner.
 #[cfg(unix)]
 fn settle_mode(file: &File, mode: u32) -> io::Result<()> {
-    if access_bits(file.metadata()?.permissions().mode()) == mode {
+    if current_bits(file)? == mode {
         return Ok(());
     }
     file.set_permissions(fs::Permissions::from_mode(mode))
+}
+
+/// Brings a just-created owner-only temp to exactly `0o600`, refusing one
+/// created wider rather than narrowing it.
+#[cfg(unix)]
+fn restrict_to_owner(file: &File) -> io::Result<()> {
+    let born = current_bits(file)?;
+    if born & !OWNER_ONLY != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("the temp was created with mode {born:o}, wider than {OWNER_ONLY:o}"),
+        ));
+    }
+    if born == OWNER_ONLY {
+        return Ok(());
+    }
+    file.set_permissions(fs::Permissions::from_mode(OWNER_ONLY))?;
+    confirm_mode(file, OWNER_ONLY)
+}
+
+/// Fails unless `file` has exactly `mode`: Linux's FAT and exFAT drivers
+/// report a chmod they cannot represent as done without applying it.
+#[cfg(unix)]
+fn confirm_mode(file: &File, mode: u32) -> io::Result<()> {
+    let actual = current_bits(file)?;
+    if actual == mode {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("the filesystem kept mode {actual:o} instead of {mode:o}"),
+    ))
 }
 
 /// The permission bits of an `st_mode`, which `Permissions` round-trips
@@ -229,6 +307,11 @@ fn access_bits(st_mode: u32) -> u32 {
     st_mode & 0o777
 }
 
+#[cfg(unix)]
+fn current_bits(file: &File) -> io::Result<u32> {
+    Ok(access_bits(file.metadata()?.permissions().mode()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
@@ -237,7 +320,10 @@ mod tests {
     use super::*;
 
     fn replace(dest: &Path, bytes: &[u8]) -> io::Result<()> {
-        let mut staged = StagedReplace::create(dest)?;
+        write_and_commit(StagedReplace::create(dest)?, bytes)
+    }
+
+    fn write_and_commit(mut staged: StagedReplace, bytes: &[u8]) -> io::Result<()> {
         staged.file_mut().write_all(bytes)?;
         staged.commit()?;
         Ok(())
@@ -413,6 +499,26 @@ mod tests {
         assert_eq!(mode & 0o777, 0o755, "access bits should still carry");
     }
 
+    /// Execute bits cannot come from creation, and `0o400` tells forcing the
+    /// mode apart from capping it at the destination's.
+    #[cfg(unix)]
+    #[test]
+    fn an_owner_only_replace_is_0600_whatever_was_there() {
+        let root = tempfile::tempdir().unwrap();
+        for (i, planted) in [None, Some(0o755), Some(0o400)].into_iter().enumerate() {
+            let dest = root.path().join(format!("{i}.toml"));
+            if let Some(mode) = planted {
+                fs::write(&dest, b"OLD").unwrap();
+                fs::set_permissions(&dest, fs::Permissions::from_mode(mode)).unwrap();
+            }
+
+            write_and_commit(StagedReplace::create_owner_only(&dest).unwrap(), b"KEYS").unwrap();
+
+            let mode = fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o7777, 0o600, "row {i}");
+        }
+    }
+
     /// The target carries an owner-execute bit, which creation cannot produce
     /// under any umask, so its absence shows the mode was not read through
     /// the link.
@@ -457,7 +563,7 @@ mod tests {
         let temp = root.path().join(".paksmith-taken.part");
         fs::write(&temp, b"TAKEN").unwrap();
 
-        let err = StagedReplace::create_at(&dest, temp.clone()).unwrap_err();
+        let err = StagedReplace::create_at(&dest, temp.clone(), Bits::Destination).unwrap_err();
 
         assert!(
             matches!(&err, StagedReplaceError::CreateTemp(e) if e.kind() == io::ErrorKind::AlreadyExists),
@@ -484,7 +590,7 @@ mod tests {
         let temp = root.path().join(".paksmith-planted.part");
         std::os::unix::fs::symlink(&victim, &temp).unwrap();
 
-        let err = StagedReplace::create_at(&dest, temp.clone()).unwrap_err();
+        let err = StagedReplace::create_at(&dest, temp.clone(), Bits::Destination).unwrap_err();
 
         assert!(
             matches!(&err, StagedReplaceError::CreateTemp(e) if e.kind() == io::ErrorKind::AlreadyExists),
@@ -513,9 +619,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dest = root.path().join("x.bin");
 
-        let mut staged = StagedReplace::create_at(&dest, dest.clone()).unwrap();
-        staged.file_mut().write_all(b"PAYLOAD").unwrap();
-        staged.commit().unwrap();
+        let staged = StagedReplace::create_at(&dest, dest.clone(), Bits::Destination).unwrap();
+        write_and_commit(staged, b"PAYLOAD").unwrap();
 
         assert_eq!(fs::read(&dest).unwrap(), b"PAYLOAD");
     }
@@ -602,6 +707,54 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o666
         );
+    }
+
+    /// A file left at other bits, as a filesystem that drops a chmod leaves
+    /// it, fails the check; the same file at the bits passes.
+    #[cfg(unix)]
+    #[test]
+    fn confirm_mode_refuses_bits_that_were_not_applied() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("x.bin");
+        fs::write(&path, b"X").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let file = File::options().write(true).open(&path).unwrap();
+
+        let err = confirm_mode(&file, 0o600).unwrap_err();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            err.to_string(),
+            "the filesystem kept mode 644 instead of 600"
+        );
+        confirm_mode(&file, 0o600).unwrap();
+    }
+
+    /// A temp created wider than `0o600` is refused and left as it was, not
+    /// narrowed; one created narrower is completed to exactly `0o600`.
+    #[cfg(unix)]
+    #[test]
+    fn restrict_to_owner_refuses_a_wide_temp_and_completes_a_narrow_one() {
+        let root = tempfile::tempdir().unwrap();
+        let wide = root.path().join("wide");
+        let narrow = root.path().join("narrow");
+        for (path, mode) in [(&wide, 0o640), (&narrow, 0o400)] {
+            fs::write(path, b"").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let mode_of = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        let err = restrict_to_owner(&File::open(&wide).unwrap()).unwrap_err();
+        restrict_to_owner(&File::open(&narrow).unwrap()).unwrap();
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            err.to_string(),
+            "the temp was created with mode 640, wider than 600"
+        );
+        assert_eq!(mode_of(&wide), 0o640, "a wide temp must not be narrowed");
+        assert_eq!(mode_of(&narrow), 0o600);
     }
 
     /// An unkeyed hash is as predictable as the counter.
