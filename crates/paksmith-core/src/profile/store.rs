@@ -2,11 +2,12 @@
 //! `<config_dir>/paksmith/profiles.toml`, overridable via
 //! `PAKSMITH_CONFIG_DIR`. Written atomically with `0600` perms on unix.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::PaksmithError;
 use crate::error::ProfileFault;
 use crate::profile::ProfileStore;
+use crate::{PaksmithError, StagedReplace};
 
 /// `<base>/paksmith/profiles.toml`.
 // Only called from tests; production code uses config_base_dir_from_env + join.
@@ -59,7 +60,10 @@ impl ProfileStore {
         Self::load_from(&Self::config_path()?)
     }
 
-    /// Save the store to the resolved [`Self::config_path`].
+    /// Save the store to the resolved [`Self::config_path`]. On Unix the file
+    /// ends exactly `0600`; when the filesystem creates the temp wider than
+    /// that or does not apply it, the save returns [`ProfileFault::Io`] and
+    /// the existing store is left as it was.
     pub fn save(&self) -> Result<(), PaksmithError> {
         self.save_to(&Self::config_path()?)
     }
@@ -84,9 +88,8 @@ impl ProfileStore {
         })
     }
 
-    /// Save to an explicit path: create the parent dir, write atomically via a
-    /// sibling temp file + rename. On unix the temp file is created at `0600`
-    /// from the start — no world-readable window.
+    /// Save to an explicit path: create the parent dir, then replace the file
+    /// through [`StagedReplace::create_owner_only`].
     pub(crate) fn save_to(&self, path: &Path) -> Result<(), PaksmithError> {
         let io = |e: std::io::Error| PaksmithError::Profile {
             fault: ProfileFault::Io {
@@ -101,32 +104,17 @@ impl ProfileStore {
                 reason: e.to_string(),
             },
         })?;
-        let tmp = path.with_extension("toml.tmp");
-        write_restricted(&tmp, text.as_bytes()).map_err(io)?;
-        std::fs::rename(&tmp, path).map_err(io)?;
-        Ok(())
+        replace_owner_only(path, text.as_bytes()).map_err(io)
     }
 }
 
-/// Write `data` to `path` with mode `0600` from creation (unix) so that AES
-/// key material is never visible to other users even momentarily.
-#[cfg(unix)]
-pub(crate) fn write_restricted(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?
-        .write_all(data)
-}
-
-/// On non-unix platforms there is no `mode()`, so fall back to a plain write.
-#[cfg(not(unix))]
-pub(crate) fn write_restricted(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, data)
+/// Writes `data` over `path` through [`StagedReplace::create_owner_only`]; a
+/// failed create, permission or rename step names itself in the error.
+pub(crate) fn replace_owner_only(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut staged = StagedReplace::create_owner_only(path)?;
+    staged.file_mut().write_all(data)?;
+    staged.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -183,6 +171,62 @@ mod tests {
         sample_store().save_to(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "store must be saved 0600");
+    }
+
+    /// The store, keys included, must not be written through a link at the
+    /// fixed temp name older versions used. Widened first, so the save is
+    /// also seen to force `0600` back.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_old_temp_name_is_not_written_through() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, b"VICTIM").unwrap();
+        let path = config_path_in(dir.path());
+        sample_store().save_to(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = path.with_extension("toml.tmp");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        sample_store().save_to(&path).unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"VICTIM");
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.is_file(), "the store was replaced by the link");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    /// A directory at the store's path fails the replace after the content is
+    /// staged.
+    #[test]
+    fn a_failed_save_names_its_step_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_path_in(dir.path());
+        std::fs::create_dir_all(&path).unwrap();
+
+        let err = sample_store().save_to(&path).unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::Profile { fault: ProfileFault::Io { reason } }
+                    if reason.starts_with("replace destination: ")
+            ),
+            "{err:?}"
+        );
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["profiles.toml"]);
     }
 
     #[test]

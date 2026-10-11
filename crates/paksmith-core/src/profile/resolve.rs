@@ -264,7 +264,9 @@ pub async fn resolve_pak_context(
         match try_fetch(&cfg, now).await {
             Ok(fetched) => {
                 // Best-effort save; don't propagate a save error.
-                let _ = fetched.save();
+                if let Err(e) = fetched.save() {
+                    tracing::warn!(error = e.to_string(), "registry cache not saved");
+                }
                 cache = Some(fetched);
             }
             Err(e) => {

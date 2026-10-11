@@ -140,7 +140,7 @@ pub struct RegistryCache { pub fetched_at_unix: u64, pub doc: RegistryDoc }
 impl RegistryCache {
     pub fn path() -> Result<PathBuf, PaksmithError>;          // <config>/paksmith/registry-cache.json (PAKSMITH_CONFIG_DIR honored)
     pub fn load() -> Result<Option<RegistryCache>, PaksmithError>;  // missing -> None; corrupt -> typed error; strict caps on parse
-    pub fn save(&self) -> Result<(), PaksmithError>;          // atomic temp+rename, 0600 (reuse write_restricted)
+    pub fn save(&self) -> Result<(), PaksmithError>;          // atomic temp+rename, 0600 (StagedReplace::create_owner_only since #850)
     pub fn is_stale(&self, now_unix: u64, staleness_hours: u64) -> bool;
     pub fn get(&self, id: &str) -> Option<&RegistryProfile>;
 }
@@ -198,7 +198,8 @@ config URL for one invocation.
   path and the cache-load path (the cache file is user-editable). No panics on
   malformed input.
 - **Secrets at rest:** `registry-cache.json` holds AES keys → `0600` from
-  creation (reuse 5b `write_restricted`), atomic temp+rename. No key material in
+  creation (5b's `write_restricted`, replaced by
+  `StagedReplace::create_owner_only` in #850), atomic temp+rename. No key material in
   logs/errors/`Debug` (the `AesKey` redaction invariants from 5a/5b hold).
 - **TLS:** rustls (pure-Rust); no OpenSSL/native-tls.
 - **Trust model:** the registry is trusted only insofar as it is signed by the

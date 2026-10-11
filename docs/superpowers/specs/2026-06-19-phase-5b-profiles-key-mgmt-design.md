@@ -78,7 +78,9 @@ pub struct ProfileStore {
 - **`PAKSMITH_CONFIG_DIR` environment variable overrides** the base dir (powers
   tests + private/portable setups). When set, it is used verbatim.
 - On write: create the dir if missing, write atomically (temp file + rename),
-  set `0600` permissions on unix (best-effort / documented no-op elsewhere).
+  set `0600` permissions on unix (documented no-op elsewhere). Since #850
+  that is `StagedReplace::create_owner_only`, which fails the save when
+  `0600` cannot be applied.
 - TOML shape:
 
 ```toml

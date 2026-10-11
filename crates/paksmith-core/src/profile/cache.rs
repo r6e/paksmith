@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::PaksmithError;
 use crate::error::ProfileFault;
 use crate::profile::registry::{MAX_BODY_BYTES, RegistryDoc, RegistryProfile, validate_caps};
-use crate::profile::store::{config_base_dir, write_restricted};
+use crate::profile::store::{config_base_dir, replace_owner_only};
 
 /// Cached registry document + the wall-clock fetch time.
 #[derive(Debug, Clone)]
@@ -38,7 +38,10 @@ impl RegistryCache {
         Self::load_from(&Self::path()?)
     }
 
-    /// Save to the resolved path at `0600`.
+    /// Save to the resolved path. On Unix the file ends exactly `0600`; when
+    /// the filesystem creates the temp wider than that or does not apply it,
+    /// the save returns [`ProfileFault::Io`] and the existing cache is left
+    /// as it was.
     pub fn save(&self) -> Result<(), PaksmithError> {
         self.save_to(&Self::path()?)
     }
@@ -93,9 +96,9 @@ impl RegistryCache {
         }))
     }
 
-    /// Save to an explicit path. Creates parent dirs, writes atomically via a
-    /// sibling `.tmp` file renamed into place. The file is born `0600` on unix
-    /// (no world-readable window) — the cache holds AES key material.
+    /// Save to an explicit path. Creates parent dirs, then replaces the file
+    /// through [`crate::StagedReplace::create_owner_only`]: the cache holds AES
+    /// key material.
     pub(crate) fn save_to(&self, path: &Path) -> Result<(), PaksmithError> {
         let io_err = |e: std::io::Error| PaksmithError::Profile {
             fault: ProfileFault::Io {
@@ -114,10 +117,7 @@ impl RegistryCache {
                 reason: e.to_string(),
             },
         })?;
-        let tmp = path.with_extension("json.tmp");
-        write_restricted(&tmp, &json).map_err(io_err)?;
-        std::fs::rename(&tmp, path).map_err(io_err)?;
-        Ok(())
+        replace_owner_only(path, &json).map_err(io_err)
     }
 
     /// True iff `now_unix` is more than `staleness_hours` after the fetch time.
@@ -175,17 +175,25 @@ mod tests {
         );
     }
 
+    /// A wide leftover at the fixed temp name older versions used must not
+    /// become the cache, and stays for the user to remove.
     #[cfg(unix)]
     #[test]
-    fn saved_cache_is_0600() {
+    fn saved_cache_is_0600_beside_an_ignored_leftover_temp() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("registry-cache.json");
+        let leftover = path.with_extension("json.tmp");
+        std::fs::write(&leftover, b"STALE").unwrap();
+        std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o644)).unwrap();
+
         sample().save_to(&path).unwrap();
+
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        assert_eq!(std::fs::read(&leftover).unwrap(), b"STALE");
     }
 
     #[test]
