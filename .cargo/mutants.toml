@@ -46,19 +46,6 @@
 # Match each mutant narrowly by function + replacement text. Remove these once an
 # env-injection test seam (e.g. a `config_path_from_env`-style param threaded through
 # `load`/`save`, or a test-only env override) lets a core unit test drive the wrapper.
-#
-# `write_restricted` has TWO cfg-gated definitions: `#[cfg(unix)]` (the real
-# 0600-create-and-write) and `#[cfg(not(unix))]` (a plain `std::fs::write`
-# fallback). cargo-mutants applies the source-text mutation to BOTH bodies, but
-# on a unix host (local macOS AND Linux CI) the `#[cfg(not(unix))]` body is never
-# compiled — so its `-> Ok(())` mutant builds, runs no tests against that body,
-# and is scored MISSED (NOT unviable, because the cfg'd-out text still parses).
-# That platform's body simply cannot be exercised on a unix runner. The unix
-# body that DOES run is covered by `save_then_load_roundtrips` (a no-op write
-# would leave the temp file empty/absent → rename fails or load mismatches) and
-# `saved_file_is_0600`, so the regex dropping the (caught) unix variant too is
-# safe — it is not masking a real gap. Remove when a non-unix CI runner exists
-# to exercise the fallback.
 exclude_re = [
     'replace \^ with \| in morton_code_2',
     'replace \| with \^ in render_tile',
@@ -66,7 +53,6 @@ exclude_re = [
     'replace ProfileStore::config_path -> Result<PathBuf, PaksmithError> with Ok\(Default::default\(\)\)',
     'replace ProfileStore::load -> Result<Self, PaksmithError> with Ok\(Default::default\(\)\)',
     'replace ProfileStore::save -> Result<\(\), PaksmithError> with Ok\(\(\)\)',
-    'replace write_restricted -> std::io::Result<\(\)> with Ok\(\(\)\)',
     # RegistryCache::{path,load,save} are thin env/IO wrappers whose ONLY logic
     # lives in already-unit-tested helpers (load_from/save_to/config_base_dir):
     #   * `path` = `config_base_dir()?.join("registry-cache.json")`. The base-dir
@@ -75,7 +61,8 @@ exclude_re = [
     #     as ProfileStore::config_path (unsafe set_var, forbidden by -D unsafe-code).
     #   * `load` = `Self::load_from(&Self::path()?)`. Real work in `load_from`
     #     (unit-tested: save_then_load_roundtrips, load_missing_is_none,
-    #     saved_cache_is_0600, corrupt_is_typed_error, load_re_applies_caps_to_untrusted_file).
+    #     saved_cache_is_0600_beside_an_ignored_leftover_temp, corrupt_is_typed_error,
+    #     load_re_applies_caps_to_untrusted_file).
     #     Cross-crate CLI integration tests exercise the full round-trip but are not
     #     credited in package-scoped mutant runs.
     #   * `save` = `self.save_to(&Self::path()?)`. Same delegation pattern.
