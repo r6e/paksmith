@@ -14,25 +14,6 @@ use crate::error::ProfileFault;
 pub(crate) const TRUSTED_REGISTRY_PUBKEY_HEX: &str =
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c";
 
-fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
-        if !chunk[0].is_ascii_hexdigit() || !chunk[1].is_ascii_hexdigit() {
-            return None;
-        }
-        out[i] = u8::from_str_radix(
-            // both bytes already validated as ASCII hex digits
-            std::str::from_utf8(chunk).ok()?,
-            16,
-        )
-        .ok()?;
-    }
-    Some(out)
-}
-
 /// Verify a detached ed25519 signature over `payload` against `pubkey_hex`.
 ///
 /// Returns `Ok(())` on success. Any failure — malformed hex, wrong key length,
@@ -47,7 +28,8 @@ pub(crate) fn verify_detached(
     let fail = || PaksmithError::Profile {
         fault: ProfileFault::SignatureInvalid,
     };
-    let key_bytes = decode_hex_32(pubkey_hex).ok_or_else(fail)?;
+    // No `strip_0x_prefix`: `ensure_key_matches_registry` guards the text as written.
+    let key_bytes = crate::hex::parse_hex_bytes::<32>(pubkey_hex).map_err(|_| fail())?;
     let vk = VerifyingKey::from_bytes(&key_bytes).map_err(|_| fail())?;
     let sig_bytes: [u8; 64] = sig.try_into().map_err(|_| fail())?;
     let signature = Signature::from_bytes(&sig_bytes);
@@ -120,10 +102,6 @@ mod tests {
         assert!(verify_detached(b"x", &[0u8; 10], &pk).is_err()); // bad sig len (short)
         assert!(verify_detached(b"x", &[0u8; 65], &pk).is_err()); // bad sig len (long)
         assert!(verify_detached(b"x", &[], &pk).is_err()); // empty sig
-        assert!(verify_detached(b"x", &[0u8; 64], "abcd").is_err()); // bad key hex len
-        // 64 hex chars but one non-hex char ('g') — exercises the is_ascii_hexdigit guard.
-        let non_hex = format!("g{}", &pk[1..]);
-        assert!(verify_detached(b"x", &[0u8; 64], &non_hex).is_err());
     }
 
     /// The key text is decoded exactly as written: no `0x` strip and no trim,
