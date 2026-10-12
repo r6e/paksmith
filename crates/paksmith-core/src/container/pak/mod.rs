@@ -6540,13 +6540,7 @@ mod tests {
         use proptest::prelude::*;
 
         use super::*;
-
-        fn zlib_compress(data: &[u8]) -> Vec<u8> {
-            let mut enc =
-                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-            enc.write_all(data).expect("in-memory zlib write");
-            enc.finish().expect("in-memory zlib finish")
-        }
+        use crate::testing::bench::zlib_stream;
 
         /// Payloads spanning both compressibility regimes. Uniform bytes
         /// alone never compress — every codec call would emit a stream at
@@ -6562,7 +6556,7 @@ mod tests {
         proptest! {
             #[test]
             fn encrypted_zlib_entry_round_trips(plaintext in payload(2048)) {
-                let compressed = zlib_compress(&plaintext);
+                let compressed = zlib_stream(&plaintext);
                 let out = encrypted_single_block_read_back("Zlib", &compressed, plaintext.len());
                 prop_assert_eq!(out, plaintext);
             }

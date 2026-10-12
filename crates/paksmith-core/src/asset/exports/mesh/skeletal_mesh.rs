@@ -552,9 +552,10 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
     if !ctx.version.is_ue4_23_or_later()
         || !is_class_data_stripped(class, STRIP_FLAG_DUPLICATED_VERTICES)
     {
-        // The returned element counts are unused here (dup-vert data is
-        // discarded; only the cloth call sites capture the count to derive
-        // `has_cloth_data`).
+        // The returned element counts are unused here: dup-vert data is
+        // discarded. Only the cloth call sites capture the count, the section
+        // ones to derive `has_cloth_data` and `skip_cloth_buffer` to size the
+        // LOD-bias trailer.
         let _ = skip_capped_array(
             r,
             asset_path,
@@ -602,9 +603,11 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
 /// skipping the body. The `i32` count is capped at `cap` (negative → `NegativeValue`,
 /// over-cap → `BoundsExceeded { field }`) before any skip.
 ///
-/// Used for both the inner cloth-mapping array (`cap = MAX_CLOTH_VERTS_PER_LOD_U32`,
-/// `elem_bytes = MESH_TO_MESH_VERT_DATA_BYTES`) and the dup-vert arrays
-/// (`cap = MAX_DUP_VERTS_PER_SECTION_U32`, `elem_bytes = 4` / `8`).
+/// Used for the inner cloth-mapping array (`cap = MAX_CLOTH_VERTS_PER_LOD_U32`,
+/// `elem_bytes = MESH_TO_MESH_VERT_DATA_BYTES`), the cloth buffer's
+/// `ClothIndexMapping` (`cap = MAX_CLOTH_VERTS_PER_LOD_U32`, `elem_bytes = 8`)
+/// and the dup-vert arrays (`cap = MAX_DUP_VERTS_PER_SECTION_U32`,
+/// `elem_bytes = 4` / `8`).
 fn skip_capped_array<R: Read + ?Sized>(
     r: &mut R,
     asset_path: &str,
@@ -984,21 +987,12 @@ fn skip_cloth_buffer<R: Read>(
     {
         // ClothIndexMapping = TArray<uint64>: a plain `i32` count + N × u64 (NOT
         // a bulk array — no elementSize header).
-        let count = read::read_capped_count(
+        let count = skip_capped_array(
             r,
             asset_path,
             AssetWireField::SkelClothIndexMappingCount,
             MAX_CLOTH_VERTS_PER_LOD_U32,
-        )?;
-        #[expect(clippy::expect_used, reason = "capped u32 count times 8 fits u64")]
-        let span = u64::from(count)
-            .checked_mul(8)
-            .expect("count is a capped u32; count*8 fits u64");
-        read::skip_bytes(
-            r,
-            span,
-            asset_path,
-            AssetWireField::SkelClothIndexMappingCount,
+            8,
         )?;
 
         if ctx
@@ -6126,6 +6120,32 @@ mod tests {
             cur.position(),
             blob.len() as u64,
             "the cloth buffer must be fully skipped (header + bulk + ClothIndexMapping)"
+        );
+    }
+
+    /// An over-cap `ClothIndexMapping` count is refused under its own field.
+    #[test]
+    fn skip_cloth_buffer_rejects_an_over_cap_index_mapping_count() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&[0u8, 0u8]); // cloth FStripDataFlags
+        bulk_header(&mut blob, 4, 0); // empty SkipBulkArrayData
+        let over_cap = i32::try_from(MAX_CLOTH_VERTS_PER_LOD_U32 + 1).unwrap();
+        blob.extend_from_slice(&over_cap.to_le_bytes());
+
+        let mut cur = Cursor::new(blob.as_slice());
+        let err = skip_cloth_buffer(&mut cur, &streamed_ctx(), "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::SkelClothIndexMappingCount,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected BoundsExceeded(SkelClothIndexMappingCount), got {err:?}"
         );
     }
 

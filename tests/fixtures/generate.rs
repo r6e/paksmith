@@ -21,9 +21,8 @@ use std::fs::File;
 use std::io::Write;
 
 use byteorder::{LittleEndian, WriteBytesExt};
-use flate2::Compression;
-use flate2::write::ZlibEncoder;
 use paksmith_core::container::pak::version::PAK_MAGIC;
+use paksmith_core::testing::bench::zlib_stream;
 use paksmith_core::testing::wire::{write_fstring, write_pak_entry};
 use sha1::{Digest, Sha1};
 
@@ -131,9 +130,7 @@ fn prepare(spec: &EntrySpec) -> PreparedEntry {
         .max(1);
     let mut compressed_blocks: Vec<Vec<u8>> = Vec::new();
     for chunk in spec.payload.chunks(chunk_size as usize) {
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(chunk).unwrap();
-        compressed_blocks.push(encoder.finish().unwrap());
+        compressed_blocks.push(zlib_stream(chunk));
     }
 
     // Compute block (start, end) pairs relative to entry.offset() (v5+

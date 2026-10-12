@@ -1975,6 +1975,8 @@ pub(crate) fn decompress_zlib(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "__test_utils")]
+    use crate::testing::bench::zlib_stream;
 
     /// Build an `AssetContext` carrying a data-resource table (#642).
     fn ctx_with_resources(
@@ -3744,17 +3746,6 @@ mod tests {
         out.extend_from_slice(&compressed.to_le_bytes());
         out.extend_from_slice(&uncompressed.to_le_bytes());
         out
-    }
-
-    /// One raw zlib stream over `payload`.
-    #[cfg(feature = "__test_utils")]
-    fn zlib_stream(payload: &[u8]) -> Vec<u8> {
-        use flate2::Compression;
-        use flate2::write::ZlibEncoder;
-        use std::io::Write;
-        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-        enc.write_all(payload).unwrap();
-        enc.finish().unwrap()
     }
 
     /// Assemble a framing from explicit parts. Malformed-input tests
