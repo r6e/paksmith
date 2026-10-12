@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::AesKey;
+use crate::hex::{self, HexError};
 
 /// 16-byte UE encryption-key GUID. The all-zero GUID is the conventional
 /// "default" key (single-key and pre-UE4.22 paks use it).
@@ -30,9 +31,9 @@ pub struct KeyGuid([u8; 16]);
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KeyGuidHexError {
-    /// The hex string was not 32 chars.
+    /// The text after one optional `0x`/`0X` was not 32 bytes (32 hex digits) long.
     WrongLength {
-        /// Byte length of the input (after stripping any `0x` prefix).
+        /// Byte length of that text.
         got: usize,
     },
     /// A non-hex character was present.
@@ -71,48 +72,18 @@ impl KeyGuid {
 
     /// Lowercase 32-char hex.
     pub fn to_hex(&self) -> String {
-        use std::fmt::Write as _;
-        let mut s = String::with_capacity(32);
-        for b in self.0 {
-            #[expect(clippy::expect_used, reason = "fmt::Write to String is infallible")]
-            write!(s, "{b:02x}").expect("write to String is infallible");
-        }
-        s
+        hex::to_hex_lower(&self.0)
     }
 
     /// Decode a 32-hex-char GUID (case-insensitive; an optional `0x`/`0X`
     /// prefix is accepted and stripped before parsing).
-    ///
-    /// # Panics
-    ///
-    /// Does not panic in practice. The two `.expect()` calls inside are
-    /// unreachable: `from_utf8` is called on a 2-byte slice already validated
-    /// as ASCII hex digits, and `from_str_radix` is called on that same pair.
     pub fn from_hex(s: &str) -> Result<Self, KeyGuidHexError> {
-        let s = s
-            .strip_prefix("0x")
-            .or_else(|| s.strip_prefix("0X"))
-            .unwrap_or(s);
-        if s.len() != 32 {
-            return Err(KeyGuidHexError::WrongLength { got: s.len() });
-        }
-        let mut bytes = [0u8; 16];
-        for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
-            if !chunk[0].is_ascii_hexdigit() || !chunk[1].is_ascii_hexdigit() {
-                return Err(KeyGuidHexError::NonHex);
-            }
-            #[expect(
-                clippy::expect_used,
-                reason = "pair validated as ASCII hex immediately above"
-            )]
-            let byte = u8::from_str_radix(
-                std::str::from_utf8(chunk).expect("ascii-validated above"),
-                16,
-            )
-            .expect("ascii-hex pair always parses");
-            bytes[i] = byte;
-        }
-        Ok(Self(bytes))
+        hex::parse_hex_bytes::<16>(hex::strip_0x_prefix(s))
+            .map(Self)
+            .map_err(|e| match e {
+                HexError::WrongLength { got } => KeyGuidHexError::WrongLength { got },
+                HexError::NonHex => KeyGuidHexError::NonHex,
+            })
     }
 }
 
@@ -558,9 +529,6 @@ mod tests {
 
     #[test]
     fn from_hex_rejects_single_non_hex_char() {
-        // Exactly one bad char in an otherwise-valid 32-char string. With the
-        // per-pair `||` flattened to `&&`, a single bad nibble would slip
-        // through; this pins the OR so the mutant dies.
         let one_bad = format!("{}z", "a".repeat(31));
         assert_eq!(one_bad.len(), 32);
         assert!(matches!(

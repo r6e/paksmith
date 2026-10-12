@@ -86,8 +86,8 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
 - `digest.rs` — `Sha1Digest` newtype with byte-equality semantics; explicitly
   not constant-time (suitable for local file integrity, not network
   attestation).
-- `hex.rs` — crate-private `decode_pair`: two ASCII hex digits of either case
-  to one byte, high nibble first. Callers keep their own length rules.
+- `hex.rs` — crate-private `parse_hex_bytes`, `strip_0x_prefix`, `decode_pair`
+  and `to_hex_lower`. Each caller picks its prefix rule, length and error type.
 - `staged_replace.rs` — `StagedReplace`: replaces a file through an
   exclusively created sibling temp and a rename, carrying the destination's
   Unix access bits, or giving it `0o600` through `create_owner_only`.

@@ -15,9 +15,9 @@ pub struct AesKey([u8; 32]);
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AesKeyHexError {
-    /// The hex string (after stripping an optional `0x`/`0X`) was not 64 chars.
+    /// The text after one optional `0x`/`0X` was not 64 bytes (64 hex digits) long.
     WrongLength {
-        /// Number of hex chars seen (excluding the prefix).
+        /// Byte length of that text.
         got: usize,
     },
     /// A non-hex character was present.
@@ -46,51 +46,20 @@ impl AesKey {
 
     /// Decode a 64-hex-char AES-256 key (optional `0x`/`0X` prefix,
     /// case-insensitive). Never includes key material in the error.
-    ///
-    /// # Panics
-    ///
-    /// Does not panic in practice. The two `.expect()` calls inside are
-    /// unreachable: `from_utf8` is called on a 2-byte slice that has already
-    /// been validated to be ASCII hex digits, and `from_str_radix` is called
-    /// on that same ASCII-validated hex pair.
     pub fn from_hex(s: &str) -> Result<Self, AesKeyHexError> {
-        let hex = s
-            .strip_prefix("0x")
-            .or_else(|| s.strip_prefix("0X"))
-            .unwrap_or(s);
-        if hex.len() != 64 {
-            return Err(AesKeyHexError::WrongLength { got: hex.len() });
-        }
-        let mut bytes = [0u8; 32];
-        for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-            if !chunk[0].is_ascii_hexdigit() || !chunk[1].is_ascii_hexdigit() {
-                return Err(AesKeyHexError::NonHex);
-            }
-            #[expect(
-                clippy::expect_used,
-                reason = "pair validated as ASCII hex immediately above"
-            )]
-            let byte = u8::from_str_radix(
-                std::str::from_utf8(chunk).expect("ascii-validated above"),
-                16,
-            )
-            .expect("ascii-hex pair always parses");
-            bytes[i] = byte;
-        }
-        Ok(Self::new(bytes))
+        crate::hex::parse_hex_bytes::<32>(crate::hex::strip_0x_prefix(s))
+            .map(Self::new)
+            .map_err(|e| match e {
+                crate::hex::HexError::WrongLength { got } => AesKeyHexError::WrongLength { got },
+                crate::hex::HexError::NonHex => AesKeyHexError::NonHex,
+            })
     }
 
-    /// Lowercase 64-char hex of the key. Crate-internal: used ONLY by the
+    /// Lowercase 64-char hex of the key, for `key_hex` (`--show-keys`) and the
     /// profile serializer to write the profile store. Not public — keeps the
     /// no-public-byte-accessor invariant.
     pub(crate) fn to_hex(&self) -> String {
-        use std::fmt::Write as _;
-        let mut s = String::with_capacity(64);
-        for b in self.0 {
-            #[expect(clippy::expect_used, reason = "fmt::Write to String is infallible")]
-            write!(s, "{b:02x}").expect("write to String is infallible");
-        }
-        s
+        crate::hex::to_hex_lower(&self.0)
     }
 }
 

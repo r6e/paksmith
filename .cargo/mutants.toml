@@ -104,18 +104,6 @@ exclude_re = [
     # cargo-mutants does not generate a mutant for the `std::env::var_os(...)
     # .is_some()` read (it doesn't mutate `.is_some()`), so there is nothing to
     # silence there either.
-    #
-    # `decode_hex_32` uses `|| !chunk[1].is_ascii_hexdigit()` so that either
-    # non-hex byte causes an early `return None`. Replacing `||` with `&&`
-    # requires BOTH bytes to be non-hex before the early return fires. When only
-    # the first byte is non-hex and the second is valid, the mutant falls through
-    # to `u8::from_str_radix(chunk, 16)` which fails (the first byte is not hex),
-    # returning `None` via `?` anyway — the same observable result. This makes
-    # the `||`→`&&` swap behavior-equivalent for all reachable inputs: the
-    # `from_str_radix` fallback re-validates the chunk regardless, so no test can
-    # distinguish the two operators. Remove if the hex-loop is rewritten to avoid
-    # the `from_str_radix` fallback.
-    'replace \|\| with && in decode_hex_32',
 
     # ── Phase 6 (GUI shell) ─────────────────────────────────────────────────
     # The `paksmith-gui` crate is Iced view code plus a thin layer of env/IO
@@ -195,8 +183,8 @@ exclude_re = [
     # white button text by accent brightness). `>` vs `>=` differ ONLY at exactly
     # `lum == 0.5` — a measure-zero float coincidence no real accent colour hits,
     # and black-vs-white text at exactly 50% luminance is an arbitrary either-way
-    # choice. Behaviour-equivalent for all reachable inputs (like the existing
-    # `decode_hex_32` boundary exclude). The per-channel coefficient arithmetic in
+    # choice. Behaviour-equivalent for all reachable inputs.
+    # The per-channel coefficient arithmetic in
     # the same fn IS killed by `readable_text_picks_dark_on_light_accent_and_light_on_dark`.
     'replace > with >= in readable_text_on',
     #
