@@ -284,8 +284,8 @@ pub enum Message {
     OpenRequested,
     /// The native file picker resolved to a path (or was cancelled → `None`).
     OpenPathChosen(Option<PathBuf>),
-    /// An open attempt finished: it settles the attempt, and its result
-    /// applies as [`Message::ArchiveOpened`].
+    /// An open attempt finished. Applied as [`Message::ArchiveOpened`] while it
+    /// is the attempt in flight, dropped once a newer one superseded it.
     OpenAttemptFinished(AttemptId, Box<Result<LoadedArchive, OpenError>>),
     /// Apply an archive-open result. Production reaches it only through
     /// [`Message::OpenAttemptFinished`].
@@ -575,7 +575,9 @@ fn attempt_finished(
 /// place, so no windowed scrollable is in the tree; and a second toast over
 /// an existing one tears nothing down, so the offsets pushed back are the
 /// ones iced already holds. [`Message::OpenAttemptFinished`] is the form the
-/// runtime delivers, so it is listed too.
+/// runtime delivers, so it is listed too; a superseded one is dropped and changes
+/// nothing the panes show (only the profile list refreshes), so it pushes back
+/// the offsets iced already holds.
 ///
 /// Residual, stated rather than left silent: this predicate,
 /// [`PaneLayout`] and [`shown_content`] are each pinned, but the lines in
@@ -677,11 +679,24 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         Message::OpenPathChosen(Some(path)) => {
             // Advance the flow to Resolving so the UI can respond.
             app.keyflow.begin();
+            // `begin` takes any key prompt down; drop its key text with it. Replace
+            // the wrapper itself: assigning through `DerefMut` would skip the zeroize.
+            app.hex_input = Zeroizing::new(String::new());
             let game = app.active_game.as_ref().map(|c| c.id.clone());
             spawn_open(app, crate::task::open::run(path, game))
         }
         Message::OpenAttemptFinished(attempt, result) => {
-            let _ = app.open_attempts.settle(attempt);
+            if !app.open_attempts.settle(attempt) {
+                let pending = app.open_attempts.in_flight();
+                tracing::debug!(
+                    ?attempt,
+                    ?pending,
+                    "dropped a superseded archive-open result"
+                );
+                // Its registry auto-fetch may still have freshened the cache.
+                refresh_profiles(app);
+                return Task::none();
+            }
             update_inner(app, Message::ArchiveOpened(result))
         }
         Message::ArchiveOpened(boxed) => {
@@ -1726,7 +1741,8 @@ fn push_toast(
 /// removes by id regardless of lifetime), a SPARE Escape (see
 /// [`is_spare_escape`], handled in the [`Message::TreeKey`] arm of [`update`]),
 /// and a later COMPLETED open attempt on the same `subject`, which supersedes
-/// the report.
+/// the report while it is the latest attempt (since #867 a superseded one is
+/// dropped at [`Message::OpenAttemptFinished`]).
 fn push_persistent_toast(
     app: &mut App,
     severity: crate::state::toast::Severity,
@@ -1821,10 +1837,10 @@ fn push_toast_with(
 /// pressed while either is up still reads as aimed at them. Treating those as
 /// claimed keeps a stray Escape from retiring the persistent card behind a
 /// surface the user is looking at. The About panel is closed by its dismiss
-/// button; the key prompt has NO close gesture and exits only through a
-/// completed open (unlock, or opening a different file) — while it is up, the
-/// card's `x` is the card's only exit, which is the cost of not letting a
-/// prompt-aimed Escape destroy it.
+/// button; the key prompt has NO close gesture and exits only on an unlock or
+/// when a dialog open starts — while it is up, the card's `x` is the card's
+/// only exit, which is the cost of not letting a prompt-aimed Escape destroy
+/// it.
 ///
 /// The enumeration is exactly those four and cannot be completed: iced keeps a
 /// `pick_list` dropdown's open/closed state in the widget tree, not in `App`,
@@ -2536,8 +2552,8 @@ pub fn subscription(app: &App) -> Subscription<Message> {
 ///
 /// Two disjoint reasons, one listener: an archive is loaded (tree
 /// navigation), or a persistent card is up with NO archive — the
-/// mismatched-failure branch can raise one in that state, and without this
-/// half the card's spare-Escape exit would not exist there, leaving it
+/// mismatched-failure branch, a guard since #867, can raise one there, and
+/// without this half the card's spare-Escape exit would not exist, leaving it
 /// mouse-only for exactly the keyboard-only user the exit serves. One
 /// listener for both keeps delivery single: a key can never fan out to a
 /// second subscription, which is the double-fire the `Message::TreeKey` arm's
@@ -3147,8 +3163,8 @@ mod tests {
     #[test]
     fn an_unrelated_open_leaves_the_card_standing() {
         // Why retirement is path-scoped: see `Toasts::dismiss_persistent_for`.
-        // This drives exactly the race that scoping exists for — two opens in
-        // flight, the failure lands (card up), then the older open's Ok.
+        // A success on another file is not evidence about the card's. Since
+        // #867 a late older open is dropped upstream, so this drives the apply step.
         let mut app = app_with_persistent_failure();
         app.keyflow.begin();
         let loaded = app_with_paths(&["Game/B.uasset"])
@@ -3818,9 +3834,9 @@ mod tests {
         assert_eq!(update(&mut app, Message::KeyDirChosen(None)).units(), 0);
     }
 
-    /// The retry resolves with the selector its locked result carries, even
-    /// with other attempts in flight: a second open, or a second install dir
-    /// that has already failed.
+    /// The apply step pairs a retry with the selector its locked result
+    /// carries. Since #867 a superseded attempt's result is dropped upstream,
+    /// so this hand-delivers results production applies only as the latest.
     #[test]
     fn a_key_retry_resolves_with_the_selector_its_locked_result_carries() {
         let game = ProfileSelector {
@@ -3912,6 +3928,88 @@ mod tests {
         let _ = update(&mut app, finished(open, Err(core_err("/b.pak", "boom"))));
         assert_eq!(app.open_attempts.in_flight(), None);
         assert_eq!(app.error.as_deref(), Some("boom"));
+    }
+
+    /// #867: an older attempt's Ok, Locked or Core landing after the newer
+    /// attempt's result is dropped whole, except that the profile list still
+    /// refreshes, since the older attempt's registry fetch may have run.
+    #[test]
+    fn an_older_open_landing_after_the_newer_one_is_dropped() {
+        use crate::state::audio_view::Transport;
+        let stale = [
+            Ok(app_with_paths(&["Game/A.uasset"]).archive.unwrap()),
+            Err(OpenError::Locked {
+                path: PathBuf::from("/a.pak"),
+                selector: ProfileSelector::default(),
+            }),
+            Err(core_err("/a.pak", "older")),
+        ];
+        for result in stale {
+            let mut app = app_with_paths(&["Game/B.uasset"]);
+            let older = start_attempt(&mut app, Message::OpenPathChosen(Some("/a.pak".into())));
+            let newer = start_attempt(&mut app, Message::OpenPathChosen(Some("/b.pak".into())));
+            let _ = update(&mut app, finished(newer, Err(core_err("/b.pak", "newer"))));
+            let generation = app.archive_generation;
+            app.profile_loader = stub_profiles;
+            app.profiles = Vec::new();
+            let _ = app.tabs.open_or_activate("Game/B.uasset");
+            app.tabs.open[0].audio.transport = Transport::Playing;
+            let _ = update(&mut app, finished(older, result));
+            assert!(matches!(app.keyflow, KeyFlow::Unlocked));
+            assert_eq!(app.archive_generation, generation);
+            assert!(app.toasts.items()[0].message.contains("newer"));
+            assert_eq!(app.profiles, stub_profiles());
+            assert_eq!(app.tabs.open[0].audio.transport, Transport::Playing);
+        }
+    }
+
+    /// A dialog open supersedes a key retry in flight and drops the prompt's
+    /// key text, and a cancelled dialog supersedes nothing: "Opening…" stays
+    /// up until the open's own result.
+    #[test]
+    fn a_dialog_open_supersedes_an_in_flight_key_retry() {
+        let mut app = App::default();
+        app.keyflow
+            .lock("/a.pak".into(), ProfileSelector::default());
+        let _ = update(&mut app, Message::KeyInputChanged("00".repeat(32)));
+        let retry = start_attempt(&mut app, Message::KeySubmitted);
+        let dialog = start_attempt(&mut app, Message::OpenPathChosen(Some("/b.pak".into())));
+        let _ = update(&mut app, Message::OpenPathChosen(None));
+        // Pins replacement over an in-place clear; the zeroize itself is not
+        // observable from safe Rust.
+        assert_eq!(
+            app.hex_input.capacity(),
+            0,
+            "replaced with a fresh buffer, not cleared in place"
+        );
+        let late = app_with_paths(&["Game/A.uasset"]).archive.unwrap();
+        let _ = update(&mut app, finished(retry, Ok(late)));
+        assert!(app.archive.is_none());
+        assert!(matches!(app.keyflow, KeyFlow::Resolving));
+        assert_eq!(app.open_attempts.in_flight(), Some(dialog));
+        let _ = update(&mut app, finished(dialog, Err(core_err("/b.pak", "boom"))));
+        assert_eq!(app.error.as_deref(), Some("boom"));
+        assert_eq!(app.open_attempts.in_flight(), None);
+    }
+
+    #[test]
+    fn a_newer_key_retry_supersedes_an_older_one() {
+        let mut app = App::default();
+        app.keyflow
+            .lock("/a.pak".into(), ProfileSelector::default());
+        let by_dir = start_attempt(&mut app, Message::KeyDirChosen(Some("/d".into())));
+        let _ = update(&mut app, Message::KeyInputChanged("00".repeat(32)));
+        let by_key = start_attempt(&mut app, Message::KeySubmitted);
+        let _ = update(
+            &mut app,
+            finished(by_dir, Err(core_err("/a.pak", "no match"))),
+        );
+        assert_eq!(app.keyflow.error(), None);
+        let _ = update(
+            &mut app,
+            finished(by_key, Err(core_err("/a.pak", "bad key"))),
+        );
+        assert_eq!(app.keyflow.error(), Some("bad key"));
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
