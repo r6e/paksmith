@@ -1,9 +1,11 @@
 //! `KeyFlow` — pure state machine for the encrypted-pak key-entry flow.
 //!
-//! The machine starts `Idle`, moves to `Resolving` when an open is
-//! initiated, transitions to `Locked` when the archive is encrypted but no
+//! The machine starts `Idle`, moves to `Resolving` when a dialog open
+//! starts, transitions to `Locked` when the archive is encrypted but no
 //! key was resolved, and to `Unlocked` once a valid key is supplied and the
 //! open succeeds.
+//!
+//! [`OpenAttempts`] tracks the latest archive-open attempt (#867).
 
 use std::path::{Path, PathBuf};
 
@@ -27,7 +29,7 @@ pub enum KeyFlow {
     /// No open in progress and no lock state active.
     #[default]
     Idle,
-    /// An open attempt is in flight; key resolution is pending.
+    /// A dialog open is in flight; key resolution is pending.
     Resolving,
     /// The archive at `path` is encrypted but no key could be resolved.
     /// `error` carries a human-readable message when a manual key attempt
@@ -48,7 +50,7 @@ pub enum KeyFlow {
 impl KeyFlow {
     /// Transition to `Resolving`.
     ///
-    /// Called when an open attempt starts so the UI can show a spinner or
+    /// Called when a dialog open starts so the UI can show a spinner or
     /// suppress interaction during resolution.
     pub fn begin(&mut self) {
         *self = Self::Resolving;
@@ -123,10 +125,61 @@ impl KeyFlow {
     }
 }
 
+/// One archive-open attempt, minted by [`OpenAttempts::start`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttemptId(u64);
+
+/// The latest archive-open attempt, while its result is pending (#867). Dialog
+/// opens and key-prompt retries share this one sequence.
+#[derive(Debug, Default)]
+pub struct OpenAttempts {
+    minted: u64,
+    pending: Option<AttemptId>,
+}
+
+impl OpenAttempts {
+    /// Start an attempt, superseding any in flight.
+    pub fn start(&mut self) -> AttemptId {
+        self.minted = self.minted.wrapping_add(1);
+        let id = AttemptId(self.minted);
+        self.pending = Some(id);
+        id
+    }
+
+    /// Settle `id`'s result: `true` when `id` is the attempt in flight, which
+    /// then no longer is; `false` when it was superseded or already settled.
+    #[must_use]
+    pub fn settle(&mut self, id: AttemptId) -> bool {
+        if self.pending != Some(id) {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+
+    /// The latest attempt, until its result settles it.
+    pub fn in_flight(&self) -> Option<AttemptId> {
+        self.pending
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn only_the_newest_attempt_settles_and_only_once() {
+        let mut attempts = OpenAttempts::default();
+        assert_eq!(attempts.in_flight(), None);
+        let older = attempts.start();
+        let newer = attempts.start();
+        assert!(!attempts.settle(older));
+        assert_eq!(attempts.in_flight(), Some(newer));
+        assert!(attempts.settle(newer));
+        assert_eq!(attempts.in_flight(), None);
+        assert!(!attempts.settle(newer));
+    }
 
     fn game(id: &str) -> ProfileSelector {
         ProfileSelector {

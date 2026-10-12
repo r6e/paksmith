@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use crate::audio_output::AudioOutput;
 use crate::panels::{content, key_prompt, sidebar, status_bar, toolbar};
 use crate::state::archive::{LoadedArchive, OpenError};
-use crate::state::keyflow::KeyFlow;
+use crate::state::keyflow::{AttemptId, KeyFlow, OpenAttempts};
 use crate::state::profiles::{ProfileChoice, available};
 use crate::theme;
 use crate::theme::tokens::{DIVIDER_GRAB_PX, TEXT_MUTED_ALPHA, TEXT_XL};
@@ -60,6 +60,8 @@ pub struct App {
     pub error: Option<String>,
     /// Key-entry flow state machine (pure).
     pub keyflow: KeyFlow,
+    /// Archive-open attempt tracking; see [`OpenAttempts`].
+    pub open_attempts: OpenAttempts,
     /// Raw hex key text bound to the key-prompt input field.
     ///
     /// Wrapped in [`Zeroizing`] so the AES key material is cleared on drop
@@ -187,6 +189,7 @@ impl Default for App {
             archive: None,
             error: None,
             keyflow: KeyFlow::Idle,
+            open_attempts: OpenAttempts::default(),
             hex_input: Zeroizing::new(String::new()),
             accent: theme::accent::DEFAULT_ACCENT,
             selected_row: None,
@@ -281,7 +284,11 @@ pub enum Message {
     OpenRequested,
     /// The native file picker resolved to a path (or was cancelled → `None`).
     OpenPathChosen(Option<PathBuf>),
-    /// The async open pipeline completed with either a loaded archive or an error.
+    /// An open attempt finished: it settles the attempt, and its result
+    /// applies as [`Message::ArchiveOpened`].
+    OpenAttemptFinished(AttemptId, Box<Result<LoadedArchive, OpenError>>),
+    /// Apply an archive-open result. Production reaches it only through
+    /// [`Message::OpenAttemptFinished`].
     ArchiveOpened(Box<Result<LoadedArchive, OpenError>>),
     /// The user edited the hex key input field.
     KeyInputChanged(String),
@@ -523,6 +530,25 @@ fn refresh_profiles(app: &mut App) {
     }
 }
 
+/// Spawn `open` as the latest archive-open attempt (#867). Call it only where
+/// an open task is spawned: an attempt with no task behind it never settles.
+/// Its result is tagged by [`attempt_finished`], the mapper the tests build
+/// their results with; only the call handing it to `Task::perform` is unpinned.
+fn spawn_open(
+    app: &mut App,
+    open: impl Future<Output = Result<LoadedArchive, OpenError>> + Send + 'static,
+) -> Task<Message> {
+    let attempt = app.open_attempts.start();
+    Task::perform(open, attempt_finished(attempt))
+}
+
+/// The message an open task spawned under `attempt` finishes with.
+fn attempt_finished(
+    attempt: AttemptId,
+) -> impl FnOnce(Result<LoadedArchive, OpenError>) -> Message + Send + 'static {
+    move |r| Message::OpenAttemptFinished(attempt, Box::new(r))
+}
+
 /// Which messages leave a windowed surface in place but showing different
 /// content, and so need iced's retained scroll offsets reconciled.
 ///
@@ -548,7 +574,8 @@ fn refresh_profiles(app: &mut App) {
 /// with no archive leaves the prompt or the error banner in the panes'
 /// place, so no windowed scrollable is in the tree; and a second toast over
 /// an existing one tears nothing down, so the offsets pushed back are the
-/// ones iced already holds.
+/// ones iced already holds. [`Message::OpenAttemptFinished`] is the form the
+/// runtime delivers, so it is listed too.
 ///
 /// Residual, stated rather than left silent: this predicate,
 /// [`PaneLayout`] and [`shown_content`] are each pinned, but the lines in
@@ -564,6 +591,7 @@ fn restores_scroll(message: &Message) -> bool {
             | Message::TabClosed(_)
             | Message::ViewModeSet(_)
             | Message::OpenAsset(_)
+            | Message::OpenAttemptFinished(..)
             | Message::ArchiveOpened(_)
     )
 }
@@ -650,9 +678,11 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // Advance the flow to Resolving so the UI can respond.
             app.keyflow.begin();
             let game = app.active_game.as_ref().map(|c| c.id.clone());
-            Task::perform(crate::task::open::run(path, game), |r| {
-                Message::ArchiveOpened(Box::new(r))
-            })
+            spawn_open(app, crate::task::open::run(path, game))
+        }
+        Message::OpenAttemptFinished(attempt, result) => {
+            let _ = app.open_attempts.settle(attempt);
+            update_inner(app, Message::ArchiveOpened(result))
         }
         Message::ArchiveOpened(boxed) => {
             // Any archive-open result stops the current playback first (spec §3
@@ -786,9 +816,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     // Good hex — try to re-open with the supplied key.
                     if let Some(path) = app.keyflow.is_locked().map(PathBuf::from) {
                         let selector = app.keyflow.retry_selector();
-                        Task::perform(crate::task::open::run_with_key(path, key, selector), |r| {
-                            Message::ArchiveOpened(Box::new(r))
-                        })
+                        spawn_open(app, crate::task::open::run_with_key(path, key, selector))
                     } else {
                         Task::none()
                     }
@@ -811,9 +839,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         Message::KeyDirChosen(Some(dir)) => {
             // Re-resolve with --detect pointing at the install directory.
             if let Some(path) = app.keyflow.is_locked().map(PathBuf::from) {
-                Task::perform(crate::task::open::run_with_detect(path, dir), |r| {
-                    Message::ArchiveOpened(Box::new(r))
-                })
+                spawn_open(app, crate::task::open::run_with_detect(path, dir))
             } else {
                 Task::none()
             }
@@ -2711,6 +2737,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         entry_count,
         selected_name,
         crate::state::memory::memory_label(app.memory_rss),
+        app.open_attempts.in_flight().is_some(),
     );
 
     // ── main content area ─────────────────────────────────────────────────────
@@ -3841,6 +3868,52 @@ mod tests {
         assert_eq!(app.keyflow.retry_selector(), d1);
     }
 
+    /// An attempt starts only where an open task spawns, from the dialog or the
+    /// key prompt, so "Opening…" never shows with nothing behind it; the
+    /// attempt's own result settles it and is applied.
+    #[test]
+    fn only_a_spawned_open_is_in_flight_until_its_result() {
+        let mut app = App::default();
+        app.keyflow
+            .lock("/a.pak".into(), ProfileSelector::default());
+        let _ = update(&mut app, Message::KeySubmitted);
+        assert_eq!(app.open_attempts.in_flight(), None, "empty key");
+        let _ = update(&mut app, Message::KeyInputChanged("zz".into()));
+        for no_task in [
+            Message::KeySubmitted,
+            Message::OpenPathChosen(None),
+            Message::KeyDirChosen(None),
+        ] {
+            let _ = update(&mut app, no_task);
+            assert_eq!(app.open_attempts.in_flight(), None);
+        }
+        let _ = update(&mut app, Message::KeyInputChanged("00".repeat(32)));
+        let by_key = start_attempt(&mut app, Message::KeySubmitted);
+        let _ = update(
+            &mut app,
+            finished(by_key, Err(core_err("/a.pak", "bad key"))),
+        );
+        assert_eq!(app.keyflow.error(), Some("bad key"));
+        let by_dir = start_attempt(&mut app, Message::KeyDirChosen(Some("/d".into())));
+        let _ = update(
+            &mut app,
+            finished(by_dir, Err(core_err("/a.pak", "no match"))),
+        );
+        assert_eq!(app.keyflow.error(), Some("no match"));
+        app.keyflow.reset();
+        for no_prompt in [
+            Message::KeySubmitted,
+            Message::KeyDirChosen(Some("/d".into())),
+        ] {
+            let _ = update(&mut app, no_prompt);
+            assert_eq!(app.open_attempts.in_flight(), None);
+        }
+        let open = start_attempt(&mut app, Message::OpenPathChosen(Some("/b.pak".into())));
+        let _ = update(&mut app, finished(open, Err(core_err("/b.pak", "boom"))));
+        assert_eq!(app.open_attempts.in_flight(), None);
+        assert_eq!(app.error.as_deref(), Some("boom"));
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     /// Returns a shared `Arc<dyn ContainerReader>` opened from the
@@ -3922,6 +3995,24 @@ mod tests {
             path: PathBuf::from(path),
             message: message.to_string(),
         }
+    }
+
+    /// An open result tagged with `attempt`, through the mapper `spawn_open`'s
+    /// task uses.
+    fn finished(attempt: AttemptId, result: Result<LoadedArchive, OpenError>) -> Message {
+        attempt_finished(attempt)(result)
+    }
+
+    /// Run `trigger` and return the NEW open attempt it started.
+    fn start_attempt(app: &mut App, trigger: Message) -> AttemptId {
+        let before = app.open_attempts.in_flight();
+        let _ = update(app, trigger);
+        let started = app
+            .open_attempts
+            .in_flight()
+            .expect("the trigger starts an open");
+        assert_ne!(Some(started), before, "a new attempt, not the pending one");
+        started
     }
 
     // ── hex / properties viewport windowing (#660) ────────────────────────────
@@ -4296,6 +4387,10 @@ mod tests {
             // tore down), and the error arms are inert. Only an error is
             // constructible here — `LoadedArchive` needs a real reader.
             Message::ArchiveOpened(Box::new(Err(core_err(FAILED_PATH, "probe")))),
+            finished(
+                OpenAttempts::default().start(),
+                Err(core_err(FAILED_PATH, "probe")),
+            ),
         ];
         for m in restores {
             assert!(

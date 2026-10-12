@@ -1,5 +1,6 @@
-//! Status-bar panel — shows the open file name, entry count, selected
-//! entry summary, and process memory usage (#661).
+//! Status-bar panel — shows the open file name, entry count, whether the
+//! latest archive open is still running (#867), selected entry summary, and
+//! process memory usage (#661).
 //!
 //! The memory reading comes from [`crate::state::memory`] (the lightweight
 //! cross-platform RSS reader this module's doc used to defer on), refreshed
@@ -25,6 +26,9 @@ use crate::theme::tokens::{SPACE_MD, SPACE_SM, TEXT_SM, muted_text_style};
 /// * `memory` – the pre-formatted memory label from
 ///   [`crate::state::memory::memory_label`], or `None` when there is no
 ///   reading to show (the segment hides).
+/// * `opening` – whether the latest archive open is still running, which
+///   nothing else shows while an archive or the key prompt fills the content
+///   area.
 // Pure view: cosmetic Style-field-deletion mutants aren't regex-excludable in
 // cargo-mutants 27 (see app::view for the rationale); validated by UI/UX review.
 #[mutants::skip]
@@ -33,6 +37,7 @@ pub fn view<'a>(
     entry_count: usize,
     selected_name: Option<&'a str>,
     memory: Option<String>,
+    opening: bool,
 ) -> Element<'a, Message> {
     let file_label: Element<'a, Message> = match archive_path {
         None => text("No archive open")
@@ -50,6 +55,7 @@ pub fn view<'a>(
         }
     };
 
+    let opening_label = muted_segment(opening.then(|| "Opening\u{2026}".to_owned()));
     let selection_label = muted_segment(selected_name.map(|name| format!("Selected: {name}")));
 
     // Last segment per the SPEC's order ("loaded archive, entry count,
@@ -59,6 +65,7 @@ pub fn view<'a>(
     container(
         row![
             file_label,
+            opening_label,
             iced::widget::Space::new().width(Length::Fill),
             selection_label,
             memory_label,
