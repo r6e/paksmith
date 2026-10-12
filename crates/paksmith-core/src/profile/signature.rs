@@ -126,6 +126,40 @@ mod tests {
         assert!(verify_detached(b"x", &[0u8; 64], &non_hex).is_err());
     }
 
+    /// The key text is decoded exactly as written: no `0x` strip and no trim,
+    /// because `ensure_key_matches_registry` guards that same raw text, and no
+    /// sign, though `u8::from_str_radix("+9", 16)` is `Ok(9)`. The signature
+    /// is valid, so only the key decode can fail.
+    #[test]
+    fn pubkey_hex_grammar_edges() {
+        let pk = TRUSTED_REGISTRY_PUBKEY_HEX;
+        let sig = SigningKey::from_bytes(&[1u8; 32]).sign(b"x").to_bytes();
+        assert_eq!(&pk[10..12], "09");
+        assert!(verify_detached(b"x", &sig, pk).is_ok());
+        assert!(verify_detached(b"x", &sig, &pk.to_uppercase()).is_ok());
+        for bad in [
+            format!("{}+9{}", &pk[..10], &pk[12..]),
+            format!("0x{pk}"),
+            format!("0X{pk}"),
+            format!(" {pk}"),
+            format!("{pk}\n"),
+            format!("g{}", &pk[1..]),
+            pk[..62].to_string(),
+            format!("a\u{e9}{}", &pk[3..]),
+            String::new(),
+        ] {
+            assert!(
+                matches!(
+                    verify_detached(b"x", &sig, &bad),
+                    Err(PaksmithError::Profile {
+                        fault: ProfileFault::SignatureInvalid
+                    })
+                ),
+                "{bad:?}"
+            );
+        }
+    }
+
     /// Verify that `TRUSTED_REGISTRY_PUBKEY_HEX` is a canonical ed25519 key
     /// (not a random 32-byte value that `VerifyingKey::from_bytes` rejects).
     /// We prove this by signing with the matching signing key (seed `[1u8;32]`)

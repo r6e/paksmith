@@ -265,12 +265,51 @@ mod tests {
         ));
     }
 
+    /// At most one `0x`/`0X` strip, then the BYTE length, then every digit:
+    /// each `Err` row pins the check that rejects it.
+    #[test]
+    fn from_hex_grammar_edges() {
+        use AesKeyHexError::{NonHex, WrongLength};
+        let h = "ab".repeat(32);
+        for (input, want) in [
+            (format!("0x{h}"), Ok(())),
+            ("aB".repeat(32), Ok(())),
+            (format!("0x0x{}", &h[2..]), Err(NonHex)),
+            (String::new(), Err(WrongLength { got: 0 })),
+            ("0x".to_string(), Err(WrongLength { got: 0 })),
+            (format!("{h}\n"), Err(WrongLength { got: 65 })),
+            ("z".repeat(63), Err(WrongLength { got: 63 })),
+            ("\u{e9}".repeat(16), Err(WrongLength { got: 32 })),
+            ("\u{e9}".repeat(32), Err(NonHex)),
+            ("+f".repeat(32), Err(NonHex)),
+            (format!(" {}", &h[1..]), Err(NonHex)),
+            (format!("{}\u{e9}", &h[2..]), Err(NonHex)),
+            (format!("a\u{e9}{}", &h[3..]), Err(NonHex)),
+            (format!("{}g", &h[1..]), Err(NonHex)),
+        ] {
+            assert_eq!(AesKey::from_hex(&input).map(|_| ()), want, "{input:?}");
+        }
+    }
+
+    /// Byte order and lowercase output against literals, which a round trip
+    /// alone cannot tell from a matching swap in both directions.
+    #[test]
+    fn hex_matches_the_fips_key_bytes() {
+        let hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        assert_eq!(AesKey::from_hex(hex).unwrap().0, KEY);
+        assert_eq!(AesKey::from_hex(&hex.to_uppercase()).unwrap().0, KEY);
+        assert_eq!(AesKey::new(KEY).to_hex(), hex);
+    }
+
     #[test]
     fn aes_key_hex_error_display_has_no_key_material() {
-        let e = AesKeyHexError::WrongLength { got: 10 };
-        assert!(
-            e.to_string().contains("64"),
-            "message names the expected length: {e}"
+        assert_eq!(
+            AesKeyHexError::WrongLength { got: 10 }.to_string(),
+            "expected 64 hex chars (32 bytes), got 10"
+        );
+        assert_eq!(
+            AesKeyHexError::NonHex.to_string(),
+            "key contains non-hex characters"
         );
     }
 

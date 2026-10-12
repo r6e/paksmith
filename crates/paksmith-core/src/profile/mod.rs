@@ -514,21 +514,46 @@ mod tests {
         );
     }
 
+    /// At most one `0x`/`0X` strip, then the BYTE length, then every digit:
+    /// each `Err` row pins the check that rejects it. A literal then pins byte
+    /// order and lowercase output.
+    #[test]
+    fn key_guid_from_hex_grammar_edges() {
+        use KeyGuidHexError::{NonHex, WrongLength};
+        let h = "ab".repeat(16);
+        for (input, want) in [
+            ("aB".repeat(16), Ok(())),
+            (format!("0x0x{}", &h[2..]), Err(NonHex)),
+            (String::new(), Err(WrongLength { got: 0 })),
+            ("0X".to_string(), Err(WrongLength { got: 0 })),
+            (format!("0X{}", &h[2..]), Err(WrongLength { got: 30 })),
+            (format!("{h}\n"), Err(WrongLength { got: 33 })),
+            ("z".repeat(31), Err(WrongLength { got: 31 })),
+            ("\u{e9}".repeat(8), Err(WrongLength { got: 16 })),
+            ("\u{e9}".repeat(16), Err(NonHex)),
+            ("+f".repeat(16), Err(NonHex)),
+            (format!(" {}", &h[1..]), Err(NonHex)),
+            (format!("{}\u{e9}", &h[2..]), Err(NonHex)),
+            (format!("a\u{e9}{}", &h[3..]), Err(NonHex)),
+        ] {
+            assert_eq!(KeyGuid::from_hex(&input).map(|_| ()), want, "{input:?}");
+        }
+        let g = KeyGuid::from_hex("000102030405060708090A0b0c0d0e0f").unwrap();
+        let bytes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        assert_eq!(g.as_bytes(), &bytes);
+        assert_eq!(g.to_hex(), "000102030405060708090a0b0c0d0e0f");
+    }
+
     #[test]
     fn key_guid_hex_error_display_is_nonempty_and_informative() {
-        // WrongLength must name the expected 32 and carry the actual length.
-        let wrong = KeyGuidHexError::WrongLength { got: 4 }.to_string();
-        assert!(
-            wrong.contains("32"),
-            "WrongLength Display must mention the expected 32 chars: {wrong}"
+        assert_eq!(
+            KeyGuidHexError::WrongLength { got: 4 }.to_string(),
+            "expected 32 hex chars (16 bytes), got 4"
         );
-        assert!(
-            wrong.contains('4'),
-            "WrongLength Display must carry the actual length: {wrong}"
+        assert_eq!(
+            KeyGuidHexError::NonHex.to_string(),
+            "GUID contains non-hex characters"
         );
-        // NonHex must produce the specific non-empty message.
-        let nonhex = KeyGuidHexError::NonHex.to_string();
-        assert_eq!(nonhex, "GUID contains non-hex characters");
     }
 
     #[test]
