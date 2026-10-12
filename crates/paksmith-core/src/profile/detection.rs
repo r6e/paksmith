@@ -138,29 +138,14 @@ pub struct ByteSignatureRule {
 /// path turns that into a parse error (`validate_caps`); the local store, which
 /// is never cap-validated, warns and declines the rule.
 pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    /// One hex digit → its nibble value. `None` for anything else, which is
-    /// the ONLY non-hex rejection — an `is_ascii_hexdigit` pre-check ahead of
-    /// this would be unreachable, and so an untestable branch.
-    fn nibble(b: u8) -> Option<u8> {
-        match b {
-            b'0'..=b'9' => Some(b - b'0'),
-            b'a'..=b'f' => Some(b - b'a' + 10),
-            b'A'..=b'F' => Some(b - b'A' + 10),
-            _ => None,
-        }
-    }
-
     // Byte length, deliberately: a multi-byte char can make the length even
-    // while the digit count is odd, and `nibble` then rejects its bytes.
+    // while the digit count is odd, and `decode_pair` then rejects its bytes.
     if s.is_empty() || !s.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(s.len() / 2);
     for pair in s.as_bytes().as_chunks::<2>().0 {
-        // `as_chunks` makes `pair[1]` structurally safe instead of safe only
-        // by way of the parity guard above. Two nibbles are at most 0xFF, so
-        // this cannot overflow and needs no fallible conversion.
-        out.push(nibble(pair[0])? * 16 + nibble(pair[1])?);
+        out.push(crate::hex::decode_pair(*pair)?);
     }
     Some(out)
 }
@@ -375,7 +360,7 @@ mod tests {
         }
     }
 
-    /// `nibble`'s three ranges, pinned at every boundary — on `decode_hex`
+    /// The three hex digit ranges, pinned at every boundary — on `decode_hex`
     /// directly, not through `rules_match`, because a range slip there only
     /// surfaces if the byte it wrongly produces happens to occur in the fixture.
     #[test]
@@ -527,7 +512,7 @@ mod tests {
             // the space — even-length whitespace is below
             "0xdead",   // no `0x` prefix accepted (see ByteSignatureRule's doc)
             "00\u{e9}", // multi-byte char: even BYTE length, odd digit count
-            "  ",       // even-length whitespace: actually reaches `nibble`
+            "  ",       // even-length whitespace: actually reaches `decode_pair`
         ] {
             assert!(
                 !rules_match(d.path(), &byte_signature_rules("game.exe", bad)),
