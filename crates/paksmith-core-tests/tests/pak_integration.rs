@@ -7,8 +7,6 @@
     clippy::cast_sign_loss
 )]
 
-use std::io::Write;
-
 use byteorder::{LittleEndian, WriteBytesExt};
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::{
@@ -24,6 +22,7 @@ use paksmith_core::error::{
     BlockBoundsKind, BoundsUnit, DecompressionFault, IndexParseFault, OffsetPastFileSizeKind,
     OverflowSite, WireField,
 };
+use paksmith_core::testing::bench::zlib_stream;
 // Issue #140: shared v3+ wire-format synthesizers, lifted out of
 // the per-file copies that used to live below this import block.
 use paksmith_core::testing::wire::{
@@ -1590,15 +1589,6 @@ fn build_single_entry_pak_with_flags(
     pak
 }
 
-/// Compress `payload` as a single zlib block; return the compressed bytes.
-fn zlib_compress(payload: &[u8]) -> Vec<u8> {
-    use flate2::Compression;
-    use flate2::write::ZlibEncoder;
-    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-    enc.write_all(payload).unwrap();
-    enc.finish().unwrap()
-}
-
 /// `PakReader::open` bounds-checks each index-recorded entry's
 /// `offset + in_data_header_size + compressed_size` against
 /// `file_size` upfront (issue #58 open-time check, corrected by
@@ -1931,7 +1921,7 @@ fn open_rejects_pak_with_encrypted_index() {
 fn read_zlib_rejects_pre_v5_compressed_entry() {
     // Build a v4 pak with a zlib-compressed entry. The actual compressed bytes
     // don't matter — we expect rejection before decompression runs.
-    let payload = zlib_compress(b"some payload");
+    let payload = zlib_stream(b"some payload");
     let header_size = 8 + 8 + 8 + 4 + 20 + 4 + 16 + 1 + 4; // 1 block compressed
     let blocks = [(
         header_size as u64,
@@ -2086,7 +2076,7 @@ fn read_entry_rejects_unsupported_compression_methods() {
 fn read_zlib_rejects_decompression_bomb() {
     // Compress a 1MB payload but lie that uncompressed_size is 100 bytes.
     let real_payload = vec![0u8; 1024 * 1024];
-    let compressed = zlib_compress(&real_payload);
+    let compressed = zlib_stream(&real_payload);
     let header_size = 8 + 8 + 8 + 4 + 20 + 4 + 16 + 1 + 4; // 1 block compressed
     let blocks = [(
         header_size as u64,
@@ -2130,20 +2120,12 @@ fn read_zlib_rejects_decompression_bomb() {
 /// uncompressed_size by padding the final block.
 #[test]
 fn read_zlib_rejects_non_final_block_size_mismatch() {
-    use flate2::Compression;
-    use flate2::write::ZlibEncoder;
-
     // Two blocks: claim block_size = 100 (so non-final must produce exactly
     // 100 bytes), but the first block actually decompresses to only 50.
     // Final block decompresses to 150 — total still = 200 = uncompressed_size,
     // so the only thing that catches the lie is the per-block check.
-    let mut enc1 = ZlibEncoder::new(Vec::new(), Compression::default());
-    enc1.write_all(&[0u8; 50]).unwrap();
-    let block1 = enc1.finish().unwrap();
-
-    let mut enc2 = ZlibEncoder::new(Vec::new(), Compression::default());
-    enc2.write_all(&[0u8; 150]).unwrap();
-    let block2 = enc2.finish().unwrap();
+    let block1 = zlib_stream(&[0u8; 50]);
+    let block2 = zlib_stream(&[0u8; 150]);
 
     let header_size: u64 = 8 + 8 + 8 + 4 + 20 + 4 + 2 * 16 + 1 + 4; // 2 blocks
     let block_offsets = [
@@ -2191,18 +2173,13 @@ fn read_zlib_rejects_non_final_block_size_mismatch() {
 /// allocator harness and live in `tests/oom_pak.rs`.
 #[test]
 fn read_zlib_rejects_size_underrun() {
-    use flate2::Compression;
-    use flate2::write::ZlibEncoder;
-
     // One block that decompresses to exactly 50 bytes, but the entry
     // claims `uncompressed_size = 100`. Single-block layout means the
     // non-final-size check never fires (it gates on `i < num_blocks - 1`).
     // The bomb check sees `new_total = 50 <= 100` and lets it through.
     // Only the post-loop `bytes_written < uncompressed_size` branch
     // remains as the catcher.
-    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-    enc.write_all(&[0u8; 50]).unwrap();
-    let block = enc.finish().unwrap();
+    let block = zlib_stream(&[0u8; 50]);
 
     let header_size: u64 = 8 + 8 + 8 + 4 + 20 + 4 + 16 + 1 + 4; // 1 block
     let block_offsets = [(header_size, header_size + block.len() as u64)];
@@ -2346,7 +2323,7 @@ fn read_uncompressed_rejects_payload_past_eof() {
 #[test]
 fn read_zlib_rejects_block_past_eof() {
     // Compress some data then claim the block extends way past the file.
-    let payload = zlib_compress(b"actual data");
+    let payload = zlib_stream(b"actual data");
     let header_size = 8 + 8 + 8 + 4 + 20 + 4 + 16 + 1 + 4;
     // block.end is 1MB past the file end.
     let blocks = [(header_size as u64, header_size as u64 + 1_000_000)];
@@ -2392,8 +2369,8 @@ fn read_zlib_rejects_out_of_order_blocks() {
     // fires inside block 0's decompression BEFORE block 1's
     // OutOfOrder check can run). Two 16-char strings keep the
     // arithmetic clean.
-    let payload_a = zlib_compress(b"AAAA_block_a_AAA");
-    let payload_b = zlib_compress(b"BBBB_block_b_BBB");
+    let payload_a = zlib_stream(b"AAAA_block_a_AAA");
+    let payload_b = zlib_stream(b"BBBB_block_b_BBB");
     let uncompressed_per_block = 16u32;
     // In-data header for v6 TWO-block entry:
     // offset(8) + compressed_size(8) + uncompressed_size(8) +
@@ -2472,8 +2449,8 @@ fn read_zlib_rejects_out_of_order_blocks() {
 /// silently re-introduce the verify/read divergence.
 #[test]
 fn verify_entry_rejects_out_of_order_zlib_blocks() {
-    let payload_a = zlib_compress(b"AAAA_block_a_AAA");
-    let payload_b = zlib_compress(b"BBBB_block_b_BBB");
+    let payload_a = zlib_stream(b"AAAA_block_a_AAA");
+    let payload_b = zlib_stream(b"BBBB_block_b_BBB");
     let uncompressed_per_block = 16u32;
     let header_size = 8u64 + 8 + 8 + 4 + 20 + 4 + (2 * 16) + 1 + 4;
     let first_decoded_start = header_size + payload_b.len() as u64;
@@ -2534,9 +2511,9 @@ fn verify_entry_rejects_out_of_order_zlib_blocks() {
 /// trying to pin (R2 advisor catch).
 #[test]
 fn read_zlib_rejects_out_of_order_third_block() {
-    let payload_a = zlib_compress(b"AAAA_block_a_AAA");
-    let payload_b = zlib_compress(b"BBBB_block_b_BBB");
-    let payload_c = zlib_compress(b"CCCC_block_c_CCC");
+    let payload_a = zlib_stream(b"AAAA_block_a_AAA");
+    let payload_b = zlib_stream(b"BBBB_block_b_BBB");
+    let payload_c = zlib_stream(b"CCCC_block_c_CCC");
     let uncompressed_per_block = 16u32;
     // 3-block in-data header: base + 3*16 bytes of block table.
     let header_size = 8u64 + 8 + 8 + 4 + 20 + 4 + (3 * 16) + 1 + 4;
@@ -2588,7 +2565,7 @@ fn read_zlib_rejects_out_of_order_third_block() {
 /// rejected with InvalidIndex.
 #[test]
 fn read_zlib_rejects_block_overlapping_header() {
-    let payload = zlib_compress(b"data");
+    let payload = zlib_stream(b"data");
     // Claim block starts at offset 10 (well inside the in-data header).
     let blocks = [(10u64, 10u64 + payload.len() as u64)];
     let pak_bytes = build_single_entry_pak(6, 1, [0; 20], &blocks, 4, &payload, Some(4));

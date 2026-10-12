@@ -91,19 +91,11 @@ pub fn zlib_decompress(compressed: &[u8], expected_size: i64) -> crate::Result<V
 /// bench/test input).
 #[must_use]
 pub fn zlib_compress_framed(payload: &[u8]) -> Vec<u8> {
-    use flate2::Compression;
-    use flate2::write::ZlibEncoder;
-    use std::io::Write;
-
     const CHUNK: usize = 131_072; // LOADING_COMPRESSION_CHUNK_SIZE
 
     let pieces: Vec<(Vec<u8>, usize)> = payload
         .chunks(CHUNK)
-        .map(|c| {
-            let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-            enc.write_all(c).expect("in-memory zlib write");
-            (enc.finish().expect("in-memory zlib finish"), c.len())
-        })
+        .map(|c| (zlib_stream(c), c.len()))
         .collect();
     let as_i64 = |n: usize| i64::try_from(n).expect("bench payload fits i64");
     let info = |c: i64, u: i64, out: &mut Vec<u8>| {
@@ -125,6 +117,22 @@ pub fn zlib_compress_framed(payload: &[u8]) -> Vec<u8> {
         out.extend_from_slice(stream);
     }
     out
+}
+
+/// One zlib stream over `payload` at the default level: a pak compression
+/// block, or one chunk of [`zlib_compress_framed`].
+///
+/// # Panics
+/// Never: writing to an in-memory `Vec` cannot fail.
+#[must_use]
+pub fn zlib_stream(payload: &[u8]) -> Vec<u8> {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(payload).expect("in-memory zlib write");
+    enc.finish().expect("in-memory zlib finish")
 }
 
 /// The exact encoded byte length `decode_mip` requires for `format_name` at
@@ -376,6 +384,23 @@ mod tests {
         let expected = i64::try_from(original.len()).expect("len fits i64");
         let out = zlib_decompress(&framed, expected).expect("decompress");
         assert_eq!(out, original, "decompress recovers the original bytes");
+    }
+
+    #[test]
+    fn zlib_stream_decodes_to_its_payload() {
+        use std::io::Read;
+        let payload = b"paksmith zlib stream ".repeat(8);
+        let stream = zlib_stream(&payload);
+        let mut out = Vec::new();
+        let _ = flate2::read::ZlibDecoder::new(stream.as_slice())
+            .read_to_end(&mut out)
+            .unwrap();
+        assert_eq!(out, payload);
+        assert_eq!(
+            stream[..2],
+            [0x78, 0x9C],
+            "zlib header for the default level"
+        );
     }
 
     #[test]

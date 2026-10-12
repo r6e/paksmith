@@ -26,7 +26,6 @@ publish = false
 # boundary, so no manual maintenance.
 paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
 byteorder.workspace = true
-flate2.workspace = true
 # Writer-side raw LZ4 blocks for the synthetic v8b LZ4 pak tests (#636).
 lz4_flex.workspace = true
 proptest.workspace = true

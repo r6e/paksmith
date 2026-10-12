@@ -32,16 +32,13 @@
 // casts on test-controlled inputs.
 #![allow(clippy::cast_possible_truncation)]
 
-use std::io::Write;
-
 use byteorder::{LittleEndian, WriteBytesExt};
-use flate2::Compression;
-use flate2::write::ZlibEncoder;
 use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::PAK_MAGIC;
 use paksmith_core::error::{AllocationContext, DecompressionFault, IndexParseFault};
+use paksmith_core::testing::bench::zlib_stream;
 use paksmith_core::testing::oom::{PakSeam, SeamSite, arm_at};
 use paksmith_core::testing::v10::{V10Fixture, build_v10_buffer};
 use paksmith_core::testing::wire::{LZ4_SYNTH_PATH, build_v8b_lz4_pak};
@@ -56,9 +53,7 @@ use paksmith_core::testing::wire::{write_fstring, write_fstring_utf16, write_pak
 /// it's encoded as a single zlib block at default compression level
 /// and packaged with the appropriate v6 wire structure.
 fn build_v6_zlib_pak(decompressed: &[u8]) -> Vec<u8> {
-    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-    enc.write_all(decompressed).unwrap();
-    let compressed = enc.finish().unwrap();
+    let compressed = zlib_stream(decompressed);
 
     let compressed_size = compressed.len() as u64;
     let uncompressed_size = decompressed.len() as u64;
