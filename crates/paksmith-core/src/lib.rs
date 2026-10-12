@@ -53,6 +53,7 @@ pub mod localization;
 pub mod profile;
 pub mod staged_replace;
 
+mod hex;
 mod seams;
 mod untrusted;
 
