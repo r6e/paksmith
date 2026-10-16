@@ -125,12 +125,7 @@ pub fn build() -> Result<Menu, muda::Error> {
     let menu = Menu::new();
 
     // ── File ──────────────────────────────────────────────────────────────────
-    let open_item = MenuItem::with_id(
-        ID_OPEN,
-        "Open\u{2026}",
-        true,
-        Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyO)),
-    );
+    let open_item = MenuItem::with_id(ID_OPEN, "Open\u{2026}", true, Some(open_accelerator()));
     // Use the platform-predefined Quit item: on macOS this provides ⌘Q and
     // correct NSApplication termination semantics automatically.  The OS handles
     // the quit action directly — no muda MenuEvent is fired, and no Message::Quit
@@ -158,6 +153,11 @@ pub fn build() -> Result<Menu, muda::Error> {
     menu.append_items(&[&file_menu, &view_menu, &help_menu])?;
 
     Ok(menu)
+}
+
+/// The File → Open shortcut: ⌘O on macOS, Ctrl+O elsewhere.
+fn open_accelerator() -> Accelerator {
+    Accelerator::new(Some(CMD_OR_CTRL), Code::KeyO)
 }
 
 // ── Subscription bridge ───────────────────────────────────────────────────────
@@ -260,5 +260,11 @@ mod tests {
     fn action_for_unknown_id_is_none() {
         let id = muda::MenuId::new("paksmith.unknown");
         assert_eq!(action_for_id(&id), None);
+    }
+
+    #[test]
+    fn open_accelerator_is_cmd_or_ctrl_o() {
+        let expected: Accelerator = "CmdOrCtrl+O".parse().expect("muda parses CmdOrCtrl+O");
+        assert_eq!(open_accelerator(), expected);
     }
 }
