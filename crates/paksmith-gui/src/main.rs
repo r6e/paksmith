@@ -50,6 +50,8 @@ fn main() -> iced::Result {
     // (e.g. no GTK display on a Linux headless runner).  In that case we log a
     // warning and continue without the native menu; the toolbar actions remain
     // reachable.  We must not panic here — a missing menu is non-fatal.
+    // Bound to `_menu`, not `_`, so it lives until `run()` returns: since
+    // muda 0.20, dropping a `Menu` on macOS removes it from the menu bar.
     let _menu = match menu::build() {
         Ok(m) => {
             #[cfg(target_os = "macos")]

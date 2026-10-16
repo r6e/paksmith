@@ -157,7 +157,7 @@ pub fn build() -> Result<Menu, muda::Error> {
 
 /// The File → Open shortcut: ⌘O on macOS, Ctrl+O elsewhere.
 fn open_accelerator() -> Accelerator {
-    Accelerator::new(Some(CMD_OR_CTRL), Code::KeyO)
+    Accelerator::new(CMD_OR_CTRL, Code::KeyO)
 }
 
 // ── Subscription bridge ───────────────────────────────────────────────────────
