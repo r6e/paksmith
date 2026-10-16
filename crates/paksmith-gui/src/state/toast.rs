@@ -49,7 +49,8 @@ pub enum Lifetime {
         /// that raised it, so it needs an identity: it is what the message
         /// names, and what [`Toasts::dismiss_persistent_for`] matches so a
         /// later completed attempt on THIS file supersedes it while an
-        /// unrelated one leaves it standing.
+        /// unrelated one leaves it standing. Since #867 a superseded attempt
+        /// never gets that far: its result is dropped first.
         subject: PathBuf,
     },
 }
@@ -143,9 +144,9 @@ impl Toasts {
     /// Whether a persistent toast is live.
     ///
     /// Drives the tree-key listener's gate: the spare-Escape exit must exist
-    /// even when no archive is loaded, because the mismatched-failure branch
-    /// can raise a card in that state — see `tree_key_listener_active` in
-    /// `app.rs`.
+    /// even when no archive is loaded, because the mismatched-failure branch,
+    /// a guard since #867, can raise a card in that state — see
+    /// `tree_key_listener_active` in `app.rs`.
     #[must_use]
     pub fn has_persistent(&self) -> bool {
         self.items.iter().any(|t| t.lifetime.subject().is_some())
@@ -161,10 +162,9 @@ impl Toasts {
     /// file cannot exist — the `Locked` arm that raised the prompt retired
     /// it. A card about a different file is deliberately left standing
     /// everywhere: the user has one notice per failed file and a success
-    /// elsewhere is not evidence about it. Matching on the path rather than
-    /// clearing on any success is also what keeps a slow earlier open,
-    /// landing after a later one already failed, from retiring the newer
-    /// file's card unreplaced.
+    /// elsewhere is not evidence about it. A slow earlier open landing after
+    /// a later one never gets here: since #867 its result is dropped as
+    /// superseded (`Message::OpenAttemptFinished`).
     pub fn dismiss_persistent_for(&mut self, path: &Path) {
         self.items
             .retain(|t| t.lifetime.subject().is_none_or(|s| s != path));
