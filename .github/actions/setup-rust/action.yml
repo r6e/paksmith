@@ -40,18 +40,17 @@ runs:
   using: composite
   steps:
     # Phase 6 (paksmith-gui): muda's Linux backend links the GTK 3 stack
-    # (glib/gtk/atk/pango/cairo via *-sys build scripts that probe pkg-config)
-    # AND `libxdo` (its X11 automation dep, linked as `-lxdo`), so every Linux
-    # job that compiles/links the workspace needs both. macOS/Windows use native
-    # menu APIs and don't need this (hence the Linux-only guard). `libgtk-3-dev`
-    # transitively pulls the glib/cairo/pango/atk dev packages; without these the
-    # build fails at `glib-sys` (missing headers) or the link fails on `-lxdo`.
+    # (glib/gtk/atk/pango/cairo via *-sys build scripts that probe pkg-config),
+    # so every Linux job that compiles/links the workspace needs it. macOS/Windows
+    # use native menu APIs and don't need this (hence the Linux-only guard).
+    # `libgtk-3-dev` transitively pulls the glib/cairo/pango/atk dev packages;
+    # without them the build fails at `glib-sys` (missing headers).
     #
     # Phase 7d (audio player): rodio's `playback` feature pulls `cpal`, whose
     # Linux backend links ALSA via `alsa-sys` (pkg-config `alsa`). `libasound2-dev`
     # supplies those headers/lib; without it the build fails at `alsa-sys`.
     # macOS (CoreAudio) / Windows (WASAPI) use native APIs and need nothing here.
-    - name: Install GTK 3 + libxdo + ALSA dev libraries (Linux only, for muda + rodio)
+    - name: Install GTK 3 + ALSA dev libraries (Linux only, for muda + rodio)
       if: runner.os == 'Linux'
       shell: bash
       # A composite step cannot set timeout-minutes, so without a cap a stalled
@@ -59,7 +58,7 @@ runs:
       run: |
         set -euo pipefail
         rc=0
-        sudo timeout --kill-after=30s 10m bash -c 'apt-get update && apt-get install -y --no-install-recommends libgtk-3-dev libxdo-dev libasound2-dev' || rc=$?
+        sudo timeout --kill-after=30s 10m bash -c 'apt-get update && apt-get install -y --no-install-recommends libgtk-3-dev libasound2-dev' || rc=$?
         # 124 when SIGTERM ends it, 137 when it has to be killed 30 s later.
         if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
           echo "::error::apt-get ran past its 10-minute cap, likely a stalled Ubuntu mirror; rerun the job"

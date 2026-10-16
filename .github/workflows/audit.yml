@@ -39,9 +39,9 @@ jobs:
           # the runtime binary (details in deny.toml). These are per-ID ignores:
           # a NEW advisory in any of these crates would still open an issue.
           #
-          #   gtk3-rs stack via `muda 0.19.x` → gtk 0.18 (gtk4-rs is the successor;
-          #   dormant on macOS/Windows, and on Linux iced 0.14 exposes no window
-          #   handle so muda's menu is never attached):
+          #   gtk3-rs stack via `muda 0.21.x` (default `gtk3` backend) → gtk 0.18
+          #   (gtk4-rs is the successor; Linux-only, and dormant there: muda
+          #   attaches only to a GTK window and an iced/winit window is not one):
           #     0412 gdk · 0413 atk · 0415 gtk · 0416 atk-sys · 0418 gdk-sys
           #     0419 gtk3-macros · 0420 gtk-sys   (all "no longer maintained")
           #     0429  glib::VariantStrIter unsoundness (paksmith never calls it;
@@ -73,8 +73,8 @@ jobs:
           #   the 0.18.2 fix is unreachable until iced bumps it:
           #     2026-0253
           #
-          # Removal condition: when muda moves its Linux backend to gtk4,
-          # texture2ddecoder drops paste, wayland-scanner ships a
+          # Removal condition: when paksmith-gui switches muda to its opt-in
+          # `gtk4` backend, texture2ddecoder drops paste, wayland-scanner ships a
           # release on quick-xml 0.41+, an iced release ships a cryoglyph allowing
           # lru >= 0.18.2, and no crate in the tree pulls ttf-parser
           # (both iced's cosmic-text/fontdb path and winit's ab_glyph/owned_ttf_parser

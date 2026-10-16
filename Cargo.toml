@@ -35,7 +35,9 @@ default-members = ["crates/paksmith-core", "crates/paksmith-cli", "crates/paksmi
 # this workspace must declare their own `version = "x.y.z"`.
 edition = "2024"
 license = "MIT"
-rust-version = "1.88"
+# muda (paksmith-gui's native menu) declares 1.90 from 0.20 on and
+# supports its Linux backend only from 1.92.
+rust-version = "1.92"
 
 [workspace.dependencies]
 thiserror = "2.0.12"
