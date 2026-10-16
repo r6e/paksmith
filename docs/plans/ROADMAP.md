@@ -6,7 +6,7 @@
 
 **Architecture:** Cargo workspace — `paksmith-core` (library), `paksmith-cli` (binary), `paksmith-gui` (binary); plus four crates excluded from `default-members`: `paksmith-fixture-gen` (cross-validation fixture generator), `paksmith-core-tests` (integration suite), `paksmith-bench` (criterion benchmarks), `paksmith-doc-lint` (docs/formats linter). Core does all heavy lifting; frontends are thin presentation layers.
 
-**Tech Stack:** Rust 1.88+, Iced (GUI, planned), wgpu (rendering, planned), clap (CLI), thiserror, tracing, serde, byteorder, sha1, flate2. Async runtime (tokio or otherwise) deferred until Phase 5 introduces network fetch — no async deps in Phase 1.
+**Tech Stack:** Rust 1.92+, Iced (GUI, planned), wgpu (rendering, planned), clap (CLI), thiserror, tracing, serde, byteorder, sha1, flate2. Async runtime (tokio or otherwise) deferred until Phase 5 introduces network fetch — no async deps in Phase 1.
 
 ---
 

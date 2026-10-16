@@ -350,19 +350,19 @@ jobs:
   # `rust-version` declared in Cargo.toml so a dep update that silently
   # raises MSRV gets caught here rather than by a downstream user. Uses
   # `cargo check` (not test) because the goal is "does this compile on
-  # 1.88"; behavior testing happens on stable. `--all-targets` takes in
+  # 1.92"; behavior testing happens on stable. `--all-targets` takes in
   # test modules, integration tests and dev-dependencies (#813);
   # doctests are not checked.
   #
   # Drops `--workspace` so the first step respects `default-members` in
   # Cargo.toml — which excludes `paksmith-fixture-gen` and its
   # `repak` git dependency. That dep doesn't declare a `rust-version`
-  # and its transitives could push MSRV above 1.88 for reasons
+  # and its transitives could push MSRV above 1.92 for reasons
   # unrelated to paksmith's own code. `paksmith-bench` depends on both
   # and stays out; the second step adds `paksmith-core-tests` and
   # `paksmith-doc-lint`, which depend on neither.
   msrv:
-    name: MSRV (Rust 1.88)
+    name: MSRV (Rust 1.92)
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -371,7 +371,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-rust
         with:
-          toolchain: "1.88"
+          toolchain: "1.92"
       - run: cargo check --all-targets --all-features
       - run: cargo check -p paksmith-core-tests -p paksmith-doc-lint --all-targets --all-features
 
