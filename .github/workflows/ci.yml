@@ -78,7 +78,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-rust
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: nextest
       - name: Regenerate all fixtures and verify byte-determinism
@@ -213,7 +213,7 @@ jobs:
         # and the action will silently fail to post the check-run —
         # that's fine, the test step itself already reports pass/fail.
         continue-on-error: true
-        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
+        uses: dorny/test-reporter@d1b5dff021aa968b288b02285a8bf47471c5928a # v3.2.0
         with:
           name: Test report (${{ matrix.os }})
           path: target/nextest/ci/junit.xml
@@ -282,7 +282,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-llvm-cov
       # `--no-report` collects instrumented coverage data without
@@ -337,7 +337,7 @@ jobs:
           siblings=$(paste -sd'|' - <<<"$members")
           infra='crates/paksmith-core/src/(testing/|asset/property/test_utils\.rs|test_patch\.rs|test_spans\.rs)'
           cargo llvm-cov report --fail-under-lines 93 --ignore-filename-regex "(($siblings)/|$infra)"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:
           name: coverage-report
@@ -436,7 +436,7 @@ jobs:
       # cargo-minimal-versions delegates the actual check phase to
       # cargo-hack (its sister tool by taiki-e), so both need to be on
       # PATH. Comma-separated tool list installs both via one action call.
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-minimal-versions,cargo-hack
       - run: cargo minimal-versions check --direct --all-features
@@ -465,7 +465,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-fuzz
       # `cargo fuzz` is invoked from the repo root (matches the
