@@ -38,6 +38,10 @@ jobs:
               - 'crates/paksmith-core/src/testing/gltf_fixtures.rs'
               - 'crates/paksmith-core/examples/emit_gltf_validation_fixtures.rs'
               - 'crates/paksmith-core/Cargo.toml'
+              # The exporter's dependencies (gltf, glam, serde_json) are
+              # declared and locked at the workspace root.
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/gltf-validation.yml'
               - '.github/actions/setup-rust/**'
 
