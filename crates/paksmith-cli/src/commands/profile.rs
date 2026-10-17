@@ -111,7 +111,8 @@ pub(crate) struct AddArgs {
     pub(crate) engine_version: Option<String>,
     /// `.usmap` mappings file this profile supplies when selected via
     /// `--game`/`--detect` (inspect/extract) for unversioned assets.
-    /// Stored as-given; absolute paths recommended.
+    /// Must name an existing regular file; stored as its absolute path
+    /// (symlinks are not resolved).
     #[arg(long, value_name = "PATH")]
     pub(crate) mappings: Option<std::path::PathBuf>,
     /// Glob pattern locating this game's archives (repeatable).
@@ -462,6 +463,15 @@ fn add(a: &AddArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
             });
         }
     }
+    let mappings = a
+        .mappings
+        .as_deref()
+        .map(MappingsSource::from_existing_file)
+        .transpose()
+        .map_err(|e| PaksmithError::InvalidArgument {
+            arg: "--mappings",
+            reason: e.to_string(),
+        })?;
     let mut store = ProfileStore::load()?;
     if store.profiles.contains_key(&a.id) {
         return Err(PaksmithError::InvalidArgument {
@@ -476,7 +486,7 @@ fn add(a: &AddArgs, fmt: ResolvedFormat) -> paksmith_core::Result<u8> {
             engine_version: a.engine_version.clone(),
             keys: BTreeMap::new(),
             detect: None,
-            mappings: a.mappings.clone().map(MappingsSource::Path),
+            mappings,
             pak_paths: a.pak_paths.clone(),
         },
     );
