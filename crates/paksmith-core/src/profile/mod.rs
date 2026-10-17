@@ -16,11 +16,13 @@ pub(crate) mod signature;
 pub(crate) mod store;
 
 use std::collections::BTreeMap;
+use std::io;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::AesKey;
 use crate::hex::{self, HexError};
+use crate::{AesKey, PaksmithError};
 
 /// 16-byte UE encryption-key GUID. The all-zero GUID is the conventional
 /// "default" key (single-key and pre-UE4.22 paks use it).
@@ -130,6 +132,50 @@ impl MappingsSource {
         match self {
             Self::Path(path) => crate::asset::Usmap::from_path(path),
         }
+    }
+
+    /// A [`Self::Path`] for a profile to store: `path` made absolute with
+    /// [`std::path::absolute`], required to be UTF-8 (profiles.toml is text)
+    /// and to name an existing regular file, following symlinks as
+    /// [`Self::load`] does.
+    ///
+    /// Lexical, not canonical: symlinks and, on POSIX, `..` stay as written,
+    /// and Windows gets no `\\?\` prefix. The checks run on the absolute form
+    /// because that string is what every later load opens.
+    ///
+    /// # Errors
+    ///
+    /// [`PaksmithError::Io`] when `path` cannot be made absolute (for example
+    /// it is empty, the working directory cannot be read, or on Windows it
+    /// holds a NUL), or the absolute path is not UTF-8, cannot be stat'ed, or
+    /// is not a regular file.
+    pub fn from_existing_file(path: &Path) -> crate::Result<Self> {
+        let fail = |kind: io::ErrorKind, msg: String| PaksmithError::Io(io::Error::new(kind, msg));
+        let absolute = std::path::absolute(path).map_err(|e| {
+            fail(
+                e.kind(),
+                format!("cannot make `{}` absolute: {e}", path.display()),
+            )
+        })?;
+        if absolute.to_str().is_none() {
+            return Err(fail(
+                io::ErrorKind::InvalidInput,
+                format!("`{}` is not valid UTF-8", absolute.display()),
+            ));
+        }
+        let meta = std::fs::metadata(&absolute).map_err(|e| {
+            fail(
+                e.kind(),
+                format!("failed to stat `{}`: {e}", absolute.display()),
+            )
+        })?;
+        if !meta.is_file() {
+            return Err(fail(
+                io::ErrorKind::InvalidInput,
+                format!("`{}` is not a regular file", absolute.display()),
+            ));
+        }
+        Ok(Self::Path(absolute))
     }
 }
 
@@ -875,5 +921,91 @@ engine_version = "4.27"
             !text.contains("redacted"),
             "store must not contain a redacted Debug: {text}"
         );
+    }
+
+    // ── MappingsSource::from_existing_file ──────────────────────────────────
+
+    fn from_existing_file_err(path: &Path) -> io::Error {
+        match MappingsSource::from_existing_file(path) {
+            Err(PaksmithError::Io(e)) => e,
+            other => panic!("expected Io for {}, got {other:?}", path.display()),
+        }
+    }
+
+    #[test]
+    fn from_existing_file_makes_a_relative_path_absolute() {
+        // Unit tests run from the package root, where Cargo.toml exists.
+        let want = std::env::current_dir().unwrap().join("Cargo.toml");
+        assert_eq!(
+            MappingsSource::from_existing_file(Path::new("Cargo.toml")).unwrap(),
+            MappingsSource::Path(want)
+        );
+    }
+
+    #[test]
+    fn from_existing_file_keeps_an_absolute_spelling() {
+        // Lexical, not canonical: macOS's temp dir is under /var, which
+        // canonicalize would rewrite to /private/var, and Windows would gain
+        // a \\?\ prefix.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hero.usmap");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            MappingsSource::from_existing_file(&file).unwrap(),
+            MappingsSource::Path(file)
+        );
+    }
+
+    #[test]
+    fn from_existing_file_refuses_a_missing_path_a_directory_and_an_empty_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = from_existing_file_err(&dir.path().join("missing.usmap"));
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        assert!(missing.to_string().contains("missing.usmap"), "{missing}");
+        let directory = from_existing_file_err(dir.path());
+        assert_eq!(directory.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            directory.to_string().contains("is not a regular file"),
+            "{directory}"
+        );
+        let empty = from_existing_file_err(Path::new(""));
+        assert_eq!(empty.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            empty.to_string().starts_with("cannot make `` absolute: "),
+            "{empty}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn from_existing_file_keeps_a_symlink_and_refuses_a_dangling_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.usmap");
+        let link = dir.path().join("link.usmap");
+        let dangling = dir.path().join("dangling.usmap");
+        std::fs::write(&target, b"x").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("gone.usmap"), &dangling).unwrap();
+        assert_eq!(
+            MappingsSource::from_existing_file(&link).unwrap(),
+            MappingsSource::Path(link)
+        );
+        assert_eq!(
+            from_existing_file_err(&dangling).kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn from_existing_file_refuses_a_path_that_is_not_utf8() {
+        // No file is created (APFS refuses the name), so InvalidInput rather
+        // than NotFound shows the UTF-8 check runs before the stat.
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(std::ffi::OsStr::from_bytes(b"\xff.usmap"));
+        let err = from_existing_file_err(&path);
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("UTF-8"), "{err}");
     }
 }
