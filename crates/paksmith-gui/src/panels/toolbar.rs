@@ -80,10 +80,10 @@ pub fn view<'a>(
 
     // On Windows / Linux the native muda menu is not attached to the window,
     // so Toggle Theme, the debug console, and About are exposed here as
-    // compact toolbar buttons. On macOS these actions live in the View /
-    // Help menu bar; the toolbar buttons are omitted to avoid duplicating
-    // them. (Console also has the F12 shortcut everywhere, but a shortcut
-    // alone is undiscoverable — #662.)
+    // compact toolbar buttons. On macOS these actions live in the menu bar
+    // (View, and About in the app menu); the toolbar buttons are omitted to
+    // avoid duplicating them. (Console also has the F12 shortcut everywhere,
+    // but a shortcut alone is undiscoverable — #662.)
     #[cfg(not(target_os = "macos"))]
     {
         items.push(secondary_btn("\u{2600}/\u{263E}", Message::ToggleTheme).into());

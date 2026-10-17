@@ -47,7 +47,8 @@ mundy = { version = "0.2.3", default-features = false, features = ["color-scheme
 # wrong cost profile for a 2 s tick on the UI thread. statm is one small
 # procfs read (rss pages × page size).
 memory-stats = { version = "1.2", features = ["always_use_statm"] }
-# Phase 6 Task 11: native menu bar (File/View/Help) with ⌘/Ctrl-O accelerator.
+# Phase 6 Task 11: native menu bar (File/View/Help; on macOS an app menu
+# holding About instead of Help) with ⌘/Ctrl-O accelerator.
 # Apache-2.0 OR MIT.  macOS: global app menu via init_for_nsapp().
 # Windows/Linux: menu built but not attached — see crate::menu's module doc
 # for the per-platform attach story (Windows: implementable follow-up via the

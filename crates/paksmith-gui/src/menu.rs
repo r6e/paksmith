@@ -2,9 +2,9 @@
 //!
 //! # Platform support
 //!
-//! - **macOS**: `main` installs the menu with `Menu::init_for_nsapp()` before
-//!   the iced event loop starts, and winit's launch handler then replaces it
-//!   (#954).  `muda` hooks into the NSApp directly — no window handle needed.
+//! - **macOS**: [`install`] makes the menu the global menu bar from inside the
+//!   event loop; it says why. `muda` hooks into the NSApp directly — no window
+//!   handle needed.
 //!
 //! - **Windows / Linux**: the menu is built but never attached, so Toggle
 //!   Theme, the debug console, and About are exposed via toolbar buttons
@@ -99,10 +99,11 @@ pub fn action_for_id(id: &muda::MenuId) -> Option<MenuAction> {
 
 // ── Menu construction ─────────────────────────────────────────────────────────
 
-/// Builds the application menu and returns it.
-///
-/// On macOS `main` installs it with `Menu::init_for_nsapp` before the iced
-/// event loop starts, and winit's launch handler then replaces it (#954).
+/// Builds the application menu with macOS's layout or every other platform's.
+/// [`install`] is the caller, and says when it may run. The layout is a
+/// parameter, not a `cfg`, so the ubuntu and windows test jobs build and pin
+/// both and ubuntu's clippy lints both. (macOS tests neither: muda builds a
+/// `Menu` there only on the main thread.)
 ///
 /// ```text
 /// macOS:            Paksmith            File         View
@@ -122,14 +123,6 @@ pub fn action_for_id(id: &muda::MenuId) -> Option<MenuAction> {
 /// Returns [`muda::Error`] if muda rejects an item, which this fixed layout
 /// does not trigger (muda builds it even without a display). Callers should
 /// still log and continue without the native menu rather than unwrapping.
-pub fn build() -> Result<Menu, muda::Error> {
-    build_for(cfg!(target_os = "macos"))
-}
-
-/// [`build`] with macOS's layout or every other platform's: a parameter, not a
-/// `cfg`, so the ubuntu and windows test jobs build and pin both layouts and
-/// ubuntu's clippy lints both. (macOS tests neither: muda builds a `Menu` there
-/// only on the main thread.)
 fn build_for(macos: bool) -> Result<Menu, muda::Error> {
     let menu = Menu::new();
     let about_item = MenuItem::with_id(ID_ABOUT, "About Paksmith", true, None);
@@ -183,6 +176,28 @@ fn build_for(macos: bool) -> Result<Menu, muda::Error> {
     }
 
     Ok(menu)
+}
+
+/// Builds the menu and, on macOS, makes it the global menu bar
+/// (`Menu::init_for_nsapp`, a plain code span because the method is
+/// macOS-only and an intra-doc link would not resolve elsewhere).
+///
+/// Run it on the main thread from inside the event loop, which is what
+/// [`crate::app::Message::InstallNativeMenu`] is for: winit's macOS launch
+/// handler replaces a main menu set any earlier (#954). Building counts, not
+/// just installing: muda registers the Services menu while it builds the
+/// items and winit's launch handler registers its own afterwards, so a menu
+/// built before launch keeps an empty Services submenu even once installed.
+/// The caller keeps the result alive ([`crate::app::App::native_menu`]). A
+/// failed build is logged and yields `None`, leaving the toolbar: Open
+/// everywhere, plus Theme, Console and About off macOS.
+pub fn install() -> Option<Menu> {
+    let menu = build_for(cfg!(target_os = "macos"))
+        .inspect_err(|e| tracing::warn!("native menu unavailable, continuing without it: {e}"))
+        .ok()?;
+    #[cfg(target_os = "macos")]
+    menu.init_for_nsapp();
+    Some(menu)
 }
 
 /// The File → Open shortcut: ⌘O on macOS, Ctrl+O elsewhere.
