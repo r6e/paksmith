@@ -2,9 +2,9 @@
 //!
 //! # Platform support
 //!
-//! - **macOS**: `Menu::init_for_nsapp()` installs a global menu bar before the
-//!   iced event loop starts.  `muda` hooks into the NSApp directly — no window
-//!   handle needed.
+//! - **macOS**: `main` installs the menu with `Menu::init_for_nsapp()` before
+//!   the iced event loop starts, and winit's launch handler then replaces it
+//!   (#954).  `muda` hooks into the NSApp directly — no window handle needed.
 //!
 //! - **Windows / Linux**: the menu is built but never attached, so Toggle
 //!   Theme, the debug console, and About are exposed via toolbar buttons
@@ -24,11 +24,11 @@
 //! # Descoped: Tools menu
 //!
 //! SPEC.md's GUI layout sketch lists File/View/Tools/Help in its Menu Bar
-//! row; only three menus are built because nothing populates Tools yet —
-//! every current action already has a home (File/View/Help). Recorded as a
-//! deliberate descope per #662 rather than shipping an empty menu; add it
-//! when the first tool (e.g. batch export, key manager) exists to live
-//! there.
+//! row; Tools is not built because nothing populates it yet — every current
+//! action already has a home (File/View/Help, or the app menu on macOS).
+//! Recorded as a deliberate descope per #662 rather than shipping an empty
+//! menu; add it when the first tool (e.g. batch export, key manager) exists
+//! to live there.
 //!
 //! # Event bridge
 //!
@@ -99,58 +99,88 @@ pub fn action_for_id(id: &muda::MenuId) -> Option<MenuAction> {
 
 // ── Menu construction ─────────────────────────────────────────────────────────
 
-/// Builds the application menu and returns it, or a [`muda::Error`] if the
-/// platform cannot construct the menu (e.g. no display on Linux headless).
+/// Builds the application menu and returns it.
 ///
-/// On macOS, call `muda::Menu::init_for_nsapp` on the returned menu before the
-/// iced event loop starts to install it as the global app menu bar. (Plain code
-/// span, not an intra-doc link: `init_for_nsapp` is macOS-only, so a `[...]`
-/// link fails to resolve under rustdoc on Linux/Windows.)
+/// On macOS `main` installs it with `Menu::init_for_nsapp` before the iced
+/// event loop starts, and winit's launch handler then replaces it (#954).
 ///
 /// ```text
-/// File          View              Help
-/// ─────────     ───────────────   ──────
-/// Open…  ⌘O    Toggle Theme      About Paksmith
-/// ─────────     Debug Console
-/// Quit   ⌘Q   (system-predefined, OS handles Quit directly)
+/// macOS:            Paksmith            File         View
+///                   About Paksmith      Open…  ⌘O    Toggle Theme
+///                   Services ▸                       Debug Console
+///                   Hide Paksmith  ⌘H
+///                   Hide Others, Show All
+///                   Quit Paksmith  ⌘Q
+///
+/// Windows / Linux:  File                View         Help
+///                   Open…  Ctrl+O       Toggle Theme About Paksmith
+///                   Quit                Debug Console
 /// ```
 ///
 /// # Errors
 ///
-/// Returns [`muda::Error`] if any submenu or item cannot be created — only
-/// possible if muda's internal platform state is inconsistent (e.g. no GTK
-/// display on Linux).  Callers should log and continue without the native menu
-/// rather than unwrapping.
+/// Returns [`muda::Error`] if muda rejects an item, which this fixed layout
+/// does not trigger (muda builds it even without a display). Callers should
+/// still log and continue without the native menu rather than unwrapping.
 pub fn build() -> Result<Menu, muda::Error> {
+    build_for(cfg!(target_os = "macos"))
+}
+
+/// [`build`] with macOS's layout or every other platform's: a parameter, not a
+/// `cfg`, so the ubuntu and windows test jobs build and pin both layouts and
+/// ubuntu's clippy lints both. (macOS tests neither: muda builds a `Menu` there
+/// only on the main thread.)
+fn build_for(macos: bool) -> Result<Menu, muda::Error> {
     let menu = Menu::new();
+    let about_item = MenuItem::with_id(ID_ABOUT, "About Paksmith", true, None);
+
+    // ── App (macOS) ───────────────────────────────────────────────────────────
+    // AppKit shows the first submenu as the application menu, under the app's
+    // name whatever this title says: without it, File would be taken for it.
+    // About and Quit sit here on macOS, beside the rows winit's default app
+    // menu had.
+    if macos {
+        menu.append(&Submenu::with_items(
+            "Paksmith",
+            true,
+            &[
+                &about_item,
+                &PredefinedMenuItem::separator(),
+                &PredefinedMenuItem::services(None),
+                &PredefinedMenuItem::separator(),
+                &PredefinedMenuItem::hide(Some("Hide Paksmith")),
+                &PredefinedMenuItem::hide_others(None),
+                &PredefinedMenuItem::show_all(None),
+                &PredefinedMenuItem::separator(),
+                &PredefinedMenuItem::quit(Some("Quit Paksmith")),
+            ],
+        )?)?;
+    }
 
     // ── File ──────────────────────────────────────────────────────────────────
     let open_item = MenuItem::with_id(ID_OPEN, "Open\u{2026}", true, Some(open_accelerator()));
-    // Use the platform-predefined Quit item: on macOS this provides ⌘Q and
-    // correct NSApplication termination semantics automatically.  The OS handles
-    // the quit action directly — no muda MenuEvent is fired, and no Message::Quit
-    // is needed on this path.
-    let quit_item = PredefinedMenuItem::quit(None);
-
-    let file_menu = Submenu::with_items(
-        "File",
-        true,
-        &[&open_item, &PredefinedMenuItem::separator(), &quit_item],
-    )?;
+    let file_menu = Submenu::with_items("File", true, &[&open_item])?;
+    // The platform-predefined Quit: the OS handles it directly, so no muda
+    // MenuEvent fires and no Message::Quit is needed. On macOS the app menu
+    // holds it instead, so ⌘Q is bound once.
+    if !macos {
+        file_menu.append_items(&[
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::quit(None),
+        ])?;
+    }
 
     // ── View ──────────────────────────────────────────────────────────────────
     let toggle_theme_item = MenuItem::with_id(ID_TOGGLE_THEME, "Toggle Theme", true, None);
     let toggle_console_item = MenuItem::with_id(ID_TOGGLE_CONSOLE, "Debug Console", true, None);
 
     let view_menu = Submenu::with_items("View", true, &[&toggle_theme_item, &toggle_console_item])?;
+    menu.append_items(&[&file_menu, &view_menu])?;
 
-    // ── Help ──────────────────────────────────────────────────────────────────
-    let about_item = MenuItem::with_id(ID_ABOUT, "About Paksmith", true, None);
-
-    let help_menu = Submenu::with_items("Help", true, &[&about_item])?;
-
-    // ── Assemble ──────────────────────────────────────────────────────────────
-    menu.append_items(&[&file_menu, &view_menu, &help_menu])?;
+    // ── Help (not macOS: About is in the app menu there) ─────────────────────
+    if !macos {
+        menu.append(&Submenu::with_items("Help", true, &[&about_item])?)?;
+    }
 
     Ok(menu)
 }
@@ -200,6 +230,26 @@ fn menu_event_stream() -> impl iced::futures::Stream<Item = Message> {
             }
         }
     })
+}
+
+/// Each submenu of `menu` as `(title, items)`, an action item by its id and a
+/// predefined one by its label. Off macOS only, like its callers: muda builds a
+/// `Menu` there only on the main thread, and libtest runs every test on a
+/// spawned thread.
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) fn layout(menu: &Menu) -> Vec<(String, Vec<String>)> {
+    let item = |kind: &muda::MenuItemKind| match kind {
+        muda::MenuItemKind::MenuItem(action) => action.id().as_ref().to_owned(),
+        muda::MenuItemKind::Predefined(predefined) => predefined.text(),
+        _ => String::from("?"),
+    };
+    menu.items()
+        .iter()
+        .map(|kind| {
+            let submenu = kind.as_submenu().expect("the bar holds only submenus");
+            (submenu.text(), submenu.items().iter().map(item).collect())
+        })
+        .collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -260,6 +310,57 @@ mod tests {
     fn action_for_unknown_id_is_none() {
         let id = muda::MenuId::new("paksmith.unknown");
         assert_eq!(action_for_id(&id), None);
+    }
+
+    /// `(title, items)` pairs, the way [`layout`] reports a bar.
+    #[cfg(not(target_os = "macos"))]
+    fn owned(bar: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+        bar.iter()
+            .map(|&(title, items)| {
+                (
+                    title.to_owned(),
+                    items.iter().copied().map(String::from).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn macos_leads_with_an_app_menu_holding_about_and_quit() {
+        let menu = build_for(true).expect("muda builds a menu off macOS without a display");
+        // "" is a separator. No Help: About moved to the app menu.
+        let app: &[&str] = &[
+            ID_ABOUT,
+            "",
+            "Services",
+            "",
+            "Hide Paksmith",
+            "Hide Others",
+            "Show All",
+            "",
+            "Quit Paksmith",
+        ];
+        let expected = [
+            ("Paksmith", app),
+            ("File", &[ID_OPEN][..]),
+            ("View", &[ID_TOGGLE_THEME, ID_TOGGLE_CONSOLE][..]),
+        ];
+        assert_eq!(layout(&menu), owned(&expected));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn other_platforms_keep_file_view_help() {
+        let menu = build_for(false).expect("muda builds a menu off macOS without a display");
+        // muda's own label for the predefined Quit, which differs per platform.
+        let quit = PredefinedMenuItem::quit(None).text();
+        let expected = [
+            ("File", &[ID_OPEN, "", quit.as_str()][..]),
+            ("View", &[ID_TOGGLE_THEME, ID_TOGGLE_CONSOLE][..]),
+            ("Help", &[ID_ABOUT][..]),
+        ];
+        assert_eq!(layout(&menu), owned(&expected));
     }
 
     #[test]
