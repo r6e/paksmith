@@ -38,16 +38,15 @@ fn main() -> iced::Result {
     // Build and install the native menu bar.
     //
     // macOS: `init_for_nsapp()` attaches the menu as the global app menu bar
-    // (the bar at the top of the screen).  This must run on the main thread
-    // and before the iced event loop takes over — calling it here in `main()`
-    // satisfies both requirements.
+    // (the bar at the top of the screen).  This must run on the main thread,
+    // but winit's launch handler replaces the menu once the event loop
+    // starts, so it does not show yet (#954).
     //
     // Windows / Linux: the menu is still built (so the subscription bridge
     // is always active) but never attached — see crate::menu's module doc
     // for the per-platform attach story. Actions remain reachable via the
     // toolbar buttons and the Ctrl+O listener.
-    // `build()` returns `Err` only if the platform cannot construct the menu
-    // (e.g. no GTK display on a Linux headless runner).  In that case we log a
+    // `build()` returns `Err` only if muda rejects an item.  In that case we log a
     // warning and continue without the native menu; the toolbar actions remain
     // reachable.  We must not panic here — a missing menu is non-fatal.
     // Bound to `_menu`, not `_`, so it lives until `run()` returns: since
