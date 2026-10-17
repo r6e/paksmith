@@ -21,47 +21,18 @@ mod widgets;
 
 use app::App;
 
-// Binary entry point: installs the tracing subscriber, builds the native menu,
-// and runs the iced event loop — none of which is unit-testable (no test can
-// drive `iced::application().run()`). The real logic — sharing the log buffer
-// into the app, and seeding the appearance and accent reads taken here on the
-// main thread — is extracted to the tested `app::boot_app`.
+// Binary entry point: installs the tracing subscriber and runs the iced event
+// loop, neither of which is unit-testable (no test can drive
+// `iced::application().run()`). The real logic — sharing the log buffer into
+// the app, seeding the appearance and accent reads taken here on the main
+// thread, and queuing the native-menu install — is in the tested
+// `app::boot_app`.
 #[mutants::skip]
 fn main() -> iced::Result {
     // Capture tracing events into a bounded ring for the in-app debug console.
-    // Install before building the menu so the menu-build path's own warnings
-    // are captured. `try_init` (inside) is a no-op if a subscriber already
-    // exists.
+    // `try_init` (inside) is a no-op if a subscriber already exists.
     let log_buffer = state::log_buffer::LogBuffer::default();
     state::log_buffer::init_console_tracing(log_buffer.clone());
-
-    // Build and install the native menu bar.
-    //
-    // macOS: `init_for_nsapp()` attaches the menu as the global app menu bar
-    // (the bar at the top of the screen).  This must run on the main thread,
-    // but winit's launch handler replaces the menu once the event loop
-    // starts, so it does not show yet (#954).
-    //
-    // Windows / Linux: the menu is still built (so the subscription bridge
-    // is always active) but never attached — see crate::menu's module doc
-    // for the per-platform attach story. Actions remain reachable via the
-    // toolbar buttons and the Ctrl+O listener.
-    // `build()` returns `Err` only if muda rejects an item.  In that case we log a
-    // warning and continue without the native menu; the toolbar actions remain
-    // reachable.  We must not panic here — a missing menu is non-fatal.
-    // Bound to `_menu`, not `_`, so it lives until `run()` returns: since
-    // muda 0.20, dropping a `Menu` on macOS removes it from the menu bar.
-    let _menu = match menu::build() {
-        Ok(m) => {
-            #[cfg(target_os = "macos")]
-            m.init_for_nsapp();
-            Some(m)
-        }
-        Err(e) => {
-            tracing::warn!("native menu unavailable, continuing without it: {e}");
-            None
-        }
-    };
 
     // Read here, on the main thread, before iced takes it: mundy's macOS
     // backend requires it and the value has to exist before the first

@@ -114,10 +114,10 @@ exclude_re = [
     # and wrong-key paths) is covered by real tests and is NOT excluded here.
     #
     # (a) Iced presentation. The `main` entry point, the pick-list `Display`
-    # impl, the `muda` menu construction, and the cosmetic styling math in
-    # `game_selector_widgets` (alpha scaling) are presentation/wiring, not
-    # unit-testable. NOTE: the "delete struct field" / "delete match arm" genus
-    # mutants on the widget `Style`/`Border` literals in the pure view functions
+    # impl and the cosmetic styling math in `game_selector_widgets` (alpha
+    # scaling) are presentation/wiring, not unit-testable. NOTE: the "delete
+    # struct field" / "delete match arm" genus mutants on the widget
+    # `Style`/`Border` literals in the pure view functions
     # (`view`, `encryption_chip`, `build_row`) are NOT regex-excludable —
     # cargo-mutants 27 does not match that genus against the name shown by
     # `--list` (verified: even `--exclude-re 'delete field'` leaves them). Those
@@ -147,7 +147,6 @@ exclude_re = [
     # first PR that actually brings this fn's lines into a scored diff.
     'replace <impl std::fmt::Display for PickItem>::fmt -> std::fmt::Result',
     'replace main -> iced::Result with Ok\(Default::default\(\)\)',
-    'replace build -> Result<Menu, muda::Error> with Ok\(Default::default\(\)\)',
     'game_selector_widgets',
     #
     # (b) Per-OS system accent reads. The native `NSColor`/portal/Windows reads

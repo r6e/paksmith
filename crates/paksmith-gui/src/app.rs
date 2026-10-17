@@ -145,6 +145,11 @@ pub struct App {
     /// keeps application state on the main thread — see `audio_output`'s module
     /// docs for the placement rationale.
     pub audio: Option<AudioOutput>,
+    /// The native menu bar, built by [`Message::InstallNativeMenu`]. Held for
+    /// the app's lifetime because since muda 0.20 dropping a `Menu` on macOS
+    /// takes it off the menu bar; `!Send` like [`App::audio`], and sound for
+    /// the same reason. `None` until then, and when the build failed.
+    pub native_menu: Option<muda::Menu>,
     /// Last process-RSS reading for the status bar (#661), refreshed on the
     /// [`crate::state::memory::MEMORY_TICK`] subscription. `None` when the
     /// platform backend has no reading — the label hides rather than guessing.
@@ -214,6 +219,7 @@ impl Default for App {
             // unset so it stays free of any real audio-hardware side effect. The
             // live path opens the real output device eagerly in `boot_app`.
             audio: None,
+            native_menu: None,
             // Seeded at construction (one cheap platform read) so the status
             // bar shows a reading immediately instead of a blank first
             // MEMORY_TICK interval.
@@ -240,12 +246,17 @@ impl Default for App {
 /// device-free, load-bearing parts — the log-buffer sharing and the
 /// appearance and accent seeds — are extracted to [`base_app`] so they stay
 /// mutation-tested.
+///
+/// Also returns the boot task, which queues [`Message::InstallNativeMenu`]
+/// rather than building the menu here (see [`crate::menu::install`]). The skip
+/// leaves it unscored; `boot_app_queues_the_native_menu_install` pins that a
+/// task is queued.
 #[mutants::skip]
 pub fn boot_app(
     log_buffer: crate::state::log_buffer::LogBuffer,
     os_reading: Option<theme::OsReading>,
     accent: iced::Color,
-) -> App {
+) -> (App, Task<Message>) {
     let mut app = base_app(log_buffer, os_reading, accent);
     // Open the real output device here (not in `App::default`/`base_app`):
     // `default()` is used throughout the tests and must stay free of any
@@ -253,7 +264,7 @@ pub fn boot_app(
     // path only. `AudioOutput::new` returns `None` when no device is available,
     // so a headless environment degrades to silent playback rather than failing.
     app.audio = crate::audio_output::AudioOutput::new();
-    app
+    (app, Task::done(Message::InstallNativeMenu))
 }
 
 /// The device-free core of [`boot_app`]: wire the caller's shared `LogBuffer`
@@ -353,6 +364,9 @@ pub enum Message {
     About,
     /// Dismiss the About banner (always closes, never re-opens).
     DismissAbout,
+    /// Build the native menu and, on macOS, install it (#954). [`boot_app`]
+    /// queues it; [`crate::menu::install`] says why it runs in the event loop.
+    InstallNativeMenu,
     /// Open (or re-activate) an asset tab for the given entry path.
     OpenAsset(String),
     /// The async asset-load task completed.
@@ -975,6 +989,10 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::DismissAbout => {
             app.about_visible = false;
+            Task::none()
+        }
+        Message::InstallNativeMenu => {
+            app.native_menu = crate::menu::install();
             Task::none()
         }
         Message::ToastDismissed(id) => {
@@ -2885,10 +2903,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     // ── About panel (replaces content area when visible) ─────────────────────
-    // When `app.about_visible` is true (Help → About Paksmith), the About panel
-    // is rendered IN PLACE OF the main content area so it does not push the
-    // pane-grid layout down.  On macOS the native menu bar sits above the iced
-    // window so the panel appears inside the window body.
+    // When `app.about_visible` is true (the app menu's About Paksmith on macOS,
+    // the toolbar's About button elsewhere), the About panel is rendered IN
+    // PLACE OF the main content area so it does not push the pane-grid layout
+    // down.  On macOS the native menu bar sits above the iced window so the
+    // panel appears inside the window body.
     //
     // The Dismiss button sends `Message::DismissAbout` — always closes, never
     // accidentally re-opens.
@@ -7173,9 +7192,38 @@ mod tests {
         let buffer = crate::state::log_buffer::LogBuffer::default();
         // No live read here: this runs off the main thread, where mundy's
         // macOS backend refuses.
-        let app = super::boot_app(buffer.clone(), None, theme::accent::DEFAULT_ACCENT);
+        let (app, _) = super::boot_app(buffer.clone(), None, theme::accent::DEFAULT_ACCENT);
         buffer.push(tracing::Level::INFO, "t".into(), "x".into());
         assert_eq!(app.log_buffer.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn boot_app_queues_the_native_menu_install() {
+        // Queued, not built: on macOS winit's launch handler replaces a menu
+        // set before the loop runs (#954). `units` shows that a task is
+        // queued, not which one; iced keeps `into_stream` private.
+        let buffer = crate::state::log_buffer::LogBuffer::default();
+        let (app, task) = super::boot_app(buffer, None, theme::accent::DEFAULT_ACCENT);
+        assert_eq!(task.units(), 1);
+        assert!(
+            app.native_menu.is_none(),
+            "nothing is built before the loop runs"
+        );
+    }
+
+    /// Off macOS only: muda builds a `Menu` only on the main thread there.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn install_native_menu_keeps_the_built_menu() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::InstallNativeMenu);
+        // This platform's bar, kept on App; `Menu::default()` holds nothing.
+        let menu = app.native_menu.as_ref().expect("the built menu is kept");
+        let titles: Vec<String> = crate::menu::layout(menu)
+            .into_iter()
+            .map(|(title, _)| title)
+            .collect();
+        assert_eq!(titles, ["File", "View", "Help"]);
     }
 
     #[test]
@@ -7204,7 +7252,7 @@ mod tests {
         }
         // And `boot_app` passes the reading through to it.
         let buffer = crate::state::log_buffer::LogBuffer::default();
-        let booted = super::boot_app(
+        let (booted, _) = super::boot_app(
             buffer,
             Some(theme::OsReading::Light),
             theme::accent::DEFAULT_ACCENT,
@@ -7229,7 +7277,7 @@ mod tests {
         assert_eq!(super::base_app(buffer, None, seeded).accent, seeded);
         let buffer = crate::state::log_buffer::LogBuffer::default();
         assert_eq!(
-            super::boot_app(buffer, None, seeded).accent,
+            super::boot_app(buffer, None, seeded).0.accent,
             seeded,
             "boot_app passes the seed through"
         );
