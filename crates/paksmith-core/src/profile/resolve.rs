@@ -141,6 +141,17 @@ impl PakOpenContext {
         Ok(self.parse_inputs(usmap.map(Arc::new)))
     }
 
+    /// The message a frontend shows when [`Self::load_parse_inputs`] fails
+    /// with `err`: [`MappingsSource::load_failure_message`] for this context's
+    /// source. Only that load can fail there, so without a source this is
+    /// `err`'s own message.
+    #[must_use]
+    pub fn load_failure_message(&self, err: &PaksmithError) -> String {
+        self.mappings
+            .as_ref()
+            .map_or_else(|| err.to_string(), |m| m.load_failure_message(err))
+    }
+
     /// A context with the given fields, for frontend tests that cannot reach
     /// [`resolve_pak_context`] without reading the user's profile store.
     #[cfg(feature = "__test_utils")]
@@ -914,6 +925,17 @@ mod tests {
         let inputs = ctx.load_parse_inputs().unwrap();
         assert!(inputs.mappings.is_none());
         assert_eq!(inputs.engine_version_hint, ctx.engine_version);
+    }
+
+    #[test]
+    fn load_failure_message_renders_the_contexts_mappings_failure() {
+        let err = PaksmithError::Io(std::io::Error::other("gone"));
+        let source = MappingsSource::Path("x.usmap".into());
+        assert_eq!(
+            context(Some(source.clone()), "5.3").load_failure_message(&err),
+            source.load_failure_message(&err)
+        );
+        assert_eq!(context(None, "5.3").load_failure_message(&err), "gone");
     }
 
     #[test]
