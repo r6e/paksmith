@@ -115,6 +115,46 @@ fn extract_unversioned_with_profile_mappings_converts() {
 }
 
 #[test]
+fn profile_mappings_added_relative_load_from_another_working_directory() {
+    // #868: `profile add --mappings` with a relative path, then an extract
+    // from a different working directory, as a GUI launch would be. The
+    // stored path has to be absolute for the second run to find the file.
+    let config_dir = tempdir().unwrap();
+    let added_from = tempdir().unwrap();
+    let run_from = tempdir().unwrap();
+    let out = tempdir().unwrap();
+    let _ = fs::copy(hero_usmap(), added_from.path().join("hero.usmap")).unwrap();
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", config_dir.path())
+        .current_dir(added_from.path())
+        .args([
+            "profile",
+            "add",
+            "hero",
+            "--name",
+            "Hero",
+            "--mappings",
+            "hero.usmap",
+        ])
+        .assert()
+        .success();
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", config_dir.path())
+        .current_dir(run_from.path())
+        .args(["--format", "json", "extract"])
+        .arg(unversioned_pak())
+        .args(["--game", "hero"])
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(v["counts"]["failed"].as_u64().unwrap(), 0);
+}
+
+#[test]
 fn extract_explicit_mappings_wins_over_profile() {
     // #651 precedence: the profile's mappings path is BROKEN; the explicit
     // `--mappings` is good. Success proves the explicit flag won (a
