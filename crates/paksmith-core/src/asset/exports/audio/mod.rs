@@ -29,7 +29,7 @@ pub(crate) mod sound_wave;
 use crate::asset::package::Package;
 use crate::asset::property::{PropertyBag, PropertyValue};
 use crate::asset::{Asset, SoundWaveData};
-use crate::export::{active_codec, assemble_streaming, extract_nonstreaming};
+use crate::export::{active_codec, codec_container};
 
 /// Lightweight summary of a `USoundWave` export — produced by
 /// [`classify_audio`] without resolving or decoding any bulk data.
@@ -144,8 +144,12 @@ pub struct AudioPcm {
 ///   or does not point at a `USoundWave` export.
 /// - [`crate::PaksmithError::UnsupportedFeature`] — the codec is not decodable
 ///   in-app (e.g. `OPUS`, `BINKA`), or the resulting PCM WAV is not 16-bit.
-/// - [`crate::PaksmithError::Internal`] — bulk resolution failed, streaming
-///   chunk reassembly desynced, or the decoded WAV is structurally invalid.
+/// - any error of [`Package::resolve_bulk_for_export`] — bulk resolution
+///   failed.
+/// - [`crate::PaksmithError::AssetParse`] with `AllocationFailed` — the codec
+///   container could not be reserved.
+/// - [`crate::PaksmithError::Internal`] — streaming chunk reassembly
+///   desynced, or the decoded WAV is structurally invalid.
 pub fn decode_audio_to_pcm(package: &Package, export_idx: usize) -> crate::Result<AudioPcm> {
     let asset =
         package
@@ -162,10 +166,7 @@ pub fn decode_audio_to_pcm(package: &Package, export_idx: usize) -> crate::Resul
         });
     };
     let bulk = package.resolve_bulk_for_export(export_idx)?;
-    let cooked = match &data.streamed {
-        Some(streamed) => assemble_streaming(&streamed.chunks, bulk)?,
-        None => extract_nonstreaming(bulk)?,
-    };
+    let cooked = codec_container(data, bulk, &package.asset_path)?;
     let codec = active_codec(data).ok_or_else(|| crate::PaksmithError::Internal {
         context: "USoundWave has no active codec".to_string(),
     })?;
