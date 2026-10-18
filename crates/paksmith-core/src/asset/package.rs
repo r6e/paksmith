@@ -1242,9 +1242,7 @@ impl Package {
         // double-charges**: each thread's `resolve()` calls already
         // incremented `bytes_resolved` for every record before the
         // racing dropped our `resolved`. Fails closed (less apparent
-        // headroom than reality), not open. Phase 5 async should
-        // consider a CAS loop in `BulkDataResolver::resolve` to
-        // close the budget over-count.
+        // headroom than reality), not open.
         Ok(cache.get_or_init(|| resolved).as_slice())
     }
 

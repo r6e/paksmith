@@ -1061,11 +1061,11 @@ pub(crate) fn counting_loader(
 ///    charged against the record's source; charges past the source's
 ///    length fire `BulkDataParseReadsExceedSource`, and nothing is
 ///    refunded.
-/// 5. Per-package budget: cumulative bytes-resolved counter
-///    incremented BEFORE allocation by the record's claim
-///    (`budget_claim`); fires `BulkDataPackageBudgetExceeded` if over
-///    cap (rolled back when the budget check or step 6 fails, and by
-///    `resolve_all` for the records before one that fails).
+/// 5. Per-package budget: the record's claim (`budget_claim`) is added
+///    to the cumulative bytes-resolved counter BEFORE allocation, only
+///    if the total stays within the cap, else
+///    `BulkDataPackageBudgetExceeded`. It is given back when step 6
+///    fails, and by `resolve_all` for the records before one that fails.
 /// 6. Compression decode: chunked `FCompressedChunkInfo` framing +
 ///    zlib via flate2 (see `decompress_zlib`); the framing summary's
 ///    uncompressed total is verified against `ElementCount`
@@ -1278,6 +1278,37 @@ impl BulkDataResolver {
         Ok(resolved)
     }
 
+    /// Add `claim` to the per-package budget, or refuse it when the total
+    /// would pass the cap. The counter is only ever compare-and-swapped to
+    /// an admitted total, never to a refused one: a zlib claim is only
+    /// sign-checked by now (its per-record cap runs in step 6), and
+    /// concurrent huge claims added first and rolled back after could wrap
+    /// the shared counter and admit another resolve's claim.
+    fn reserve(&self, claim: u64, asset_path: &str) -> crate::Result<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut prev = self.bytes_resolved.load(Relaxed);
+        loop {
+            // A sum past u64 saturates to u64::MAX, which the cap refuses.
+            let total = prev.saturating_add(claim);
+            if total > MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE {
+                return Err(crate::PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: crate::error::AssetParseFault::BulkDataPackageBudgetExceeded {
+                        resolved: total,
+                        cap: MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE,
+                    },
+                });
+            }
+            match self
+                .bytes_resolved
+                .compare_exchange_weak(prev, total, Relaxed, Relaxed)
+            {
+                Ok(_) => return Ok(()),
+                Err(actual) => prev = actual,
+            }
+        }
+    }
+
     /// Give back `bytes` of the per-package budget.
     fn release(&self, bytes: u64) {
         let _ = self
@@ -1477,29 +1508,11 @@ impl BulkDataResolver {
 
         // 5. Budget check BEFORE allocation.
         let claimed_size = budget_claim(record);
-        let prev = self
-            .bytes_resolved
-            .fetch_add(claimed_size, std::sync::atomic::Ordering::Relaxed);
-        // `saturating_add` collapses u64 overflow (impossible in
-        // practice given the per-record + per-package caps, but
-        // defensive) to `u64::MAX`, which the `> CAP` check below
-        // always catches.
-        let total = prev.saturating_add(claimed_size);
-        if total > MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE {
-            self.release(claimed_size);
-            return Err(crate::PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: crate::error::AssetParseFault::BulkDataPackageBudgetExceeded {
-                    resolved: total,
-                    cap: MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE,
-                },
-            });
-        }
-        // NO TRACING EVENTS OR SIDE EFFECTS between the fetch_add and
-        // the materialization — side effects between increment and
-        // (possible) rollback would not be undone. `resolve_all`'s
-        // refund also relies on a failed resolve leaving the counter
-        // as it found it.
+        self.reserve(claimed_size, asset_path)?;
+        // NO TRACING EVENTS OR SIDE EFFECTS between the reservation and
+        // the materialization — side effects between them would not be
+        // undone by the rollback. `resolve_all`'s refund also relies on
+        // a failed resolve leaving the counter as it found it.
 
         // 6. Compression decode + materialize.
         let bytes = if record.flags.is_zlib_compressed() {
@@ -4421,10 +4434,8 @@ mod tests {
     #[test]
     fn resolve_accepts_total_at_exactly_cap() {
         // Budget boundary: pre-seed counter at `cap - 100`, resolve
-        // a record of exactly 100 bytes → total = cap. Strict-greater
-        // check (`>`): cap > cap = false → passes. Mutant `>=`:
-        // cap >= cap = true → fires (wrong). Kills the `> -> >=`
-        // mutant on the budget cap.
+        // a record of exactly 100 bytes → total = cap, which `reserve`
+        // admits: only a total past the cap is refused.
         let uasset = vec![0xAA; 1024];
         let record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 100, 0);
         let resolver = BulkDataResolver::new_for_test(uasset, 1024, 0);
@@ -4438,10 +4449,8 @@ mod tests {
     #[test]
     fn resolve_rejects_budget_exceeded() {
         // Pre-seed the bytes_resolved counter near the per-package
-        // cap (16 GiB) so a small record (200 bytes) tips over.
-        // Kills cargo-mutants `match guard total <= CAP -> true`
-        // which would defeat the budget check by always taking
-        // the "in-budget" arm.
+        // cap (16 GiB) so a small record (200 bytes) tips over, and
+        // `reserve` must refuse it.
         let uasset = vec![0u8; 1024];
         let record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 200, 0);
         let resolver = BulkDataResolver::new_for_test(uasset, 1024, 0);
@@ -4459,6 +4468,59 @@ mod tests {
             }
             other => panic!("expected BulkDataPackageBudgetExceeded, got {other:?}"),
         }
+    }
+
+    /// Concurrent admissions all land: four threads each admit an 8-byte
+    /// claim 1,000 times, and the counter ends at exactly their sum.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn concurrent_claims_are_all_counted() {
+        let resolver = BulkDataResolver::new_for_test(vec![0u8; 64], 64, 0);
+        let record = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 8, 0);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let _ = scope.spawn(|| {
+                    for _ in 0..1_000 {
+                        let _ = resolver.resolve(&record, "test.uasset").unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(resolver.bytes_resolved_for_test(), 4 * 1_000 * 8);
+    }
+
+    /// A refused claim is never stored, even for a moment: while one
+    /// thread is refused a zlib claim near `i64::MAX` over and over, every
+    /// value another thread reads stays within the cap.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn a_refused_claim_never_shows_on_the_shared_counter() {
+        let resolver = BulkDataResolver::new_for_test(vec![0u8; 64], 64, 0);
+        let huge = FByteBulkData::for_test(
+            BulkDataFlags::from(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SERIALIZE_COMPRESSED_ZLIB),
+            i64::MAX,
+            0,
+            0,
+        );
+        std::thread::scope(|scope| {
+            let refused = scope.spawn(|| {
+                for _ in 0..200_000 {
+                    assert!(matches!(
+                        resolver.resolve(&huge, "test.uasset"),
+                        Err(crate::PaksmithError::AssetParse {
+                            fault: crate::error::AssetParseFault::BulkDataPackageBudgetExceeded {
+                                ..
+                            },
+                            ..
+                        })
+                    ));
+                }
+            });
+            while !refused.is_finished() {
+                let seen = resolver.bytes_resolved_for_test();
+                assert!(seen <= MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE, "saw {seen}");
+            }
+        });
     }
 
     /// A record of `size_on_disk` bytes at `offset_in_file` in the `.uptnl`
