@@ -133,16 +133,11 @@ fn add_with_mappings_shows_source_path() {
     // #651: `profile add --mappings <path>` persists the source and
     // `profile show` renders it unredacted (it is not key material).
     let cfg = tempdir().unwrap();
+    let usmap = cfg.path().join("hero.usmap");
+    std::fs::write(&usmap, b"").unwrap();
     let _ = paksmith_table(cfg.path())
-        .args([
-            "profile",
-            "add",
-            "hero",
-            "--name",
-            "Hero",
-            "--mappings",
-            "/maps/hero.usmap",
-        ])
+        .args(["profile", "add", "hero", "--name", "Hero", "--mappings"])
+        .arg(&usmap)
         .assert()
         .success();
     let out = paksmith_table(cfg.path())
@@ -151,9 +146,31 @@ fn add_with_mappings_shows_source_path() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("mappings: /maps/hero.usmap"),
+        stdout.contains(&format!("mappings: {}", usmap.display())),
         "show must render the mappings path: {stdout}"
     );
+}
+
+#[test]
+fn add_refuses_a_mappings_path_that_does_not_exist() {
+    // #868: a stored path must name a file, so a missing one is refused at
+    // add time and nothing is stored.
+    let cfg = tempdir().unwrap();
+    let missing = cfg.path().join("missing.usmap");
+    let out = paksmith_table(cfg.path())
+        .args(["profile", "add", "hero", "--name", "Hero", "--mappings"])
+        .arg(&missing)
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("`--mappings`") && stderr.contains("missing.usmap"),
+        "{stderr}"
+    );
+    let _ = paksmith_table(cfg.path())
+        .args(["profile", "show", "hero"])
+        .assert()
+        .code(2);
 }
 
 #[test]
@@ -2444,15 +2461,15 @@ fn not_found_note_neutralizes_the_typed_id() {
 #[test]
 fn profile_add_and_show_neutralize_store_text() {
     let cfg = tempdir().unwrap();
+    // A real file, since add requires one: C1 CSI (U+009B) is legal in a file
+    // name on every CI filesystem, where ESC is not on Windows.
+    let usmap = cfg.path().join("m\u{9b}2J.usmap");
+    std::fs::write(&usmap, b"").unwrap();
 
     let added = paksmith_table(cfg.path())
-        .args(["profile", "add", "p\u{202e}q", "--name", "n"])
-        .args([
-            "--mappings",
-            "m\u{1b}[2J.usmap",
-            "--pak-path",
-            "Paks/\u{9b}*.pak",
-        ])
+        .args(["profile", "add", "p\u{202e}q", "--name", "n", "--mappings"])
+        .arg(&usmap)
+        .args(["--pak-path", "Paks/\u{9b}*.pak"])
         .assert()
         .success();
     let shown = paksmith_table(cfg.path())
@@ -2463,8 +2480,6 @@ fn profile_add_and_show_neutralize_store_text() {
     let added = String::from_utf8(added.get_output().stdout.clone()).unwrap();
     assert_neutralized(&added, &["p\u{FFFD}q"]);
     let shown = String::from_utf8(shown.get_output().stdout.clone()).unwrap();
-    assert_neutralized(
-        &shown,
-        &["mappings: m\u{FFFD}[2J.usmap", "  Paks/\u{FFFD}*.pak"],
-    );
+    let mappings = format!("mappings: {}", usmap.display()).replace('\u{9b}', "\u{FFFD}");
+    assert_neutralized(&shown, &[&mappings, "  Paks/\u{FFFD}*.pak"]);
 }
