@@ -1211,7 +1211,8 @@ impl Package {
     /// # Errors
     /// Any [`PaksmithError`] from the resolver (offset overflow, cap
     /// exceeded, companion missing, decompression failure, etc.). A
-    /// failing call caches nothing for the export, so the next call
+    /// failing call caches nothing for the export and gives back the
+    /// per-package budget its earlier records charged, so the next call
     /// resolves its records again. A `.ubulk` or `.uptnl` companion
     /// that failed to load is not loaded again for the life of this
     /// `Package` and its clones: a later call that reaches that
@@ -1228,10 +1229,7 @@ impl Package {
         // Resolve all records up-front (fallible). On any per-record
         // error, the cache slot stays empty so the next call resolves
         // again.
-        let mut resolved: Vec<BulkData> = Vec::with_capacity(records.len());
-        for record in records {
-            resolved.push(self.resolver.resolve(record, &self.asset_path)?);
-        }
+        let resolved = self.resolver.resolve_all(records, &self.asset_path)?;
         // Race-safely place the freshly-resolved value into the
         // OnceLock. `get_or_init`'s closure is infallible
         // (`get_or_try_init` is gated on the unstable `once_cell_try`
@@ -3448,6 +3446,49 @@ mod tests {
         );
         assert_eq!(err2.to_string(), err.to_string());
         assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// The seed leaves exactly the two resolving records' 24 bytes, so a
+    /// charge the failing call kept would trip the budget on the next call.
+    #[test]
+    fn resolve_bulk_for_export_refunds_the_records_before_a_failure() {
+        use crate::asset::bulk_data::{
+            BulkDataFlags, FLAG_NO_OFFSET_FIXUP, FLAG_PAYLOAD_AT_END_OF_FILE,
+            FLAG_PAYLOAD_IN_SEPARATE_FILE, MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE,
+        };
+        let mut parsed =
+            Package::read_from(&build_minimal_ue4_27().bytes, None, None, "test.uasset").unwrap();
+        let inline = BulkDataFlags::from(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_NO_OFFSET_FIXUP);
+        let streaming = BulkDataFlags::from(FLAG_PAYLOAD_IN_SEPARATE_FILE);
+        parsed
+            .insert_bulk_records(
+                0,
+                vec![
+                    FByteBulkData::for_test(inline, 8, 8, 0),
+                    FByteBulkData::for_test(inline, 16, 16, 8),
+                    FByteBulkData::for_test(streaming, 8, 8, 0),
+                ],
+            )
+            .unwrap();
+        let seed = MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE - 24;
+        parsed.resolver.set_bytes_resolved_for_test(seed);
+        for call in 0..2 {
+            let err = parsed.resolve_bulk_for_export(0).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PaksmithError::AssetParse {
+                        fault: AssetParseFault::MissingCompanionFile {
+                            kind: CompanionFileKind::Ubulk,
+                        },
+                        ..
+                    }
+                ),
+                "call {call}: expected MissingCompanionFile(Ubulk), got {err:?}"
+            );
+            let charged = parsed.resolver.bytes_resolved_for_test();
+            assert_eq!(charged, seed, "call {call}");
+        }
     }
 
     #[test]
