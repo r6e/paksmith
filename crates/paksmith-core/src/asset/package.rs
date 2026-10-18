@@ -1442,6 +1442,7 @@ fn read_payloads(
             ctx,
             asset_path,
         )?;
+        let mut typed_end = None;
         if let Some(read_typed) = crate::asset::exports::dispatch::class_dispatch().get(&class_name)
         {
             // Typed reader registered for this class (3d+ populate the
@@ -1455,6 +1456,7 @@ fn read_payloads(
             // `Package` is constructed (`read_payloads` itself only has the
             // read-only `&ExportTable` / `&AssetContext`). 3e-3a collected
             // them; 3e-3b wires them through.
+            let mark = ctx.derived_strings.mark();
             match read_typed(export_slice, ctx, asset_path) {
                 Ok((asset, records)) => {
                     payloads.push(asset);
@@ -1479,7 +1481,8 @@ fn read_payloads(
                         error = err.to_string(),
                         "typed reader failed; falling back to generic property-bag parse"
                     );
-                    // fall through to the generic path below
+                    // The generic parse below re-reads these bytes (#846).
+                    typed_end = Some(ctx.derived_strings.rewind(mark));
                 }
             }
         } else {
@@ -1546,6 +1549,9 @@ fn read_payloads(
                 )?)
             }
         };
+        if let Some(end) = typed_end {
+            ctx.derived_strings.retain(end);
+        }
         payloads.push(super::Asset::Generic(bag));
     }
     Ok((payloads, bulk_records))
@@ -1680,6 +1686,7 @@ mod tests {
     use super::*;
     use crate::asset::property::test_utils::{
         assert_derived_budget_exceeded, with_derived_budget, write_fname, write_none_tag,
+        write_object_end, write_suffixed_int_property,
     };
     use crate::error::{AssetAllocationContext, CompanionFileKind};
     use crate::testing::uasset::{
@@ -1702,12 +1709,7 @@ mod tests {
             crate::asset::FName::new("IntProperty"),
         ]);
         let mut payload = Vec::new();
-        write_fname(&mut payload, 3, 1); // Name "Score_0"
-        write_fname(&mut payload, 4, 0); // Type "IntProperty"
-        payload.extend_from_slice(&4i32.to_le_bytes()); // Size
-        payload.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
-        payload.push(0); // HasPropertyGuid
-        payload.extend_from_slice(&7i32.to_le_bytes());
+        write_suffixed_int_property(&mut payload, 3, 4, 7); // "Score_0" = 7
         write_none_tag(&mut payload);
         let mut export = spec.exports.exports[0];
         export.serial_size = i64::try_from(payload.len()).unwrap();
@@ -2104,6 +2106,48 @@ mod tests {
             "error=\"asset deserialization failed for `PATHKEPT\\u{1b}[2J"
         ));
         logs_assert(lines_free_of_raw_controls("typed reader failed"));
+    }
+
+    /// A DataTable whose segment-1 name `Foo_0` (5 bytes) and first row name
+    /// `Foo` (3) fill a budget of 8, and whose second row is corrupt, falls
+    /// through to a generic parse that charges `Foo_0` again. That re-parse
+    /// fits, and the export keeps the costlier charge: 8, not 5 or 13.
+    #[test]
+    fn a_failed_typed_attempt_charges_its_segment_one_names_once() {
+        let mut spec = MinimalPackageSpec::default();
+        spec.names.names[2] = crate::asset::FName::new("DataTable");
+        spec.names.names.extend([
+            crate::asset::FName::new("Foo"),
+            crate::asset::FName::new("IntProperty"),
+        ]);
+        let mut payload = Vec::new();
+        write_suffixed_int_property(&mut payload, 3, 4, 1); // "Foo_0" = 1
+        write_object_end(&mut payload);
+        payload.extend_from_slice(&2i32.to_le_bytes()); // NumRows
+        write_fname(&mut payload, 3, 0); // row 0 "Foo"
+        write_none_tag(&mut payload);
+        write_fname(&mut payload, 99, 0); // row 1: name index out of range
+        let mut export = spec.exports.exports[0];
+        export.serial_size = i64::try_from(payload.len()).unwrap();
+        spec.exports.exports = vec![export];
+        spec.payloads = vec![payload];
+        let MinimalPackage { bytes, .. } = build_minimal(spec);
+
+        let pkg = Package::read_from(&bytes, None, None, "x.uasset").unwrap();
+        let ctx = with_derived_budget(pkg.context(), 8);
+        let (payloads, _) = read_payloads(&bytes, &pkg.exports, &ctx, "x.uasset")
+            .expect("the generic re-parse fits the budget");
+        match &payloads[0] {
+            crate::asset::Asset::Generic(PropertyBag::Tree { properties }) => {
+                assert_eq!(properties[0].name(), "Foo_0");
+                assert_eq!(
+                    properties[0].value,
+                    crate::asset::property::primitives::PropertyValue::Int(1)
+                );
+            }
+            other => panic!("expected Generic(Tree) fall-through, got {other:?}"),
+        }
+        assert_eq!(ctx.derived_strings.mark(), 8);
     }
 
     /// 3e-3b: parsing a package whose typed export surfaces `FByteBulkData`

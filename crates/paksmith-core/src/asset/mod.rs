@@ -867,9 +867,11 @@ pub struct Texture2DMipMap {
 /// unknown type names, string-table ids) build a fresh copy per decoded
 /// value. The copied entry can be 64 Ki characters while the reference
 /// to it costs a few wire bytes. A suffixed name copied into a `String`
-/// is charged twice, once when resolved and once when copied. 256 MiB
-/// matches the per-export `MAX_PAYLOAD_BYTES`; passing it fails the whole
-/// package read.
+/// is charged twice, once when resolved and once when copied. Bytes parsed
+/// again after a failed attempt (a typed reader's fall-through, the
+/// SoundWave streaming retry) are charged once, at the costlier attempt's
+/// total. 256 MiB matches the per-export `MAX_PAYLOAD_BYTES`; passing it
+/// fails the whole package read.
 pub(crate) const MAX_DERIVED_STRING_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Test-only accessor for `MAX_DERIVED_STRING_BYTES` (256 MiB).
@@ -978,8 +980,8 @@ pub(crate) fn keep_out_of_memory(
 }
 
 /// Running total of the bytes charged by
-/// [`AssetContext::charge_derived`], shared by every clone of one
-/// context.
+/// [`AssetContext::charge_derived`], less what a re-parse rewinds (see
+/// [`MAX_DERIVED_STRING_BYTES`]), shared by every clone of one context.
 #[derive(Debug)]
 pub(crate) struct DerivedStringBudget {
     used: AtomicU64,
@@ -992,6 +994,28 @@ impl DerivedStringBudget {
             used: AtomicU64::new(0),
             limit,
         }
+    }
+
+    /// The bytes charged so far, to pass to [`Self::rewind`].
+    pub(crate) fn mark(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    /// Set the charge back to `mark` before bytes that a failed attempt
+    /// already charged are parsed again, and return that attempt's total for
+    /// [`Self::retain`]. Only a read that owns its context may rewind it:
+    /// `read_payloads` decodes one export at a time, so no other charge lands
+    /// between the mark and the matching retain.
+    pub(crate) fn rewind(&self, mark: u64) -> u64 {
+        self.used.swap(mark, Ordering::Relaxed)
+    }
+
+    /// Keep at least `total`, a failed attempt's charge, once the re-parse is
+    /// done, so the costlier of the two stays counted (#846). An attempt that
+    /// falls through without ending the read never passed the limit, since a
+    /// refused charge ends the read, so neither does this.
+    pub(crate) fn retain(&self, total: u64) {
+        let _ = self.used.fetch_max(total, Ordering::Relaxed);
     }
 }
 
@@ -1385,6 +1409,24 @@ mod derived_string_budget_tests {
         assert_eq!(ctx.charge_derived("ab".into(), "x").unwrap(), "ab");
         assert_eq!(clone.charge_derived("cd".into(), "x").unwrap(), "cd");
         assert_derived_budget_exceeded(ctx.charge_derived("e".into(), "x"), 4);
+    }
+
+    #[test]
+    fn a_rewound_attempt_keeps_the_costlier_total() {
+        let ctx = with_derived_budget(make_ctx(&[]), 10);
+        let budget = &ctx.derived_strings;
+        let _ = ctx.charge_derived("abc".into(), "x").unwrap();
+        assert_eq!(budget.mark(), 3);
+        let _ = ctx.charge_derived("defgh".into(), "x").unwrap();
+        assert_eq!(budget.rewind(3), 8);
+        let _ = ctx
+            .charge_derived("ijklmno".into(), "x")
+            .expect("fits only after the rewind");
+        budget.retain(8);
+        assert_eq!(budget.mark(), 10, "retain never lowers the charge");
+        let _ = budget.rewind(3);
+        budget.retain(8);
+        assert_eq!(budget.mark(), 8, "retain raises the charge to the total");
     }
 
     #[test]
