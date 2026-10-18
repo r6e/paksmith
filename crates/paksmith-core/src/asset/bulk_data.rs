@@ -225,7 +225,7 @@ impl From<u32> for BulkDataFlags {
 // `#[allow(dead_code)]`: each constant is pinned by
 // `flag_constants_pin_expected_values`, so `#[expect]` would falsely
 // fire under test cfg.
-const FLAG_PAYLOAD_AT_END_OF_FILE: u32 = 0x0000_0001;
+pub(crate) const FLAG_PAYLOAD_AT_END_OF_FILE: u32 = 0x0000_0001;
 const FLAG_SERIALIZE_COMPRESSED_ZLIB: u32 = 0x0000_0002;
 #[allow(
     dead_code,
@@ -1062,9 +1062,10 @@ pub(crate) fn counting_loader(
 ///    length fire `BulkDataParseReadsExceedSource`, and nothing is
 ///    refunded.
 /// 5. Per-package budget: cumulative bytes-resolved counter
-///    incremented BEFORE allocation; fires
-///    `BulkDataPackageBudgetExceeded` if over cap (rolled back when
-///    the budget check or step 6 fails).
+///    incremented BEFORE allocation by the record's claim
+///    (`budget_claim`); fires `BulkDataPackageBudgetExceeded` if over
+///    cap (rolled back when the budget check or step 6 fails, and by
+///    `resolve_all` for the records before one that fails).
 /// 6. Compression decode: chunked `FCompressedChunkInfo` framing +
 ///    zlib via flate2 (see `decompress_zlib`); the framing summary's
 ///    uncompressed total is verified against `ElementCount`
@@ -1109,12 +1110,10 @@ pub struct BulkDataResolver {
     uptnl_loader: Box<dyn Fn() -> crate::Result<Vec<u8>> + Send + Sync + 'static>,
     /// The `.uptnl` load outcome; see `load_companion`.
     uptnl_cache: std::sync::OnceLock<crate::Result<Vec<u8>>>,
-    /// Cumulative resolved bytes across all `resolve()` calls.
-    /// Enforces `MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE` (16 GiB).
-    /// Incremented BEFORE allocation against the wire-claimed size
-    /// (`size_on_disk` for uncompressed, `element_count` for zlib);
-    /// rolled back when the budget check or the step-6 decode or copy
-    /// fails (see the struct's defense chain).
+    /// Bytes charged against `MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE` (16
+    /// GiB). An admitted claim stays charged, even after its result is
+    /// dropped, unless step 6 fails or `resolve_all` gives back the records
+    /// before a failing one; see step 5 of the struct's defense chain.
     /// `AtomicU64::Relaxed` — pure counter with no happens-before
     /// relationship to other memory, so SeqCst's barriers are
     /// wasted (zero cost on x86, ~5-10 ns on ARM64).
@@ -1252,6 +1251,38 @@ impl BulkDataResolver {
     /// of loading again.
     pub fn resolve(&self, record: &FByteBulkData, asset_path: &str) -> crate::Result<BulkData> {
         self.resolve_inner(record, asset_path, None)
+    }
+
+    /// Resolve one export's `records` in order. When one fails, drop those
+    /// before it and give back their claims (#846); a failed one keeps none.
+    pub(crate) fn resolve_all(
+        &self,
+        records: &[FByteBulkData],
+        asset_path: &str,
+    ) -> crate::Result<Vec<BulkData>> {
+        let mut resolved = Vec::with_capacity(records.len());
+        let mut charged: u64 = 0;
+        for record in records {
+            match self.resolve(record, asset_path) {
+                Ok(bulk) => {
+                    charged += budget_claim(record);
+                    resolved.push(bulk);
+                }
+                Err(err) => {
+                    drop(resolved);
+                    self.release(charged);
+                    return Err(err);
+                }
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// Give back `bytes` of the per-package budget.
+    fn release(&self, bytes: u64) {
+        let _ = self
+            .bytes_resolved
+            .fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// [`Self::resolve`] for a typed reader decoding during a package
@@ -1444,21 +1475,8 @@ impl BulkDataResolver {
         )]
         let raw = &source_bytes[resolved_offset as usize..end as usize];
 
-        // 5. Budget check BEFORE allocation. For compressed records,
-        // ElementCount is the decompressed byte claim (per the format
-        // doc); the wire reader has already sign-checked it so the
-        // `as u64` cast is non-negative-safe.
-        let claimed_size: u64 = if record.flags.is_zlib_compressed() {
-            #[allow(
-                clippy::cast_sign_loss,
-                reason = "element_count sign-checked at FByteBulkData::read_from"
-            )]
-            {
-                record.element_count as u64
-            }
-        } else {
-            record.size_on_disk
-        };
+        // 5. Budget check BEFORE allocation.
+        let claimed_size = budget_claim(record);
         let prev = self
             .bytes_resolved
             .fetch_add(claimed_size, std::sync::atomic::Ordering::Relaxed);
@@ -1468,9 +1486,7 @@ impl BulkDataResolver {
         // always catches.
         let total = prev.saturating_add(claimed_size);
         if total > MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE {
-            let _ = self
-                .bytes_resolved
-                .fetch_sub(claimed_size, std::sync::atomic::Ordering::Relaxed);
+            self.release(claimed_size);
             return Err(crate::PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
                 fault: crate::error::AssetParseFault::BulkDataPackageBudgetExceeded {
@@ -1481,7 +1497,9 @@ impl BulkDataResolver {
         }
         // NO TRACING EVENTS OR SIDE EFFECTS between the fetch_add and
         // the materialization — side effects between increment and
-        // (possible) rollback would not be undone.
+        // (possible) rollback would not be undone. `resolve_all`'s
+        // refund also relies on a failed resolve leaving the counter
+        // as it found it.
 
         // 6. Compression decode + materialize.
         let bytes = if record.flags.is_zlib_compressed() {
@@ -1489,11 +1507,7 @@ impl BulkDataResolver {
         } else {
             crate::error::try_copy_asset(raw, asset_path, crate::seams::AssetSeam::BulkDataBytes)
         }
-        .inspect_err(|_| {
-            let _ = self
-                .bytes_resolved
-                .fetch_sub(claimed_size, std::sync::atomic::Ordering::Relaxed);
-        })?;
+        .inspect_err(|_| self.release(claimed_size))?;
 
         Ok(BulkData {
             bytes,
@@ -1512,6 +1526,31 @@ impl BulkDataResolver {
     pub fn set_bytes_resolved_for_test(&self, n: u64) {
         self.bytes_resolved
             .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Read the per-package byte-budget counter. Test-only.
+    #[cfg(feature = "__test_utils")]
+    #[must_use]
+    pub fn bytes_resolved_for_test(&self) -> u64 {
+        self.bytes_resolved
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// What `record` charges the per-package budget: its ElementCount (the
+/// decompressed byte claim, per the format doc) when zlib-compressed, and
+/// otherwise its size on disk.
+fn budget_claim(record: &FByteBulkData) -> u64 {
+    if record.flags.is_zlib_compressed() {
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "element_count sign-checked at FByteBulkData::read_from"
+        )]
+        {
+            record.element_count as u64
+        }
+    } else {
+        record.size_on_disk
     }
 }
 
@@ -3470,6 +3509,45 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// Claims 8 and 40 (ElementCount, not framed size) resolve, then a corrupt
+    /// zlib record reserves 100 bytes, exactly to the cap, and rolls back.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn resolve_all_refunds_only_the_records_that_succeeded() {
+        let payload: Vec<u8> = (0..40u8).collect();
+        let framed = frame_zlib(&payload, 131_072, (TEST_V1_TAG, TEST_CHUNK_128K), None);
+        assert_ne!(framed.len(), payload.len(), "the claims must differ");
+        let mut uasset = b"prefix!!".to_vec();
+        uasset.extend_from_slice(&framed);
+        let corrupt_at = uasset.len();
+        uasset.extend_from_slice(&[0xFF; 32]);
+        let uasset_len = uasset.len() as u64;
+        let resolver = BulkDataResolver::new_for_test(uasset, uasset_len, 0);
+        let zlib =
+            BulkDataFlags::from(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SERIALIZE_COMPRESSED_ZLIB);
+        let ok = record_with(FLAG_PAYLOAD_AT_END_OF_FILE, 8, 0);
+        let zipped = FByteBulkData::for_test(zlib, 40, framed.len() as u64, 8);
+        let corrupt = FByteBulkData::for_test(zlib, 100, 32, i64::try_from(corrupt_at).unwrap());
+        let seed = MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE - 148;
+        resolver.set_bytes_resolved_for_test(seed);
+        match resolver.resolve_all(&[ok.clone(), zipped.clone(), corrupt], "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BulkDataCompressionDecodeFailed { .. },
+                ..
+            }) => {}
+            other => {
+                panic!("expected decode failure after a successful reservation, got {other:?}")
+            }
+        }
+        assert_eq!(resolver.bytes_resolved_for_test(), seed);
+
+        let bulk = resolver.resolve_all(&[ok, zipped], "test.uasset").unwrap();
+        assert_eq!(bulk.len(), 2);
+        assert_eq!(bulk[0].bytes, b"prefix!!");
+        assert_eq!(bulk[1].bytes, payload);
+        assert_eq!(resolver.bytes_resolved_for_test(), seed + 48);
+    }
+
     #[cfg(feature = "__test_utils")]
     #[test]
     fn resolve_zlib_decompression_failure_rolls_back_budget() {
@@ -3498,7 +3576,7 @@ mod tests {
         // the 8-byte follow-up would NOT (cap - 5 + 8 > cap). The
         // follow-up on the SAME resolver therefore succeeds only if
         // the failed resolve rolled its reservation back — deleting
-        // the `inspect_err` fetch_sub flips the final expect into
+        // the `inspect_err` release flips the final expect into
         // BulkDataPackageBudgetExceeded.
         resolver.set_bytes_resolved_for_test(MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE - 105);
         let result = resolver.resolve(&record, "test.uasset");
