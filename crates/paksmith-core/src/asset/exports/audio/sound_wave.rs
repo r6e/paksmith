@@ -181,6 +181,7 @@ pub(crate) fn read_from(
     // the oracle wraps the parse in a try/catch streaming-flip retry: on failure
     // it rewinds, flips `bStreaming`, and re-parses the opposite branch (3f-5).
     let saved = cur.position();
+    let mark = ctx.derived_strings.mark();
     let mut effective_streaming = streaming;
     let platform = match read_platform_data(&mut cur, ctx, streaming, cooked, total_len, asset_path)
     {
@@ -201,14 +202,18 @@ pub(crate) fn read_from(
             // gate.)
             cur.set_position(saved);
             effective_streaming = !streaming;
-            read_platform_data(
+            // The retry re-reads these bytes (#846).
+            let first_end = ctx.derived_strings.rewind(mark);
+            let retried = read_platform_data(
                 &mut cur,
                 ctx,
                 effective_streaming,
                 cooked,
                 total_len,
                 asset_path,
-            )?
+            );
+            ctx.derived_strings.retain(first_end);
+            retried?
         }
     };
 
@@ -707,6 +712,7 @@ mod tests {
         // `none` ends a top-level export body: the `None` tag + the object-GUID
         // tail (bSerializeGuid = 0) the reader now consumes after the properties.
         write_object_end as none,
+        write_suffixed_int_property,
     };
 
     // --- wire-byte builders (explicit so the fixture bytes are auditable
@@ -1566,11 +1572,9 @@ mod tests {
         let mut bytes = Vec::new();
         none(&mut bytes);
         write_flags(&mut bytes, 0x1); // cooked
-        bytes.extend_from_slice(&1i32.to_le_bytes()); // numFormats = 1 | GUID[0..4]
-        write_fname(&mut bytes, 1, 1); // format key "OGG_0" | GUID[4..12]
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // GUID[12..16]
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // streaming NumChunks = 0
-        write_fname(&mut bytes, 0, 0); // AudioFormat = "None"
+        let mut tail = 0i32.to_le_bytes().to_vec(); // streaming NumChunks = 0
+        write_fname(&mut tail, 0, 0); // AudioFormat = "None"
+        write_flip_retry_platform(&mut bytes, (1, 1), &tail); // format key "OGG_0"
         let ctx = || make_ctx_with_version_and_names(516, None, &["None", "OGG"]);
 
         let (data, _) = read_from(&bytes, &ctx(), "s").expect("the retry parses the tail");
@@ -1580,6 +1584,59 @@ mod tests {
             read_from(&bytes, &with_derived_budget(ctx(), limit), "s"),
             limit,
         );
+    }
+
+    /// Platform data the non-streaming read fails on and the streaming retry
+    /// parses: `numFormats = 1` and format key `key`, then too few bytes for
+    /// that format's bulk record, which the retry reads as a 16-byte GUID
+    /// followed by `tail`.
+    fn write_flip_retry_platform(buf: &mut Vec<u8>, key: (i32, i32), tail: &[u8]) {
+        buf.extend_from_slice(&1i32.to_le_bytes()); // numFormats = 1 | GUID[0..4]
+        write_fname(buf, key.0, key.1); // format key | GUID[4..12]
+        buf.extend_from_slice(&0i32.to_le_bytes()); // GUID[12..16]
+        buf.extend_from_slice(tail);
+    }
+
+    const RETRY_NAMES: [&str; 5] = ["None", "OGG", "VORBIS", "Foo", "IntProperty"];
+
+    /// Segment 1's `Foo_0` (5) is charged before either attempt, the failed
+    /// first attempt's key `OGG_0` (5), and the retry's AudioFormat `VORBIS_0`
+    /// (8). The retry is charged from after segment 1, and is the costlier:
+    /// 13, within a budget of 13 that all three charges (18) would pass.
+    #[test]
+    fn streaming_flip_retry_is_charged_from_where_the_attempt_started() {
+        let mut bytes = Vec::new();
+        write_suffixed_int_property(&mut bytes, 3, 4, 1); // "Foo_0" = 1
+        none(&mut bytes);
+        write_flags(&mut bytes, 0x1); // cooked
+        let mut tail = 0i32.to_le_bytes().to_vec(); // streaming NumChunks = 0
+        write_fname(&mut tail, 2, 1); // AudioFormat = "VORBIS_0"
+        write_flip_retry_platform(&mut bytes, (1, 1), &tail); // format key "OGG_0"
+        let base = make_ctx_with_version_and_names(516, None, &RETRY_NAMES);
+        let ctx = with_derived_budget(base, 13);
+
+        let (data, _) = read_from(&bytes, &ctx, "s").expect("the retry fits the budget");
+        let streamed = data.streamed.expect("streamed populated by the retry");
+        assert_eq!(streamed.audio_format.as_ref(), "VORBIS_0");
+        assert_eq!(ctx.derived_strings.mark(), 13);
+    }
+
+    /// A retry that fails without ending the read still leaves the first
+    /// attempt's key `VORBIS_0` (8) charged for the package-level
+    /// fall-through to keep; the retry is refused before it charges anything.
+    #[test]
+    fn a_failed_streaming_flip_retry_keeps_the_first_attempt_charged() {
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_flags(&mut bytes, 0x1); // cooked
+        let tail = (MAX_STREAMED_AUDIO_CHUNKS + 1).to_le_bytes(); // NumChunks
+        write_flip_retry_platform(&mut bytes, (2, 1), &tail); // format key "VORBIS_0"
+        let ctx = make_ctx_with_version_and_names(516, None, &RETRY_NAMES);
+
+        let err =
+            read_from(&bytes, &ctx, "s").expect_err("the retry's chunk count is over its cap");
+        assert!(!crate::asset::ends_package_read(&err), "{err:?}");
+        assert_eq!(ctx.derived_strings.mark(), 8);
     }
 
     #[test]

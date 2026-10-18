@@ -200,7 +200,17 @@ pub fn write_object_end(buf: &mut Vec<u8>) {
 /// Name FName, Type FName (`type_idx` = `"IntProperty"`), `i32` Size=4,
 /// `i32` ArrayIndex=0, `u8` HasPropertyGuid=0, then the value.
 pub fn write_int_property(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, value: i32) {
-    write_fname(buf, name_idx, 0);
+    write_int_property_tag(buf, (name_idx, 0), type_idx, value);
+}
+
+/// [`write_int_property`] whose name carries the suffix `_0` (FName number
+/// 1), so resolving it copies a derived string.
+pub fn write_suffixed_int_property(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, value: i32) {
+    write_int_property_tag(buf, (name_idx, 1), type_idx, value);
+}
+
+fn write_int_property_tag(buf: &mut Vec<u8>, name: (i32, i32), type_idx: i32, value: i32) {
+    write_fname(buf, name.0, name.1);
     write_fname(buf, type_idx, 0);
     buf.extend_from_slice(&4i32.to_le_bytes()); // Size
     buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
