@@ -155,6 +155,40 @@ fn profile_mappings_added_relative_load_from_another_working_directory() {
 }
 
 #[test]
+fn extract_relative_profile_mappings_names_where_the_path_resolved() {
+    // #868: a stored relative path, hand-written or added before `profile
+    // add` made it absolute, fails with where it resolved and the fix.
+    let config_dir = tempdir().unwrap();
+    let run_from = tempdir().unwrap();
+    let out = tempdir().unwrap();
+    seed_hero_profile(config_dir.path(), std::path::Path::new("hero-868.usmap"));
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", config_dir.path())
+        .current_dir(run_from.path())
+        .arg("extract")
+        .arg(unversioned_pak())
+        .args(["--game", "hero"])
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    // The working directory's own name, since macOS reports /var temp dirs
+    // under /private/var.
+    let resolved =
+        std::path::Path::new(run_from.path().file_name().unwrap()).join("hero-868.usmap");
+    for needle in [
+        "--game",
+        "`hero-868.usmap` is not absolute",
+        &format!("{}`", resolved.display()),
+        "profiles.toml",
+    ] {
+        assert!(stderr.contains(needle), "missing {needle:?}: {stderr}");
+    }
+}
+
+#[test]
 fn extract_explicit_mappings_wins_over_profile() {
     // #651 precedence: the profile's mappings path is BROKEN; the explicit
     // `--mappings` is good. Success proves the explicit flag won (a
