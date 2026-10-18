@@ -7,7 +7,7 @@ use std::borrow::Cow;
 /// Characters of untrusted text [`clamp`] keeps before eliding the rest.
 pub(crate) const MAX_UNTRUSTED_CHARS: usize = 64;
 
-/// Characters of an untrusted archive path [`clamp_path`] keeps. Real paths
+/// Characters of an untrusted path [`clamp_path`] keeps. Real paths
 /// stay far below it; a v10+ pak entry path joins a directory and a file
 /// FString of up to 64 Ki characters each.
 pub(crate) const MAX_UNTRUSTED_PATH_CHARS: usize = 1024;
@@ -20,7 +20,7 @@ pub(crate) fn clamp(s: &str) -> Cow<'_, str> {
     clamp_to(s, MAX_UNTRUSTED_CHARS)
 }
 
-/// [`clamp`] for an archive path (an asset or pak entry path), at
+/// [`clamp`] for a path (an asset, pak entry or filesystem path), at
 /// [`MAX_UNTRUSTED_PATH_CHARS`].
 #[must_use]
 pub(crate) fn clamp_path(s: &str) -> Cow<'_, str> {

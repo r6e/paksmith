@@ -17,11 +17,12 @@ pub(crate) mod store;
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::hex::{self, HexError};
+use crate::untrusted::clamp_path;
 use crate::{AesKey, PaksmithError};
 
 /// 16-byte UE encryption-key GUID. The all-zero GUID is the conventional
@@ -114,9 +115,11 @@ impl KeyGuid {
 #[serde(rename_all = "snake_case")]
 pub enum MappingsSource {
     /// A `.usmap` file on the local filesystem, serialized in TOML as
-    /// `mappings = { path = "…" }`. Relative paths resolve against the
-    /// process working directory; profiles are user-authored, so
-    /// absolute paths are recommended.
+    /// `mappings = { path = "…" }`. `profile add` stores an absolute path
+    /// ([`Self::from_existing_file`]). One that is not absolute, hand-written
+    /// or stored before that, is opened as written, so it resolves against
+    /// the process's working directory or, on Windows, that directory's root
+    /// or a drive's current directory.
     Path(std::path::PathBuf),
 }
 
@@ -177,6 +180,39 @@ impl MappingsSource {
         }
         Ok(Self::Path(absolute))
     }
+
+    /// The message a frontend shows when [`Self::load`] fails with `err`. For
+    /// a path that is not absolute it also names where that path resolves
+    /// ([`std::path::absolute`]) and how to fix the profile.
+    #[must_use]
+    pub fn load_failure_message(&self, err: &PaksmithError) -> String {
+        match self {
+            Self::Path(path) => load_failure_message_in(path, err, std::path::absolute(path)),
+        }
+    }
+}
+
+/// [`MappingsSource::load_failure_message`] with where `path` resolves, or why
+/// that could not be determined, passed in.
+fn load_failure_message_in(
+    path: &Path,
+    err: &PaksmithError,
+    resolved: io::Result<PathBuf>,
+) -> String {
+    let failed = format!("profile mappings file failed to load: {err}");
+    if path.is_absolute() {
+        return failed;
+    }
+    let shown = |p: &Path| clamp_path(&p.display().to_string()).into_owned();
+    let resolved = match resolved {
+        Ok(absolute) => format!("so it resolved to `{}`", shown(&absolute)),
+        Err(e) => format!("and where it resolved could not be determined ({e})"),
+    };
+    format!(
+        "{failed}; the profile's mappings path `{}` is not absolute, {resolved}; set an absolute \
+         `mappings.path` for the profile in profiles.toml",
+        shown(path),
+    )
 }
 
 /// One game's stored keys + light metadata. The profile's id is the
@@ -434,6 +470,7 @@ mod tests {
 
     use super::*;
     use crate::AesKey;
+    use crate::untrusted::test_support::{assert_message_clamps_long_path, long_path};
 
     fn key(h: &str) -> AesKey {
         AesKey::from_hex(h).unwrap()
@@ -1007,5 +1044,101 @@ engine_version = "4.27"
         let err = from_existing_file_err(&path);
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("UTF-8"), "{err}");
+    }
+
+    // ── MappingsSource::load_failure_message ────────────────────────────────
+
+    fn gone() -> PaksmithError {
+        PaksmithError::Io(io::Error::other("gone"))
+    }
+
+    #[test]
+    fn load_failure_message_is_the_error_alone_for_an_absolute_path() {
+        let absolute = MappingsSource::Path(std::env::temp_dir().join("x.usmap"));
+        assert_eq!(
+            absolute.load_failure_message(&gone()),
+            "profile mappings file failed to load: gone"
+        );
+    }
+
+    #[test]
+    fn load_failure_message_names_where_a_path_that_is_not_absolute_resolved() {
+        let bad_magic = PaksmithError::MappingsParse {
+            fault: crate::error::MappingsParseFault::InvalidMagic { found: 0 },
+        };
+        for err in [gone(), bad_magic] {
+            assert_eq!(
+                load_failure_message_in(
+                    Path::new("maps/x.usmap"),
+                    &err,
+                    Ok(PathBuf::from("/launch/maps/x.usmap"))
+                ),
+                format!(
+                    "profile mappings file failed to load: {err}; the profile's mappings path \
+                     `maps/x.usmap` is not absolute, so it resolved to `/launch/maps/x.usmap`; \
+                     set an absolute `mappings.path` for the profile in profiles.toml"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn load_failure_message_hints_for_windows_rooted_and_drive_relative_paths() {
+        // Not absolute on Windows, and plain relative names elsewhere.
+        for path in [r"\maps\x.usmap", r"D:maps\x.usmap"] {
+            assert_eq!(
+                load_failure_message_in(
+                    Path::new(path),
+                    &gone(),
+                    Ok(PathBuf::from(r"C:\maps\x.usmap"))
+                ),
+                format!(
+                    "profile mappings file failed to load: gone; the profile's mappings path \
+                     `{path}` is not absolute, so it resolved to `C:\\maps\\x.usmap`; set an \
+                     absolute `mappings.path` for the profile in profiles.toml"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn load_failure_message_says_when_where_it_resolved_is_unknown() {
+        assert_eq!(
+            load_failure_message_in(
+                Path::new("x.usmap"),
+                &gone(),
+                Err(io::Error::other("unreadable"))
+            ),
+            "profile mappings file failed to load: gone; the profile's mappings path `x.usmap` \
+             is not absolute, and where it resolved could not be determined (unreadable); set an \
+             absolute `mappings.path` for the profile in profiles.toml"
+        );
+    }
+
+    #[test]
+    fn load_failure_message_clamps_the_path_and_where_it_resolved() {
+        // Each field is checked alone, so a missing clamp on either shows.
+        let long = PathBuf::from(long_path());
+        assert_message_clamps_long_path(&load_failure_message_in(
+            &long,
+            &gone(),
+            Ok(PathBuf::from("/launch/x.usmap")),
+        ));
+        assert_message_clamps_long_path(&load_failure_message_in(
+            Path::new("x.usmap"),
+            &gone(),
+            Ok(long),
+        ));
+    }
+
+    #[test]
+    fn load_failure_message_resolves_against_the_working_directory() {
+        // One component, so `join` agrees with Windows' separator handling.
+        let shown = MappingsSource::Path("x.usmap".into()).load_failure_message(&gone());
+        let want = std::env::current_dir().unwrap().join("x.usmap");
+        assert!(
+            shown.contains(&format!("so it resolved to `{}`;", want.display())),
+            "{shown}"
+        );
     }
 }
