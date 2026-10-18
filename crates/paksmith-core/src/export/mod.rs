@@ -83,7 +83,7 @@ pub use texture::{PngCompression, PngHandler};
 // modules are private, so `pub(crate)` re-exports here are the only way to
 // name these functions from outside `export`.
 pub(crate) use adpcm::transcode_adpcm_to_pcm;
-pub(crate) use audio::{active_codec, assemble_streaming, extract_nonstreaming};
+pub(crate) use audio::{active_codec, codec_container};
 pub(crate) use pcm::parse_pcm_wav;
 pub(crate) use vorbis::transcode_vorbis_to_pcm;
 // `build_pcm_wav` lives in the private `pcm` submodule; consumers outside

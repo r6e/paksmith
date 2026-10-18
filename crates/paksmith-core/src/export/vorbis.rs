@@ -67,10 +67,10 @@ fn accumulate_within_cap(total: usize, new_samples: usize) -> crate::Result<usiz
 /// and a truncated stream yields the partial PCM decoded so far — so "corrupt
 /// mid-decode" is salvaged where possible rather than erroring.
 pub(crate) fn transcode_vorbis_to_pcm(buf: &[u8]) -> crate::Result<Option<Vec<u8>>> {
-    // symphonia needs an owned, seekable source; the cooked buffer is already in
-    // memory and resolver-capped, so a copy is acceptable.
+    // A borrowed cursor: symphonia 0.6's stream takes any `MediaSource + 's`, so
+    // the codec container is not copied again.
     let mss = MediaSourceStream::new(
-        Box::new(Cursor::new(buf.to_vec())),
+        Box::new(Cursor::new(buf)),
         MediaSourceStreamOptions::default(),
     );
     // Probe for an Ogg container. A non-Ogg buffer is "not decodable here" → None

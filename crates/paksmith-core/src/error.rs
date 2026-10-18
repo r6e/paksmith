@@ -4931,6 +4931,8 @@ pub enum AssetAllocationContext {
     StructLayoutMemo,
     /// `HashMap` entry for the per-read memo of resolved class schemas.
     ClassSchemaMemo,
+    /// `Vec<u8>` for an audio passthrough's codec container.
+    AudioContainerBytes,
 }
 
 impl AssetAllocationContext {
@@ -4945,7 +4947,8 @@ impl AssetAllocationContext {
             | Self::SplitAssetCombined
             | Self::BulkDataBytes
             | Self::DecompressedBulkDataBytes
-            | Self::FStringUtf8Bytes => BoundsUnit::Bytes,
+            | Self::FStringUtf8Bytes
+            | Self::AudioContainerBytes => BoundsUnit::Bytes,
             Self::NameTable
             | Self::ImportTable
             | Self::ExportTable
@@ -4982,6 +4985,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::FStringUtf16CodeUnits => "FString UTF-16 code units",
             Self::StructLayoutMemo => "struct layout memo",
             Self::ClassSchemaMemo => "class schema memo",
+            Self::AudioContainerBytes => "audio container bytes",
         };
         f.write_str(s)
     }
@@ -8720,6 +8724,10 @@ mod tests {
                 "struct layout memo",
             ),
             (AssetAllocationContext::ClassSchemaMemo, "class schema memo"),
+            (
+                AssetAllocationContext::AudioContainerBytes,
+                "audio container bytes",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -8886,6 +8894,10 @@ mod tests {
             ),
             (AssetAllocationContext::StructLayoutMemo, BoundsUnit::Items),
             (AssetAllocationContext::ClassSchemaMemo, BoundsUnit::Items),
+            (
+                AssetAllocationContext::AudioContainerBytes,
+                BoundsUnit::Bytes,
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(

@@ -215,13 +215,17 @@ pub enum AssetSeam {
     /// class name a package read resolves, through `check_asset_reserve`.
     /// Surfaces as `AssetAllocationContext::ClassSchemaMemo`.
     ClassSchemaMemo,
+    /// The audio passthrough's codec container: the non-streaming buffer's
+    /// copy or the streaming chunks' concatenation.
+    /// Surfaces as `AssetAllocationContext::AudioContainerBytes`.
+    AudioContainerBytes,
 }
 
 impl AssetSeam {
     /// Total number of asset-side seam sites. Pinned by the `const _`
     /// guard below and by the exhaustive `match` in
     /// [`SeamSite::slot`].
-    pub const COUNT: usize = 17;
+    pub const COUNT: usize = 18;
 
     /// Map an asset seam to its paired
     /// [`crate::error::AssetAllocationContext`].
@@ -254,12 +258,13 @@ impl AssetSeam {
             Self::FStringUtf16CodeUnits => C::FStringUtf16CodeUnits,
             Self::StructLayoutMemo => C::StructLayoutMemo,
             Self::ClassSchemaMemo => C::ClassSchemaMemo,
+            Self::AudioContainerBytes => C::AudioContainerBytes,
         }
     }
 }
 
 // Same compile-time guard pattern as PakSeam above (see precondition).
-const _: [(); AssetSeam::COUNT] = [(); AssetSeam::ClassSchemaMemo as usize + 1];
+const _: [(); AssetSeam::COUNT] = [(); AssetSeam::AudioContainerBytes as usize + 1];
 
 /// `.usmap` parser OOM seams. The inner enum of [`SeamSite::Mappings`].
 ///
@@ -480,6 +485,9 @@ mod tests {
                 AssetSeam::ClassSchemaMemo => {
                     "read_asset_class_schema_memo_surfaces_allocation_failed_under_oom"
                 }
+                AssetSeam::AudioContainerBytes => {
+                    "decode_audio_container_bytes_surfaces_allocation_failed_under_oom"
+                }
             }
         }
         const fn mappings_test_name(site: MappingsSeam) -> &'static str {
@@ -552,6 +560,7 @@ mod tests {
                 AssetSeam::FStringUtf16CodeUnits => PakSeam::COUNT + 14,
                 AssetSeam::StructLayoutMemo => PakSeam::COUNT + 15,
                 AssetSeam::ClassSchemaMemo => PakSeam::COUNT + 16,
+                AssetSeam::AudioContainerBytes => PakSeam::COUNT + 17,
             }
         }
         const fn expected_mappings_slot(site: MappingsSeam) -> usize {
@@ -601,6 +610,7 @@ mod tests {
             AssetSeam::FStringUtf16CodeUnits,
             AssetSeam::StructLayoutMemo,
             AssetSeam::ClassSchemaMemo,
+            AssetSeam::AudioContainerBytes,
         ];
         assert_eq!(asset_all.len(), AssetSeam::COUNT);
         for site in asset_all {
