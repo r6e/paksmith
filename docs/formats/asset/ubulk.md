@@ -211,10 +211,11 @@ gone.
   package. A companion that fails to load reports that failure again
   instead of loading again.
 - `Package::resolve_bulk_for_export(export_idx)` — first-call lazy
-  resolution + per-call `OnceLock`-cached return. Drives the
-  `BulkDataResolver::resolve` chain over the records previously
+  resolution + per-call `OnceLock`-cached return. Drives
+  `BulkDataResolver::resolve_all` over the records previously
   registered via `Package::insert_bulk_records` (the 3e/3g/3h
-  typed-reader hook).
+  typed-reader hook), charging them against a bulk-read ledger of the
+  call's own (see [`bulk-data.md`](bulk-data.md)).
 
 **Error variants:** see [`bulk-data.md`](bulk-data.md) §Caps & limits
 for the full list. `.ubulk`-specific:

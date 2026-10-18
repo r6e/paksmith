@@ -3096,6 +3096,18 @@ pub enum AssetParseFault {
         /// Length of the source.
         source_len: u64,
     },
+    /// [`Self::BulkDataParseReadsExceedSource`] for the records one
+    /// `Package::resolve_bulk_for_export` call resolves, after the package
+    /// read (#846). The call fails and caches nothing.
+    BulkDataExportReadsExceedSource {
+        /// The tier of the record that crossed the limit.
+        tier: crate::asset::bulk_data::BulkDataTier,
+        /// Bytes this export's records charged against the source, the
+        /// refused record included.
+        charged: u64,
+        /// Length of the source.
+        source_len: u64,
+    },
     /// A Phase 3c typed-struct decoder finished its read but the
     /// stream position is BELOW `expected_end` — the caller's
     /// declared size for this struct was larger than the wire
@@ -3704,6 +3716,15 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "bulk-data records resolved while parsing charged {charged} bytes against \
                  a {source_len}-byte {tier} source; records name overlapping or repeated regions"
+            ),
+            Self::BulkDataExportReadsExceedSource {
+                tier,
+                charged,
+                source_len,
+            } => write!(
+                f,
+                "one export's bulk-data records charged {charged} bytes against a \
+                 {source_len}-byte {tier} source; records name overlapping or repeated regions"
             ),
             Self::TypedStructTrailingBytes {
                 struct_name,
@@ -9671,6 +9692,24 @@ mod tests {
             "asset deserialization failed for `Game/Mesh.uasset`: \
              bulk-data records resolved while parsing charged 200 bytes against a \
              100-byte streaming source; records name overlapping or repeated regions"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_export_reads_exceed_source() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Tex.uasset".to_string(),
+            fault: AssetParseFault::BulkDataExportReadsExceedSource {
+                tier: crate::asset::bulk_data::BulkDataTier::Inline,
+                charged: 200,
+                source_len: 100,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Tex.uasset`: \
+             one export's bulk-data records charged 200 bytes against a \
+             100-byte inline source; records name overlapping or repeated regions"
         );
     }
 
