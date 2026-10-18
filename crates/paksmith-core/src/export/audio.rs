@@ -63,6 +63,11 @@ const OGG_CODECS: &[&str] = &["OGG"];
 /// (PCM-in-WAV) and `"ADPCM"` (ADPCM-in-WAV). Both export verbatim to `.wav`.
 const WAV_CODECS: &[&str] = &["PCM", "ADPCM"];
 
+/// The asset path an allocation fault in [`passthrough_export`] names:
+/// [`FormatHandler::export`] is not given the asset's path, so it names the
+/// step instead, as the texture handler does for its mip.
+const PASSTHROUGH_PATH: &str = "<audio passthrough>";
+
 /// Exports `Asset::SoundWave` Ogg-Vorbis audio to a `.ogg` file. Stateless.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OggHandler;
@@ -240,9 +245,19 @@ fn passthrough_export(asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>
             context: "audio passthrough export called on a non-SoundWave Asset".to_string(),
         });
     };
+    codec_container(data, bulk, PASSTHROUGH_PATH)
+}
+
+/// A wave's complete codec container: the reassembled chunk stream when it
+/// streams, else its first format buffer.
+pub(crate) fn codec_container(
+    data: &SoundWaveData,
+    bulk: &[BulkData],
+    asset_path: &str,
+) -> crate::Result<Vec<u8>> {
     match &data.streamed {
-        Some(streamed) => assemble_streaming(&streamed.chunks, bulk),
-        None => extract_nonstreaming(bulk),
+        Some(streamed) => assemble_streaming(&streamed.chunks, bulk, asset_path),
+        None => extract_nonstreaming(bulk, asset_path),
     }
 }
 
@@ -272,23 +287,29 @@ fn codec_prefix(key: &str) -> &str {
 
 /// Non-streaming passthrough: the first format buffer is the complete codec
 /// container file. The caller's `supports` guarantees that buffer's codec, so
-/// its bytes are returned verbatim.
-pub(crate) fn extract_nonstreaming(bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
+/// its bytes are returned verbatim, copied into a buffer reserved fallibly.
+fn extract_nonstreaming(bulk: &[BulkData], asset_path: &str) -> crate::Result<Vec<u8>> {
     let buffer = bulk.first().ok_or_else(|| PaksmithError::Internal {
         context: "audio passthrough: non-streaming SoundWave has no codec buffer \
                   (resolved bulk is empty)"
             .to_string(),
     })?;
-    Ok(buffer.bytes.clone())
+    crate::error::try_copy_asset(
+        &buffer.bytes,
+        asset_path,
+        crate::seams::AssetSeam::AudioContainerBytes,
+    )
 }
 
 /// Streaming reassembly: concatenate the leading `AudioDataSize` bytes of each
 /// chunk's payload (the remainder is `DataSize` zero padding). Mirrors CUE4Parse
 /// `SoundDecoder`. Errors if the resolved bulk count desyncs from the chunk
-/// metadata, or a chunk's `AudioDataSize` is negative or exceeds its payload.
-pub(crate) fn assemble_streaming(
+/// metadata, a chunk's `AudioDataSize` is negative or exceeds its payload, or
+/// the output cannot be reserved.
+fn assemble_streaming(
     chunks: &[StreamedAudioChunk],
     bulk: &[BulkData],
+    asset_path: &str,
 ) -> crate::Result<Vec<u8>> {
     if chunks.len() != bulk.len() {
         return Err(PaksmithError::Internal {
@@ -314,7 +335,13 @@ pub(crate) fn assemble_streaming(
                 .min(record.bytes.len())
         })
         .fold(0usize, usize::saturating_add);
-    let mut out = Vec::with_capacity(total);
+    let mut out = Vec::new();
+    crate::error::try_reserve_asset(
+        &mut out,
+        total,
+        asset_path,
+        crate::seams::AssetSeam::AudioContainerBytes,
+    )?;
     for (index, (chunk, record)) in chunks.iter().zip(bulk).enumerate() {
         let audio_len =
             usize::try_from(chunk.audio_data_size).map_err(|_| PaksmithError::Internal {
@@ -527,6 +554,39 @@ mod tests {
             .export(&Asset::SoundWave(nonstreaming(&["OGG"])), &[])
             .unwrap_err();
         assert!(matches!(err, PaksmithError::Internal { .. }));
+    }
+
+    /// The non-streaming copy and the streaming concatenation each fail with
+    /// `AllocationFailed` for the buffer they would build, instead of
+    /// aborting, when the allocator refuses it.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn passthrough_buffers_surface_allocation_failed_under_oom() {
+        use crate::error::{AssetAllocationContext, AssetParseFault};
+        use crate::seams::{AssetSeam, SeamSite};
+        let under_oom = |data: SoundWaveData| {
+            let _guard =
+                crate::testing::oom::arm_at(SeamSite::Asset(AssetSeam::AudioContainerBytes), 0);
+            let records = [bulk(&[7; 12]), bulk(&[7; 12])];
+            match OggHandler.export(&Asset::SoundWave(data), &records) {
+                Err(PaksmithError::AssetParse {
+                    asset_path,
+                    fault:
+                        AssetParseFault::AllocationFailed {
+                            context, requested, ..
+                        },
+                }) => (asset_path, context, requested),
+                other => panic!("expected AllocationFailed, got {other:?}"),
+            }
+        };
+        let fault = |requested| {
+            let context = AssetAllocationContext::AudioContainerBytes;
+            ("<audio passthrough>".to_string(), context, requested)
+        };
+        assert_eq!(under_oom(nonstreaming(&["OGG"])), fault(12));
+        // 9 + 20 clamped to its 12-byte payload.
+        let chunks = vec![chunk(12, 9), chunk(12, 20)];
+        assert_eq!(under_oom(streaming("OGG", chunks)), fault(21));
     }
 
     #[test]

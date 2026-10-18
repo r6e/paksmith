@@ -3,8 +3,9 @@
 //!
 //! Mirror of `oom_pak.rs` for the asset side. Each test drives a
 //! `Package::read_from` call (or, for the bulk-data seams,
-//! `BulkDataResolver::resolve`, and for the UTF-16 FString seam,
-//! `EngineVersion::read_from`) against an arming
+//! `BulkDataResolver::resolve`, for the UTF-16 FString seam,
+//! `EngineVersion::read_from`, and for the audio passthrough seam,
+//! `decode_audio_to_pcm`) against an arming
 //! `SeamSite::Asset(AssetSeam::*)` seam — synthesizing a
 //! `TryReserveError` at the targeted reservation
 //! and asserting that
@@ -19,7 +20,8 @@
 //!
 //! **Naming convention** matches `oom_pak.rs`:
 //! `read_<scope>_surfaces_allocation_failed_under_oom`, or
-//! `resolve_<scope>_…` for the bulk-data seams. The input isn't
+//! `resolve_<scope>_…` for the bulk-data seams and `decode_<scope>_…` for
+//! the audio passthrough seam. The input isn't
 //! malformed — it's a valid asset or bulk record whose typed-error
 //! path we surface via injected allocator failure.
 
@@ -27,7 +29,7 @@
 
 use paksmith_core::PaksmithError;
 use paksmith_core::asset::bulk_data::{BulkDataFlags, BulkDataResolver, FByteBulkData};
-use paksmith_core::asset::{EngineVersion, Package};
+use paksmith_core::asset::{Asset, EngineVersion, Package, SoundWaveData, decode_audio_to_pcm};
 use paksmith_core::error::{AssetAllocationContext, AssetParseFault};
 use paksmith_core::testing::bench::zlib_compress_framed;
 use paksmith_core::testing::oom::{AssetSeam, SeamSite, arm_at};
@@ -295,6 +297,8 @@ fn read_asset_data_resource_table_surfaces_allocation_failed_under_oom() {
 const PAYLOAD_AT_END_OF_FILE: u32 = 0x0000_0001;
 /// `BULKDATA_SerializeCompressedZLIB` (bit 1), private in `bulk_data.rs`.
 const SERIALIZE_COMPRESSED_ZLIB: u32 = 0x0000_0002;
+/// `BULKDATA_NoOffsetFixup` (bit 16), private in `bulk_data.rs`.
+const NO_OFFSET_FIXUP: u32 = 0x0001_0000;
 
 /// Resolve one Inline-tier record storing `stored` with `seam` armed;
 /// return the `AllocationFailed` fault's context and requested size.
@@ -514,4 +518,38 @@ fn read_asset_class_schema_memo_surfaces_allocation_failed_under_oom() {
         ),
         "expected AllocationFailed{{ClassSchemaMemo}}; got {err:?}"
     );
+}
+
+/// Arm `AssetSeam::AudioContainerBytes` → `decode_audio_to_pcm`'s copy of a
+/// non-streaming SoundWave's codec buffer surfaces
+/// `AllocationFailed{AudioContainerBytes}` for the buffer's size.
+#[test]
+fn decode_audio_container_bytes_surfaces_allocation_failed_under_oom() {
+    let fixture = build_minimal_ue4_27();
+    let mut pkg = Package::read_from(&fixture.bytes, None, None, "Game/Test.uasset").unwrap();
+    let mut wave = SoundWaveData::empty();
+    wave.cooked = true;
+    wave.compressed_format_keys = vec![std::sync::Arc::from("OGG")];
+    pkg.payloads[0] = Asset::SoundWave(wave);
+    let inline = BulkDataFlags::from(PAYLOAD_AT_END_OF_FILE | NO_OFFSET_FIXUP);
+    pkg.insert_bulk_records_for_test(0, vec![FByteBulkData::for_test(inline, 16, 16, 0)])
+        .unwrap();
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::AudioContainerBytes), 0);
+    match decode_audio_to_pcm(&pkg, 0) {
+        Err(PaksmithError::AssetParse {
+            asset_path,
+            fault:
+                AssetParseFault::AllocationFailed {
+                    context, requested, ..
+                },
+        }) => assert_eq!(
+            (asset_path.as_str(), context, requested),
+            (
+                "Game/Test.uasset",
+                AssetAllocationContext::AudioContainerBytes,
+                16
+            )
+        ),
+        other => panic!("expected AllocationFailed{{AudioContainerBytes}}; got {other:?}"),
+    }
 }
