@@ -29,16 +29,17 @@ fn load_explicit(path: &Path) -> paksmith_core::Result<Usmap> {
     })
 }
 
-/// Load a profile-supplied mappings source, attributing failures to
-/// `selector` — the flag that picked the profile (`"--game"` or
-/// `"--detect"`).
+/// Load a profile-supplied mappings source. A failure is an
+/// `InvalidArgument` on `selector`, the flag that picked the profile
+/// (`"--game"` or `"--detect"`), with
+/// [`MappingsSource::load_failure_message`] as its reason.
 fn load_from_profile(
     source: &MappingsSource,
     selector: &'static str,
 ) -> paksmith_core::Result<Usmap> {
     source.load().map_err(|e| PaksmithError::InvalidArgument {
         arg: selector,
-        reason: format!("profile mappings file failed to load: {e}"),
+        reason: source.load_failure_message(&e),
     })
 }
 
@@ -89,13 +90,14 @@ mod tests {
         );
     }
 
-    /// The whole reason string, byte for byte: the prefix plus the
-    /// loader's own message, for either selector.
+    /// The whole reason string for an absolute path, byte for byte: the
+    /// prefix plus the loader's own message, for either selector.
     #[test]
-    fn profile_load_failure_reason_is_the_prefix_plus_the_loader_error() {
-        let path = Path::new("/nonexistent/x.usmap");
-        let src = MappingsSource::Path(path.into());
-        let loader = Usmap::from_path(path).unwrap_err().to_string();
+    fn profile_load_failure_reason_for_an_absolute_path_is_the_prefix_plus_the_loader_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.usmap");
+        let src = MappingsSource::Path(path.clone());
+        let loader = Usmap::from_path(&path).unwrap_err().to_string();
         for selector in ["--game", "--detect"] {
             let err = resolve_usmap(None, Some(&src), selector).unwrap_err();
             let PaksmithError::InvalidArgument { arg, reason } = err else {
@@ -107,6 +109,17 @@ mod tests {
                 format!("profile mappings file failed to load: {loader}")
             );
         }
+    }
+
+    #[test]
+    fn profile_load_failure_reason_explains_a_path_that_is_not_absolute() {
+        let src = MappingsSource::Path("missing-868.usmap".into());
+        let loader = src.load().unwrap_err();
+        let err = resolve_usmap(None, Some(&src), "--game").unwrap_err();
+        let PaksmithError::InvalidArgument { reason, .. } = err else {
+            panic!("expected InvalidArgument, got {err:?}");
+        };
+        assert_eq!(reason, src.load_failure_message(&loader));
     }
 
     #[test]
