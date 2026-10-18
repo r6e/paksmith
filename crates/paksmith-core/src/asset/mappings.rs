@@ -576,7 +576,8 @@ impl Usmap {
     /// Both kinds of defensive failure surface as [`PaksmithError::Io`]
     /// with an `InvalidInput` `io::Error` that includes the offending
     /// path — callers wanting CLI-arg context can wrap the result in
-    /// [`PaksmithError::InvalidArgument`].
+    /// [`PaksmithError::InvalidArgument`]. Every I/O error here quotes the
+    /// path cut short when it is very long, as other untrusted text is.
     ///
     /// # Errors
     ///
@@ -595,6 +596,7 @@ impl Usmap {
     /// without writing 128 MiB to a tempfile.
     fn from_path_with_cap(path: &std::path::Path, cap: u64) -> crate::Result<Self> {
         use std::io::Read;
+        let shown = crate::untrusted::clamp_fs_path(path);
         // ADVISORY pre-check: opening a FIFO for reading blocks until a
         // writer appears, so a stable FIFO path must be rejected BEFORE
         // `open` (the read cap bounds size, not blocking). This stat is
@@ -603,13 +605,13 @@ impl Usmap {
         let pre = std::fs::metadata(path).map_err(|e| {
             PaksmithError::Io(std::io::Error::new(
                 e.kind(),
-                format!("failed to stat `{}`: {e}", path.display()),
+                format!("failed to stat `{shown}`: {e}"),
             ))
         })?;
         if !pre.is_file() {
             return Err(PaksmithError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("`{}` is not a regular file", path.display()),
+                format!("`{shown}` is not a regular file"),
             )));
         }
         // AUTHORITATIVE check: fstat the opened handle — the stat→open
@@ -620,19 +622,19 @@ impl Usmap {
         let file = std::fs::File::open(path).map_err(|e| {
             PaksmithError::Io(std::io::Error::new(
                 e.kind(),
-                format!("failed to open `{}`: {e}", path.display()),
+                format!("failed to open `{shown}`: {e}"),
             ))
         })?;
         let metadata = file.metadata().map_err(|e| {
             PaksmithError::Io(std::io::Error::new(
                 e.kind(),
-                format!("failed to stat `{}`: {e}", path.display()),
+                format!("failed to stat `{shown}`: {e}"),
             ))
         })?;
         if !metadata.is_file() {
             return Err(PaksmithError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("`{}` is not a regular file", path.display()),
+                format!("`{shown}` is not a regular file"),
             )));
         }
         let mut buf = Vec::new();
@@ -642,17 +644,13 @@ impl Usmap {
         let _ = file.take(cap + 1).read_to_end(&mut buf).map_err(|e| {
             PaksmithError::Io(std::io::Error::new(
                 e.kind(),
-                format!("failed to read `{}`: {e}", path.display()),
+                format!("failed to read `{shown}`: {e}"),
             ))
         })?;
         if buf.len() as u64 > cap {
             return Err(PaksmithError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!(
-                    "`{}` exceeds the {} byte Usmap::MAX_FILE_SIZE limit",
-                    path.display(),
-                    cap
-                ),
+                format!("`{shown}` exceeds the {cap} byte Usmap::MAX_FILE_SIZE limit"),
             )));
         }
         Self::from_bytes(&buf)
@@ -4672,5 +4670,14 @@ mod tests {
                  got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn from_path_clamps_a_path_too_long_to_stat() {
+        use crate::untrusted::test_support::{assert_message_clamps_long_path, long_path};
+        // Too long for any OS to stat, so only the first check can see it;
+        // every later error quotes the same clamped string.
+        let err = Usmap::from_path(long_path()).expect_err("the path cannot be stat'ed");
+        assert_message_clamps_long_path(&err);
     }
 }

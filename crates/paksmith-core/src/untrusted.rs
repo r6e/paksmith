@@ -27,6 +27,13 @@ pub(crate) fn clamp_path(s: &str) -> Cow<'_, str> {
     clamp_to(s, MAX_UNTRUSTED_PATH_CHARS)
 }
 
+/// [`clamp_path`] for a filesystem path, as [`std::path::Path::display`]
+/// shows it.
+#[must_use]
+pub(crate) fn clamp_fs_path(path: &std::path::Path) -> String {
+    clamp_path(&path.display().to_string()).into_owned()
+}
+
 fn clamp_to(s: &str, max_chars: usize) -> Cow<'_, str> {
     match s.char_indices().nth(max_chars) {
         Some((cut, _)) => Cow::Owned(format!("{}…", &s[..cut])),
@@ -171,7 +178,7 @@ pub(crate) mod test_support {
 mod tests {
     use std::borrow::Cow;
 
-    use super::{MAX_UNTRUSTED_CHARS, MAX_UNTRUSTED_PATH_CHARS, clamp, clamp_path};
+    use super::{MAX_UNTRUSTED_CHARS, MAX_UNTRUSTED_PATH_CHARS, clamp, clamp_fs_path, clamp_path};
 
     #[test]
     fn clamp_bounds_untrusted_values() {
@@ -192,6 +199,16 @@ mod tests {
         assert!(matches!(clamp_path(&at), Cow::Borrowed(_)));
         assert_eq!(clamp_path(&format!("{at}q")), format!("{at}…"));
         assert_eq!(MAX_UNTRUSTED_PATH_CHARS, 1024);
+    }
+
+    #[test]
+    fn clamp_fs_path_clamps_a_long_path() {
+        use super::test_support::{assert_message_clamps_long_path, long_path};
+        assert_message_clamps_long_path(&clamp_fs_path(std::path::Path::new(&long_path())));
+        assert_eq!(
+            clamp_fs_path(std::path::Path::new("a/b.usmap")),
+            "a/b.usmap"
+        );
     }
 
     #[test]
