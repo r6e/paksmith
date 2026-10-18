@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::hex::{self, HexError};
-use crate::untrusted::clamp_path;
+use crate::untrusted::clamp_fs_path;
 use crate::{AesKey, PaksmithError};
 
 /// 16-byte UE encryption-key GUID. The all-zero GUID is the conventional
@@ -203,15 +203,14 @@ fn load_failure_message_in(
     if path.is_absolute() {
         return failed;
     }
-    let shown = |p: &Path| clamp_path(&p.display().to_string()).into_owned();
     let resolved = match resolved {
-        Ok(absolute) => format!("so it resolved to `{}`", shown(&absolute)),
+        Ok(absolute) => format!("so it resolved to `{}`", clamp_fs_path(&absolute)),
         Err(e) => format!("and where it resolved could not be determined ({e})"),
     };
     format!(
         "{failed}; the profile's mappings path `{}` is not absolute, {resolved}; set an absolute \
          `mappings.path` for the profile in profiles.toml",
-        shown(path),
+        clamp_fs_path(path),
     )
 }
 
