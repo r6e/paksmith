@@ -155,8 +155,9 @@ pub enum OpenError {
     Core {
         /// Path the open was attempted on.
         path: PathBuf,
-        /// The rendered failure: core's error, prefixed where the GUI names
-        /// the step that failed.
+        /// The rendered failure: core's error or, when the profile's mappings
+        /// fail to load, core's message for that
+        /// ([`paksmith_core::profile::resolve::PakOpenContext::load_failure_message`]).
         message: String,
     },
 }

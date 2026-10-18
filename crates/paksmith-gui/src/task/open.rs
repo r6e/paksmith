@@ -102,7 +102,7 @@ fn open_with_context(
 ) -> Result<LoadedArchive, OpenError> {
     let parse_inputs = ctx.load_parse_inputs().map_err(|e| OpenError::Core {
         path: path.clone(),
-        message: format!("profile mappings file failed to load: {e}"),
+        message: ctx.load_failure_message(&e),
     })?;
     build_loaded(path, ctx.key.as_ref(), parse_inputs, selector)
 }
@@ -409,21 +409,41 @@ mod tests {
     /// opens: the reverse order would report `Locked`.
     #[test]
     fn open_with_context_fails_the_open_when_profile_mappings_cannot_load() {
-        let usmap = std::path::Path::new("/nonexistent/broken.usmap");
+        let dir = tempfile::tempdir().unwrap();
+        let usmap = dir.path().join("broken.usmap");
         let pak = fixture("real_v8b_encrypted_index.pak");
 
         let err = open_with_context(
             pak.clone(),
-            &context(Some(usmap), None),
+            &context(Some(&usmap), None),
             ProfileSelector::default(),
         )
         .unwrap_err();
 
-        let loader = paksmith_core::asset::Usmap::from_path(usmap).unwrap_err();
+        let loader = paksmith_core::asset::Usmap::from_path(&usmap).unwrap_err();
         assert!(
             matches!(&err, OpenError::Core { path, message }
                 if *path == pak
                     && *message == format!("profile mappings file failed to load: {loader}")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn open_with_context_explains_a_profile_mappings_path_that_is_not_absolute() {
+        let ctx = context(Some(std::path::Path::new("missing-868.usmap")), None);
+
+        let err = open_with_context(
+            fixture("real_v8b_uasset.pak"),
+            &ctx,
+            ProfileSelector::default(),
+        )
+        .unwrap_err();
+
+        let loader = ctx.load_parse_inputs().unwrap_err();
+        assert!(
+            matches!(&err, OpenError::Core { message, .. }
+                if *message == ctx.load_failure_message(&loader)),
             "{err:?}"
         );
     }
