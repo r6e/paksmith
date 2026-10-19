@@ -142,14 +142,14 @@ pub fn max_total_bulk_data_bytes_per_package() -> u64 {
 
 /// Identifies where a resolved `FByteBulkData` record's bytes live.
 ///
-/// The resolver dispatches on `BulkDataFlags`:
+/// The resolver dispatches on `BulkDataFlags`, top row first:
 ///
 /// | Flag combination | Tier |
 /// |------------------|------|
+/// | `BULKDATA_OptionalPayload` + `PayloadInSeperateFile` | [`Self::OptionalStreaming`] |
+/// | `BULKDATA_PayloadInSeperateFile` (no `OptionalPayload`) | [`Self::Streaming`] |
 /// | `BULKDATA_PayloadAtEndOfFile` + offset < `total_header_size` | [`Self::Inline`] |
 /// | `BULKDATA_PayloadAtEndOfFile` + offset ≥ `total_header_size` | [`Self::UexpResident`] |
-/// | `BULKDATA_PayloadInSeperateFile` (no `OptionalPayload`) | [`Self::Streaming`] |
-/// | `BULKDATA_OptionalPayload` + `PayloadInSeperateFile` | [`Self::OptionalStreaming`] |
 ///
 /// `#[non_exhaustive]` reserves the right for Phase 8 (IoStore) to
 /// extend with additional tiers (e.g. partition-spanning streaming)
@@ -163,8 +163,8 @@ pub enum BulkDataTier {
     /// Payload bytes live in the `.uexp` companion body (resolved
     /// offset ≥ `total_header_size`).
     UexpResident,
-    /// Payload bytes live in the `.ubulk` companion file (offset is
-    /// absolute within `.ubulk`, no `BulkDataStartOffset` fix-up).
+    /// Payload bytes live in the `.ubulk` companion file, at the
+    /// fixed-up offset from its start.
     Streaming,
     /// Payload bytes live in the `.uptnl` companion file (the
     /// `BULKDATA_OptionalPayload` tier). Lazy-loaded; absence of
@@ -302,8 +302,8 @@ const FLAG_DATA_IS_MEMORY_MAPPED: u32 = 0x4000_0000;
 const VALID_FLAG_MASK: u32 = 0x7007_FFFF;
 
 impl BulkDataFlags {
-    /// `BULKDATA_PayloadAtEndOfFile` (bit 0). When set, the payload
-    /// lives in the parent file (`.uasset` for inline,
+    /// `BULKDATA_PayloadAtEndOfFile` (bit 0). Without `PayloadInSeperateFile`,
+    /// the payload lives in the parent file (`.uasset` for inline,
     /// `.uexp` for uexp-resident; tier disambiguated by offset).
     #[must_use]
     pub fn payload_at_end_of_file(self) -> bool {
@@ -1096,7 +1096,7 @@ pub struct BulkDataResolver {
     stitched: std::sync::Arc<Vec<u8>>,
     /// `summary.total_header_size` — boundary between inline
     /// (`.uasset` body) and uexp-resident (`.uexp` body) tiers for
-    /// `BULKDATA_PayloadAtEndOfFile` records.
+    /// `BULKDATA_PayloadAtEndOfFile` records without `PayloadInSeperateFile`.
     total_header_size: u64,
     /// `summary.bulk_data_start_offset` — added to `OffsetInFile`
     /// unless `BULKDATA_NoOffsetFixUp` (bit 16) is set.
@@ -1411,21 +1411,8 @@ impl BulkDataResolver {
             }
         };
 
-        // 3. Tier dispatch + source-slice selection.
-        //
-        // Reject `payload_in_separate_file && payload_at_end_of_file`
-        // BEFORE the tier dispatch — the wire format requires exactly
-        // one tier-routing bit. Without this check, both-set silently
-        // routes to streaming (first match wins), defeating the
-        // `BulkDataConflictingTierFlags` variant's purpose.
-        if record.flags.payload_in_separate_file() && record.flags.payload_at_end_of_file() {
-            return Err(crate::PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: crate::error::AssetParseFault::BulkDataConflictingTierFlags {
-                    flags: record.flags.0,
-                },
-            });
-        }
+        // 3. Tier dispatch + source-slice selection. Separate-file wins:
+        // cooked companion records set `PayloadAtEndOfFile` too.
         let (tier, source_bytes): (BulkDataTier, &[u8]) = if record.flags.payload_in_separate_file()
         {
             let (tier, cache, loader, kind) = if record.flags.optional_payload() {
@@ -3502,28 +3489,40 @@ mod tests {
         }
     }
 
+    /// Cooked separate-file records set `PayloadAtEndOfFile` too: 0x501
+    /// before UE 4.26 stores the companion offset less
+    /// `BulkDataStartOffset`, 0x10501 stores it as is, and adding
+    /// `OptionalPayload` picks the `.uptnl`.
     #[cfg(feature = "__test_utils")]
     #[test]
-    fn resolve_rejects_conflicting_tier_flags() {
-        // Both tier-routing bits set → `BulkDataConflictingTierFlags`.
-        // Without the explicit check, the first-match `if` cascade
-        // would silently route to streaming.
-        let uasset = vec![0u8; 100];
-        let record = record_with(
-            FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_PAYLOAD_IN_SEPARATE_FILE,
-            8,
-            0,
+    fn cooked_separate_file_records_resolve_from_their_companion() {
+        use BulkDataTier::{OptionalStreaming, Streaming};
+        const BULK_DATA_START: i64 = 4113;
+        let ubulk: Vec<u8> = (0..64).collect();
+        let uptnl: Vec<u8> = (64..128).collect();
+        let cooked =
+            FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_FORCE_NOT_INLINE | FLAG_PAYLOAD_IN_SEPARATE_FILE;
+        let fixed_up = cooked | FLAG_NO_OFFSET_FIXUP;
+        let optional = fixed_up | FLAG_OPTIONAL_PAYLOAD;
+        let cases = [
+            (cooked, 16 - BULK_DATA_START, Streaming, &ubulk),
+            (fixed_up, 16, Streaming, &ubulk),
+            (optional, 16, OptionalStreaming, &uptnl),
+        ];
+        let (u, o) = (ubulk.clone(), uptnl.clone());
+        let resolver = BulkDataResolver::new(
+            std::sync::Arc::new(vec![0u8; 100]),
+            100,
+            BULK_DATA_START,
+            move || Ok(u.clone()),
+            move || Ok(o.clone()),
         );
-        let resolver = BulkDataResolver::new_for_test(uasset, 100, 0);
-        match resolver.resolve(&record, "test.uasset") {
-            Err(crate::PaksmithError::AssetParse {
-                fault: crate::error::AssetParseFault::BulkDataConflictingTierFlags { flags },
-                ..
-            }) => assert_eq!(
-                flags,
-                FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_PAYLOAD_IN_SEPARATE_FILE
-            ),
-            other => panic!("expected BulkDataConflictingTierFlags, got {other:?}"),
+        for (flags, offset, tier, companion) in cases {
+            let data = resolver
+                .resolve(&record_with(flags, 8, offset), "test.uasset")
+                .unwrap_or_else(|err| panic!("flags 0x{flags:x}: {err}"));
+            assert_eq!(data.tier, tier, "flags 0x{flags:x}");
+            assert_eq!(data.bytes, companion[16..24], "flags 0x{flags:x}");
         }
     }
 

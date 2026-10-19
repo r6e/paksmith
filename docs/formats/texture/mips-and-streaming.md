@@ -93,7 +93,7 @@ the flags identify.
 
 | Bit name | Hex | Meaning |
 |----------|-----|---------|
-| `BULKDATA_PayloadAtEndOfFile` | `0x0001` | Payload bytes are at `OffsetInFile` of the *parent file* (`.uasset` for inline, `.uexp` for uexp-resident). |
+| `BULKDATA_PayloadAtEndOfFile` | `0x0001` | Payload bytes are stored apart from the header, at `OffsetInFile`: in the companion when `BULKDATA_PayloadInSeperateFile` is also set, otherwise in the *parent file* (`.uasset` for inline, `.uexp` for uexp-resident). |
 | `BULKDATA_SerializeCompressedZLIB` | `0x0002` | Payload zlib-compressed; decompress before use. `BULKDATA_SerializeCompressed` is an alias for this flag. |
 | `BULKDATA_ForceSingleElementSerialization` | `0x0004` | Element-by-element serialization (rare for textures). |
 | `BULKDATA_SingleUse` | `0x0008` | Discard after first read. |
@@ -122,10 +122,14 @@ The tier the bytes live in is determined by `BulkDataFlags`:
 
 | Flag combination | Tier | File |
 |------------------|------|------|
-| `BULKDATA_PayloadAtEndOfFile` only | Inline | The `.uasset` itself; `OffsetInFile` is from the `.uasset`'s start. |
-| `BULKDATA_PayloadAtEndOfFile` + (in `.uexp` region) | uexp-resident | `.uexp`; offset is from `.uasset` start (after stitching, that's `total_header_size + uexp_offset`). |
-| `BULKDATA_PayloadInSeperateFile` [sic] | Streaming | `.ubulk`; offset is from `.ubulk`'s start. |
 | `BULKDATA_OptionalPayload` + `BULKDATA_PayloadInSeperateFile` [sic] | Optional streaming | `.uptnl`. |
+| `BULKDATA_PayloadInSeperateFile` [sic] without `BULKDATA_OptionalPayload` | Streaming | `.ubulk`; offset is from `.ubulk`'s start. |
+| `BULKDATA_PayloadAtEndOfFile` without `BULKDATA_PayloadInSeperateFile`, in the `.uasset` region | Inline | The `.uasset` itself; `OffsetInFile` is from the `.uasset`'s start. |
+| `BULKDATA_PayloadAtEndOfFile` without `BULKDATA_PayloadInSeperateFile`, in the `.uexp` region | uexp-resident | `.uexp`; offset is from `.uasset` start (after stitching, that's `total_header_size + uexp_offset`). |
+
+The separate-file rows win: cooked `.ubulk` mips set
+`BULKDATA_PayloadAtEndOfFile` too (see
+[`../asset/bulk-data.md`](../asset/bulk-data.md) §*Tier dispatch*).
 
 The distinction between "inline" and "uexp-resident" comes down to
 whether `OffsetInFile` falls within `[0, total_header_size)`
@@ -171,10 +175,9 @@ non-zero `BulkDataStartOffset` published in the package summary
 resolved offset falls within `[0, total_header_size)` (inline) or
 `[total_header_size, …)` (uexp-resident); both use the same
 `BULKDATA_PayloadAtEndOfFile` flag. To put the same payload in
-`.ubulk` instead, set `BulkDataFlags = 0x00000100`
-(`BULKDATA_PayloadInSeperateFile`) and `OffsetInFile` becomes the
-byte offset within `.ubulk` (no fixup applies — `.ubulk` offsets
-are absolute from the file start).
+`.ubulk` instead, a UE 4.26+ cooker writes `BulkDataFlags =
+0x00010501` and `OffsetInFile` becomes the byte offset within `.ubulk`
+(see [`../asset/bulk-data.md`](../asset/bulk-data.md) §*Tier dispatch*).
 
 ## Variants
 

@@ -86,8 +86,10 @@ values symbolically:
 ```
 FByteBulkData record (conceptual; field types deferred to the
                       FByteBulkData doc):
-  bulk_data_flags   = 0x00000100   (BULKDATA_PayloadInSeperateFile;
-                                    routes to .ubulk per the tier-dispatch
+  bulk_data_flags   = 0x00010501   (PayloadAtEndOfFile | PayloadInSeperateFile
+                                    | Force_NOT_InlinePayload | NoOffsetFixUp,
+                                    a UE 4.26+ cooked word; the separate-file
+                                    bit routes it to .ubulk per the tier-dispatch
                                     table in bulk-data.md; not compressed,
                                     not encrypted)
   element_count     = 32           (one element per byte for raw byte payloads)

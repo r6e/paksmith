@@ -48,6 +48,9 @@ mod flag_bits {
     /// (`.ubulk`) when `OptionalPayload` is unset; OptionalStreaming
     /// (`.uptnl`) when set.
     pub const PAYLOAD_IN_SEPARATE_FILE: u32 = 0x0000_0100;
+    /// `BULKDATA_Force_NOT_InlinePayload` (bit 10): set on cooked
+    /// companion records, with `PayloadAtEndOfFile`.
+    pub const FORCE_NOT_INLINE: u32 = 0x0000_0400;
     /// `BULKDATA_OptionalPayload` (bit 11): OptionalStreaming tier
     /// discriminator. Paired with `PayloadInSeparateFile`.
     pub const OPTIONAL_PAYLOAD: u32 = 0x0000_0800;
@@ -206,7 +209,8 @@ fn resolve_uexp_resident_tier_returns_uexp_body_bytes() {
 
 #[test]
 fn resolve_streaming_tier_returns_ubulk_sentinel_bytes() {
-    // Streaming tier (PayloadInSeparateFile=1, OptionalPayload=0).
+    // Streaming tier, with the word a UE 4.26+ cooker writes:
+    // PayloadInSeparateFile and PayloadAtEndOfFile both set (#971).
     // `read_from_pak` baked an `.ubulk` loader closure capturing
     // an `Arc<PakReader>`; first matching-tier resolve fires the
     // closure, loads `Game/Maps/Demo.ubulk`, and the OnceLock
@@ -219,7 +223,12 @@ fn resolve_streaming_tier_returns_ubulk_sentinel_bytes() {
     let mut pkg =
         Package::read_from_pak(&pak_path, "Game/Maps/Demo.uasset", None).expect("parse uasset");
     let streaming_record = FByteBulkData::for_test(
-        BulkDataFlags::from(flag_bits::PAYLOAD_IN_SEPARATE_FILE | flag_bits::NO_OFFSET_FIXUP),
+        BulkDataFlags::from(
+            flag_bits::PAYLOAD_AT_END_OF_FILE
+                | flag_bits::FORCE_NOT_INLINE
+                | flag_bits::PAYLOAD_IN_SEPARATE_FILE
+                | flag_bits::NO_OFFSET_FIXUP,
+        ),
         32,   // element_count
         32,   // size_on_disk
         0i64, // offset_in_file → start of .ubulk
