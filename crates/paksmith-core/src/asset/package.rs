@@ -1210,10 +1210,13 @@ impl Package {
     ///
     /// # Errors
     /// Any [`PaksmithError`] from the resolver (offset overflow, cap
-    /// exceeded, companion missing, decompression failure, etc.). A
-    /// failing call caches nothing for the export and gives back the
-    /// per-package budget its earlier records charged, so the next call
-    /// resolves its records again. A `.ubulk` or `.uptnl` companion
+    /// exceeded, companion missing, decompression failure, etc.), and
+    /// [`AssetParseFault::BulkDataExportReadsExceedSource`] when the
+    /// export's records charge more bytes against one source than it
+    /// holds, so their regions repeat or overlap. A failing call caches
+    /// nothing for the export and gives back the per-package budget its
+    /// earlier records charged, so the next call resolves its records
+    /// again. A `.ubulk` or `.uptnl` companion
     /// that failed to load is not loaded again for the life of this
     /// `Package` and its clones: a later call that reaches that
     /// companion reports the same failure (same variant and message)
@@ -1237,9 +1240,9 @@ impl Package {
         // between the `cache.get()` check above and this point, our
         // `resolved` is dropped here and the racing thread's value
         // is returned. **Payload bytes are equivalent** (both threads
-        // ran the same `BulkDataResolver::resolve` chain over the
+        // ran the same `BulkDataResolver::resolve_all` over the
         // same `records`), but **the per-package budget counter
-        // double-charges**: each thread's `resolve()` calls already
+        // double-charges**: each thread's record resolves already
         // incremented `bytes_resolved` for every record before the
         // racing dropped our `resolved`. Fails closed (less apparent
         // headroom than reality), not open.
@@ -3531,6 +3534,41 @@ mod tests {
             let charged = parsed.resolver.bytes_resolved_for_test();
             assert_eq!(charged, seed, "call {call}");
         }
+    }
+
+    /// Two records naming the whole buffer trip at the second and give back
+    /// the first's claim. Each call charges its own ledger: call 2 trips at
+    /// the same total, and two more slots' single copies both resolve.
+    #[test]
+    fn records_naming_one_region_trip_the_export_ledger() {
+        use crate::asset::bulk_data::{
+            BulkDataFlags, BulkDataTier, FLAG_NO_OFFSET_FIXUP, FLAG_PAYLOAD_AT_END_OF_FILE,
+        };
+        let bytes = build_minimal_ue4_27().bytes;
+        let len = bytes.len() as u64;
+        let mut parsed = Package::read_from(&bytes, None, None, "test.uasset").unwrap();
+        let inline = BulkDataFlags::from(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_NO_OFFSET_FIXUP);
+        let whole = FByteBulkData::for_test(inline, i64::try_from(len).unwrap(), len, 0);
+        parsed
+            .insert_bulk_records(0, vec![whole.clone(), whole.clone()])
+            .unwrap();
+        parsed.insert_bulk_records(1, vec![whole.clone()]).unwrap();
+        parsed.insert_bulk_records(2, vec![whole]).unwrap();
+        let expected = AssetParseFault::BulkDataExportReadsExceedSource {
+            tier: BulkDataTier::Inline,
+            charged: 2 * len,
+            source_len: len,
+        };
+        for call in 0..2 {
+            match parsed.resolve_bulk_for_export(0) {
+                Err(PaksmithError::AssetParse { fault, .. }) => assert_eq!(fault, expected),
+                other => panic!("call {call}: expected {expected:?}, got {other:?}"),
+            }
+            let charged = parsed.resolver.bytes_resolved_for_test();
+            assert_eq!(charged, 0, "call {call}");
+        }
+        assert_eq!(parsed.resolve_bulk_for_export(1).unwrap()[0].bytes, bytes);
+        assert_eq!(parsed.resolve_bulk_for_export(2).unwrap()[0].bytes, bytes);
     }
 
     #[test]

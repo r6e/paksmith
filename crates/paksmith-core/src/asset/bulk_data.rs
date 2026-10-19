@@ -1057,10 +1057,11 @@ pub(crate) fn counting_loader(
 ///    source slice length (`BulkDataEndOffsetOverflow` on `u64`
 ///    overflow, `BulkDataOffsetOob` on OOB).
 ///
-///    4b. Bulk-read ledger (`resolve_charged` only): `size_on_disk` is
-///    charged against the record's source; charges past the source's
-///    length fire `BulkDataParseReadsExceedSource`, and nothing is
-///    refunded.
+///    4b. Bulk-read ledger (`resolve_charged`, and `resolve_all` with one
+///    per call): `size_on_disk` is charged against the record's source;
+///    a charge that takes the source's total past its length fires
+///    `BulkDataParseReadsExceedSource` (`BulkDataExportReadsExceedSource`
+///    from `resolve_all`), and nothing is refunded.
 /// 5. Per-package budget: the record's claim (`budget_claim`) is added
 ///    to the cumulative bytes-resolved counter BEFORE allocation, only
 ///    if the total stays within the cap, else
@@ -1253,17 +1254,20 @@ impl BulkDataResolver {
         self.resolve_inner(record, asset_path, None)
     }
 
-    /// Resolve one export's `records` in order. When one fails, drop those
-    /// before it and give back their claims (#846); a failed one keeps none.
+    /// Resolve one export's `records` in order, charging one fresh
+    /// [`BulkReadLedger`] for the call (step 4b). When one fails, drop
+    /// those before it and give back their claims (#846); a failed one
+    /// keeps none.
     pub(crate) fn resolve_all(
         &self,
         records: &[FByteBulkData],
         asset_path: &str,
     ) -> crate::Result<Vec<BulkData>> {
+        let reads = BulkReadLedger::for_export();
         let mut resolved = Vec::with_capacity(records.len());
         let mut charged: u64 = 0;
         for record in records {
-            match self.resolve(record, asset_path) {
+            match self.resolve_charged(record, asset_path, &reads) {
                 Ok(bulk) => {
                     charged += budget_claim(record);
                     resolved.push(bulk);
@@ -1316,8 +1320,9 @@ impl BulkDataResolver {
             .fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// [`Self::resolve`] for a typed reader decoding during a package
-    /// read, also charging `reads`, the decode's [`BulkReadLedger`] (#841).
+    /// [`Self::resolve`], also charging `reads`: a package decode's
+    /// [`BulkReadLedger`] for a typed reader (#841), or one export
+    /// resolve's (#846).
     pub(crate) fn resolve_charged(
         &self,
         record: &FByteBulkData,
@@ -1486,11 +1491,7 @@ impl BulkDataResolver {
                 .charge(tier, record.size_on_disk, file_size)
                 .map_err(|total| crate::PaksmithError::AssetParse {
                     asset_path: asset_path.to_string(),
-                    fault: crate::error::AssetParseFault::BulkDataParseReadsExceedSource {
-                        tier,
-                        charged: total,
-                        source_len: file_size,
-                    },
+                    fault: reads.exceeded(tier, total, file_size),
                 })?;
         }
 
@@ -1530,7 +1531,7 @@ impl BulkDataResolver {
     }
 
     /// Pre-seed the per-package byte-budget counter. Test-only —
-    /// the production path drives the counter via `resolve()`.
+    /// the production path drives the counter via `resolve_charged`.
     /// Used to test `BulkDataPackageBudgetExceeded` without
     /// allocating 16 GiB of test bytes; the test pre-seeds the
     /// counter near the cap and resolves a small record that
@@ -1567,11 +1568,12 @@ fn budget_claim(record: &FByteBulkData) -> u64 {
     }
 }
 
-/// Bytes that one package decode's typed readers have charged against
-/// each bulk-data source (#841). Nothing in the format stops several
-/// records from naming one region or overlapping regions, so the eager
-/// mesh readers refuse any charge that takes a source's total past its
-/// length; records over disjoint regions never do. The stitched
+/// Bytes that one package decode's typed readers, or one
+/// [`BulkDataResolver::resolve_all`] call, have charged against each
+/// bulk-data source (#841, #846). Nothing in the format stops several
+/// records from naming one region or overlapping regions, so the ledger
+/// refuses any charge that takes a source's total past its length;
+/// records over disjoint regions never do. The stitched
 /// `.uasset` + `.uexp` buffer is one source for the inline and
 /// uexp-resident tiers.
 ///
@@ -1583,9 +1585,44 @@ pub(crate) struct BulkReadLedger {
     stitched: std::sync::atomic::AtomicU64,
     ubulk: std::sync::atomic::AtomicU64,
     uptnl: std::sync::atomic::AtomicU64,
+    /// One export resolve's ledger rather than a package decode's, which
+    /// picks the fault a refused charge reports.
+    export: bool,
 }
 
 impl BulkReadLedger {
+    /// One [`BulkDataResolver::resolve_all`] call's ledger.
+    fn for_export() -> Self {
+        Self {
+            export: true,
+            ..Self::default()
+        }
+    }
+
+    /// The fault for a refused charge that took `tier`'s source to
+    /// `charged` bytes of its `source_len`.
+    fn exceeded(
+        &self,
+        tier: BulkDataTier,
+        charged: u64,
+        source_len: u64,
+    ) -> crate::error::AssetParseFault {
+        use crate::error::AssetParseFault as F;
+        if self.export {
+            F::BulkDataExportReadsExceedSource {
+                tier,
+                charged,
+                source_len,
+            }
+        } else {
+            F::BulkDataParseReadsExceedSource {
+                tier,
+                charged,
+                source_len,
+            }
+        }
+    }
+
     /// Charge `size` bytes read from `tier`'s source, which holds
     /// `source_len` bytes. Returns the source's new total as the error
     /// once it passes `source_len`.
@@ -1597,8 +1634,8 @@ impl BulkReadLedger {
         };
         // Cannot wrap: each charge follows the bounds check, so it is at
         // most one source's length, and a decode makes at most 2^19
-        // exports x 64 LODs = 2^25 charges; wrapping would take sources
-        // of about 2^39 bytes.
+        // exports x 64 LODs = 2^25 charges (one `resolve_all` call, at
+        // most 256); wrapping would take sources of about 2^39 bytes.
         let total = counter
             .fetch_add(size, std::sync::atomic::Ordering::Relaxed)
             .saturating_add(size);
