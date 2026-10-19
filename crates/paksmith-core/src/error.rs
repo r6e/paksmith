@@ -2983,24 +2983,20 @@ pub enum AssetParseFault {
         cap: u64,
     },
     /// `BulkDataFlags` is valid (all bits in the catalog) but has
-    /// none of the four tier-routing bits set: no
+    /// neither tier-routing bit set: no
     /// `BULKDATA_PayloadAtEndOfFile` AND no
-    /// `BULKDATA_PayloadInSeperateFile`. The wire format requires
-    /// at least one tier bit to identify the source file.
+    /// `BULKDATA_PayloadInSeperateFile`, so the resolver has no
+    /// source file for the payload.
     /// Distinguished from `UnknownBulkDataFlags` which surfaces
-    /// reserved-bit violations and from
-    /// `BulkDataConflictingTierFlags` which surfaces the both-bits-set
-    /// case.
+    /// reserved-bit violations.
     BulkDataNoTierFlag {
         /// Flags as read from the wire.
         flags: u32,
     },
-    /// `BulkDataFlags` carries BOTH `BULKDATA_PayloadAtEndOfFile`
-    /// AND `BULKDATA_PayloadInSeperateFile` set. The wire format
-    /// requires exactly one tier-routing bit; both-bits-set is
-    /// crafted-record or wire-corruption indicator. Rejecting
-    /// explicitly avoids silently routing to whichever match arm
-    /// the dispatcher checks first.
+    /// No longer returned. Cooked separate-file records set both
+    /// `BULKDATA_PayloadAtEndOfFile` and `BULKDATA_PayloadInSeperateFile`,
+    /// and the resolver reads them from the companion file (#971).
+    #[deprecated(note = "no longer returned; both-tier-bit records resolve (#971)")]
     BulkDataConflictingTierFlags {
         /// Flags as read from the wire (both tier bits set).
         flags: u32,
@@ -3683,6 +3679,7 @@ impl fmt::Display for AssetParseFault {
                 "BulkDataFlags 0x{flags:08x} sets no tier-routing bit \
                  (need PayloadAtEndOfFile=0x01 or PayloadInSeperateFile=0x100)"
             ),
+            #[allow(deprecated, reason = "the retired variant keeps its Display")]
             Self::BulkDataConflictingTierFlags { flags } => write!(
                 f,
                 "BulkDataFlags 0x{flags:08x} sets both PayloadAtEndOfFile=0x01 \
@@ -9559,9 +9556,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated, reason = "pins the retired variant's wire-stable Display")]
     fn asset_parse_display_bulk_data_conflicting_tier_flags() {
-        // 0x0101 = PayloadAtEndOfFile | PayloadInSeperateFile (both
-        // tier-routing bits set — wire format requires exactly one).
         let err = PaksmithError::AssetParse {
             asset_path: "Game/Texture.uasset".to_string(),
             fault: AssetParseFault::BulkDataConflictingTierFlags { flags: 0x0000_0101 },

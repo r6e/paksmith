@@ -32,10 +32,10 @@ Concretely, an `FByteBulkData` record on the wire publishes:
 
 Where the payload bytes live is governed by the `BulkDataFlags`:
 
-- **Inline** (in `.uasset`): `BULKDATA_PayloadAtEndOfFile` set and
-  `OffsetInFile` falls within `[0, total_header_size)`.
-- **`.uexp`-resident**: `BULKDATA_PayloadAtEndOfFile` set and
-  `OffsetInFile` falls within `[total_header_size, …)`.
+- **Inline** (in `.uasset`): `BULKDATA_PayloadAtEndOfFile` set without
+  `BULKDATA_PayloadInSeperateFile`, `OffsetInFile` in `[0, total_header_size)`.
+- **`.uexp`-resident**: the same bits, with `OffsetInFile` in
+  `[total_header_size, …)`.
 - **`.ubulk` streaming**: `BULKDATA_PayloadInSeperateFile` set (note the
   engine's spelling preserves "Seperate"); `OffsetInFile` is from the
   start of the `.ubulk` file.
@@ -125,7 +125,7 @@ Total fixed-header size on paksmith's accepted UE range (no
 
 | Bit | Name | Hex | Meaning |
 |-----|------|-----|---------|
-| 0 | `BULKDATA_PayloadAtEndOfFile` | `0x0001` | Payload bytes are at `OffsetInFile` of the *parent file* (`.uasset` for inline, `.uexp` for uexp-resident; disambiguated by the offset's range relative to `total_header_size`). |
+| 0 | `BULKDATA_PayloadAtEndOfFile` | `0x0001` | Payload bytes are stored apart from the header, at `OffsetInFile`: in the companion when `BULKDATA_PayloadInSeperateFile` is also set, otherwise in the *parent file* (`.uasset` for inline, `.uexp` for uexp-resident; disambiguated by the offset's range relative to `total_header_size`). |
 | 1 | `BULKDATA_SerializeCompressedZLIB` | `0x0002` | Payload zlib-compressed; decompress before use. `BULKDATA_SerializeCompressed` is an alias for this flag. |
 | 2 | `BULKDATA_ForceSingleElementSerialization` | `0x0004` | Element-by-element serialization (rare for byte bulk data). |
 | 3 | `BULKDATA_SingleUse` | `0x0008` | Discard after first read. |
@@ -206,10 +206,18 @@ the reader maps the record to its physical file:
 
 | Flag combination | Tier | File | Offset interpretation |
 |------------------|------|------|------------------------|
-| `BULKDATA_PayloadAtEndOfFile` only, `OffsetInFile < total_header_size` | Inline | `.uasset` itself | Offset from `.uasset` start. |
-| `BULKDATA_PayloadAtEndOfFile` only, `OffsetInFile >= total_header_size` | uexp-resident | `.uexp` | Offset from `.uasset` start (after stitching, that's `total_header_size + uexp_offset`). |
-| `BULKDATA_PayloadInSeperateFile` only | Streaming | `.ubulk` | Offset from `.ubulk` start (absolute). |
-| `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile` | Optional streaming | `.uptnl` | Offset from `.uptnl` start (absolute). |
+| `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile` | Optional streaming | `.uptnl` | Offset from `.uptnl` start. |
+| `BULKDATA_PayloadInSeperateFile` without `BULKDATA_OptionalPayload` | Streaming | `.ubulk` | Offset from `.ubulk` start. |
+| `BULKDATA_PayloadAtEndOfFile` without `BULKDATA_PayloadInSeperateFile`, `OffsetInFile < total_header_size` | Inline | `.uasset` itself | Offset from `.uasset` start. |
+| `BULKDATA_PayloadAtEndOfFile` without `BULKDATA_PayloadInSeperateFile`, `OffsetInFile >= total_header_size` | uexp-resident | `.uexp` | Offset from `.uasset` start (after stitching, that's `total_header_size + uexp_offset`). |
+
+The rows are tested in order. Cooked companion records set
+`BULKDATA_PayloadAtEndOfFile` as well as `BULKDATA_PayloadInSeperateFile`:
+`.ubulk` mips are `0x00000501` in a UE 4.18 cook and `0x00010501` in a
+4.27 one, both with `BULKDATA_Force_NOT_InlinePayload`, and a writer adds
+`BULKDATA_OptionalPayload` for `.uptnl`. CUE4Parse and UEViewer read
+them from the companion.[^4] Before 4.26 the stored offset needs the
+usual fix-up; from 4.26 `BULKDATA_NoOffsetFixUp` is set.
 
 See [`ubulk.md`](ubulk.md) and `../texture/mips-and-streaming.md`
 for the per-format consumer side; this section is the wire-side
@@ -302,7 +310,7 @@ proceeding (CUE4Parse short-circuits at the head of the constructor).
 
 ### Worked example — minimal 20-byte FByteBulkDataHeader (UE 4.4+, no special flags)
 
-The minimal cooked-content header: a `.ubulk`-routed streaming payload
+A minimal header (not a cooker's word): a `.ubulk`-routed streaming payload
 of 256 bytes located at offset 0 of the `.ubulk` companion. No
 `Size64Bit`, no `BadDataVersion`, no `DuplicateNonOptionalPayload`,
 no `NoOffsetFixUp` (so a non-zero `BulkDataStartOffset` fixup would
@@ -347,9 +355,9 @@ form is documented for spec completeness.
 
 ### Tier routing (`.uasset` vs `.uexp` vs `.ubulk` vs `.uptnl`)
 
-Per §*Tier dispatch* above. Tier selection is a function of two
-flag bits plus the offset-vs-total_header_size comparison. There are
-four possible tiers; the four-way table is exhaustive.
+Per §*Tier dispatch* above: `BULKDATA_PayloadInSeperateFile` first
+(`BULKDATA_OptionalPayload` picks `.uptnl`), then `BULKDATA_PayloadAtEndOfFile`
+with the offset-vs-total_header_size comparison.
 
 ### Skip-region presence
 
@@ -443,13 +451,14 @@ A `FByteBulkDataHeader` reader MUST:
 - **Validate tier-dispatch consistency**: a record with
   `BULKDATA_OptionalPayload` set MUST also have
   `BULKDATA_PayloadInSeperateFile` set (the routing combination
-  documented above). Any flag combination outside the four-way
-  tier-dispatch table — including `BULKDATA_PayloadAtEndOfFile` +
-  `BULKDATA_PayloadInSeperateFile` set simultaneously — MUST be
-  rejected with a typed error rather than warned-and-accepted. A
-  miss-dispatched payload could be sourced from the wrong file at
-  an indeterminate offset, which is a memory-safety hazard
-  attacker-controllable via the flag bits.
+  documented above). Test the tier bits in §*Tier dispatch* order. A
+  record with a payload (a nonzero size, no `BULKDATA_Unused`) is
+  in-stream when `BULKDATA_ForceInlinePayload` is set or its flags are
+  exactly `0` or `BULKDATA_LazyLoadable`.[^4] One that is neither
+  in-stream nor sets a tier bit MUST be rejected with a typed error
+  rather than read from a guessed file. A mis-dispatched record reads
+  the wrong bytes; the bounds checks above keep the read inside its
+  source.
 - **Reject mis-aligned encrypted regions** when the payload tier
   carries encrypted blocks (per the parent format's encryption
   conventions; see [`../crypto/aes-pak.md`](../crypto/aes-pak.md)).
@@ -565,3 +574,5 @@ plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
 [^2]: Chunked-framing layout (primary oracle): `FabianFG/CUE4Parse/CUE4Parse/UE4/Readers/FArchive.cs` (`SerializeCompressedNew`) and `CUE4Parse/Compression/Compression.cs` (`LOADING_COMPRESSION_CHUNK_SIZE`). Independent cross-anchors: `Brabb3l/Remnant-2-Save-Parser` `src/sav.rs` (`ARCHIVE_V2_HEADER_TAG`, Rust) and `t1nky/revision-go` `remnant/save_file.go` (tag constants + chunk size, Go).
 
 [^3]: LZO/BitWindow bulk handling across community references: `gildor2/UEViewer` `Unreal/UnCoreCompression.cpp` decodes UE3 LZO bulk via `lzo1x_decompress_safe` (`DetectCompressionMethod` notes "LZO was used only with UE3 games") and has no BitWindow branch; `FabianFG/CUE4Parse` `CUE4Parse/UE4/Assets/Objects/TBulkData.cs` decodes only `BULKDATA_SerializeCompressedZLIB` and reads every other flag as a raw payload; `trumank/repak` is a pak-container library and does not parse bulk records (its `Compression` enum has no LZO). BitWindow is documented deprecated ("platform-specific bit window") in `adrianstephens/orbiscrude` `shared/filetypes/container/unreal_types.cpp`. Pure-Rust LZO1X decoder for a future in-scope fixture: the MIT-licensed `lzokay` crate.
+
+[^4]: Separate-file dispatch: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/TBulkData.cs@2b8901c3ee9818558ad33e2496a58d50b82e99db` (`GetBulkArchive` tests `BULKDATA_PayloadInSeperateFile` at L176 before `BULKDATA_PayloadAtEndOfFile` at L215) and `gildor2/UEViewer/Unreal/UnCoreSerialize.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` (L1351 before L1360). CUE4Parse skips a record with no payload at `TBulkData.cs` L53 (UEViewer at L1338) and tests for an in-stream one at L62. Cooked words: `matyalatte/Matya-Uasset-Samples@a7921caec72aca1d1a9cf28e488d702dceaf6f93`, where `4.18/T_Worm_A.uexp` mip 0 (at 0x100) is `0x00000501` with `OffsetInFile` equal to minus `BulkDataStartOffset`, and `4.27/T_Worm_A.uexp` mip 0 (at 0x104) is `0x00010501` with `OffsetInFile` 0. The writer side is `matyalatte/UE4-DDS-Tools/src/unreal/data_resource.py@10bf27eef8b6d3a8048bf4e226268abe07313879` L71-L82.
