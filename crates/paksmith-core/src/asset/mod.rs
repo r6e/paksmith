@@ -1133,6 +1133,10 @@ pub struct AssetContext {
     /// Decode-time warnings this decode has asked to log; see
     /// [`MAX_DECODE_WARNINGS`]. Clones share it, like `derived_strings`.
     pub(crate) decode_warnings: Arc<AtomicU64>,
+    /// Where the slice a typed reader's cursor spans starts in the
+    /// stitched buffer, so in-stream bulk payloads record their position.
+    /// `None`, as in every context the crate builds for now, records none.
+    pub(crate) payload_base: Option<u64>,
 }
 
 impl AssetContext {
@@ -1169,6 +1173,7 @@ impl AssetContext {
             derived_strings: Arc::default(),
             bulk_reads: Arc::default(),
             decode_warnings: Arc::default(),
+            payload_base: None,
         }
     }
 

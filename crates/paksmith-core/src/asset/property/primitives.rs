@@ -858,6 +858,7 @@ mod tests {
             derived_strings: Arc::default(),
             bulk_reads: Arc::default(),
             decode_warnings: Arc::default(),
+            payload_base: None,
         }
     }
 

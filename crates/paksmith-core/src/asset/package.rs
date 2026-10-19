@@ -828,6 +828,7 @@ impl Package {
             derived_strings: Arc::default(),
             bulk_reads: Arc::default(),
             decode_warnings: Arc::default(),
+            payload_base: None,
         };
 
         // Phase 2f: dispatch the unversioned (schema-driven) property
@@ -1276,6 +1277,7 @@ impl Package {
             derived_strings: Arc::default(),
             bulk_reads: Arc::default(),
             decode_warnings: Arc::default(),
+            payload_base: None,
         }
     }
 }
@@ -3286,6 +3288,7 @@ mod tests {
             element_count: 0,
             size_on_disk: 0,
             offset_in_file: 0,
+            in_stream_offset: None,
         }];
         parsed.insert_bulk_records(3, records).unwrap();
         assert!(parsed.bulk_data.contains_key(&3));
@@ -3314,6 +3317,7 @@ mod tests {
                 element_count: 0,
                 size_on_disk: 0,
                 offset_in_file: 0,
+                in_stream_offset: None,
             };
             MAX_BULK_DATA_RECORDS_PER_EXPORT + 1
         ];
@@ -3345,6 +3349,7 @@ mod tests {
                 element_count: 0,
                 size_on_disk: 0,
                 offset_in_file: 0,
+                in_stream_offset: None,
             };
             MAX_BULK_DATA_RECORDS_PER_EXPORT
         ];
@@ -3373,6 +3378,7 @@ mod tests {
             element_count: 0,
             size_on_disk: 0,
             offset_in_file: 0,
+            in_stream_offset: None,
         }];
         parsed.insert_bulk_records_for_test(5, records).unwrap();
         assert!(
@@ -3459,6 +3465,7 @@ mod tests {
             element_count: 8,
             size_on_disk: 8,
             offset_in_file: 0,
+            in_stream_offset: None,
         };
         parsed
             .insert_bulk_records(0, vec![streaming_record])

@@ -494,7 +494,7 @@ pub struct BulkData {
     /// decompressed output.
     pub bytes: Vec<u8>,
     /// The wire-format record this payload was resolved from. Carries
-    /// `flags`, `element_count`, `size_on_disk`, `offset_in_file`.
+    /// `flags`, `element_count`, `size_on_disk`, `offset_in_file`, `in_stream_offset`.
     /// Read-only; the resolver consumes the record metadata to
     /// route the read and never mutates it.
     pub record: FByteBulkData,
@@ -551,6 +551,13 @@ pub struct FByteBulkData {
     /// `BULKDATA_NoOffsetFixUp` is set. UE 4.4+ floor: always 8
     /// bytes on the wire.
     pub offset_in_file: i64,
+    /// Where an in-stream payload starts in the stitched `.uasset` +
+    /// `.uexp` buffer, set by the crate's reader only when it knows where
+    /// its slice starts (no package read supplies that yet) and the stream
+    /// held the whole payload. In-stream means [`BulkDataFlags::payload_is_inline`]
+    /// without `BULKDATA_Unused`, on a classic header's flags after the
+    /// `BadDataVersion` clear or a data-resource entry's legacy flags. `None` otherwise.
+    pub in_stream_offset: Option<u64>,
 }
 
 impl FByteBulkData {
@@ -573,6 +580,7 @@ impl FByteBulkData {
             element_count,
             size_on_disk,
             offset_in_file,
+            in_stream_offset: None,
         }
     }
 
@@ -617,31 +625,51 @@ impl FByteBulkData {
     /// `FObjectDataResource` table is non-empty, the wire form is a
     /// single `i32` index into that table (no classic header at all) —
     /// the entry supplies flags/count/size/offset. With an empty table
-    /// this is exactly [`Self::read_from`]. Every typed-reader call
-    /// site routes through this (or the capturing sibling) so UE 5.2+
-    /// data-resource packages decode instead of misparsing.
-    pub(crate) fn read_from_ctx<R: std::io::Read>(
-        reader: &mut R,
+    /// it parses the classic wire as [`Self::read_from`] does. Every
+    /// typed-reader call site routes through this (or the capturing
+    /// sibling) so UE 5.2+ data-resource packages decode instead of
+    /// misparsing. Unlike `read_from`, it records
+    /// [`Self::in_stream_offset`] from `ctx.payload_base`, the stitched
+    /// position `cur`'s slice starts at.
+    pub(crate) fn read_from_ctx(
+        cur: &mut std::io::Cursor<&[u8]>,
         ctx: &crate::asset::AssetContext,
         asset_path: &str,
     ) -> crate::Result<Self> {
-        if ctx.data_resources.is_empty() {
-            return Self::read_from(reader, asset_path);
-        }
-        Self::read_indexed_inner(reader, ctx, asset_path, false).map(|(record, _payload)| record)
+        Self::read_from_ctx_inner(cur, ctx, asset_path, false).map(|(record, _payload)| record)
     }
 
-    /// Context-aware sibling of [`Self::read_from_capturing_inline`] —
-    /// same indexed-form dispatch as [`Self::read_from_ctx`]. #642.
-    pub(crate) fn read_from_ctx_capturing_inline<R: std::io::Read>(
-        reader: &mut R,
+    /// [`Self::read_from_ctx`], also returning an in-stream payload's bytes
+    /// (`None` when there are none); a short one is an `UnexpectedEof`.
+    /// Used by the skeletal-mesh non-inlined LOD path (#563).
+    pub(crate) fn read_from_ctx_capturing_inline(
+        cur: &mut std::io::Cursor<&[u8]>,
         ctx: &crate::asset::AssetContext,
         asset_path: &str,
     ) -> crate::Result<(Self, Option<Vec<u8>>)> {
-        if ctx.data_resources.is_empty() {
-            return Self::read_from_capturing_inline(reader, asset_path);
+        Self::read_from_ctx_inner(cur, ctx, asset_path, true)
+    }
+
+    fn read_from_ctx_inner(
+        cur: &mut std::io::Cursor<&[u8]>,
+        ctx: &crate::asset::AssetContext,
+        asset_path: &str,
+        capture_inline: bool,
+    ) -> crate::Result<(Self, Option<Vec<u8>>)> {
+        let (mut record, (bytes, whole)) = if ctx.data_resources.is_empty() {
+            Self::read_from_inner(cur, asset_path, capture_inline)?
+        } else {
+            Self::read_indexed_inner(cur, ctx, asset_path, capture_inline)?
+        };
+        // A whole payload ends at the cursor: it is each reader's last read.
+        if whole {
+            record.in_stream_offset = cur
+                .position()
+                .checked_sub(record.size_on_disk)
+                .zip(ctx.payload_base)
+                .and_then(|(start, base)| base.checked_add(start));
         }
-        Self::read_indexed_inner(reader, ctx, asset_path, true)
+        Ok((record, bytes))
     }
 
     /// Read the indexed (data-resource) record form: one `i32` index
@@ -668,7 +696,7 @@ impl FByteBulkData {
         ctx: &crate::asset::AssetContext,
         asset_path: &str,
         capture_inline: bool,
-    ) -> crate::Result<(Self, Option<Vec<u8>>)> {
+    ) -> crate::Result<(Self, InlinePayload)> {
         use byteorder::{LittleEndian, ReadBytesExt};
 
         let index = reader
@@ -752,6 +780,7 @@ impl FByteBulkData {
                 element_count,
                 size_on_disk,
                 offset_in_file: entry.serial_offset,
+                in_stream_offset: None,
             },
             inline_payload,
         ))
@@ -798,9 +827,10 @@ impl FByteBulkData {
         size_on_disk: u64,
         capture_inline: bool,
         asset_path: &str,
-    ) -> crate::Result<Option<Vec<u8>>> {
+    ) -> crate::Result<InlinePayload> {
         use std::io::Read;
-        if size_on_disk != 0 && !flags.has_unused() && flags.payload_is_inline() {
+        let in_stream = !flags.has_unused() && flags.payload_is_inline();
+        if size_on_disk != 0 && in_stream {
             if capture_inline {
                 let mut buf = Vec::new();
                 let read = std::io::Read::take(reader.by_ref(), size_on_disk)
@@ -812,32 +842,18 @@ impl FByteBulkData {
                         crate::error::AssetWireField::BulkDataInlinePayload,
                     ));
                 }
-                Ok(Some(buf))
+                Ok((Some(buf), true))
             } else {
-                let _ = std::io::copy(
+                let drained = std::io::copy(
                     &mut std::io::Read::take(reader.by_ref(), size_on_disk),
                     &mut std::io::sink(),
                 )
                 .map_err(crate::PaksmithError::Io)?;
-                Ok(None)
+                Ok((None, drained == size_on_disk))
             }
         } else {
-            Ok(None)
+            Ok((None, in_stream))
         }
-    }
-
-    /// Like [`Self::read_from`], but when the record carries an **in-stream inline
-    /// payload** (per [`BulkDataFlags::payload_is_inline`]), the payload bytes are
-    /// captured and returned as `Some(Vec<u8>)` instead of discarded into a sink.
-    /// Returns `None` for non-inline (separate-file / `PayloadAtEndOfFile`) records.
-    /// Used by the skeletal-mesh non-inlined LOD path (#563) to decode geometry
-    /// from an inline bulk payload via `read_streamed_data`, mirroring the oracle's
-    /// `SerializeStreamedData` over `bulk.Data`.
-    pub(crate) fn read_from_capturing_inline<R: std::io::Read>(
-        reader: &mut R,
-        asset_path: &str,
-    ) -> crate::Result<(Self, Option<Vec<u8>>)> {
-        Self::read_from_inner(reader, asset_path, true)
     }
 
     #[allow(
@@ -848,7 +864,7 @@ impl FByteBulkData {
         reader: &mut R,
         asset_path: &str,
         capture_inline: bool,
-    ) -> crate::Result<(Self, Option<Vec<u8>>)> {
+    ) -> crate::Result<(Self, InlinePayload)> {
         use byteorder::{LittleEndian, ReadBytesExt};
 
         let raw_flags = reader
@@ -976,11 +992,15 @@ impl FByteBulkData {
                 element_count,
                 size_on_disk,
                 offset_in_file,
+                in_stream_offset: None,
             },
             inline_payload,
         ))
     }
 }
+
+/// `consume_inline`'s captured payload, and whether it was in-stream and whole (empty is).
+type InlinePayload = (Option<Vec<u8>>, bool);
 
 /// Constructs an `UnexpectedEof` fault wrapped in `PaksmithError::AssetParse`.
 /// Inlined twice per error site in `read_from`; the helper saves the
@@ -2051,6 +2071,7 @@ pub(crate) fn decompress_zlib(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asset::property::test_utils::make_ctx;
     #[cfg(feature = "__test_utils")]
     use crate::testing::bench::zlib_stream;
 
@@ -2258,8 +2279,8 @@ mod tests {
         crate::untrusted::test_support::assert_message_clamps_long_path(&err);
     }
 
-    /// With an EMPTY table, `read_from_ctx` is exactly the classic read
-    /// — a classic-wire record parses identically through both. #642.
+    /// With an EMPTY table and no `payload_base`, `read_from_ctx` is the
+    /// classic read — a classic-wire record parses identically. #642.
     #[test]
     fn read_from_ctx_empty_table_is_classic() {
         let ctx = ctx_with_resources(Vec::new());
@@ -2631,27 +2652,93 @@ mod tests {
         assert_eq!(read_and_pos(&bytes), 23); // 20 header + 3 payload (sentinel 0x5A left)
     }
 
+    /// The reader behind both context-aware entry points records a whole in-stream
+    /// payload's start (base + header end); a short one records none (only capture may fail).
     #[test]
-    fn read_from_capturing_inline_returns_inline_payload_bytes() {
+    fn read_from_ctx_records_where_an_in_stream_payload_starts() {
+        const PREFIX: u64 = 7;
+        let read_at = |wire: &[u8], ctx: &crate::asset::AssetContext, capture| {
+            let mut bytes = vec![0xEE; usize::try_from(PREFIX).unwrap()];
+            bytes.extend_from_slice(wire);
+            let mut cur = std::io::Cursor::new(&bytes[..]);
+            cur.set_position(PREFIX);
+            let read = FByteBulkData::read_from_ctx_inner(&mut cur, ctx, "t", capture);
+            let read = read.inspect_err(|err| assert!(capture, "sink failed: {err}"));
+            read.ok().and_then(|(record, _)| record.in_stream_offset)
+        };
+        let mut ctx = make_ctx(&[]);
+        ctx.payload_base = Some(1000);
+        let bad_data_version = [inline_record(FLAG_BAD_DATA_VERSION, 4, &[0, 0]), vec![1; 4]];
+        let unused = FLAG_FORCE_INLINE_PAYLOAD | FLAG_UNUSED;
+        let classic = [
+            (inline_record(0x48, 4, &[1; 4]), Some(1000 + PREFIX + 20)),
+            (bad_data_version.concat(), Some(1000 + PREFIX + 22)),
+            (inline_record(0x48, 0, &[]), Some(1000 + PREFIX + 20)),
+            (inline_record(FLAG_PAYLOAD_AT_END_OF_FILE, 4, &[1; 4]), None),
+            (inline_record(unused, 4, &[1; 4]), None),
+            (inline_record(0x48, 4, &[1; 2]), None),
+        ];
+        for (wire, expected) in &classic {
+            for capture in [false, true] {
+                assert_eq!(read_at(wire, &ctx, capture), *expected, "{wire:02x?}");
+            }
+        }
+        ctx.payload_base = None;
+        assert_eq!(read_at(&classic[0].0, &ctx, true), None, "no base");
+
+        let mut indexed = ctx_with_resources(
+            [0, FLAG_LAZY_LOADABLE, FLAG_BAD_DATA_VERSION]
+                .map(|flags| resource_entry(flags, 0, 4, 4))
+                .to_vec(),
+        );
+        indexed.payload_base = Some(1000);
+        let at = Some(1000 + PREFIX + 4);
+        for (index, expected) in [(0i32, at), (1, at), (2, None)] {
+            let mut wire = index.to_le_bytes().to_vec();
+            wire.extend_from_slice(&[1; 4]);
+            for capture in [false, true] {
+                assert_eq!(read_at(&wire, &indexed, capture), expected, "{index}");
+            }
+        }
+    }
+
+    /// 4.18 `T_Worm_A`'s inline mip header records the OffsetInFile its cooker stored.
+    #[test]
+    fn in_stream_offset_matches_a_cooked_inline_mips_stored_offset() {
+        let mut bytes = [vec![0u8; 320], inline_record(0x48, 2048, &[0; 2048])].concat();
+        bytes[332..334].copy_from_slice(&[0x89, 0x04]); // the cooked OffsetInFile
+        let mut ctx = make_ctx(&[]);
+        ctx.payload_base = Some(821);
+        let mut cur = std::io::Cursor::new(&bytes[..]);
+        cur.set_position(320);
+        let record = FByteBulkData::read_from_ctx(&mut cur, &ctx, "t").unwrap();
+        assert_eq!(record.offset_in_file, 1161);
+        assert_eq!(record.in_stream_offset, Some(1161));
+    }
+
+    #[test]
+    fn read_from_ctx_capturing_inline_returns_inline_payload_bytes() {
         // ForceInlinePayload: the SizeOnDisk payload bytes are CAPTURED (not
         // sunk), and the cursor still advances past them. (#563 consumer.)
         let bytes = inline_record(FLAG_FORCE_INLINE_PAYLOAD, 3, &[0xAA, 0xBB, 0xCC, 0x5A]);
         let mut cur = std::io::Cursor::new(bytes.as_slice());
         let (record, payload) =
-            FByteBulkData::read_from_capturing_inline(&mut cur, "t").expect("read");
+            FByteBulkData::read_from_ctx_capturing_inline(&mut cur, &make_ctx(&[]), "t")
+                .expect("read");
         assert_eq!(record.size_on_disk, 3);
         assert_eq!(payload.as_deref(), Some(&[0xAA, 0xBB, 0xCC][..]));
         assert_eq!(cur.position(), 23, "header (20) + 3 payload consumed");
     }
 
     #[test]
-    fn read_from_capturing_inline_returns_none_for_separate_file() {
+    fn read_from_ctx_capturing_inline_returns_none_for_separate_file() {
         // PayloadAtEndOfFile (external .ubulk): not inline → no bytes captured,
         // cursor stops at the 20-byte header.
         let bytes = inline_record(FLAG_PAYLOAD_AT_END_OF_FILE, 3, &[0xAA, 0xBB, 0xCC]);
         let mut cur = std::io::Cursor::new(bytes.as_slice());
         let (_record, payload) =
-            FByteBulkData::read_from_capturing_inline(&mut cur, "t").expect("read");
+            FByteBulkData::read_from_ctx_capturing_inline(&mut cur, &make_ctx(&[]), "t")
+                .expect("read");
         assert!(payload.is_none(), "separate-file payload not captured");
         assert_eq!(cur.position(), 20);
     }
@@ -2661,7 +2748,7 @@ mod tests {
         // Sink path (`read_from`): SizeOnDisk claims 4 inline bytes but only 2 are
         // present. `read_from` silently copies what's available (no error HERE);
         // the caller sees the short read when the NEXT field read EOFs. This is the
-        // documented asymmetry with `read_from_capturing_inline` (which faults
+        // documented asymmetry with `read_from_ctx_capturing_inline` (which faults
         // immediately) — both are EOF-safe. Pins the sink-copy behavior.
         let bytes = inline_record(FLAG_FORCE_INLINE_PAYLOAD, 4, &[0xAA, 0xBB]);
         let mut cur = std::io::Cursor::new(bytes.as_slice());
@@ -2675,12 +2762,13 @@ mod tests {
     }
 
     #[test]
-    fn read_from_capturing_inline_truncated_payload_is_eof() {
+    fn read_from_ctx_capturing_inline_truncated_payload_is_eof() {
         // SizeOnDisk claims 4 inline bytes but only 2 are present → typed EOF on
         // the BulkDataInlinePayload field (not a short/partial capture).
         let bytes = inline_record(FLAG_FORCE_INLINE_PAYLOAD, 4, &[0xAA, 0xBB]);
         let mut cur = std::io::Cursor::new(bytes.as_slice());
-        let err = FByteBulkData::read_from_capturing_inline(&mut cur, "t").unwrap_err();
+        let err = FByteBulkData::read_from_ctx_capturing_inline(&mut cur, &make_ctx(&[]), "t")
+            .unwrap_err();
         assert!(
             matches!(
                 err,

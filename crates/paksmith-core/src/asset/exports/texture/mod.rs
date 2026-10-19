@@ -1054,6 +1054,7 @@ mod tests {
             element_count: 8,
             size_on_disk: 8,
             offset_in_file: 0,
+            in_stream_offset: None,
         }
     }
 
