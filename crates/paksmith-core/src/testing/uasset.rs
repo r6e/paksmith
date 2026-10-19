@@ -558,7 +558,7 @@ pub fn cooked_decodable_cube_body() -> Vec<u8> {
     // PackedData 0x8000_0006 = slice count 6 | cubemap bit 31, written as
     // one literal: `6 | (1 << 31)` invites the equivalent `|`→`^` mutant
     // (disjoint bits) — see MEMORY's disjoint-bit OR-mask class.
-    cooked_texture_body_raw(4, 96, 96, 0x8000_0006, 1)
+    cooked_texture_body_raw(4, 96, 96, 0x8000_0006, 1, 0x0001_0001, &[])
 }
 
 /// A cooked `UTexture2DArray` body: 4×4 `PF_DXT5`, 3 layers (`PackedData`
@@ -566,7 +566,7 @@ pub fn cooked_decodable_cube_body() -> Vec<u8> {
 /// Feed to [`build_minimal_with_texture_class`] with `"Texture2DArray"`. #648.
 #[must_use]
 pub fn cooked_decodable_array_body() -> Vec<u8> {
-    cooked_texture_body_raw(4, 48, 48, 3, 3)
+    cooked_texture_body_raw(4, 48, 48, 3, 3, 0x0001_0001, &[])
 }
 
 /// A cooked `UVolumeTexture` body: 4×4 `PF_DXT5`, depth 2 (`PackedData`
@@ -574,7 +574,7 @@ pub fn cooked_decodable_array_body() -> Vec<u8> {
 /// Feed to [`build_minimal_with_texture_class`] with `"VolumeTexture"`. #648.
 #[must_use]
 pub fn cooked_decodable_volume_body() -> Vec<u8> {
-    cooked_texture_body_raw(4, 32, 32, 2, 2)
+    cooked_texture_body_raw(4, 32, 32, 2, 2, 0x0001_0001, &[])
 }
 
 /// Shared body writer for the cooked `UTexture2D` fixtures. `dim` is the
@@ -582,19 +582,31 @@ pub fn cooked_decodable_volume_body() -> Vec<u8> {
 /// single inline mip's `FByteBulkData` (`offset 0`, so it resolves against the
 /// package buffer's first `size_on_disk` bytes).
 fn cooked_texture2d_body_dims(dim: i32, element_count: i32, size_on_disk: u32) -> Vec<u8> {
-    cooked_texture_body_raw(dim, element_count, size_on_disk, 1, 1)
+    cooked_texture_body_raw(dim, element_count, size_on_disk, 1, 1, 0x0001_0001, &[])
+}
+
+/// A cooked `UTexture2D` body whose one 4×4 `PF_DXT5` mip is in-stream (`0x48`):
+/// `payload` right after its header, and a stored `OffsetInFile` of 0. #971.
+#[must_use]
+pub fn cooked_in_stream_mip_texture2d_body(payload: &[u8]) -> Vec<u8> {
+    let size = u32::try_from(payload.len()).expect("a small test payload");
+    let count = i32::try_from(size).expect("a small test payload");
+    cooked_texture_body_raw(4, count, size, 1, 1, 0x48, payload)
 }
 
 /// The fully-parameterized cooked-texture body writer behind both the
 /// `UTexture2D` and the #648 multidim fixtures: `packed_data` lands in the
 /// `FTexturePlatformData` `PackedData` field verbatim (slice count low
-/// bits, bit 31 cubemap), `mip_size_z` in the single mip's `SizeZ`.
+/// bits, bit 31 cubemap), `mip_size_z` in the single mip's `SizeZ`, and
+/// `in_stream` right after the mip's header, whose flags are `mip_flags`.
 fn cooked_texture_body_raw(
     dim: i32,
     element_count: i32,
     size_on_disk: u32,
     packed_data: u32,
     mip_size_z: i32,
+    mip_flags: u32,
+    in_stream: &[u8],
 ) -> Vec<u8> {
     let mut b = Vec::new();
     // Segment 1: tagged properties — just the `None` terminator (FName 0,0) +
@@ -622,10 +634,11 @@ fn cooked_texture_body_raw(
     // One FTexture2DMipMap: per-mip bCooked (UE4) + inline FByteBulkData +
     // SizeX/SizeY/SizeZ.
     b.extend_from_slice(&1u32.to_le_bytes()); // per-mip bCooked (cooked → no derived-data tail)
-    b.extend_from_slice(&0x0001_0001u32.to_le_bytes()); // flags: PAYLOAD_AT_END_OF_FILE | NO_OFFSET_FIXUP
+    b.extend_from_slice(&mip_flags.to_le_bytes()); // e.g. 0x0001_0001 = PAYLOAD_AT_END_OF_FILE | NO_OFFSET_FIXUP
     b.extend_from_slice(&element_count.to_le_bytes()); // ElementCount
     b.extend_from_slice(&size_on_disk.to_le_bytes()); // SizeOnDisk
     b.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile (inline → package start)
+    b.extend_from_slice(in_stream);
     b.extend_from_slice(&dim.to_le_bytes()); // mip SizeX
     b.extend_from_slice(&dim.to_le_bytes()); // mip SizeY
     b.extend_from_slice(&mip_size_z.to_le_bytes()); // mip SizeZ (UE 4.20+)

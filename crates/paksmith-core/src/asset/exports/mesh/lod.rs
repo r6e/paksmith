@@ -140,8 +140,8 @@ pub(crate) fn read_lod(
 }
 
 /// Read a non-inlined (streamed) `FStaticMeshLODResources` LOD: the geometry
-/// buffers live out-of-line in a companion `.ubulk`, referenced by an
-/// `FByteBulkData` header. Resolves the payload via `ctx.bulk_resolver` and
+/// buffers live where the `FByteBulkData` header that describes them says (a
+/// companion file, the package, or in-stream). Resolves the payload via `ctx.bulk_resolver` and
 /// decodes it with the same [`serialize_buffers`] used for inlined LODs, then
 /// consumes the in-stream availability-info trailer from the main cursor.
 ///
@@ -157,7 +157,7 @@ pub(crate) fn read_lod(
 /// Wire order (oracle `FStaticMeshLODResources.cs`, `!bInlined` branch, UE4.23–4.27
 /// / UE5.0–5.3 generic path): the `FByteBulkData` header, then — when
 /// `element_count > 0` — the resolved `SerializeBuffers` blob (decoded from the
-/// `.ubulk` bytes, NOT the main cursor), then the availability-info trailer
+/// resolved bytes, NOT the main cursor), then the availability-info trailer
 /// consumed **unconditionally** from the main cursor (present even when
 /// `element_count == 0`): `DepthOnlyNumTriangles + Packed` (8) + the
 /// buffer-count/stride stats (72) + — while the engine still serialises

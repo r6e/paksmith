@@ -2892,8 +2892,7 @@ pub enum AssetParseFault {
     BulkDataOffsetOob {
         /// Which storage tier was the read targeting.
         tier: crate::asset::bulk_data::BulkDataTier,
-        /// Resolved offset (post-fixup for inline / uexp-resident
-        /// tiers; absolute for streaming tiers).
+        /// Resolved offset: an in-stream payload's position, else `OffsetInFile` as step 2 resolves it.
         offset: u64,
         /// `SizeOnDisk` from the wire record.
         size: u64,
@@ -2985,8 +2984,8 @@ pub enum AssetParseFault {
     /// `BulkDataFlags` is valid (all bits in the catalog) but has
     /// neither tier-routing bit set: no
     /// `BULKDATA_PayloadAtEndOfFile` AND no
-    /// `BULKDATA_PayloadInSeperateFile`, so the resolver has no
-    /// source file for the payload.
+    /// `BULKDATA_PayloadInSeperateFile`, and no in-stream position was
+    /// recorded, so the resolver has no source for the payload.
     /// Distinguished from `UnknownBulkDataFlags` which surfaces
     /// reserved-bit violations.
     BulkDataNoTierFlag {
