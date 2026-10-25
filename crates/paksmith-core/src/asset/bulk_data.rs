@@ -142,10 +142,11 @@ pub fn max_total_bulk_data_bytes_per_package() -> u64 {
 
 /// Identifies where a resolved `FByteBulkData` record's bytes live.
 ///
-/// The resolver dispatches on `BulkDataFlags`, top row first:
+/// The resolver dispatches on each record, top row first:
 ///
-/// | Flag combination | Tier |
-/// |------------------|------|
+/// | Record | Tier |
+/// |--------|------|
+/// | In-stream (`FByteBulkData::in_stream_offset`) | [`Self::Inline`] / [`Self::UexpResident`] by that position |
 /// | `BULKDATA_OptionalPayload` + `PayloadInSeperateFile` | [`Self::OptionalStreaming`] |
 /// | `BULKDATA_PayloadInSeperateFile` (no `OptionalPayload`) | [`Self::Streaming`] |
 /// | `BULKDATA_PayloadAtEndOfFile` + offset < `total_header_size` | [`Self::Inline`] |
@@ -330,7 +331,7 @@ impl BulkDataFlags {
     /// `BULKDATA_NoOffsetFixUp` (bit 16). When set, `OffsetInFile`
     /// is used directly; when unset, the reader MUST add
     /// `PackageSummary::bulk_data_start_offset` to get the actual
-    /// in-file position.
+    /// in-file position. Neither applies once an in-stream position is recorded.
     #[must_use]
     pub fn no_offset_fixup(self) -> bool {
         (self.0 & FLAG_NO_OFFSET_FIXUP) != 0
@@ -548,15 +549,16 @@ pub struct FByteBulkData {
     pub size_on_disk: u64,
     /// Pre-fixup offset within the containing file. The resolver
     /// adds `PackageSummary::bulk_data_start_offset` unless
-    /// `BULKDATA_NoOffsetFixUp` is set. UE 4.4+ floor: always 8
+    /// `BULKDATA_NoOffsetFixUp` is set (or an in-stream position was recorded). UE 4.4+ floor: always 8
     /// bytes on the wire.
     pub offset_in_file: i64,
     /// Where an in-stream payload starts in the stitched `.uasset` +
     /// `.uexp` buffer, set by the crate's reader only when it knows where
-    /// its slice starts (no package read supplies that yet) and the stream
-    /// held the whole payload. In-stream means [`BulkDataFlags::payload_is_inline`]
+    /// its slice starts (a package read does) and the stream held the
+    /// whole payload. In-stream means [`BulkDataFlags::payload_is_inline`]
     /// without `BULKDATA_Unused`, on a classic header's flags after the
     /// `BadDataVersion` clear or a data-resource entry's legacy flags. `None` otherwise.
+    /// The resolver reads such a payload here and ignores `offset_in_file`.
     pub in_stream_offset: Option<u64>,
 }
 
@@ -1066,13 +1068,15 @@ pub(crate) fn counting_loader(
 ///    `UnsupportedBulkCompression` — fail-closed, #559).
 /// 2. Offset fix-up: `OffsetInFile + bulk_data_start_offset` checked
 ///    via `checked_add`; fires `BulkDataOffsetFixupOverflow` on
-///    overflow OR negative result.
-/// 3. Tier dispatch: `payload_in_separate_file` →
+///    overflow OR negative result. An in-stream payload skips it and
+///    uses its recorded position.
+/// 3. Tier dispatch: an in-stream payload → `Inline`/`UexpResident` by
+///    its position; `payload_in_separate_file` →
 ///    `Streaming`/`OptionalStreaming` via lazy companion loaders,
 ///    each run at most once;
 ///    `payload_at_end_of_file` → `Inline`/`UexpResident` based on
-///    `resolved_offset` vs `total_header_size`. Neither bit set
-///    fires `BulkDataNoTierFlag`.
+///    `resolved_offset` vs `total_header_size`. Neither, with no
+///    in-stream position recorded, fires `BulkDataNoTierFlag`.
 /// 4. Bounds: `resolved_offset + size_on_disk` checked against the
 ///    source slice length (`BulkDataEndOffsetOverflow` on `u64`
 ///    overflow, `BulkDataOffsetOob` on OOB).
@@ -1119,7 +1123,7 @@ pub struct BulkDataResolver {
     /// `BULKDATA_PayloadAtEndOfFile` records without `PayloadInSeperateFile`.
     total_header_size: u64,
     /// `summary.bulk_data_start_offset` — added to `OffsetInFile`
-    /// unless `BULKDATA_NoOffsetFixUp` (bit 16) is set.
+    /// unless `BULKDATA_NoOffsetFixUp` (bit 16) is set or a payload is in-stream.
     bulk_data_start_offset: i64,
     /// Lazy `.ubulk` loader; called at most once, on the first
     /// `Streaming`-tier resolution.
@@ -1302,6 +1306,16 @@ impl BulkDataResolver {
         Ok(resolved)
     }
 
+    /// The stitched-buffer tier `offset` falls in: the `.uasset` header
+    /// region, or past it.
+    fn stitched_tier(&self, offset: u64) -> BulkDataTier {
+        if offset < self.total_header_size {
+            BulkDataTier::Inline
+        } else {
+            BulkDataTier::UexpResident
+        }
+    }
+
     /// Add `claim` to the per-package budget, or refuse it when the total
     /// would pass the cap. The counter is only ever compare-and-swapped to
     /// an admitted total, never to a refused one: a zlib claim is only
@@ -1390,8 +1404,11 @@ impl BulkDataResolver {
             });
         }
 
-        // 2. Offset fix-up.
-        let resolved_offset: u64 = if record.flags.no_offset_fixup() {
+        // 2. Offset fix-up, skipped for an in-stream payload: the parser
+        // recorded where it sits, and its `OffsetInFile` is not used.
+        let resolved_offset: u64 = if let Some(at) = record.in_stream_offset {
+            at
+        } else if record.flags.no_offset_fixup() {
             if record.offset_in_file < 0 {
                 return Err(crate::PaksmithError::AssetParse {
                     asset_path: asset_path.to_string(),
@@ -1431,10 +1448,12 @@ impl BulkDataResolver {
             }
         };
 
-        // 3. Tier dispatch + source-slice selection. Separate-file wins:
-        // cooked companion records set `PayloadAtEndOfFile` too.
-        let (tier, source_bytes): (BulkDataTier, &[u8]) = if record.flags.payload_in_separate_file()
-        {
+        // 3. Tier dispatch + source-slice selection. In-stream first, as the
+        // parser drains it whatever the tier bits say; then separate-file,
+        // since cooked companion records set `PayloadAtEndOfFile` too.
+        let (tier, source_bytes): (BulkDataTier, &[u8]) = if record.in_stream_offset.is_some() {
+            (self.stitched_tier(resolved_offset), &self.stitched[..])
+        } else if record.flags.payload_in_separate_file() {
             let (tier, cache, loader, kind) = if record.flags.optional_payload() {
                 (
                     BulkDataTier::OptionalStreaming,
@@ -1453,12 +1472,7 @@ impl BulkDataResolver {
             let bytes = load_companion(cache, loader, kind, MAX_UBULK_FILE_SIZE, asset_path)?;
             (tier, bytes)
         } else if record.flags.payload_at_end_of_file() {
-            let tier = if resolved_offset < self.total_header_size {
-                BulkDataTier::Inline
-            } else {
-                BulkDataTier::UexpResident
-            };
-            (tier, &self.stitched[..])
+            (self.stitched_tier(resolved_offset), &self.stitched[..])
         } else {
             return Err(crate::PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
@@ -3831,17 +3845,44 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn resolve_rejects_no_tier_flag() {
-        // Flags valid (zlib bit set) but no tier-routing bit.
-        let uasset = vec![0u8; 100];
-        let record = record_with(FLAG_SERIALIZE_COMPRESSED_ZLIB, 8, 0);
-        let resolver = BulkDataResolver::new_for_test(uasset, 100, 0);
-        match resolver.resolve(&record, "test.uasset") {
-            Err(crate::PaksmithError::AssetParse {
-                fault: crate::error::AssetParseFault::BulkDataNoTierFlag { flags },
-                ..
-            }) => assert_eq!(flags, FLAG_SERIALIZE_COMPRESSED_ZLIB),
-            other => panic!("expected BulkDataNoTierFlag, got {other:?}"),
+        // Flags valid (zlib bit set) but no tier-routing bit, and an
+        // in-stream record with no recorded position.
+        let resolver = BulkDataResolver::new_for_test(vec![0u8; 100], 100, 0);
+        for wire in [FLAG_SERIALIZE_COMPRESSED_ZLIB, FLAG_FORCE_INLINE_PAYLOAD] {
+            match resolver.resolve(&record_with(wire, 8, 0), "test.uasset") {
+                Err(crate::PaksmithError::AssetParse {
+                    fault: crate::error::AssetParseFault::BulkDataNoTierFlag { flags },
+                    ..
+                }) => assert_eq!(flags, wire),
+                other => panic!("expected BulkDataNoTierFlag, got {other:?}"),
+            }
         }
+    }
+
+    /// An in-stream payload resolves at its recorded position, ahead of any tier bit and
+    /// either fix-up branch: the 4.18 `T_Worm_A` mip's stored 1161 is already stitched.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn an_in_stream_payload_resolves_at_its_recorded_position() {
+        let stitched: Vec<u8> = (0..4117u32).map(|i| i.to_le_bytes()[0]).collect();
+        let resolver = BulkDataResolver::new_for_test(stitched.clone(), 821, 4113);
+        let resolve = |flags, size: u64, offset_in_file, at| {
+            let record = FByteBulkData {
+                flags: BulkDataFlags::from(flags),
+                element_count: i64::try_from(size).unwrap(),
+                size_on_disk: size,
+                offset_in_file,
+                in_stream_offset: Some(at),
+            };
+            let bulk = resolver.resolve(&record, "t").unwrap();
+            (bulk.tier, bulk.bytes)
+        };
+        let mip = (BulkDataTier::UexpResident, stitched[1161..3209].to_vec());
+        let at_4 = (BulkDataTier::Inline, stitched[4..12].to_vec());
+        assert_eq!(resolve(0x48, 2048, 1161, 1161), mip);
+        assert_eq!(resolve(0x141, 8, i64::MAX, 4), at_4);
+        assert_eq!(resolve(0x1_0048, 8, -1, 4), at_4);
+        assert_eq!(resolve(0x48, 0, 0, 5), (BulkDataTier::Inline, Vec::new()));
     }
 
     #[cfg(feature = "__test_utils")]

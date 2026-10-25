@@ -1458,7 +1458,11 @@ fn read_payloads(
             // read-only `&ExportTable` / `&AssetContext`). 3e-3a collected
             // them; 3e-3b wires them through.
             let mark = ctx.derived_strings.mark();
-            match read_typed(export_slice, ctx, asset_path) {
+            let export_ctx = AssetContext {
+                payload_base: u64::try_from(e.serial_offset).ok(),
+                ..ctx.clone()
+            };
+            match read_typed(export_slice, &export_ctx, asset_path) {
                 Ok((asset, records)) => {
                     payloads.push(asset);
                     if !records.is_empty() {
@@ -3541,6 +3545,22 @@ mod tests {
             let charged = parsed.resolver.bytes_resolved_for_test();
             assert_eq!(charged, seed, "call {call}");
         }
+    }
+
+    /// An in-stream mip resolves where the parser read it, not at its stored or slice offset.
+    #[test]
+    fn an_in_stream_mip_resolves_from_where_the_parser_drained_it() {
+        use crate::testing::uasset::{
+            build_minimal_with_texture_class, cooked_in_stream_mip_texture2d_body,
+        };
+        let payload: Vec<u8> = (0xA0..0xB0).collect();
+        let body = cooked_in_stream_mip_texture2d_body(&payload);
+        let pkg = build_minimal_with_texture_class("Texture2D", body);
+        let parsed = Package::read_from(&pkg.bytes, None, None, "t.uasset").unwrap();
+        let at = pkg.bytes.windows(16).position(|w| w == payload).unwrap() as u64;
+        let bulk = parsed.resolve_bulk_for_export(1).unwrap();
+        assert_eq!(bulk[0].record.in_stream_offset, Some(at));
+        assert_eq!(bulk[0].bytes, payload);
     }
 
     /// Two records naming the whole buffer trip at the second and give back

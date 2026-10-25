@@ -32,6 +32,8 @@ Concretely, an `FByteBulkData` record on the wire publishes:
 
 Where the payload bytes live is governed by the `BulkDataFlags`:
 
+- **In-stream**: `BULKDATA_ForceInlinePayload` set, or the flags exactly `0`
+  or `BULKDATA_LazyLoadable`, with a payload; it follows the header.
 - **Inline** (in `.uasset`): `BULKDATA_PayloadAtEndOfFile` set without
   `BULKDATA_PayloadInSeperateFile`, `OffsetInFile` in `[0, total_header_size)`.
 - **`.uexp`-resident**: the same bits, with `OffsetInFile` in
@@ -113,7 +115,7 @@ below directly), the constructor reads:
 | 1 | `BulkDataFlags` | 4 | LE | `u32` (`EBulkDataFlags` bitmask) | Storage tier + compression + size-format selector. Bit allocations per the catalog below. |
 | 2 | `ElementCount` | 4 or 8 | LE | `i32` / `i64` | Number of elements. 8 bytes (`i64`) when `BULKDATA_Size64Bit` (bit 13) is set, otherwise 4 bytes (`i32`). Signed on both widths. For byte bulk data, equals the uncompressed byte count. |
 | 3 | `SizeOnDisk` | 4 or 8 | LE | `u32` / `u64` | Bytes occupied by the on-wire payload (post-compression if applicable). With `BULKDATA_Size64Bit` unset: 4 bytes `u32`. With set: 8 bytes read as `u64`. **Reference deviation:** CUE4Parse's reference implementation reads 8 bytes signed and truncates to the low 32 bits (`(uint) Ar.Read<long>()`), effectively capping `SizeOnDisk` at ~4 GiB. Paksmith reads the full `u64` and relies on `MAX_BULK_DATA_SIZE` (8 GiB) — and `MAX_BULK_DATA_COMPRESSED_SIZE` (512 MiB) for compressed records — to cap pathological values. The paksmith policy is strictly safer than the reference truncation: a wire value like `0x0000_0001_0000_0000` (4 GiB + 0) is interpreted as `4_294_967_296` by paksmith (caught by the 8 GiB cap on a per-record basis, or by the resolver's per-package budget) instead of silently truncated to `0` bytes. Legitimate cooked content has `SizeOnDisk` well under 4 GiB so behavior matches the reference on valid input. |
-| 4 | `OffsetInFile` | 8 or 4 | LE | `i64` / `i32` | Byte offset into the containing file. Width is gated on the `BULKDATA_AT_LARGE_OFFSETS` UE version constant (UE 4.3+): 8 bytes (`i64`) for that range and later; 4 bytes (`i32`) on older packages. Paksmith's pak v3+ accepted range starts at UE 4.4+, so paksmith readers always see 8 bytes. **Pre-fixup wire value**: a reader MUST add `Ar.Owner.Summary.BulkDataStartOffset` to the read value UNLESS `BULKDATA_NoOffsetFixUp` (bit 16) is set. |
+| 4 | `OffsetInFile` | 8 or 4 | LE | `i64` / `i32` | Byte offset into the containing file. Width is gated on the `BULKDATA_AT_LARGE_OFFSETS` UE version constant (UE 4.3+): 8 bytes (`i64`) for that range and later; 4 bytes (`i32`) on older packages. Paksmith's pak v3+ accepted range starts at UE 4.4+, so paksmith readers always see 8 bytes. **Pre-fixup wire value**: a reader MUST add `Ar.Owner.Summary.BulkDataStartOffset` to the read value UNLESS `BULKDATA_NoOffsetFixUp` (bit 16) is set; an in-stream payload does not use it. |
 | 5 | *(conditional)* | 2 | — | skip | When `BULKDATA_BadDataVersion` (bit 15) is set, `Ar.Position += sizeof(ushort)` (2 bytes). The reader then CLEARS the `BULKDATA_BadDataVersion` bit from `BulkDataFlags` (does not propagate to downstream consumers). |
 | 6 | *(conditional)* | 12–20 | — | skip | When `BULKDATA_DuplicateNonOptionalPayload` (bit 14) is set, three additional fields follow: `DuplicateFlags: EBulkDataFlags` (4 bytes), `DuplicateSizeOnDisk` (4 or 8 bytes gated on `BULKDATA_Size64Bit`), `DuplicateOffset` (4 or 8 bytes gated on `BULKDATA_AT_LARGE_OFFSETS`). Total additional bytes: 12 (neither gate), 16 (one gate), or 20 (both gates). |
 
@@ -201,11 +203,12 @@ and confirmed this is the honest state:
 
 ### Tier dispatch (file lookup)
 
-Once `BulkDataFlags` and `OffsetInFile` (post-fixup) are resolved,
+Once `BulkDataFlags` and `OffsetInFile` (post-fixup, unless in-stream) are resolved,
 the reader maps the record to its physical file:
 
 | Flag combination | Tier | File | Offset interpretation |
 |------------------|------|------|------------------------|
+| `BULKDATA_ForceInlinePayload`, or flags exactly `0` or `BULKDATA_LazyLoadable`, with a payload | In-stream | The header's own archive | Where the header ends; `OffsetInFile` is not used. |
 | `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile` | Optional streaming | `.uptnl` | Offset from `.uptnl` start. |
 | `BULKDATA_PayloadInSeperateFile` without `BULKDATA_OptionalPayload` | Streaming | `.ubulk` | Offset from `.ubulk` start. |
 | `BULKDATA_PayloadAtEndOfFile` without `BULKDATA_PayloadInSeperateFile`, `OffsetInFile < total_header_size` | Inline | `.uasset` itself | Offset from `.uasset` start. |
@@ -218,6 +221,9 @@ The rows are tested in order. Cooked companion records set
 `BULKDATA_OptionalPayload` for `.uptnl`. CUE4Parse and UEViewer read
 them from the companion.[^4] Before 4.26 the stored offset needs the
 usual fix-up; from 4.26 `BULKDATA_NoOffsetFixUp` is set.
+
+In-stream is tested first, as in CUE4Parse (UEViewer tests the tier bits first).[^4] The sample
+cooks' in-stream mips are `0x00000048`, `OffsetInFile` stitched with `BULKDATA_NoOffsetFixUp` clear.
 
 See [`ubulk.md`](ubulk.md) and `../texture/mips-and-streaming.md`
 for the per-format consumer side; this section is the wire-side
@@ -355,9 +361,9 @@ form is documented for spec completeness.
 
 ### Tier routing (`.uasset` vs `.uexp` vs `.ubulk` vs `.uptnl`)
 
-Per §*Tier dispatch* above: `BULKDATA_PayloadInSeperateFile` first
-(`BULKDATA_OptionalPayload` picks `.uptnl`), then `BULKDATA_PayloadAtEndOfFile`
-with the offset-vs-total_header_size comparison.
+Per §*Tier dispatch* above: an in-stream payload first, then
+`BULKDATA_PayloadInSeperateFile` (`BULKDATA_OptionalPayload` picks `.uptnl`),
+then `BULKDATA_PayloadAtEndOfFile` with the offset-vs-total_header_size comparison.
 
 ### Skip-region presence
 
@@ -451,7 +457,8 @@ A `FByteBulkDataHeader` reader MUST:
 - **Validate tier-dispatch consistency**: a record with
   `BULKDATA_OptionalPayload` set MUST also have
   `BULKDATA_PayloadInSeperateFile` set (the routing combination
-  documented above). Test the tier bits in §*Tier dispatch* order. A
+  documented above). Test the §*Tier dispatch* rows in order, and read
+  an in-stream payload where its header ends, never at `OffsetInFile`. A
   record with a payload (a nonzero size, no `BULKDATA_Unused`) is
   in-stream when `BULKDATA_ForceInlinePayload` is set or its flags are
   exactly `0` or `BULKDATA_LazyLoadable`.[^4] One that is neither
@@ -575,4 +582,4 @@ plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
 
 [^3]: LZO/BitWindow bulk handling across community references: `gildor2/UEViewer` `Unreal/UnCoreCompression.cpp` decodes UE3 LZO bulk via `lzo1x_decompress_safe` (`DetectCompressionMethod` notes "LZO was used only with UE3 games") and has no BitWindow branch; `FabianFG/CUE4Parse` `CUE4Parse/UE4/Assets/Objects/TBulkData.cs` decodes only `BULKDATA_SerializeCompressedZLIB` and reads every other flag as a raw payload; `trumank/repak` is a pak-container library and does not parse bulk records (its `Compression` enum has no LZO). BitWindow is documented deprecated ("platform-specific bit window") in `adrianstephens/orbiscrude` `shared/filetypes/container/unreal_types.cpp`. Pure-Rust LZO1X decoder for a future in-scope fixture: the MIT-licensed `lzokay` crate.
 
-[^4]: Separate-file dispatch: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/TBulkData.cs@2b8901c3ee9818558ad33e2496a58d50b82e99db` (`GetBulkArchive` tests `BULKDATA_PayloadInSeperateFile` at L176 before `BULKDATA_PayloadAtEndOfFile` at L215) and `gildor2/UEViewer/Unreal/UnCoreSerialize.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` (L1351 before L1360). CUE4Parse skips a record with no payload at `TBulkData.cs` L53 (UEViewer at L1338) and tests for an in-stream one at L62. Cooked words: `matyalatte/Matya-Uasset-Samples@a7921caec72aca1d1a9cf28e488d702dceaf6f93`, where `4.18/T_Worm_A.uexp` mip 0 (at 0x100) is `0x00000501` with `OffsetInFile` equal to minus `BulkDataStartOffset`, and `4.27/T_Worm_A.uexp` mip 0 (at 0x104) is `0x00010501` with `OffsetInFile` 0. The writer side is `matyalatte/UE4-DDS-Tools/src/unreal/data_resource.py@10bf27eef8b6d3a8048bf4e226268abe07313879` L71-L82.
+[^4]: Separate-file dispatch: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/TBulkData.cs@2b8901c3ee9818558ad33e2496a58d50b82e99db` (`GetBulkArchive` tests `BULKDATA_PayloadInSeperateFile` at L176 before `BULKDATA_PayloadAtEndOfFile` at L215) and `gildor2/UEViewer/Unreal/UnCoreSerialize.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` (L1351 before L1360). CUE4Parse skips a record with no payload at `TBulkData.cs` L53 (UEViewer at L1338), tests for an in-stream one at L62, and reads it at the stream position after the header (L59, L137, L141). In `4.27/T_Worm_A.uexp` the `0x00000048` mip header at 0x14c ends at byte 352, and its `OffsetInFile` is 1173: the 821-byte `.uasset` plus 352. Cooked words: `matyalatte/Matya-Uasset-Samples@a7921caec72aca1d1a9cf28e488d702dceaf6f93`, where `4.18/T_Worm_A.uexp` mip 0 (at 0x100) is `0x00000501` with `OffsetInFile` equal to minus `BulkDataStartOffset`, and `4.27/T_Worm_A.uexp` mip 0 (at 0x104) is `0x00010501` with `OffsetInFile` 0. The writer side is `matyalatte/UE4-DDS-Tools/src/unreal/data_resource.py@10bf27eef8b6d3a8048bf4e226268abe07313879` L71-L82.

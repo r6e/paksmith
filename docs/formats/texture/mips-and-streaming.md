@@ -84,7 +84,7 @@ skip regions, and the full `EBulkDataFlags` catalog.
 | `BulkDataFlags` | 4 | LE | `u32` | Bitfield publishing the storage tier + flags. See bit catalog below. |
 | `ElementCount` | 4 or 8 | LE | `i32` / `i64` | Number of elements (bytes for byte bulk data). 8 bytes (i64) when `BULKDATA_Size64Bit` is set, otherwise 4 bytes (i32). Signed. |
 | `SizeOnDisk` | 4 or 8 | LE | `uint` | Stored byte size (post-compression if applicable). Width is 8 bytes when `BULKDATA_Size64Bit` is set, 4 bytes otherwise. |
-| `OffsetInFile` | 8 or 4 | LE | `i64` / `i32` | Byte offset within the containing file. Width is gated on the `BULKDATA_AT_LARGE_OFFSETS` UE version constant (UE 4.3+): 8 bytes (`i64`) for that range and later; 4 bytes (`i32`) on older packages. Paksmith's pak v3+ accepted range starts at UE 4.4+, so paksmith readers always see 8 bytes. **Offset fix-up:** unless `BULKDATA_NoOffsetFixUp` (bit 16) is set, the on-wire value is a pre-fixup offset that a reader MUST adjust by adding the package summary's `BulkDataStartOffset` (see [`../asset/uasset.md`](../asset/uasset.md)) before interpretation as an absolute file offset. |
+| `OffsetInFile` | 8 or 4 | LE | `i64` / `i32` | Byte offset within the containing file. Width is gated on the `BULKDATA_AT_LARGE_OFFSETS` UE version constant (UE 4.3+): 8 bytes (`i64`) for that range and later; 4 bytes (`i32`) on older packages. Paksmith's pak v3+ accepted range starts at UE 4.4+, so paksmith readers always see 8 bytes. **Offset fix-up:** unless `BULKDATA_NoOffsetFixUp` (bit 16) is set, the on-wire value is a pre-fixup offset that a reader MUST adjust by adding the package summary's `BulkDataStartOffset` (see [`../asset/uasset.md`](../asset/uasset.md)) before interpretation as an absolute file offset. An in-stream payload does not use `OffsetInFile`. |
 
 The "containing file" is whichever of `.uasset` / `.uexp` / `.ubulk`
 the flags identify.
@@ -122,12 +122,13 @@ The tier the bytes live in is determined by `BulkDataFlags`:
 
 | Flag combination | Tier | File |
 |------------------|------|------|
+| `BULKDATA_ForceInlinePayload` (cooked in-stream mips are `0x48`), or flags exactly `0` or `BULKDATA_LazyLoadable`, with a payload | In-stream | After the mip's bulk header, before its `SizeX`; `OffsetInFile` is not used. |
 | `BULKDATA_OptionalPayload` + `BULKDATA_PayloadInSeperateFile` [sic] | Optional streaming | `.uptnl`. |
 | `BULKDATA_PayloadInSeperateFile` [sic] without `BULKDATA_OptionalPayload` | Streaming | `.ubulk`; offset is from `.ubulk`'s start. |
 | `BULKDATA_PayloadAtEndOfFile` without `BULKDATA_PayloadInSeperateFile`, in the `.uasset` region | Inline | The `.uasset` itself; `OffsetInFile` is from the `.uasset`'s start. |
 | `BULKDATA_PayloadAtEndOfFile` without `BULKDATA_PayloadInSeperateFile`, in the `.uexp` region | uexp-resident | `.uexp`; offset is from `.uasset` start (after stitching, that's `total_header_size + uexp_offset`). |
 
-The separate-file rows win: cooked `.ubulk` mips set
+The rows are tested in order; separate-file wins over end-of-file: cooked `.ubulk` mips set
 `BULKDATA_PayloadAtEndOfFile` too (see
 [`../asset/bulk-data.md`](../asset/bulk-data.md) §*Tier dispatch*).
 
