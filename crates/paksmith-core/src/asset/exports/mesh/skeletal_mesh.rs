@@ -1310,8 +1310,8 @@ fn read_lod_post_loop_tail(
 /// distinct `SerializeRenderItem_Legacy` header (UE4.19–4.23; this is the
 /// skeletal-LOD `SplitModelAndRenderData` split, NOT the UE4.16 split-asset
 /// `.uexp` cooking split) → returns
-/// [`crate::PaksmithError::UnsupportedFeature`]; an absent version (unversioned
-/// package — the shipping-game norm) proceeds, relying on the strict `bool32`
+/// [`crate::PaksmithError::UnsupportedFeature`]; an absent version
+/// proceeds, relying on the strict `bool32`
 /// reads + the section reader's caps as the natural backstop against a
 /// legacy-as-new mis-parse.
 ///
@@ -1463,8 +1463,8 @@ pub(crate) fn read_typed(
         // `cooked` block so a non-cooked mesh isn't rejected for a pre-4.24
         // rendering version it never uses. Discriminator: FRenderingObjectVersion
         // >= MaterialShaderMapIdSerialization. Present-and-below → reject;
-        // present-and-at/above → proceed; ABSENT (unversioned package, the
-        // shipping-game norm) → proceed, relying on the strict bool32 reads
+        // present-and-at/above → proceed; ABSENT → proceed, relying on
+        // the strict bool32 reads
         // (bIsLODCookedOut / bInlined) + the section reader's caps/strict-bools as
         // the natural backstop against a legacy-as-new mis-parse.
         let rendering_ver = ctx
@@ -4803,7 +4803,7 @@ mod tests {
     }
 
     /// The 4.24 gate proceeds when `FRenderingObjectVersion` is ABSENT
-    /// (unversioned package — the shipping-game norm). The `is_some_and` gate
+    /// from the custom-version container. The `is_some_and` gate
     /// must NOT reject a `None` version; pins it against an `is_some_and`→
     /// `is_none_or` mutant.
     ///
@@ -4894,7 +4894,7 @@ mod tests {
 
     /// A non-strict `bIsLODCookedOut` wire value of `2` (neither 0 nor 1) is
     /// rejected by `read_bool32` as `InvalidBool32 { SkelLodCookedOut, observed:
-    /// 2 }`. Documents the legacy-as-new safety backstop for unversioned packages
+    /// 2 }`. Documents the legacy-as-new safety backstop for an absent version
     /// (a `SerializeRenderItem_Legacy` mis-parse lands on a non-bool here).
     #[test]
     fn read_static_lod_model_non_strict_cooked_out_bool_is_rejected() {

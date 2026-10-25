@@ -162,9 +162,8 @@ pub(crate) fn read_from(
     // platform data (#643). The oracle's gate is `Game >= UE5_4 &&
     // bCooked`; for VERSIONED packages the object-version proxy is
     // 1012 (`PROPERTY_TAG_COMPLETE_TYPE_NAME`, the version UE 5.4
-    // ships). Unversioned cooked assets carry no version and cannot
-    // resolve the gate until profile engine-version plumbing lands
-    // (#656) — they parse as before. Bodies are consumed for cursor
+    // ships). Unversioned packages record no version and are refused
+    // at the summary (#985). Bodies are consumed for cursor
     // correctness and discarded (no export surface for cues yet).
     if cooked
         && ctx

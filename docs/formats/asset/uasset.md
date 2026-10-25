@@ -69,8 +69,8 @@ across UE versions due to conditional reads; the canonical sequence (UE
 | 0 | 4 | LE | `magic` | `u32` | Must equal `0x9E2A83C1` (`PACKAGE_FILE_TAG`). |
 | 4 | 4 | LE | `legacy_file_version` | `i32` | Negative; one of `-7`, `-8`, `-9`. |
 | 8 | 4 | LE | `legacy_ue3_version` | `i32` | Always `-1` for paksmith-supported archives. |
-| 12 | 4 | LE | `file_version_ue4` | `i32` | 504–522 (UE 4.21 – 4.27). |
-| 16 | 4 | LE | `file_version_ue5` | `i32` | 0 (UE4) or 1000–1013 (UE5). Present only if `legacy_file_version ≤ -8`. |
+| 12 | 4 | LE | `file_version_ue4` | `i32` | UE4 object version; paksmith requires ≥ 504. 0 in an [unversioned package](#unversioned-packages). |
+| 16 | 4 | LE | `file_version_ue5` | `i32` | UE5 object version, from 1000; paksmith refuses ≥ 1014. 0 in an [unversioned package](#unversioned-packages). Present only if `legacy_file_version ≤ -8`. |
 | → varies | 4 | LE | `file_version_licensee_ue4` | `i32` | Game-studio fork version (usually 0). |
 | → varies | variable | — | `custom_versions` | `FCustomVersion[]`[^3] | See [`primitive/fcustom-version.md`](../primitive/fcustom-version.md). |
 | → varies | 4 | LE | `total_header_size` | `i32` | Total byte length of the header region (everything before payloads). Capped at 256 MiB by paksmith. |
@@ -228,6 +228,20 @@ detection logic.
   parse fails with `AssetParseFault::UnversionedWithoutMappings` (Phase
   2f shipped the loader).
 
+### Unversioned packages
+
+A package cooked unversioned records no object version:
+`FileVersionUE4`, `FileVersionUE5` (at `-8` / `-9`) and
+`FileVersionLicenseeUE4` are all 0. Its layout is still the cooking
+engine's, so a reader must be told which engine that was. CUE4Parse
+substitutes its configured version when all three are 0, before it reads
+the custom versions;[^9] UEViewer detects `FileVersion == 0 &&
+LicenseeVersion == 0` and, when no game is selected, asks the user to
+select an engine, or fails.[^10] This is independent of unversioned
+property serialization above: a package can be either, or both. Paksmith
+refuses an unversioned package with
+`AssetParseFault::UnversionedPackage`.
+
 ### Legacy file version (`-7` / `-8` / `-9`)
 
 - `-7`: omits `file_version_ue5` field (UE4 only).
@@ -315,8 +329,8 @@ policy.
     `FGuid` → `FIoHash`). The 1011/1012 property-tag shapes are
     handled as of #643; CUE4Parse supports 1014+ while the
     `unreal_asset` oracle's version enum ends at 1009.
-  - **`PKG_UnversionedProperties` requires mappings.** Unversioned
-    packages are decoded against a `.usmap` schema supplied via the
+  - **`PKG_UnversionedProperties` requires mappings.** Packages with
+    unversioned properties are decoded against a `.usmap` schema supplied via the
     `mappings: Option<&Arc<Usmap>>` parameter (Phase 2f's loader shipped).
     Parsing without mappings surfaces as
     `AssetParseFault::UnversionedWithoutMappings`. CUE4Parse and
@@ -364,6 +378,7 @@ for the full enum):
 - `AssetParseFault::InvalidMagic { observed, expected }`.
 - `AssetParseFault::UnsupportedLegacyFileVersion { version }`.
 - `AssetParseFault::UnsupportedFileVersionUE4 { version, minimum }`.
+- `AssetParseFault::UnversionedPackage { legacy_file_version }`.
 - `AssetParseFault::UnsupportedFileVersionUE5 { version, first_unsupported }`.
 - `AssetParseFault::BoundsExceeded { field: AssetWireField, … }` — every
   cap above surfaces this with a specific `AssetWireField` discriminant.
@@ -371,8 +386,8 @@ for the full enum):
 - `AssetParseFault::FStringMalformed { kind }`.
 - `AssetParseFault::PackageIndexUnderflow { field }`.
 - `AssetParseFault::AllocationFailed { context: AssetAllocationContext, … }`.
-- `AssetParseFault::UnversionedWithoutMappings` (raised when an unversioned
-  package is parsed without `mappings: Some(...)`; Phase 2f's `.usmap`
+- `AssetParseFault::UnversionedWithoutMappings` (raised when a package with
+  unversioned properties is parsed without `mappings: Some(...)`; Phase 2f's `.usmap`
   loader supplies these).
 - `AssetParseFault::UnsupportedCompressionInSummary { site, observed }`
   (raised when the summary's compressed-chunks tail is non-empty —
@@ -390,3 +405,5 @@ for the full enum):
 [^6]: See [`../primitive/fengine-version.md`](../primitive/fengine-version.md).
 [^7]: See [`../primitive/fpackage-index.md`](../primitive/fpackage-index.md).
 [^8]: See [`../primitive/fname.md`](../primitive/fname.md).
+[^9]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L212-L218 (detection and substitution), L235 (custom versions).
+[^10]: `gildor2/UEViewer/Unreal/UnrealPackage/UnPackage4.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L119-L139; `gildor2/UEViewer/UmodelTool/Main.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L548-L556.

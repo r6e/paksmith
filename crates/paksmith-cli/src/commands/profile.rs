@@ -110,7 +110,7 @@ pub(crate) struct AddArgs {
     #[arg(long)]
     pub(crate) engine_version: Option<String>,
     /// `.usmap` mappings file this profile supplies when selected via
-    /// `--game`/`--detect` (inspect/extract) for unversioned assets.
+    /// `--game`/`--detect` (inspect/extract) for unversioned properties.
     /// Must name an existing regular file; stored as its absolute path
     /// (symlinks are not resolved).
     #[arg(long, value_name = "PATH")]

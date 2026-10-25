@@ -1146,8 +1146,8 @@ options are, in order of invasiveness:
    the property data is already in unversioned (header-stripped)
    layout, so the file becomes unparsable. **Don't do this.**
 
-For Phase 2f fixtures, paksmith generally pairs an unversioned cooked
-package with a `.usmap` mapping file (next section). The "versioned
+For Phase 2f fixtures, paksmith generally pairs a cooked package with
+unversioned properties and a `.usmap` mapping file (next section). The "versioned
 UE5" case is mostly useful for sanity-checking the parser fast path,
 not for production usage.
 
