@@ -268,7 +268,7 @@ fn read_platform_data(
 /// path).
 ///
 /// **Bulk-payload placement.** Each `FByteBulkData` value is read by
-/// [`FByteBulkData::read_from`], which advances the cursor past an in-stream
+/// `FByteBulkData::read_from_ctx`, which advances the cursor past an in-stream
 /// inline payload (`ForceInlinePayload` / exactly-`LazyLoadable` / no-flags
 /// records) exactly as CUE4Parse's `TBulkData` does, and leaves the cursor at
 /// the header's end for `PayloadAtEndOfFile` / separate-file records (the cooked

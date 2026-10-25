@@ -181,8 +181,8 @@ pub enum Asset {
 /// decodes the classic LOD geometry; only the Nanite tail (the virtualized-mesh
 /// detail beyond that LOD) is intentionally surfaced as
 /// [`crate::error::PaksmithError::UnsupportedFeature`] rather than mis-decoded. A
-/// non-inlined (`bInlined == false`) LOD's streamed geometry is resolved from its
-/// companion `.ubulk` via the bulk resolver, when one is available; an
+/// non-inlined (`bInlined == false`) LOD's geometry is resolved via the bulk
+/// resolver (from a companion file, the package, or in-stream), when one is available; an
 /// unresolvable record (no resolver, a missing companion, or LZO / BitWindow
 /// compression) degrades the export to a generic property bag; an allocation
 /// failure while loading the companion or inflating a zlib payload ends the
@@ -322,7 +322,8 @@ pub struct SkeletalMeshData {
     pub bounds: structs::bounds::FBoxSphereBounds,
     /// Per-LOD records — one entry per `LODModels[i]`, each with its
     /// sections + bone arrays and per-vertex skin geometry. Non-inlined
-    /// LODs resolve their streamed blob through the bulk resolver (#650).
+    /// LODs resolve their streamed blob through the bulk resolver (#650),
+    /// unless the parser captured it in-stream.
     /// A LOD legitimately carries no geometry in three cases:
     /// audiovisual-stripped and `bIsLODCookedOut` (both lack the whole
     /// section block), or an EMPTY bulk record (`element_count == 0` —
