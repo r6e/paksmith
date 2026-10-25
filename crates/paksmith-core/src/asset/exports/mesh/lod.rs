@@ -13,7 +13,7 @@
 //! (`!AudioVisualStripped && !bIsLODCookedOut`, the cooked-runtime case):
 //!
 //! - **inlined** (`bInlined == true`): `SerializeBuffers` in-stream.
-//! - **non-inlined** (`bInlined == false`, the streamed `.ubulk` path): an
+//! - **non-inlined** (`bInlined == false`, the streamed path): an
 //!   `FByteBulkData` header whose payload is resolved via
 //!   [`AssetContext::bulk_resolver`] and decoded with the same `SerializeBuffers`,
 //!   followed by the in-stream availability-info trailer. See
@@ -78,7 +78,7 @@ const CDSF_RAY_TRACING_RESOURCES: u8 = 8;
 /// `MaxDeviation` (`f32`) → `bIsLODCookedOut` + `bInlined` (`u32` bools).
 /// When the LOD carries buffers (`!AVStripped && !bIsLODCookedOut`): if
 /// `bInlined`, `SerializeBuffers` in-stream; otherwise [`read_non_inlined_lod`]
-/// resolves the streamed `.ubulk` geometry. Either way the 12-byte
+/// resolves the streamed geometry. Either way the 12-byte
 /// `FStaticMeshBuffersSize` trailer closes the LOD. A cooked-out /
 /// audio-visual-stripped LOD has no buffers and decodes to empty geometry (just
 /// its sections).
@@ -197,7 +197,7 @@ fn read_non_inlined_lod(
     // — `FUE5ReleaseStreamObjectVersion < RemovingTessellation`). Unlike the
     // inlined adjacency buffer in `serialize_buffers`, there is NO
     // `CDSF_AdjacencyData` strip-flag check here: the inner `FStripDataFlags` live
-    // in the `.ubulk` payload, not the main stream, and these are fixed-size
+    // inside the separately decoded bulk payload, and these are fixed-size
     // availability stats rather than the conditional buffer itself.
     if tessellation_present(ctx) {
         read::skip(cur, 8, asset_path, AssetWireField::MeshLodAvailabilityInfo)?;
@@ -548,7 +548,7 @@ pub(crate) mod test_support {
     /// 3 verts `(0,0,0)/(1,0,0)/(0,1,0)`, one triangle of `indices`, no
     /// per-vertex color. Shared by [`inlined_lod_ue4_23`] (where it follows `bInlined`
     /// in-stream) and the non-inlined LOD tests (where it is the resolved
-    /// `.ubulk` payload). The inner strip flags strip editor data plus the
+    /// bulk payload). The inner strip flags strip editor data plus the
     /// reversed and adjacency buffers, so only `IndexBuffer` and
     /// `DepthOnlyIndexBuffer` follow the four geometry buffers; two empty
     /// area-weighted samplers close it.
@@ -614,8 +614,8 @@ pub(crate) mod test_support {
         }
     }
 
-    /// The standalone UE4.23 `SerializeBuffers` blob — used as the resolved
-    /// `.ubulk` payload of a non-inlined LOD.
+    /// The standalone UE4.23 `SerializeBuffers` blob — used as the bulk payload
+    /// of a non-inlined LOD, in a companion file or in-stream.
     #[cfg(feature = "__test_utils")]
     #[must_use]
     pub(crate) fn serialize_buffers_blob_ue4_23(indices: [u16; 3]) -> Vec<u8> {
@@ -744,19 +744,13 @@ pub(crate) mod test_support {
     pub(crate) const SEPARATE_FILE_LZO: u32 =
         SEPARATE_FILE_NO_FIXUP | bulk_data::FLAG_COMPRESSED_LZO;
 
-    /// Write a 20-byte `FByteBulkData` header for a separate-file (streamed)
-    /// record: the given `flags` word (e.g. [`SEPARATE_FILE_NO_FIXUP`]),
-    /// `element_count`, `size_on_disk` and `offset_in_file`.
+    /// Write a 20-byte `FByteBulkData` header: the given `flags` word (e.g.
+    /// [`SEPARATE_FILE_NO_FIXUP`]), `ElementCount` and `SizeOnDisk` both
+    /// `size_on_disk` as in an uncompressed record, and `offset_in_file`.
     #[cfg(feature = "__test_utils")]
-    fn push_separate_file_bulk_header(
-        b: &mut Vec<u8>,
-        flags: u32,
-        element_count: i32,
-        size_on_disk: usize,
-        offset_in_file: usize,
-    ) {
+    fn push_bulk_header(b: &mut Vec<u8>, flags: u32, size_on_disk: usize, offset_in_file: usize) {
         b.extend_from_slice(&flags.to_le_bytes());
-        b.extend_from_slice(&element_count.to_le_bytes());
+        b.extend_from_slice(&i32::try_from(size_on_disk).unwrap().to_le_bytes());
         b.extend_from_slice(&u32::try_from(size_on_disk).unwrap().to_le_bytes());
         b.extend_from_slice(&i64::try_from(offset_in_file).unwrap().to_le_bytes());
     }
@@ -778,15 +772,35 @@ pub(crate) mod test_support {
     ) -> Vec<u8> {
         let mut b = Vec::new();
         push_lod_header_ue4_23(&mut b, false); // bInlined = 0
-        push_separate_file_bulk_header(&mut b, flags, 3, bulk_size_on_disk, offset_in_file);
-        // Availability-info trailer (UE4 path, per CUE4Parse
-        // FStaticMeshLODResources.cs): DepthOnlyNumTriangles + Packed (8), the
-        // buffer-count/stride stats (4*4 + 2*4 + 2*4 + 5*2*4 = 72), and — since UE4
-        // is below RemovingTessellation — the AdjacencyIndexBuffer stats (8).
-        b.extend_from_slice(&[0u8; 8 + 72 + 8]);
-        // FStaticMeshBuffersSize (3 × u32), shared with the inlined path.
-        b.extend_from_slice(&[0u8; 12]);
+        push_bulk_header(&mut b, flags, bulk_size_on_disk, offset_in_file);
+        push_non_inlined_lod_trailer(&mut b);
         b
+    }
+
+    /// [`non_inlined_lod_ue4_23`] whose `SerializeBuffers` blob is in-stream: a
+    /// `0x48` header (`SingleUse | ForceInlinePayload`, the word cooked in-stream
+    /// mips carry), `blob` right after it, and a stored `OffsetInFile` of 0. #971.
+    #[cfg(feature = "__test_utils")]
+    #[must_use]
+    pub(crate) fn in_stream_lod_ue4_23(blob: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        push_lod_header_ue4_23(&mut b, false); // bInlined = 0
+        push_bulk_header(&mut b, 0x48, blob.len(), 0);
+        b.extend_from_slice(blob);
+        push_non_inlined_lod_trailer(&mut b);
+        b
+    }
+
+    /// The in-stream tail of a non-inlined LOD: the availability-info trailer
+    /// (UE4 path, per CUE4Parse FStaticMeshLODResources.cs) —
+    /// DepthOnlyNumTriangles + Packed (8), the buffer-count/stride stats (4*4 +
+    /// 2*4 + 2*4 + 5*2*4 = 72) and, since UE4 is below RemovingTessellation, the
+    /// AdjacencyIndexBuffer stats (8) — then `FStaticMeshBuffersSize` (3 × u32),
+    /// shared with the inlined path.
+    #[cfg(feature = "__test_utils")]
+    fn push_non_inlined_lod_trailer(b: &mut Vec<u8>) {
+        b.extend_from_slice(&[0u8; 8 + 72 + 8]);
+        b.extend_from_slice(&[0u8; 12]);
     }
 
     /// The `UStaticMesh.Deserialize` fields through `Sockets`: strip flags,
@@ -848,7 +862,7 @@ pub(crate) mod test_support {
     pub(crate) fn non_inlined_lod_ue5_0_empty() -> Vec<u8> {
         let mut b = Vec::new();
         push_lod_header_ue5_0(&mut b, false); // bInlined = 0
-        push_separate_file_bulk_header(&mut b, SEPARATE_FILE_NO_FIXUP, 0, 0, 0); // element_count 0 → no geometry
+        push_bulk_header(&mut b, SEPARATE_FILE_NO_FIXUP, 0, 0); // element_count 0 → no geometry
         // Availability-info trailer WITHOUT the adjacency stats (UE5 removed them).
         b.extend_from_slice(&[0u8; 8 + 72]);
         b.extend_from_slice(&[0u8; 12]); // FStaticMeshBuffersSize

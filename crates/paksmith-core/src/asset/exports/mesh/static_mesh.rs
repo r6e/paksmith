@@ -29,8 +29,8 @@
 //! render-data scope boundary: pre-4.23 legacy (UNVERIFIED, see
 //! [`super::lod::read_lod_legacy`]) + UE 4.23–4.27 (full) + UE 5.0–5.3
 //! (geometry-only, the classic LOD geometry without the un-decoded Nanite tail).
-//! UE5.4+ degrades to a generic property bag. A non-inlined LOD's streamed
-//! geometry is resolved from its companion `.ubulk` (see [`StaticMeshData`]
+//! UE5.4+ degrades to a generic property bag. A non-inlined LOD's geometry
+//! is resolved from a companion file, the package, or in-stream (see [`StaticMeshData`]
 //! for when an unresolvable record degrades the export); a distance-field-present
 //! UE4 mesh is parsed (the `FDistanceFieldVolumeData` is validated-skipped)
 //! and still exports its geometry.

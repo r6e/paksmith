@@ -209,7 +209,7 @@ the reader maps the record to its physical file:
 | Flag combination | Tier | File | Offset interpretation |
 |------------------|------|------|------------------------|
 | `BULKDATA_ForceInlinePayload`, or flags exactly `0` or `BULKDATA_LazyLoadable`, with a payload | In-stream | The header's own archive | Where the header ends; `OffsetInFile` is not used. |
-| `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile` | Optional streaming | `.uptnl` | Offset from `.uptnl` start. |
+| `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile` (`OptionalPayload` alone: see *Known divergences*) | Optional streaming | `.uptnl` | Offset from `.uptnl` start. |
 | `BULKDATA_PayloadInSeperateFile` without `BULKDATA_OptionalPayload` | Streaming | `.ubulk` | Offset from `.ubulk` start. |
 | `BULKDATA_PayloadAtEndOfFile` without `BULKDATA_PayloadInSeperateFile`, `OffsetInFile < total_header_size` | Inline | `.uasset` itself | Offset from `.uasset` start. |
 | `BULKDATA_PayloadAtEndOfFile` without `BULKDATA_PayloadInSeperateFile`, `OffsetInFile >= total_header_size` | uexp-resident | `.uexp` | Offset from `.uasset` start (after stitching, that's `total_header_size + uexp_offset`). |
@@ -454,10 +454,9 @@ A `FByteBulkDataHeader` reader MUST:
   combinations sum to 16), or 20 bytes (both gates set). An
   attacker-crafted record near EOF could otherwise drive a read
   past the archive end.
-- **Validate tier-dispatch consistency**: a record with
-  `BULKDATA_OptionalPayload` set MUST also have
-  `BULKDATA_PayloadInSeperateFile` set (the routing combination
-  documented above). Test the §*Tier dispatch* rows in order, and read
+- **Validate tier-dispatch consistency**: test the §*Tier dispatch* rows in
+  order (*Known divergences* covers a record that sets
+  `BULKDATA_OptionalPayload` without `BULKDATA_PayloadInSeperateFile`), and read
   an in-stream payload where its header ends, never at `OffsetInFile`. A
   record with a payload (a nonzero size, no `BULKDATA_Unused`) is
   in-stream when `BULKDATA_ForceInlinePayload` is set or its flags are
@@ -528,6 +527,15 @@ See `docs/security/allocation-caps.md` for the broader policy.
      bits 19-27 and 31; the reference warns. See "Paksmith
      deviation" in the `BulkDataFlags` bit catalog and the
      hardening checklist above.
+  3. **`OptionalPayload` without `PayloadInSeperateFile`:** UEViewer
+     (`UnCoreSerialize.cpp` L1351, L1595-L1602) reads such a record from the
+     `.uptnl`, and so does CUE4Parse (`TBulkData.cs` L149) unless
+     `ForceInlinePayload` is also set, which its L141 reads in-stream as
+     paksmith does.[^4] Paksmith tests `OptionalPayload` only inside the
+     separate-file row, so it routes the record by its other bits:
+     `0x00000801` reads the package at its fixed-up `OffsetInFile`, and
+     `0x00000800` alone fails with `BulkDataNoTierFlag`. No sample shows
+     the shape.
 
 ## Paksmith implementation
 
@@ -570,6 +578,14 @@ generic property bag. A companion load that runs out of memory fails the
 package read instead. A later `resolve_bulk_for_export` call charges its
 export's records against a ledger of its own the same way, and fails
 with `BulkDataExportReadsExceedSource` instead.
+
+An in-stream payload the parser read whole resolves from the stitched
+package at that position, under the same ledger and budget; a short one
+records no position, so its tier bits route it or it fails with
+`BulkDataNoTierFlag`, a departure from the rule above for a truncated
+archive whose reads stay bounds-checked. The
+skeletal-mesh reader is the exception: it decodes an in-stream LOD
+payload it captured while parsing, without resolving or charging it.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 + the per-task
 plans in `docs/plans/phase-3b-bulk-data-resolver.md`.

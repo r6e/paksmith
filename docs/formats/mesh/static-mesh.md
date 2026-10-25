@@ -44,8 +44,8 @@ tagged-property segment, the full `UStaticMesh.Deserialize` chain
 `LightingGuid`, `Sockets`), and the `bCooked`-gated
 `FStaticMeshRenderData` geometry — per-LOD vertex / index buffers,
 bounds, and screen sizes — for the UE 4.23–4.27 new-cooked, inlined
-layout. A non-inlined (`bInlined == false`) LOD's streamed geometry is
-resolved from its companion `.ubulk` via the bulk resolver and decoded
+layout. A non-inlined (`bInlined == false`) LOD's geometry is resolved
+via the bulk resolver, from a companion file, the package, or in-stream, and decoded
 with the same `SerializeBuffers` path as an inlined LOD. A present per-LOD
 `FDistanceFieldVolumeData` (UE4 path) is validated-skipped so the
 already-parsed geometry is still returned. The pre-4.23 legacy
@@ -319,7 +319,7 @@ the `bCooked`-gated `FStaticMeshRenderData` geometry into
 4.23–4.27 new-cooked, inlined layout, with `MAX_LODS_PER_MESH` /
 `MAX_SECTIONS_PER_LOD` / `MAX_VERTICES_PER_LOD` / `MAX_INDICES_PER_LOD`
 caps enforced before allocation. A non-inlined (`bInlined == false`) LOD's
-streamed geometry is resolved from its companion `.ubulk` (via
+geometry is resolved from a companion file, the package, or in-stream (via
 `AssetContext::bulk_resolver`) and decoded with the same `SerializeBuffers`
 path as an inlined LOD. A present per-LOD `FDistanceFieldVolumeData` (UE4
 path) is validated-skipped, so a distance-field-bearing mesh still exports

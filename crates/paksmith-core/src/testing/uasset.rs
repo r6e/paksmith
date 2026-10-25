@@ -631,13 +631,13 @@ fn cooked_texture_body_raw(
     write_fstring(&mut b, "PF_DXT5"); // PixelFormat
     b.extend_from_slice(&0i32.to_le_bytes()); // FirstMipToSerialize
     b.extend_from_slice(&1i32.to_le_bytes()); // mip count
-    // One FTexture2DMipMap: per-mip bCooked (UE4) + inline FByteBulkData +
+    // One FTexture2DMipMap: per-mip bCooked (UE4) + FByteBulkData (+ `in_stream`) +
     // SizeX/SizeY/SizeZ.
     b.extend_from_slice(&1u32.to_le_bytes()); // per-mip bCooked (cooked → no derived-data tail)
     b.extend_from_slice(&mip_flags.to_le_bytes()); // e.g. 0x0001_0001 = PAYLOAD_AT_END_OF_FILE | NO_OFFSET_FIXUP
     b.extend_from_slice(&element_count.to_le_bytes()); // ElementCount
     b.extend_from_slice(&size_on_disk.to_le_bytes()); // SizeOnDisk
-    b.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile (inline → package start)
+    b.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile (end-of-file → package start)
     b.extend_from_slice(in_stream);
     b.extend_from_slice(&dim.to_le_bytes()); // mip SizeX
     b.extend_from_slice(&dim.to_le_bytes()); // mip SizeY

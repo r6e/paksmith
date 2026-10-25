@@ -2818,6 +2818,34 @@ mod tests {
         }
     }
 
+    /// In-stream static-mesh LODs decode through a package read: each one
+    /// resolves mid-parse from its own export's bytes, at the position the
+    /// parser recorded with that export's base, so each mesh keeps its triangle.
+    #[test]
+    fn in_stream_static_mesh_lods_decode_through_a_package_read() {
+        use crate::asset::exports::mesh::lod::test_support::{
+            cooked_static_mesh_ue4_23, in_stream_lod_ue4_23, serialize_buffers_blob_ue4_23,
+        };
+        let triangles = [[0, 1, 2], [2, 1, 0]];
+        let lod = |t| in_stream_lod_ue4_23(&serialize_buffers_blob_ue4_23(t));
+        let bytes = static_mesh_package(
+            triangles
+                .map(|t| cooked_static_mesh_ue4_23(&[lod(t)]))
+                .to_vec(),
+        );
+
+        let pkg = Package::read_from(&bytes, None, None, "m.uasset").unwrap();
+
+        assert_eq!(pkg.payloads.len(), 2);
+        for (payload, triangle) in pkg.payloads.iter().zip(triangles) {
+            let crate::asset::Asset::StaticMesh(mesh) = payload else {
+                panic!("expected a static mesh, got {payload:?}");
+            };
+            let lods = &mesh.render_data.as_ref().unwrap().lods;
+            assert_eq!(lods[0].indices, triangle.map(u32::from));
+        }
+    }
+
     /// Every `Package::context` starts a fresh bulk-read ledger, so a
     /// second decode through one reads the regions the first decode read.
     #[test]

@@ -319,10 +319,10 @@ impl BulkDataFlags {
         (self.0 & FLAG_PAYLOAD_IN_SEPARATE_FILE) != 0
     }
 
-    /// `BULKDATA_OptionalPayload` (bit 11). Routes
-    /// `payload_in_separate_file` records to `.uptnl` instead of
-    /// `.ubulk`. The wire format requires
-    /// `payload_in_separate_file` to also be set when this is on.
+    /// `BULKDATA_OptionalPayload` (bit 11). The resolver consults it
+    /// only on `payload_in_separate_file` records, routing them to
+    /// `.uptnl` instead of `.ubulk`; the format doc lists how other
+    /// readers treat it alone.
     #[must_use]
     pub fn optional_payload(self) -> bool {
         (self.0 & FLAG_OPTIONAL_PAYLOAD) != 0
@@ -1120,7 +1120,7 @@ pub struct BulkDataResolver {
     stitched: std::sync::Arc<Vec<u8>>,
     /// `summary.total_header_size` — boundary between inline
     /// (`.uasset` body) and uexp-resident (`.uexp` body) tiers for
-    /// `BULKDATA_PayloadAtEndOfFile` records without `PayloadInSeperateFile`.
+    /// in-stream payloads and end-of-file records without `PayloadInSeperateFile`.
     total_header_size: u64,
     /// `summary.bulk_data_start_offset` — added to `OffsetInFile`
     /// unless `BULKDATA_NoOffsetFixUp` (bit 16) is set or a payload is in-stream.
@@ -2093,7 +2093,7 @@ mod tests {
     fn ctx_with_resources(
         entries: Vec<crate::asset::data_resource::FObjectDataResource>,
     ) -> crate::asset::AssetContext {
-        let mut ctx = crate::asset::property::test_utils::make_ctx(&[]);
+        let mut ctx = make_ctx(&[]);
         ctx.data_resources = std::sync::Arc::new(entries);
         ctx
     }

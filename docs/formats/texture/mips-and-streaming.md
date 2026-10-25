@@ -301,8 +301,9 @@ See `docs/security/allocation-caps.md` for the broader policy.
 - **Cross-validation oracle:** CUE4Parse[^1] — the
   `FTexture2DMipMap` and `FByteBulkData` constructors row-for-row
   in §*Wire layout* above.
-- **Known divergences:** none currently known for per-mip resolution
-  and decode; full mip-pyramid stitching of streamed mips is deferred.
+- **Known divergences:** none for per-mip resolution and decode beyond
+  the bulk-record ones in [`../asset/bulk-data.md`](../asset/bulk-data.md)
+  §*Verification*; full mip-pyramid stitching of streamed mips is deferred.
 
 ## Paksmith implementation
 
