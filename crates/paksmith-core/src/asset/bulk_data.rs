@@ -2093,7 +2093,7 @@ mod tests {
     fn ctx_with_resources(
         entries: Vec<crate::asset::data_resource::FObjectDataResource>,
     ) -> crate::asset::AssetContext {
-        let mut ctx = crate::asset::property::test_utils::make_ctx(&[]);
+        let mut ctx = make_ctx(&[]);
         ctx.data_resources = std::sync::Arc::new(entries);
         ctx
     }
