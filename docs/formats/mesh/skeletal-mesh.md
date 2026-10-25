@@ -199,11 +199,12 @@ payload to the new-format reader mis-parses it; the strict `ReadBoolean`
 checks on `bIsLODCookedOut` and `bInlined` provide a natural backstop
 (values other than 0/1 are rejected with a typed error in most cases).
 
-**Unversioned packages** (the norm for shipping games) carry no in-file
+**Unversioned packages** carry no in-file
 4.23-vs-4.24 signal; both CUE4Parse and UEViewer ultimately gate
-`UseNewCookedFormat` on an out-of-band engine version. paksmith degrades
+`UseNewCookedFormat` on an out-of-band engine version; paksmith refuses
+them at the summary. For a versioned package, paksmith degrades
 `FRenderingObjectVersion` present-and-below-threshold to `UnsupportedFeature`;
-when `FRenderingObjectVersion` is absent (unversioned), it proceeds with the
+when `FRenderingObjectVersion` is absent from the custom versions, it proceeds with the
 new format and relies on the strict-bool backstop to reject a legacy-as-new
 mis-parse.
 

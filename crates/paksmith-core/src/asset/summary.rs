@@ -251,10 +251,13 @@ impl PackageSummary {
     /// - [`AssetParseFault::InvalidMagic`] if the first 4 bytes aren't
     ///   [`PACKAGE_FILE_TAG`].
     /// - [`AssetParseFault::UnsupportedLegacyFileVersion`] if
-    ///   `legacy_file_version` isn't `-7` or `-8`.
-    /// - [`AssetParseFault::UnsupportedFileVersionUE4`] if
+    ///   `legacy_file_version` isn't `-7`, `-8` or `-9`.
+    /// - [`AssetParseFault::UnversionedPackage`] if `file_version_ue4`,
+    ///   `file_version_ue5` (where present) and
+    ///   `file_version_licensee_ue4` are all 0.
+    /// - [`AssetParseFault::UnsupportedFileVersionUE4`] otherwise if
     ///   `file_version_ue4 < VER_UE4_NAME_HASHES_SERIALIZED` (504).
-    /// - [`AssetParseFault::UnsupportedFileVersionUE5`] if
+    /// - [`AssetParseFault::UnsupportedFileVersionUE5`] otherwise if
     ///   `file_version_ue5 >= FIRST_UNSUPPORTED_UE5_VERSION` (1014).
     /// - [`AssetParseFault::NegativeValue`] (with field
     ///   [`AssetWireField::TotalHeaderSize`], [`AssetWireField::GenerationCount`],
@@ -355,7 +358,10 @@ impl PackageSummary {
         }
         let _legacy_ue3_version = reader.read_i32::<LittleEndian>()?;
         let file_version_ue4 = reader.read_i32::<LittleEndian>()?;
-        if file_version_ue4 < VER_UE4_NAME_HASHES_SERIALIZED {
+        // 0 may mean "not recorded" rather than "too old"; decided once
+        // the UE5 and licensee versions are read.
+        let ue4_recorded = file_version_ue4 != 0;
+        if ue4_recorded && file_version_ue4 < VER_UE4_NAME_HASHES_SERIALIZED {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
                 fault: AssetParseFault::UnsupportedFileVersionUE4 {
@@ -369,7 +375,8 @@ impl PackageSummary {
         } else {
             None
         };
-        if let Some(v) = file_version_ue5
+        if ue4_recorded
+            && let Some(v) = file_version_ue5
             && v >= FIRST_UNSUPPORTED_UE5_VERSION
         {
             return Err(PaksmithError::AssetParse {
@@ -381,6 +388,25 @@ impl PackageSummary {
             });
         }
         let file_version_licensee_ue4 = reader.read_i32::<LittleEndian>()?;
+        if !ue4_recorded {
+            // CUE4Parse's FPackageFileSummary applies the same test.
+            let unversioned =
+                file_version_ue5.is_none_or(|v| v == 0) && file_version_licensee_ue4 == 0;
+            let fault = if unversioned {
+                AssetParseFault::UnversionedPackage {
+                    legacy_file_version,
+                }
+            } else {
+                AssetParseFault::UnsupportedFileVersionUE4 {
+                    version: 0,
+                    minimum: VER_UE4_NAME_HASHES_SERIALIZED,
+                }
+            };
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault,
+            });
+        }
         let version = AssetVersion {
             legacy_file_version,
             file_version_ue4,
@@ -1090,6 +1116,68 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A summary's version prefix with a zero UE4 version: tag, `legacy`,
+    /// zero UE3 and UE4 versions, `ue5` (if given) and `licensee`.
+    fn version_prefix(legacy: i32, ue5: Option<i32>, licensee: i32) -> Vec<u8> {
+        let mut buf = PACKAGE_FILE_TAG.to_le_bytes().to_vec();
+        for v in [legacy, 0, 0].into_iter().chain(ue5).chain([licensee]) {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        buf
+    }
+
+    fn version_fault(buf: &[u8]) -> AssetParseFault {
+        match PackageSummary::read_from(&mut Cursor::new(buf), "x.uasset") {
+            Err(PaksmithError::AssetParse { fault, .. }) => fault,
+            other => panic!("expected an AssetParse fault, got {other:?}"),
+        }
+    }
+
+    /// A package that records no version (UE4, UE5 and licensee all 0)
+    /// is named as unversioned at every accepted legacy version (#985).
+    #[test]
+    fn names_an_unversioned_package() {
+        for (legacy, ue5) in [(-7, None), (-8, Some(0)), (-9, Some(0))] {
+            let fault = version_fault(&version_prefix(legacy, ue5, 0));
+            let expected = AssetParseFault::UnversionedPackage {
+                legacy_file_version: legacy,
+            };
+            assert_eq!(fault, expected);
+        }
+    }
+
+    /// A zero UE4 version beside a recorded UE5 or licensee version is
+    /// not an unversioned package: it stays below the UE4 floor, even
+    /// beside a UE5 version past the ceiling.
+    #[test]
+    fn a_zero_ue4_version_beside_a_recorded_one_is_too_old() {
+        let past_ceiling = Some(FIRST_UNSUPPORTED_UE5_VERSION);
+        for (legacy, ue5, licensee) in [
+            (-7, None, 1),
+            (-8, Some(1004), 0),
+            (-8, Some(0), 1),
+            (-9, past_ceiling, 0),
+        ] {
+            let fault = version_fault(&version_prefix(legacy, ue5, licensee));
+            let expected = AssetParseFault::UnsupportedFileVersionUE4 {
+                version: 0,
+                minimum: VER_UE4_NAME_HASHES_SERIALIZED,
+            };
+            assert_eq!(fault, expected, "{legacy} {ue5:?} {licensee}");
+        }
+    }
+
+    /// A summary that ends after a zero UE4 version, before the versions
+    /// that decide whether it is unversioned, is a short read.
+    #[test]
+    fn a_summary_cut_after_a_zero_ue4_version_is_a_short_read() {
+        for (legacy, ue5, len) in [(-7, None, 16), (-8, Some(0), 16), (-8, Some(0), 20)] {
+            let buf = version_prefix(legacy, ue5, 0);
+            let result = PackageSummary::read_from(&mut Cursor::new(&buf[..len]), "x.uasset");
+            assert!(matches!(result, Err(PaksmithError::Io(_))), "{result:?}");
+        }
     }
 
     /// The exact ceiling boundary (#643): 1014

@@ -1269,7 +1269,7 @@ mod tests {
     }
 
     /// A version-inconsistent index-serialized soft path
-    /// (`soft_object_paths_indexed == true`) in an unversioned package
+    /// (`soft_object_paths_indexed == true`) among unversioned properties
     /// must degrade to a partial-tree stop (drop the rest of the export
     /// and return `Ok`) rather than fail the whole package — i.e.
     /// `UnsupportedSoftObjectPathLayout` is in `is_partial_tree_stop`,

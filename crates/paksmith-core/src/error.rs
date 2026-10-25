@@ -2527,6 +2527,14 @@ pub enum AssetParseFault {
         /// The Phase 2a floor.
         minimum: i32,
     },
+    /// The summary records no object version: `FileVersionUE4`,
+    /// `FileVersionUE5` (where present) and the licensee version are all
+    /// 0, as in a package cooked unversioned. Its layout is that of the
+    /// engine that cooked it, which the bytes do not name (#985).
+    UnversionedPackage {
+        /// The `LegacyFileVersion` read from the asset.
+        legacy_file_version: i32,
+    },
     /// `FileVersionUE5` is at/above
     /// [`FIRST_UNSUPPORTED_UE5_VERSION`](crate::asset::summary::FIRST_UNSUPPORTED_UE5_VERSION)
     /// (1014 as of #643 — UE 5.0-5.5 accepted). At 1014
@@ -3467,6 +3475,13 @@ impl fmt::Display for AssetParseFault {
             Self::UnsupportedFileVersionUE4 { version, minimum } => write!(
                 f,
                 "unsupported FileVersionUE4 {version} (minimum {minimum})"
+            ),
+            Self::UnversionedPackage {
+                legacy_file_version,
+            } => write!(
+                f,
+                "unversioned package (legacy file version {legacy_file_version}): its summary \
+                 records no object version"
             ),
             Self::UnsupportedFileVersionUE5 {
                 version,
@@ -6533,6 +6548,21 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `x.uasset`: \
              unsupported FileVersionUE4 503 (minimum 504)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unversioned_package() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::UnversionedPackage {
+                legacy_file_version: -7,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: unversioned package (legacy file \
+             version -7): its summary records no object version"
         );
     }
 

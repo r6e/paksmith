@@ -335,11 +335,11 @@ impl ObjectExport {
         };
 
         // Script-serialization tail: 2 × i64 added at UE5
-        // SCRIPT_SERIALIZATION_OFFSET (1010), but ONLY for versioned
+        // SCRIPT_SERIALIZATION_OFFSET (1010), but ONLY for tagged-property
         // packages (PKG_UnversionedProperties clear). The fields are
         // emitted AFTER the preload-dep tail, per CUE4Parse
         // (ObjectResource.cs lines 288-292). Below threshold (or for
-        // unversioned packages at threshold), defaults to None — these
+        // unversioned-property packages at threshold), defaults to None — these
         // bytes are not in the wire stream.
         // Note: the gate uses the SUMMARY's package_flags
         // (`summary_package_flags`), not the per-export `package_flags`

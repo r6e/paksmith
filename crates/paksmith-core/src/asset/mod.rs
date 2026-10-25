@@ -569,8 +569,8 @@ pub struct DataTableRow {
 /// and the encoded buffers in the `read_typed` bulk-record list — plus the
 /// `CompressedDataGuid`. The UE 5.4+ cue points the oracle reads between the
 /// header and platform data are consumed and discarded for versioned ≥ 1012
-/// packages as of #643 (unversioned cooked assets cannot resolve the gate
-/// until #656); below 1012, platform data follows `DummyCompressionName`
+/// packages as of #643 (unversioned packages are refused at the summary,
+/// #985); below 1012, platform data follows `DummyCompressionName`
 /// directly. As of 3f-4 the streaming branch (`streaming && cooked`) parses the
 /// `FStreamedAudioPlatformData` — the `CompressedDataGuid`, the `AudioFormat`
 /// codec, and the per-chunk metadata (into [`Self::streamed`]) with the chunk
