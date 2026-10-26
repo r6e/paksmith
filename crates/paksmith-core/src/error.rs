@@ -4307,7 +4307,8 @@ pub enum AssetWireField {
     MeshVertexCount,
     /// `FStaticMeshVertexBuffer::NumTexCoords` (`i32`).
     MeshNumTexCoords,
-    /// `FStaticMeshVertexBuffer::Strides` (pre-UE-4.19 only, read-and-discarded).
+    /// `FStaticMeshVertexBuffer::Strides` (pre-UE-4.19 only). No longer
+    /// emitted: the reader refuses a pre-4.19 buffer before this field.
     MeshVertexStrides,
     /// `FStaticMeshVertexBuffer` `FStripDataFlags` pair.
     MeshVertexStripFlags,

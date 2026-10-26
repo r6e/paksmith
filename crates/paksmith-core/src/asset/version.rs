@@ -175,6 +175,14 @@ pub(crate) const VER_UE4_ADDED_SOFT_OBJECT_PATH: i32 = 514;
 pub(crate) const VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID: i32 = 516;
 
 /// Object-version proxy for CUE4Parse's engine boundary `Ar.Game >=
+/// GAME_UE4_19` (`GAME_UE4_18 → 514`, `GAME_UE4_19 → 516` per the `EGame`
+/// map; neither CUE4Parse nor UEViewer maps an engine to 515). Below it,
+/// `FStaticMeshVertexBuffer` carries `Strides` and one interleaved tangent/UV
+/// array, which both key on the engine version alone. `GAME_UE4_20` also
+/// maps to `516` (see [`VER_UE4_GAME_UE4_20_OBJECT_PROXY`]).
+pub(crate) const VER_UE4_GAME_UE4_19_OBJECT_PROXY: i32 = 516;
+
+/// Object-version proxy for CUE4Parse's engine boundary `Ar.Game >=
 /// GAME_UE4_20` (`GAME_UE4_20 → FileVersionUE4 516` per the `EGame` map).
 /// **Not** a distinct object-version feature — the changes it gates (the
 /// texture per-mip `SizeZ` field and the `FTexturePlatformData`

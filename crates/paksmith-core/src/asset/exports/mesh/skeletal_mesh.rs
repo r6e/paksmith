@@ -5920,7 +5920,7 @@ mod tests {
             Arc::new(ExportTable::default()),
             AssetVersion {
                 legacy_file_version: -7,
-                file_version_ue4: 518, // >= 514 (no static strides); < 522 (no ray tracing)
+                file_version_ue4: 518, // >= 516 (4.19+ vertex buffer); < 522 (no ray tracing)
                 file_version_ue5: None,
                 file_version_licensee_ue4: 0,
             },

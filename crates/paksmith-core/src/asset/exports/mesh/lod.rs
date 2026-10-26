@@ -348,10 +348,11 @@ fn read_weighted_random_sampler(cur: &mut Cursor<&[u8]>, asset_path: &str) -> cr
 ///   block's class-strip bit for `Game >= UE4_21`, whereas the shared
 ///   `read_distance_field_block` applies it unconditionally — so an asset with that
 ///   bit set would desync. The fixture sets it to 0, so this path is un-exercised.
-/// - The lower sub-band (object 504–515, UE4 ≤4.19) has two more unverified edges:
-///   pre-4.17 has no samplers, and pre-4.20 screen sizes are plain `f32` (not
-///   `FPerPlatformFloat`). None of these is gated (no clean object-version proxy for
-///   the boundaries), so each may desync.
+/// - Below object 516 (UE4 ≤4.18) a LOD with buffers is refused as
+///   `UnsupportedFeature` at its `FStaticMeshVertexBuffer`. Screen sizes are plain
+///   `f32` (not `FPerPlatformFloat`) before 4.20, and 4.19 also writes object 516,
+///   so the ungated render-data tail may desync for a 4.19 mesh or for a mesh below
+///   516 whose LODs are all buffer-stripped.
 ///
 /// Two oracle gates simplify out below paksmith's 504 version floor: the inline
 /// `FDistanceFieldVolumeData` window (`< RENAME_CROUCHMOVESCHARACTERDOWN` = 394)
@@ -451,10 +452,9 @@ fn serialize_buffers_legacy(
     }
 
     // areaWeightedSectionSamplers (one per section) + areaWeightedSampler (one),
-    // present for UE4.17+ (oracle `Ar.Game > GAME_UE4_16`). paksmith has no clean
-    // object-version proxy for the 4.17 boundary, so these are read unconditionally
-    // — correct for the object ≤516 (~UE4.20) tested band; a UE4.14–4.16 asset (no
-    // samplers) would desync here (part of the UNVERIFIED contract in `read_lod_legacy`).
+    // present for UE4.17+ (oracle `Ar.Game > GAME_UE4_16`). Read unconditionally:
+    // every version that gets here is object ≥ 516 (UE4.19+), since the
+    // vertex-buffer read above refuses older ones.
     for _ in 0..=lod.sections.len() {
         read_weighted_random_sampler(cur, asset_path)?;
     }
