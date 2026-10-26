@@ -290,7 +290,7 @@ fn serialize_buffers(
 
     // UE 4.25+ (`StaticMesh.HasRayTracingGeometry`): the ray-tracing geometry
     // bulk array, gated `!CDSF_RayTracingResources`. Read-and-discarded.
-    if ctx.version.is_ue4_25_or_later() && inner_class & CDSF_RAY_TRACING_RESOURCES == 0 {
+    if read::ue4_25_mesh_layout(ctx) && inner_class & CDSF_RAY_TRACING_RESOURCES == 0 {
         read::skip_bulk_array(cur, asset_path, AssetWireField::MeshRayTracingGeometry)?;
     }
 
@@ -482,11 +482,13 @@ pub(crate) mod test_support {
     #[cfg(feature = "__test_utils")]
     use crate::asset::bulk_data;
     use crate::asset::custom_version::{
-        CustomVersion, CustomVersionContainer, UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
+        CustomVersion, CustomVersionContainer, RENDERING_OBJECT_VERSION_GUID,
+        UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
     };
     use crate::asset::export_table::ExportTable;
     use crate::asset::import_table::ImportTable;
     use crate::asset::name_table::{FName, NameTable};
+    use crate::asset::property::test_utils::make_ctx_with_version;
     use crate::asset::version::AssetVersion;
     use crate::asset::wire::write_bool32;
 
@@ -969,13 +971,32 @@ pub(crate) mod test_support {
             None,
         )
     }
+
+    /// A UE4 context at `file_version_ue4` whose custom versions record
+    /// `FRenderingObjectVersion` at `rendering`, or nothing for `None`.
+    #[must_use]
+    pub(crate) fn rendering_ctx(file_version_ue4: i32, rendering: Option<i32>) -> AssetContext {
+        let mut ctx = make_ctx_with_version(file_version_ue4, None);
+        ctx.custom_versions = Arc::new(CustomVersionContainer {
+            versions: rendering
+                .map(|version| CustomVersion {
+                    guid: RENDERING_OBJECT_VERSION_GUID,
+                    version,
+                })
+                .into_iter()
+                .collect(),
+        });
+        ctx
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
-    use super::test_support::{inlined_lod_ue4_23, inlined_lod_ue5_0, ue5_release_ctx};
+    use super::test_support::{
+        inlined_lod_ue4_23, inlined_lod_ue5_0, rendering_ctx, ue5_release_ctx,
+    };
     use super::*;
     use crate::asset::property::test_utils::make_ctx_with_version;
     use crate::asset::structs::vector::FVector;
@@ -1072,6 +1093,19 @@ mod tests {
     #[test]
     fn max_sampler_entries_value() {
         assert_eq!(MAX_SAMPLER_ENTRIES, 25_165_824); // 4 Mi × 6
+    }
+
+    /// UE 4.24 writes object 518 like 4.25 but records rendering version 36:
+    /// its LOD has no `bForceOpaque`, `bShouldExpandTo32Bit` or ray-tracing
+    /// array, so the 4.23 layout reads to its end.
+    #[test]
+    fn ue4_24_lod_has_no_ue4_25_fields() {
+        let ctx = rendering_ctx(518, Some(36));
+        let bytes = inlined_lod_ue4_23();
+        let mut cur = Cursor::new(bytes.as_slice());
+        let lod = read_lod(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(cur.position(), bytes.len() as u64);
+        assert_eq!(lod.indices, vec![0, 1, 2]);
     }
 
     #[test]

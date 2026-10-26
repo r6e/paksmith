@@ -231,7 +231,8 @@ pub(crate) const VER_UE4_GAME_UE4_23_OBJECT_PROXY: i32 = 517;
 /// refinement is a Phase-5 game-profile concern). `USoundWave` (3f-2) consults
 /// this for its initial `bStreaming` default — a 4.24 false positive (default
 /// `true` instead of `false`) can be corrected by the 3f-5 streaming-flip
-/// retry.
+/// retry. The static-mesh readers fall back to it only when a package records
+/// no `FRenderingObjectVersion`, which separates 4.24 from 4.25.
 /// Shares the `518` object version with [`VER_UE4_ADDED_PACKAGE_OWNER`] (an
 /// unrelated feature at the same boundary). See [`AssetVersion::is_ue4_25_or_later`].
 pub(crate) const VER_UE4_GAME_UE4_25_OBJECT_PROXY: i32 = 518;

@@ -98,6 +98,11 @@ pub const RENDERING_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
 /// MaterialShaderMapIdSerialization`, confirming the UE4.24 mapping.
 pub const MATERIAL_SHADER_MAP_ID_SERIALIZATION: i32 = 36;
 
+/// `FRenderingObjectVersion::StaticMeshSectionForceOpaqueField`, the successor
+/// of [`MATERIAL_SHADER_MAP_ID_SERIALIZATION`] (position 37; UEViewer's
+/// `UE4Version.h` spells it out). Stock UE 4.24 records 36 and 4.25 records 43.
+pub(crate) const STATIC_MESH_SECTION_FORCE_OPAQUE_FIELD: i32 = 37;
+
 /// `FFortniteMainBranchObjectVersion` GUID. Cited via CUE4Parse
 /// `FFortniteMainBranchObjectVersion.cs`
 /// (`new(0x601D1886, 0xAC644F84, 0xAA16D3DE, 0x0DEAC7D6)`) — paksmith's `FGuid`
@@ -587,6 +592,13 @@ mod tests {
         // Same enum + same count method as TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA
         // (= 10) above — that known-good value cross-anchors this one.
         assert_eq!(MATERIAL_SHADER_MAP_ID_SERIALIZATION, 36);
+    }
+
+    /// `StaticMeshSectionForceOpaqueField` directly follows the
+    /// `MaterialShaderMapIdSerialization` (36) anchored above.
+    #[test]
+    fn static_mesh_ue4_25_layout_gate_position() {
+        assert_eq!(STATIC_MESH_SECTION_FORCE_OPAQUE_FIELD, 37);
     }
 
     #[test]

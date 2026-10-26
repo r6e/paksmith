@@ -1,5 +1,6 @@
-//! Shared little-endian wire-read helpers for the Phase 3g mesh render-data
-//! readers (`vertex_buffers`, `index_buffer`, `section`, `lod`, `render_data`).
+//! Shared little-endian wire-read helpers and version gates for the Phase 3g
+//! mesh render-data readers (`vertex_buffers`, `index_buffer`, `section`, `lod`,
+//! `render_data`).
 //!
 //! Mirrors the per-reader `eof` / `negative` / `bounds` pattern the other typed
 //! readers use (e.g. `audio::sound_wave`), plus the count-cap / bulk-array-header
@@ -12,7 +13,30 @@ use std::io::{Cursor, Read};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
+use crate::asset::AssetContext;
+use crate::asset::custom_version::{
+    RENDERING_OBJECT_VERSION_GUID, STATIC_MESH_SECTION_FORCE_OPAQUE_FIELD,
+};
 use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
+
+/// Whether a static mesh carries the UE 4.25 fields: a section's
+/// `bForceOpaque`, an index buffer's trailing `bShouldExpandTo32Bit` and a
+/// LOD's ray-tracing geometry array. 4.24 and 4.25 both write object version
+/// 518, so this reads the package's `FRenderingObjectVersion` (4.24 records 36,
+/// 4.25 records 43) and falls back to the object version when the package
+/// records none, as CUE4Parse and UEViewer fall back to their configured
+/// engine. Both gate `bForceOpaque` on
+/// [`STATIC_MESH_SECTION_FORCE_OPAQUE_FIELD`] and the other two on engine
+/// 4.25.
+pub(super) fn ue4_25_mesh_layout(ctx: &AssetContext) -> bool {
+    match ctx
+        .custom_versions
+        .version_for(RENDERING_OBJECT_VERSION_GUID)
+    {
+        Some(rendering) => rendering >= STATIC_MESH_SECTION_FORCE_OPAQUE_FIELD,
+        None => ctx.version.is_ue4_25_or_later(),
+    }
+}
 
 /// Wrap a parse `fault` with the asset path.
 pub(super) fn fault(asset_path: &str, fault: AssetParseFault) -> PaksmithError {
