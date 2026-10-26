@@ -240,7 +240,7 @@ pub(crate) fn read_static_mesh_vertex_buffer<R: Read>(
         asset_path,
         AssetWireField::MeshVertexPrecisionFlags,
     )?;
-    let xor = ctx.version.is_ue4_20_or_later();
+    let xor = read::ue4_20_mesh_layout(ctx);
 
     let mut normals = Vec::new();
     let mut tangents = Vec::new();
@@ -401,12 +401,8 @@ fn read_uv<R: Read>(
 /// `IncreaseNormalPrecision`) the raw `u32` is XORed with `0x8080_8080` before
 /// the per-byte `b / 127.5 - 1` decode (`vertex-formats.md` §`FPackedNormal`).
 /// Components are `[X, Y, Z, W]`; `W` carries the tangent handedness sign.
-pub(crate) fn decode_packed_normal(raw: u32, is_ue4_20_or_later: bool) -> [f64; 4] {
-    let data = if is_ue4_20_or_later {
-        raw ^ 0x8080_8080
-    } else {
-        raw
-    };
+pub(crate) fn decode_packed_normal(raw: u32, xor: bool) -> [f64; 4] {
+    let data = if xor { raw ^ 0x8080_8080 } else { raw };
     data.to_le_bytes().map(|b| f64::from(b) / 127.5 - 1.0)
 }
 
@@ -414,9 +410,9 @@ pub(crate) fn decode_packed_normal(raw: u32, is_ue4_20_or_later: bool) -> [f64; 
 /// `[-1, 1]`. For UE 4.20+ each raw `u16` is XORed with `0x8000` before the
 /// `(v - 32767.5) / 32767.5` decode (`vertex-formats.md` §`FPackedRGBA16N`).
 /// The high-precision tangent-basis path; components are `[X, Y, Z, W]`.
-pub(crate) fn decode_packed_rgba16n(raw: [u16; 4], is_ue4_20_or_later: bool) -> [f64; 4] {
+pub(crate) fn decode_packed_rgba16n(raw: [u16; 4], xor: bool) -> [f64; 4] {
     raw.map(|s| {
-        let v = if is_ue4_20_or_later { s ^ 0x8000 } else { s };
+        let v = if xor { s ^ 0x8000 } else { s };
         (f64::from(v) - 32767.5) / 32767.5
     })
 }
@@ -738,13 +734,12 @@ mod tests {
         );
     }
 
+    use crate::asset::exports::mesh::lod::test_support::rendering_ctx;
     use crate::asset::property::test_utils::make_ctx_with_version;
 
-    /// `FStaticMeshVertexBuffer` low-precision path: `FPackedNormal` tangents
-    /// (8 B/vertex) + `FMeshUVHalf` (f16) UVs. UE4.27 (XOR on, strides absent).
-    #[test]
-    fn static_mesh_vertex_low_precision_f16_uvs() {
-        let ctx = make_ctx_with_version(522, None);
+    /// A one-vertex low-precision `FStaticMeshVertexBuffer`: `FPackedNormal`
+    /// `tangent_x` and `tangent_z` as written, then one f16 UV `(0.5, 0.25)`.
+    fn low_precision_vertex(tangent_x: [u8; 4], tangent_z: [u8; 4]) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&[0u8, 0u8]); // strip flags
         bytes.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords
@@ -753,12 +748,49 @@ mod tests {
         bytes.extend_from_slice(&0i32.to_le_bytes()); // bUseHighPrecisionTangentBasis = false
         bytes.extend_from_slice(&8i32.to_le_bytes()); // tangent bulk itemSize (FPackedNormal x2)
         bytes.extend_from_slice(&1i32.to_le_bytes()); // tangent bulk itemCount
-        bytes.extend_from_slice(&[0x7F, 0x00, 0x00, 0x00]); // TangentX → +X
-        bytes.extend_from_slice(&[0x00, 0x00, 0x7F, 0x00]); // TangentZ → +Z
+        bytes.extend_from_slice(&tangent_x);
+        bytes.extend_from_slice(&tangent_z);
         bytes.extend_from_slice(&4i32.to_le_bytes()); // UV bulk itemSize (FMeshUVHalf)
         bytes.extend_from_slice(&1i32.to_le_bytes()); // UV bulk itemCount (1 vert × 1 channel)
         bytes.extend_from_slice(&f16::from_f32(0.5).to_bits().to_le_bytes());
         bytes.extend_from_slice(&f16::from_f32(0.25).to_bits().to_le_bytes());
+        bytes
+    }
+
+    /// The tangent XOR follows the recorded rendering version at object 516,
+    /// which UE 4.19 (25, no XOR) and 4.20 (26, XOR) share; an unrecorded
+    /// version falls back to the object version. Every row decodes to +X/+Z.
+    #[test]
+    fn static_mesh_vertex_xor_follows_rendering_version() {
+        let plain = ([0xFF, 0x80, 0x80, 0x80], [0x80, 0x80, 0xFF, 0x80]);
+        let xored = ([0x7F, 0x00, 0x00, 0x00], [0x00, 0x00, 0x7F, 0x00]);
+        for (ue4, rendering, (tangent_x, tangent_z)) in [
+            (516, Some(25), plain),
+            (516, Some(26), xored),
+            (522, Some(45), xored),
+            (516, None, xored),
+        ] {
+            let ctx = rendering_ctx(ue4, rendering);
+            let bytes = low_precision_vertex(tangent_x, tangent_z);
+            let data = read_static_mesh_vertex_buffer(&mut Cursor::new(bytes), &ctx, "T").unwrap();
+            let case = format!("{ue4} {rendering:?}");
+            assert!(
+                (data.tangents[0].x - 1.0).abs() < 0.01,
+                "TangentX → +X, {case}"
+            );
+            assert!(
+                (data.normals[0].z - 1.0).abs() < 0.01,
+                "TangentZ → +Z, {case}"
+            );
+        }
+    }
+
+    /// `FStaticMeshVertexBuffer` low-precision path: `FPackedNormal` tangents
+    /// (8 B/vertex) + `FMeshUVHalf` (f16) UVs. UE4.27 (XOR on, strides absent).
+    #[test]
+    fn static_mesh_vertex_low_precision_f16_uvs() {
+        let ctx = make_ctx_with_version(522, None);
+        let bytes = low_precision_vertex([0x7F, 0x00, 0x00, 0x00], [0x00, 0x00, 0x7F, 0x00]);
 
         let mut cur = Cursor::new(bytes.as_slice());
         let data = read_static_mesh_vertex_buffer(&mut cur, &ctx, "T").unwrap();

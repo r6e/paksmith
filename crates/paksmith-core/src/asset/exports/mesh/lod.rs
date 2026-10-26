@@ -349,10 +349,9 @@ fn read_weighted_random_sampler(cur: &mut Cursor<&[u8]>, asset_path: &str) -> cr
 ///   `read_distance_field_block` applies it unconditionally — so an asset with that
 ///   bit set would desync. The fixture sets it to 0, so this path is un-exercised.
 /// - Below object 516 (UE4 ≤4.18) a LOD with buffers is refused as
-///   `UnsupportedFeature` at its `FStaticMeshVertexBuffer`. Screen sizes are plain
-///   `f32` (not `FPerPlatformFloat`) before 4.20, and 4.19 also writes object 516,
-///   so the ungated render-data tail may desync for a 4.19 mesh or for a mesh below
-///   516 whose LODs are all buffer-stripped.
+///   `UnsupportedFeature` at its `FStaticMeshVertexBuffer`.
+/// - 4.19 and 4.20 both write object 516; a 4.19 mesh that records no
+///   `FRenderingObjectVersion` has its tangents read with the 4.20 XOR.
 ///
 /// Two oracle gates simplify out below paksmith's 504 version floor: the inline
 /// `FDistanceFieldVolumeData` window (`< RENAME_CROUCHMOVESCHARACTERDOWN` = 394)
@@ -818,6 +817,17 @@ pub(crate) mod test_support {
         buf.extend_from_slice(&0i32.to_le_bytes()); // Sockets count = 0
     }
 
+    /// The 8 `ScreenSize` entries, each `value`: `FPerPlatformFloat`s (`bCooked`
+    /// then the value) when `per_platform`, plain `f32`s otherwise.
+    pub(crate) fn push_screen_sizes(buf: &mut Vec<u8>, per_platform: bool, value: f32) {
+        for _ in 0..8 {
+            if per_platform {
+                write_bool32(buf, true).unwrap(); // bCooked
+            }
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+
     /// The render-data fields that follow the LOD array: numInlinedLODs, the
     /// distance-field strip + `lod_count` `bValid` bools (all `false`), a 28-byte
     /// UE4 Bounds, bLODsShareStaticLighting, and 8 `FPerPlatformFloat`s
@@ -831,10 +841,7 @@ pub(crate) mod test_support {
         }
         buf.extend_from_slice(&[0u8; 28]); // Bounds
         write_bool32(buf, true).unwrap(); // bLODsShareStaticLighting
-        for _ in 0..8 {
-            write_bool32(buf, true).unwrap();
-            buf.extend_from_slice(&0.5f32.to_le_bytes());
-        }
+        push_screen_sizes(buf, true, 0.5);
     }
 
     /// A cooked UE4.23 `UStaticMesh` export body: the `None` property

@@ -15,7 +15,8 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::asset::AssetContext;
 use crate::asset::custom_version::{
-    RENDERING_OBJECT_VERSION_GUID, STATIC_MESH_SECTION_FORCE_OPAQUE_FIELD,
+    INCREASE_NORMAL_PRECISION, RENDERING_OBJECT_VERSION_GUID,
+    STATIC_MESH_SECTION_FORCE_OPAQUE_FIELD,
 };
 use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
 
@@ -29,13 +30,36 @@ use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
 /// [`STATIC_MESH_SECTION_FORCE_OPAQUE_FIELD`] and the other two on engine
 /// 4.25.
 pub(super) fn ue4_25_mesh_layout(ctx: &AssetContext) -> bool {
-    match ctx
-        .custom_versions
+    rendering_at_least(
+        ctx,
+        STATIC_MESH_SECTION_FORCE_OPAQUE_FIELD,
+        ctx.version.is_ue4_25_or_later(),
+    )
+}
+
+/// Whether a mesh uses the UE 4.20 encodings: `FStaticMeshVertexBuffer`
+/// tangents (static and skeletal meshes) XORed with the 4.20 sign mask, and
+/// static-mesh `ScreenSize` entries as `FPerPlatformFloat`. 4.19 and
+/// 4.20 both write object version 516, so this reads the package's
+/// `FRenderingObjectVersion` (4.19 records 25, 4.20 records 26) and falls back
+/// to the object version when the package records none. CUE4Parse gates the
+/// `FPackedNormal` XOR on [`INCREASE_NORMAL_PRECISION`] and the
+/// `FPackedRGBA16N` XOR and screen sizes on engine 4.20; UEViewer gates all
+/// three on engine 4.20.
+pub(super) fn ue4_20_mesh_layout(ctx: &AssetContext) -> bool {
+    rendering_at_least(
+        ctx,
+        INCREASE_NORMAL_PRECISION,
+        ctx.version.is_ue4_20_or_later(),
+    )
+}
+
+/// Whether the package's recorded `FRenderingObjectVersion` is at least
+/// `threshold`, or `unrecorded` when it records none.
+fn rendering_at_least(ctx: &AssetContext, threshold: i32, unrecorded: bool) -> bool {
+    ctx.custom_versions
         .version_for(RENDERING_OBJECT_VERSION_GUID)
-    {
-        Some(rendering) => rendering >= STATIC_MESH_SECTION_FORCE_OPAQUE_FIELD,
-        None => ctx.version.is_ue4_25_or_later(),
-    }
+        .map_or(unrecorded, |rendering| rendering >= threshold)
 }
 
 /// Wrap a parse `fault` with the asset path.

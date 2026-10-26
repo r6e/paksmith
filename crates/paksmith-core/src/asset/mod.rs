@@ -253,8 +253,9 @@ pub struct StaticMeshRenderData {
     pub bounds: structs::bounds::FBoxSphereBounds,
     /// `bLODsShareStaticLighting`.
     pub lods_share_static_lighting: bool,
-    /// Per-LOD screen-size thresholds (`FPerPlatformFloat::Value`, the cooked
-    /// `Default`). `MAX_STATIC_LODS_UE4` (8) entries on the wire.
+    /// Per-LOD screen-size thresholds: the cooked `FPerPlatformFloat` `Default`
+    /// from UE 4.20, a plain `f32` before. `MAX_STATIC_LODS_UE4` (8) entries on
+    /// the wire.
     pub screen_sizes: Vec<f32>,
 }
 
