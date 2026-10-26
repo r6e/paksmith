@@ -66,6 +66,34 @@ ignore = [
     # cryoglyph allowing lru >= 0.18.2 — and re-check if cryoglyph ever adds a
     # second LruCache with a non-`Copy` key.
     { id = "RUSTSEC-2026-0253", reason = "lru reaches the tree only via cryoglyph's glyph cache, whose key type cosmic_text::CacheKey is `Copy` — Rust forbids Drop on a Copy type, so the advisory's panicking-key-Drop precondition is unsatisfiable, which alone is dispositive; paksmith itself wraps no cache operation in catch_unwind (winit's event loops do use it, so that half is NOT a standing guarantee); fix blocked because cryoglyph pins lru ^0.16" },
+
+    # RUSTSEC-2026-0391 and RUSTSEC-2026-0395..0406: the zstd / zstd-safe
+    # advisory wave. paksmith-core is on the fixed zstd 0.14.3 / zstd-safe
+    # 8.2.0. The affected copies come only from the git-pinned parser oracles in
+    # paksmith-fixture-gen and, as dev-dependencies, in paksmith-bench: repak at
+    # e215472c pulls zstd 0.13.3 and zstd-safe 7.2.4, and unreal_asset at
+    # f4df5d8e pulls zstd 0.12.4 and zstd-safe 6.0.6, which only the second
+    # group below reaches. The oracles call only `zstd::stream::encode_all`,
+    # `stream::read::Decoder::new` and `stream::copy_decode`, on paksmith's own
+    # generated fixtures, and never ship in a paksmith binary. No fix exists on
+    # their zstd lines (repak master still pins zstd 0.13). Remove the first
+    # group when repak moves to zstd 0.14.3+, and the second when both oracles
+    # do.
+    # First group: repak only.
+    { id = "RUSTSEC-2026-0391", reason = "reached only by zstd 0.13.3 under the dev-only repak oracle, which paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; unreal_asset's zstd 0.12.4 is below the affected range; paksmith-core uses the fixed zstd 0.14.3; repak master still pins zstd 0.13" },
+    { id = "RUSTSEC-2026-0396", reason = "reached only by zstd-safe 7.2.4 under the dev-only repak oracle, which paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; unreal_asset's zstd-safe 6.0.6 is below the affected range; paksmith-core uses the fixed zstd-safe 8.2.0; repak master still pins zstd 0.13" },
+    { id = "RUSTSEC-2026-0398", reason = "reached only by zstd-safe 7.2.4 under the dev-only repak oracle, which paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; unreal_asset's zstd-safe 6.0.6 is below the affected range; paksmith-core uses the fixed zstd-safe 8.2.0; repak master still pins zstd 0.13" },
+    { id = "RUSTSEC-2026-0405", reason = "reached only by zstd-safe 7.2.4 under the dev-only repak oracle, which paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; unreal_asset's zstd-safe 6.0.6 is below the affected range; paksmith-core uses the fixed zstd-safe 8.2.0; repak master still pins zstd 0.13" },
+    # Second group: repak and unreal_asset.
+    { id = "RUSTSEC-2026-0395", reason = "reached only by zstd-safe 7.2.4 (repak) and 6.0.6 (unreal_asset), the dev-only parser oracles that paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; paksmith-core uses the fixed zstd-safe 8.2.0; no fix exists on the 6.x/7.x lines and neither oracle has moved to zstd 0.14" },
+    { id = "RUSTSEC-2026-0397", reason = "reached only by zstd-safe 7.2.4 (repak) and 6.0.6 (unreal_asset), the dev-only parser oracles that paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; paksmith-core uses the fixed zstd-safe 8.2.0; no fix exists on the 6.x/7.x lines and neither oracle has moved to zstd 0.14" },
+    { id = "RUSTSEC-2026-0399", reason = "reached only by zstd-safe 7.2.4 (repak) and 6.0.6 (unreal_asset), the dev-only parser oracles that paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; paksmith-core uses the fixed zstd-safe 8.2.0; no fix exists on the 6.x/7.x lines and neither oracle has moved to zstd 0.14" },
+    { id = "RUSTSEC-2026-0400", reason = "reached only by zstd-safe 7.2.4 (repak) and 6.0.6 (unreal_asset), the dev-only parser oracles that paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; paksmith-core uses the fixed zstd-safe 8.2.0; no fix exists on the 6.x/7.x lines and neither oracle has moved to zstd 0.14" },
+    { id = "RUSTSEC-2026-0401", reason = "reached only by zstd-safe 7.2.4 (repak) and 6.0.6 (unreal_asset), the dev-only parser oracles that paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; paksmith-core uses the fixed zstd-safe 8.2.0; no fix exists on the 6.x/7.x lines and neither oracle has moved to zstd 0.14" },
+    { id = "RUSTSEC-2026-0402", reason = "reached only by zstd-safe 7.2.4 (repak) and 6.0.6 (unreal_asset), the dev-only parser oracles that paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; paksmith-core uses the fixed zstd-safe 8.2.0; no fix exists on the 6.x/7.x lines and neither oracle has moved to zstd 0.14" },
+    { id = "RUSTSEC-2026-0403", reason = "reached only by zstd-safe 7.2.4 (repak) and 6.0.6 (unreal_asset), the dev-only parser oracles that paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; paksmith-core uses the fixed zstd-safe 8.2.0; no fix exists on the 6.x/7.x lines and neither oracle has moved to zstd 0.14" },
+    { id = "RUSTSEC-2026-0404", reason = "reached only by zstd-safe 7.2.4 (repak) and 6.0.6 (unreal_asset), the dev-only parser oracles that paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; paksmith-core uses the fixed zstd-safe 8.2.0; no fix exists on the 6.x/7.x lines and neither oracle has moved to zstd 0.14" },
+    { id = "RUSTSEC-2026-0406", reason = "reached only by zstd-safe 7.2.4 (repak) and 6.0.6 (unreal_asset), the dev-only parser oracles that paksmith-fixture-gen and paksmith-bench run on paksmith's own fixtures and no paksmith binary ships; paksmith-core uses the fixed zstd-safe 8.2.0; no fix exists on the 6.x/7.x lines and neither oracle has moved to zstd 0.14" },
 ]
 
 [licenses]

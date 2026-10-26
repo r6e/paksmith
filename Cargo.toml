@@ -84,7 +84,10 @@ proptest = "1"
 # The `%`-sigil gate's tokenizer (paksmith-core dev-dep). `span-locations`
 # gives token line numbers outside a proc macro.
 proc-macro2 = { version = "1.0.106", features = ["span-locations"] }
-zstd = "0.14"
+# 0.14.3 floor: the first zstd with the RUSTSEC-2026-0391 fix. It requires
+# zstd-safe ^8.2.0 (the RUSTSEC-2026-0395..0406 fixes), which requires
+# zstd-sys ^2.1.2 (the RUSTSEC-2026-0410 fix).
+zstd = "0.14.3"
 brotli = "9"
 # Phase 3d Task 4: DataTable CSV export (RFC 4180 writer). MIT/Unlicense.
 csv = "1.3"
