@@ -32,9 +32,10 @@
 //! object 516** (~UE4.20). Even at 516 the shared distance-field block applies its
 //! class-strip bit unconditionally where the oracle gates it on `Game >= UE4_21`
 //! (object 517+) — an un-exercised desync edge if that bit is set. Below object
-//! 516 (UE4 ≤4.18) a LOD with buffers is refused as `UnsupportedFeature`; see
-//! [`super::lod::read_lod_legacy`] for the screen-size edge that remains. Some
-//! CUE4Parse branches stay unreachable / undecoded:
+//! 516 (UE4 ≤4.18) a LOD with buffers is refused as `UnsupportedFeature`, and a
+//! 4.19 mesh that records no `FRenderingObjectVersion` has its screen sizes
+//! read as 4.20's `FPerPlatformFloat`. Some CUE4Parse branches stay unreachable
+//! / undecoded:
 //!
 //! - `minMobileLODIdx` — `StaticMesh.KeepMobileMinLODSettingOnDesktop` is `false`
 //!   for stock games, so it is never serialized.
@@ -158,9 +159,14 @@ pub(crate) fn read_render_data(
     let lods_share_static_lighting =
         crate::asset::wire::read_bool32(cur, asset_path, AssetWireField::MeshLodShareLighting)?;
 
+    let per_platform = read::ue4_20_mesh_layout(ctx);
     let mut screen_sizes = Vec::with_capacity(SCREEN_SIZE_COUNT);
     for _ in 0..SCREEN_SIZE_COUNT {
-        screen_sizes.push(read_per_platform_float(cur, asset_path)?);
+        screen_sizes.push(if per_platform {
+            read_per_platform_float(cur, asset_path)?
+        } else {
+            read::read_f32(cur, asset_path, AssetWireField::MeshScreenSize)?
+        });
     }
 
     Ok(StaticMeshRenderData {
@@ -243,7 +249,8 @@ fn read_per_platform_float(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::
 #[cfg(test)]
 mod tests {
     use super::super::lod::test_support::{
-        inlined_lod_ue4_23, inlined_lod_ue5_0, render_data_tail, ue5_release_ctx,
+        inlined_lod_ue4_23, inlined_lod_ue5_0, push_screen_sizes, render_data_tail, rendering_ctx,
+        ue5_release_ctx,
     };
     use super::*;
     use crate::asset::custom_version::REMOVING_TESSELLATION;
@@ -271,6 +278,32 @@ mod tests {
         assert!(rd.lods_share_static_lighting);
         assert_eq!(rd.screen_sizes.len(), 8);
         assert!((rd.screen_sizes[0] - 0.5).abs() < 1e-6);
+    }
+
+    /// `ScreenSize` entries are `FPerPlatformFloat` from UE 4.20 on and plain
+    /// `f32` before. 4.19 and 4.20 share object 516 and record rendering
+    /// versions 25 and 26; an unrecorded version falls back to the object
+    /// version. A zero-LOD pre-4.23 render data isolates the tail.
+    #[test]
+    fn screen_size_is_per_platform_from_ue4_20() {
+        for (ue4, rendering, per_platform) in [
+            (514, None, false),
+            (516, Some(25), false),
+            (516, Some(26), true),
+            (516, None, true),
+        ] {
+            let mut bytes = 0i32.to_le_bytes().to_vec(); // LOD count = 0
+            bytes.extend_from_slice(&[0, 0]); // distance-field strip flags
+            bytes.extend_from_slice(&[0u8; 28]); // Bounds
+            write_bool32(&mut bytes, true).unwrap(); // bLODsShareStaticLighting
+            push_screen_sizes(&mut bytes, per_platform, 0.5);
+            let ctx = rendering_ctx(ue4, rendering);
+            let mut cur = Cursor::new(bytes.as_slice());
+            let rd = read_render_data(&mut cur, &ctx, "T").unwrap();
+            let case = format!("{ue4} {rendering:?}");
+            assert_eq!(cur.position(), bytes.len() as u64, "{case}");
+            assert_eq!(rd.screen_sizes, [0.5; 8], "{case}");
+        }
     }
 
     #[test]

@@ -84,6 +84,10 @@ pub const RENDERING_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
     0x29, 0xBD, 0x3A, 0x38, // D = 0x383ABD29 (LE)
 ]);
 
+/// `FRenderingObjectVersion::IncreaseNormalPrecision` (position 26; UEViewer's
+/// `UE4Version.h` spells it out). Stock UE 4.19 records 25 and 4.20 records 26.
+pub(crate) const INCREASE_NORMAL_PRECISION: i32 = 26;
+
 /// `FRenderingObjectVersion::MaterialShaderMapIdSerialization` — the first
 /// rendering-object version at/after which a cooked skeletal mesh uses the
 /// new `FStaticLODModel::SerializeRenderItem` format (UE 4.24; `Game >= UE4.24`
@@ -599,6 +603,11 @@ mod tests {
     #[test]
     fn static_mesh_ue4_25_layout_gate_position() {
         assert_eq!(STATIC_MESH_SECTION_FORCE_OPAQUE_FIELD, 37);
+    }
+
+    #[test]
+    fn static_mesh_ue4_20_encoding_gate_position() {
+        assert_eq!(INCREASE_NORMAL_PRECISION, 26);
     }
 
     #[test]

@@ -189,7 +189,8 @@ pub(crate) const VER_UE4_GAME_UE4_19_OBJECT_PROXY: i32 = 516;
 /// `skipOffset` width) are engine-gated in CUE4Parse; this is the closest
 /// object-version proxy. `GAME_UE4_19` also maps to `516`, so a genuine
 /// UE4.19 asset is indistinguishable and treated as 4.20+ — see
-/// [`AssetVersion::is_ue4_20_or_later`]. Coincidentally equal in value to
+/// [`AssetVersion::is_ue4_20_or_later`], which the mesh tangent and screen-size
+/// reads fall back to. Coincidentally equal in value to
 /// [`VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID`] (an unrelated feature).
 pub(crate) const VER_UE4_GAME_UE4_20_OBJECT_PROXY: i32 = 516;
 
@@ -448,7 +449,9 @@ impl AssetVersion {
     /// doesn't have → 4-byte desync → the export degrades to `Generic`).
     /// paksmith picks the `516` boundary to parse UE4.20 textures
     /// correctly; the inverse (`517`) would instead misclassify UE4.20.
-    /// Used by the `UTexture2D` reader.
+    /// Used by the `UTexture2D` reader, and by the `FStaticMeshVertexBuffer`
+    /// tangent reads and static-mesh screen-size reads when a package records
+    /// no `FRenderingObjectVersion`.
     #[must_use]
     pub fn is_ue4_20_or_later(self) -> bool {
         self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_20_OBJECT_PROXY)
@@ -484,6 +487,7 @@ impl AssetVersion {
     /// `USoundWave` (3f-2) consults this for its initial `bStreaming` default
     /// (overridden by a tagged `bStreaming` / `LoadingBehavior` property; the
     /// 3f-5 streaming-flip retry can correct a wrong guess).
+    /// The static-mesh 4.25 reads use it when no `FRenderingObjectVersion` is recorded.
     #[must_use]
     pub fn is_ue4_25_or_later(self) -> bool {
         self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_25_OBJECT_PROXY)
