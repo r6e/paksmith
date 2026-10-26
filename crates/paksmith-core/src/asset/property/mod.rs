@@ -349,7 +349,7 @@ pub(crate) fn read_class_serialization_control<R: Read>(
 /// non-CDO export reads a `bSerializeGuid` bool32; when it is set **and** ≥16
 /// bytes remain before `export_end`, it then reads the 16-byte object `FGuid`.
 ///
-/// paksmith's input floor (UE4.4+ cooked, non-CDO exports) is always in that
+/// paksmith's input floor (UE4.14+ cooked, non-CDO exports) is always in that
 /// gated range, so the bool32 is unconditionally present. Every typed top-level
 /// export reader (`StaticMesh`, `Texture2D`, `SoundWave`, `DataTable`) calls
 /// this immediately after its top-level [`read_properties`] so the cursor lands

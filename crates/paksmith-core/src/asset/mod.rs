@@ -2,7 +2,7 @@
 //!
 //! # Scope (Phase 2a)
 //!
-//! Parses the structural header of UE 4.21–UE 5.x `.uasset` files.
+//! Parses the structural header of versioned UE 4.14–UE 5.5 `.uasset` files.
 //! Property bodies (`FPropertyTag`-iterated payloads inside export
 //! serialized regions) are carried as opaque bytes via the
 //! [`PropertyBag::Opaque`] variant; tagged-property iteration and the
@@ -1120,7 +1120,7 @@ pub struct AssetContext {
     /// byte-for-byte what it was before this field existed.
     ///
     /// REFINES, never restricts: a hint can only disambiguate a gate
-    /// the wire leaves ambiguous, never raise paksmith's UE 4.13+ asset
+    /// the wire leaves ambiguous, never raise paksmith's UE 4.14+ asset
     /// floor or reject a package the unhinted path accepts. Defaults
     /// `None` from [`AssetContext::new`]; set on the
     /// `Package::read_from*` path from the caller's profile.

@@ -2495,7 +2495,7 @@ pub enum AssetParseFault {
     },
     /// The `LegacyFileVersion` (an `i32` read from offset 4) isn't one
     /// of the values Phase 2a supports (`-7`, `-8`, or `-9`). Earlier
-    /// values (`-6` and shallower) shipped with UE 4.20 and below;
+    /// values (`-6` and shallower) shipped with UE 4.13 and below;
     /// later values (`-10` and beyond) don't exist yet. Rejected
     /// explicitly rather than risking silent misparse of a divergent
     /// on-disk layout.
@@ -3033,7 +3033,7 @@ pub enum AssetParseFault {
     },
     /// `FByteBulkData` requested a compression method paksmith
     /// doesn't decode. LZO + BitWindow are fail-closed by design
-    /// (#559): LZO is a UE3-era codec, out of paksmith's UE4.13+
+    /// (#559): LZO is a UE3-era codec, out of paksmith's UE4.14+
     /// cooked-asset scope and with no in-scope oracle, and BitWindow
     /// is a deprecated, inert flag with no codec to decode. Oodle
     /// ships in Phase 8 via the runtime-SDK loader.
@@ -4093,7 +4093,7 @@ pub enum AssetWireField {
     /// `FByteBulkData::SizeOnDisk` — u32 or u64 (gated by
     /// `BULKDATA_Size64Bit`); capped per the cap chain.
     BulkDataSizeOnDisk,
-    /// `FByteBulkData::OffsetInFile` — i64 (UE 4.4+ floor, always
+    /// `FByteBulkData::OffsetInFile` — i64 (UE 4.14+ floor, always
     /// 8 bytes per paksmith's accepted version range).
     BulkDataOffsetInFile,
     /// The 2-byte ushort that trails `OffsetInFile` when

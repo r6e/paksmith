@@ -4,10 +4,10 @@
 //! container is `i32 count` followed by `count` records, each `FGuid`
 //! (16 bytes) + `i32 version`.
 //!
-//! Phase 2a accepts the modern post-UE4.13 ("Optimized") layout
-//! exclusively — pre-4.13 archives used an extra FString name per
-//! record (the `Guids` enum variant), but they're below our
-//! `LegacyFileVersion ≥ -7` floor.
+//! Phase 2a reads only the "Optimized" layout that `LegacyFileVersion -6`
+//! introduced — older (-3 to -5) archives used an extra FString name per
+//! record (the `Guids` enum variant), but they predate our
+//! `LegacyFileVersion ≤ -7` floor.
 
 use std::io::Read;
 #[cfg(any(test, feature = "__test_utils"))]
@@ -177,7 +177,7 @@ pub const SPLIT_MODEL_AND_RENDER_DATA: i32 = 12;
 /// `cf74fc32`, position 10 (pair-anchored against this enum's
 /// [`SPLIT_MODEL_AND_RENDER_DATA`] (`= 12`) and `RemoveSourceData = 11`, both of
 /// which immediately follow it; uses [`SKELETAL_MESH_CUSTOM_VERSION_GUID`]).
-/// Always on for paksmith's UE4.24–4.27 cooked target.
+/// Always on for the cooked UE 4.24+ skeletal meshes paksmith reads.
 pub const COMPACT_CLOTH_VERTEX_BUFFER: i32 = 10;
 
 /// `FRecomputeTangentCustomVersion` GUID. Cited via CUE4Parse
@@ -247,8 +247,8 @@ pub const SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED: i32 = 54;
 /// `FUE5MainStreamObjectVersion::IncreasedSkinWeightPrecision` — the
 /// UE5-main-stream version at/after which `FSkinWeightVertexBuffer`'s new cooked
 /// format serializes the `bUse16BitBoneWeight` bool (skin weights widen from
-/// `uint8` to `uint16`). UE5-only — never fires for paksmith's UE4.24–4.27
-/// skeletal-mesh scope. Per CUE4Parse `FUE5MainStreamObjectVersion.cs` @
+/// `uint8` to `uint16`). UE5-only — never fires for a UE4 skeletal mesh.
+/// Per CUE4Parse `FUE5MainStreamObjectVersion.cs` @
 /// `cf74fc32`, position 90. Cross-anchored against this enum's
 /// [`SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED`] (`= 54`, +36 forward;
 /// the same count method reproduces that known-good value); uses

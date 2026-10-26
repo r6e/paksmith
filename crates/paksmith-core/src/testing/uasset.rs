@@ -111,7 +111,7 @@ pub struct MinimalPackage {
 /// a thin builder wrapper that delegates to [`build_minimal`].
 #[derive(Debug, Clone)]
 pub struct MinimalPackageSpec {
-    /// `LegacyFileVersion`. UE 4.x = -7; UE 5.0-5.3 = -8; UE 5.4+ = -9.
+    /// `LegacyFileVersion`. UE 4.14-4.27 = -7; UE 5.0-5.5 = -8; UE 5.6+ = -9.
     pub legacy_file_version: i32,
     /// `FileVersionUE4` wire value (default 522 = UE 4.27).
     pub file_version_ue4: i32,
@@ -2530,10 +2530,10 @@ pub fn build_minimal_ue5_1010_with_data_resources() -> MinimalPackage {
     pkg
 }
 
-/// UE5 with `legacy_file_version = -9` (UE 5.4+ forward-compat).
-/// PR #234 widened the accepted window from `{-7, -8}` to
-/// `{-7, -8, -9}`; this fixture validates that -9 + UE5 1010 wire
-/// bytes are accepted.
+/// UE5 with `legacy_file_version = -9` (forward-compat; UE 5.6+ writes
+/// -9). PR #224 widened the accepted window from `{-7, -8}` to
+/// `{-7, -8, -9}`; this synthetic fixture validates that -9 + UE5 1010
+/// wire bytes, stamped with a 5.4 engine version, are accepted.
 #[must_use]
 pub fn build_minimal_ue5_legacy_neg9() -> MinimalPackage {
     let (exports, imports, payloads) = ue5_1010_export_import(vec![0xAA; 16]);

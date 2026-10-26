@@ -15,9 +15,9 @@
 //! ## Wire-format support vs fixture-validated support
 //!
 //! Paksmith's accepted version range is defined by the `VER_UE4_*` /
-//! `VER_UE5_*` gates in this module plus `FIRST_UNSUPPORTED_UE5_VERSION`
-//! in [`crate::asset::summary`]. Within that range, the parsers
-//! implement CUE4Parse's reader logic.
+//! `VER_UE5_*` gates in this module plus the `LegacyFileVersion` window
+//! and `FIRST_UNSUPPORTED_UE5_VERSION` in [`crate::asset::summary`].
+//! Within that range, the parsers implement CUE4Parse's reader logic.
 //!
 //! Issue #243 expanded the cross-parser-validated fixture matrix from
 //! the original single UE 4.27 cooked fixture to a parameterized
@@ -44,7 +44,8 @@
 //!   (cooked, so editor-only side suppresses; `build_minimal_ue4_516`)
 //! - **UE5 1010** — `SCRIPT_SERIALIZATION_OFFSET` path (PR #224 fix)
 //!   (`build_minimal_ue5_1010`)
-//! - **`LegacyFileVersion == -9`** — UE 5.4+ forward-compat (PR #234)
+//! - **`LegacyFileVersion == -9`** — forward-compat (PR #224); UE 5.6+
+//!   writes it, and the summary still refuses UE 5.6+ packages
 //!   (`build_minimal_ue5_legacy_neg9`)
 //! - Shape variations (`build_minimal_multi_import`,
 //!   `build_minimal_multi_export`, `build_minimal_engine_branch_nonempty`,
@@ -121,12 +122,16 @@ pub(crate) const VER_UE4_INNER_ARRAY_TAG_INFO: i32 = 500;
 /// table doesn't carry the dual CityHash16 hash pair we require.
 ///
 /// Per CUE4Parse's `EGame`→`FileVersionUE4` map, `504` is `GAME_UE4_12`'s
-/// object version (`< GAME_UE4_13 => 504`), so paksmith's UE4 floor is
-/// **~UE4.12, NOT UE4.21** — it deliberately parses UE4.13–4.27 cooked
-/// assets (see the `build_minimal_ue4_504`/`_516` fixtures, cross-validated
-/// against the repak/`unreal_asset` oracle). The few UE 4.20+ wire
-/// differences (texture per-mip `SizeZ`, platform-data `skipOffset` width)
-/// are gated separately via [`AssetVersion::is_ue4_20_or_later`].
+/// object version (`< GAME_UE4_13 => 504`), so paksmith's `FileVersionUE4`
+/// floor is **~UE4.12, NOT UE4.21** — it deliberately parses versioned
+/// UE4.14–4.27 cooked assets (see the `build_minimal_ue4_504`/`_516` fixtures,
+/// cross-validated against the repak/`unreal_asset` oracle). Stock UE4.12
+/// and 4.13 write `LegacyFileVersion -6`, which `PackageSummary::read_from`
+/// refuses first, so UE4.14 (`508`) is the first stock release whose versioned
+/// packages it accepts.
+/// UE 4.20+ wire differences (for example the texture per-mip `SizeZ` and the
+/// platform-data `skipOffset` width) are gated separately, on
+/// [`AssetVersion::is_ue4_20_or_later`] or a custom version.
 pub(crate) const VER_UE4_NAME_HASHES_SERIALIZED: i32 = 504;
 
 /// UE 4.x: cooked files began emitting the 5 preload-dependency
@@ -384,8 +389,9 @@ pub(crate) const VER_UE5_ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES: i32 = 1013;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AssetVersion {
     /// The `LegacyFileVersion` field from the start of the summary.
-    /// Phase 2a accepts `-7` (UE 4.21–4.27), `-8` (UE 5.0–5.3), and
-    /// `-9` (UE 5.4+).
+    /// Phase 2a accepts `-7` (UE 4.14–4.27), `-8` (UE 5.0–5.5), and
+    /// `-9`, which UE 5.6+ writes; the summary still refuses UE 5.6+
+    /// packages.
     pub legacy_file_version: i32,
     /// `FileVersionUE4` (`EUnrealEngineObjectUE4Version`).
     pub file_version_ue4: i32,

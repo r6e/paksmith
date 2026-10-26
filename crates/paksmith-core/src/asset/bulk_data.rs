@@ -380,7 +380,7 @@ impl BulkDataFlags {
     /// in an `FCompressedChunkInfo`-style chunked framing (UE3 used a
     /// narrower u32-width chunk record than paksmith's UE4 i64 form;
     /// no in-scope fixture pins the exact UE3 shape) — and only
-    /// UE3-era cooked content emits it, out of paksmith's UE4.13+
+    /// UE3-era cooked content emits it, out of paksmith's UE4.14+
     /// cooked-asset scope. No in-scope cooker or cross-validation
     /// oracle produces it (repak cannot write it; CUE4Parse reads UE4
     /// non-ZLIB bulk as raw; only UEViewer decodes the UE3 LZO path),
@@ -549,8 +549,8 @@ pub struct FByteBulkData {
     pub size_on_disk: u64,
     /// Pre-fixup offset within the containing file. The resolver
     /// adds `PackageSummary::bulk_data_start_offset` unless
-    /// `BULKDATA_NoOffsetFixUp` is set (or an in-stream position was recorded). UE 4.4+ floor: always 8
-    /// bytes on the wire.
+    /// `BULKDATA_NoOffsetFixUp` is set (or an in-stream position
+    /// was recorded). UE 4.14+ floor: always 8 bytes on the wire.
     pub offset_in_file: i64,
     /// Where an in-stream payload starts in the stitched `.uasset` +
     /// `.uexp` buffer, set by the crate's reader only when it knows where
@@ -592,7 +592,7 @@ impl FByteBulkData {
     /// `BadDataVersion` flag is cleared in the returned record per
     /// the wire-format spec.
     ///
-    /// Wire shape (paksmith's UE 4.4+ floor — `BULKDATA_AT_LARGE_OFFSETS`
+    /// Wire shape (paksmith's UE 4.14+ floor — `BULKDATA_AT_LARGE_OFFSETS`
     /// always implied, so `OffsetInFile` is always 8 bytes):
     ///
     /// ```text
@@ -1384,7 +1384,7 @@ impl BulkDataResolver {
     ) -> crate::Result<BulkData> {
         // 1. Unsupported compression rejection (fail-closed, #559).
         // LZO is a real LZO1X codec, but only UE3-era content emits it
-        // (out of paksmith's UE4.13+ cooked-asset scope) and no
+        // (out of paksmith's UE4.14+ cooked-asset scope) and no
         // in-scope oracle produces it; BitWindow is a deprecated,
         // inert flag with no codec to decode. Both fail-closed with an
         // explicit fault rather than silently raw-reading a

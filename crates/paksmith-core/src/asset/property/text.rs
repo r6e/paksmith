@@ -13,9 +13,10 @@
 //!
 //! Absence of an `FEditorObjectVersion` entry on the summary's
 //! custom-version table is treated as "stamp implicit, ≥ 32" (field
-//! present): CUE4Parse's `FEditorObjectVersion.Get()` returns its
-//! latest version when the stamp is absent, and real cooked content in
-//! range carries an explicit `FEditorObjectVersion` stamp.
+//! present), as CUE4Parse's `FEditorObjectVersion.Get()` does at its
+//! default game (a UE 4.14-4.22 game falls back below the gate); real
+//! cooked content in range carries an explicit `FEditorObjectVersion`
+//! stamp.
 //!
 //! Wire layout for `ETextHistoryType::Base (0)`:
 //!
@@ -224,10 +225,9 @@ pub fn read_ftext<R: Read + Seek>(
             // (= 32, i.e. UE 4.23). Below the gate the field isn't on the
             // wire and the decoder must not consume those bytes. When the
             // `FEditorObjectVersion` stamp is absent, `is_none_or` treats
-            // it as ≥ gate (field present), matching CUE4Parse's
-            // `FEditorObjectVersion.Get()` latest-version fallback; real
-            // cooked content in range carries an explicit stamp. See
-            // unreal_asset `str_property.rs` and CUE4Parse `FTextHistory.None`.
+            // it as ≥ gate (field present; see the module doc). See
+            // unreal_asset `str_property.rs` and CUE4Parse
+            // `FTextHistory.None`.
             let needs_has_culture = ctx
                 .custom_versions
                 .version_for(EDITOR_OBJECT_VERSION_GUID)
@@ -620,9 +620,8 @@ mod tests {
 
     #[test]
     fn history_none_reads_has_culture_field_when_no_editor_version_stamp() {
-        // Absent `FEditorObjectVersion` entry defaults to "modern" —
-        // paksmith's UE4 floor (504 / 4.21) post-dates the gate
-        // (UE 4.15). The decoder MUST read the field.
+        // Absent `FEditorObjectVersion` entry defaults to "modern"
+        // (field present). The decoder MUST read the field.
         let mut buf = Vec::new();
         buf.extend_from_slice(&0u32.to_le_bytes()); // flags
         buf.push(0xFFu8); // history_type = -1

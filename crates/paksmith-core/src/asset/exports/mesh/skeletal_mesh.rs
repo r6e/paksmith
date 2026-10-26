@@ -866,9 +866,8 @@ fn skin_weight_metadata_size(ctx: &AssetContext) -> u64 {
 /// 3. **`SkinWeightProfiles`** (UNCONDITIONAL): a capped `i32 count`, then
 ///    `count × 8` (`count` × `FName`-pair, 8 bytes each).
 ///
-/// (No ray-tracing region — that is UE5.6-only and never fires for the UE4-cooked
-/// inputs this path handles; a UE5.6 asset reaching here desyncs → the post-loop
-/// sentinel → `Generic`.)
+/// (No ray-tracing region — it is gated on UE 5.6+, and the summary refuses
+/// UE 5.6+ packages.)
 ///
 /// # Errors
 /// [`crate::error::AssetParseFault::UnexpectedEof`] on a short metadata skip;
@@ -1018,7 +1017,7 @@ fn skip_cloth_buffer<R: Read>(
 }
 
 /// Parse one inlined `FStaticLODModel::SerializeStreamedData` blob (oracle
-/// @ `cf74fc32`, UE4.24–4.27 cooked), filling `lod`'s geometry in place.
+/// @ `cf74fc32`, cooked UE 4.24–5.4), filling `lod`'s geometry in place.
 ///
 /// Wire order (after the LOD header's `BuffersSize`, when
 /// `bInlined && !av_stripped && !cooked_out`):
@@ -1202,16 +1201,17 @@ fn read_streamed_data<R: Read>(
 ///
 /// Tail wire order (oracle `USkeletalMesh.Deserialize` @ `cf74fc32`, cooked,
 /// `UseNewCookedFormat` — the UE4.24 gate has already passed):
-/// 1. `numInlinedLODs` (`u8`) + `numNonOptionalLODs` (`u8`) — read-and-discarded.
-/// 2. `dummyObjs` — `i32` count (capped at [`MAX_DUMMY_OBJECTS_U32`], a generous
+/// 1. `FNaniteResources` (Game `>= UE5.5`) does **not** fire for UE4.24-5.4;
+///    [`read_typed`] refuses a versioned UE5.5 asset (1013) before reading it,
+///    and the summary refuses UE5.6+.
+/// 2. `numInlinedLODs` (`u8`) + `numNonOptionalLODs` (`u8`) — read-and-discarded.
+/// 3. `dummyObjs` — `i32` count (capped at [`MAX_DUMMY_OBJECTS_U32`], a generous
 ///    cooked ceiling) + N × `FPackageIndex`, discarded.
-/// 3. UV-channel `SkipFixedArray(4)` — `i32` count + `count × 4` bytes, gated
+/// 4. UV-channel `SkipFixedArray(4)` — `i32` count + `count × 4` bytes, gated
 ///    `FRenderingObjectVersion` PRESENT-and-`< TextureStreamingMeshUVChannelData`.
 ///    `is_some_and` so an ABSENT version does NOT fire; the 4.24 gate guarantees
 ///    present `>= 36 > 10`, so this never fires for paksmith's range — kept for
 ///    cursor-math completeness only.
-/// 4. `FNaniteResources` (Game `>= UE5.5`) does **not** fire for UE4.24-4.27; a
-///    UE5.5+ asset desyncs into the sentinel below rather than mis-reading it.
 ///
 /// Sentinel: segment-2 (the LODs + this tail) runs to the export payload end
 /// (the `UObject` object-GUID tail was consumed early in [`read_typed`]). A
