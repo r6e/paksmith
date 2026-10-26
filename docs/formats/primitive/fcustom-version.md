@@ -24,13 +24,18 @@ CUE4Parse[^1] with a worked example below covering a 2-row container.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| `LegacyFileVersion ∈ {-9, -8, -7}` (UE4.21+ through UE5.4+) | "Optimized" layout: `FGuid + i32` rows only. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Serialization/FCustomVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
-| Older `LegacyFileVersion` (less negative than -7, i.e., -6, -5, … or positive) | "Guids" or "Enum" layout: each row carries an additional `FString`[^4] name. | Same source[^1] |
+| `LegacyFileVersion ∈ {-9, -8, -7}` (UE4.14+) | "Optimized" layout: `FGuid + i32` rows only. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Serialization/FCustomVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
+| Older `LegacyFileVersion` (-6 to -2) | `-6` still uses the "Optimized" layout but is refused at the package summary. `-5` to `-3` use the "Guids" layout: each row carries an additional `FString`[^4] name. `-2` uses the older "Enums" layout. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Serialization/FCustomVersionContainer.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7`[^5] |
 
-UE's convention: the legacy-file-version constant becomes more negative with
-each engine major release. Paksmith accepts only the post-UE4.13
-("Optimized") layout, gated by the `LegacyFileVersion ∈ {-9, -8, -7}` window
-in the package summary parser. Older archives are rejected upstream and
+UE's convention: each more-negative legacy-file-version value marks one
+change to the summary or to how loaders must treat it, not an engine release.
+`-6` optimizes the custom-version serialization, `-7` drops the
+texture-allocation info, `-8` adds `FileVersionUE5`, and `-9` lets the bytes
+after `FileVersionLicensee` change format behind a `FileVersionTooNew` early
+exit.[^6] Paksmith accepts only UE4.14+ packages (UE4.14 is the first release
+to write `-7`; see [`uasset.md`](../asset/uasset.md)), gated by the
+`LegacyFileVersion ∈ {-9, -8, -7}` window in the package summary parser; all
+of them use the "Optimized" layout. Older archives are rejected upstream and
 never reach the custom-version reader.
 
 ## Wire layout
@@ -166,3 +171,5 @@ See `docs/security/allocation-caps.md` for the broader allocation-cap policy.
 [^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/custom_version.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust `CustomVersion::read` paksmith cross-validates against.
 [^3]: See [`fguid.md`](fguid.md) for FGuid wire details.
 [^4]: See [`fstring.md`](fstring.md) for FString wire details.
+[^5]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Serialization/FCustomVersionContainer.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L73-L81 — `DetermineSerializationFormat`: `-2` Enums, `-3` to `-5` Guids, below `-5` Optimized.
+[^6]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L130-L143 — the `LegacyFileVersion` history comment.

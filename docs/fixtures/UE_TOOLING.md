@@ -50,8 +50,9 @@ This doc covers fixture generation for:
   [`crates/paksmith-core/src/container/pak/version.rs`][src-pak-version]
   for the in-tree mapping.
 - All paksmith-supported UE asset versions —
-  `FileVersionUE4 ∈ [504, 522]` and UE5 1001–1010 plus
-  `LegacyFileVersion ∈ {-7, -8, -9}`. See
+  `LegacyFileVersion ∈ {-7, -8, -9}`, `FileVersionUE4 ≥ 504` (UE
+  4.12+; the legacy window makes UE 4.14 the first stock release) and
+  `FileVersionUE5` below 1014 (UE 5.0–5.5). See
   [`crates/paksmith-core/src/asset/version.rs`][src-asset-version] for
   the authoritative constant list.
 - Compression backends: uncompressed, zlib (always available), Oodle
@@ -154,27 +155,30 @@ emitting V11 pak files — Epic has not bumped the format since 4.27. [^v11-stil
 
 ### UE engine version → `FileVersionUE4` / `FileVersionUE5`
 
-Pulled from [`asset::version`][src-asset-version] (constants are
-**wire-format gates** — a field appears in the stream only when the
-file's reported version is ≥ the constant). UE5 introduced a separate
-`FileVersionUE5` axis layered on top of the existing UE4 axis.
+Per-engine object versions follow [CUE4Parse `EGame`][cue4parse-egame];
+the last column names notable object-version constants each release
+introduces. Most are **wire-format gates** — a field appears in the
+stream only when the file's reported version is ≥ the constant — and
+paksmith's own are in [`asset::version`][src-asset-version]. UE5
+introduced a separate `FileVersionUE5` axis layered on top of the
+existing UE4 axis.
 
-| UE version | `FileVersionUE4` | `FileVersionUE5` | `LegacyFileVersion` | Notable wire-format gates that fire |
+| UE version | `FileVersionUE4` | `FileVersionUE5` | `LegacyFileVersion` | Notable object-version constants introduced |
 |------------|------------------|------------------|---------------------|-------------------------------------|
-| UE 4.21 | 503 | — | -7 | (below paksmith floor of 504) |
-| UE 4.22 | 504 | — | -7 | `NAME_HASHES_SERIALIZED` |
-| UE 4.23 | 507 | — | -7 | `PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS` (cooked) |
-| UE 4.24 | 508 | — | -7 | `TEMPLATE_INDEX_IN_COOKED_EXPORTS` |
-| UE 4.25 | 510 | — | -7 | `ADDED_SEARCHABLE_NAMES`, `64BIT_EXPORTMAP_SERIALSIZES` (511) |
-| UE 4.26 | 516 | — | -7 | `ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID` |
-| UE 4.27 | 522 | — | -7 | (canonical UE4 final — paksmith's reference cooked fixture) |
+| UE 4.21 | 517 | — | -7 | `FIX_WIDE_STRING_CRC` (517) |
+| UE 4.22 | 517 | — | -7 | (no new gate vs 4.21) |
+| UE 4.23 | 517 | — | -7 | (no new gate vs 4.22) |
+| UE 4.24 | 518 | — | -7 | `ADDED_PACKAGE_OWNER` (518) |
+| UE 4.25 | 518 | — | -7 | (no new gate vs 4.24) |
+| UE 4.26 | 522 | — | -7 | `SKINWEIGHT_PROFILE_DATA_LAYOUT_CHANGES` (519), `NON_OUTER_PACKAGE_IMPORT` (520), `ASSETREGISTRY_DEPENDENCYFLAGS` (521), `CORRECT_LICENSEE_FLAG` (522) |
+| UE 4.27 | 522 | — | -7 | (no new gate vs 4.26; canonical UE4 final — paksmith's reference cooked fixture) |
 | UE 5.0 | 522 | 1004 | -8 | UE5 begins; `LARGE_WORLD_COORDINATES` |
 | UE 5.1 | 522 | 1008 | -8 | `ADD_SOFTOBJECTPATH_LIST` |
 | UE 5.2 | 522 | 1009 | -8 | `DATA_RESOURCES` |
 | UE 5.3 | 522 | 1009 | -8 | (no new gate vs 5.2) |
-| UE 5.4 | 522 | 1012 | -9 | `SCRIPT_SERIALIZATION_OFFSET` (1010), `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` (1011), `PROPERTY_TAG_COMPLETE_TYPE_NAME` (1012); LegacyFileVersion drops to -9 |
-| UE 5.5 | 522 | 1013 | -9 | `ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES` |
-| UE 5.6 | 522 | 1017 | -9 | `METADATA_SERIALIZATION_OFFSET` (1014), `VERSE_CELLS` (1015), `PACKAGE_SAVED_HASH` (1016), `OS_SUB_OBJECT_SHADOW_SERIALIZATION` (1017) |
+| UE 5.4 | 522 | 1012 | -8 | `SCRIPT_SERIALIZATION_OFFSET` (1010), `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` (1011), `PROPERTY_TAG_COMPLETE_TYPE_NAME` (1012) |
+| UE 5.5 | 522 | 1013 | -8 | `ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES` |
+| UE 5.6 | 522 | 1017 | -9 | `METADATA_SERIALIZATION_OFFSET` (1014), `VERSE_CELLS` (1015), `PACKAGE_SAVED_HASH` (1016), `OS_SUB_OBJECT_SHADOW_SERIALIZATION` (1017); LegacyFileVersion drops to -9 |
 | UE 5.7 | 522 | 1018 | -9 | `IMPORT_TYPE_HIERARCHIES` |
 | UE 5.8 | 522 | 1018 | -9 | (no new gate vs 5.7) |
 
@@ -189,11 +193,13 @@ instead.
 
 **Paksmith's current support window.** Paksmith refuses files where
 `FileVersionUE5 ≥ FIRST_UNSUPPORTED_UE5_VERSION` (currently **1014**
-— see [`asset::summary`][src-asset-summary]). UE 5.4+ packages
-(`FileVersionUE5 ≥ 1012`) are therefore rejected today. The fixture
-matrix still lists UE 5.4–5.8 rows because paksmith is forward-looking:
-fixtures for those versions need to exist when the floor is raised.
-Rows above the floor are marked with **(awaiting paksmith support)**.
+— see [`asset::summary`][src-asset-summary]). Versioned UE 5.6+
+packages (`FileVersionUE5 ≥ 1017`) are therefore rejected today, and
+every unversioned package in the accepted legacy window, UE 5.6+
+included, is refused as unversioned. The fixture
+matrix still lists UE 5.6–5.8 rows because paksmith is forward-looking:
+fixtures for those versions need to exist when the ceiling is raised.
+Rows above the ceiling are marked with **(awaiting paksmith support)**.
 
 ---
 

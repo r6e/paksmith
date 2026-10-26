@@ -40,8 +40,8 @@ in the [`../property/`](../property/) family.
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | `LegacyFileVersion ∈ {-7, -8, -9}` | Paksmith's accepted legacy-version floor; pre-`-7` archives have a different summary shape and are rejected at parse time. | `CUE4Parse/UE4/Versions/ObjectVersion.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
-| `FileVersionUE4 ∈ [504, 522]` (UE 4.21 – 4.27) | Paksmith's accepted UE4 version range. 504 sets the name-table-with-hash-trailers shape; 522 is UE 4.27's latest object-version constant. | Same[^1] |
-| `FileVersionUE5 ∈ [1000, 1013]` (UE 5.0 – 5.5) | Paksmith's accepted UE5 version range (#643). 1014 (`METADATA_SERIALIZATION_OFFSET`) adds a summary field the reader does not consume. | Same[^1] |
+| `FileVersionUE4 ≥ 504` (UE 4.12+) | Paksmith's UE4 floor; 504 sets the name-table-with-hash-trailers shape. No upper bound is applied: 522 is UE 4.27's latest object-version constant, and versioned UE5 packages record 522 too. The legacy check refuses stock UE 4.12 and 4.13 packages, which write `-6`, so UE 4.14 (508) is the first stock release whose versioned packages paksmith reads.[^11] | Same[^1] |
+| `FileVersionUE5 ≤ 1013` (up to UE 5.5) | Paksmith's UE5 ceiling (#643); no lower bound is applied. 1014 (`METADATA_SERIALIZATION_OFFSET`) adds a summary field the reader does not consume. | Same[^1] |
 | 1003 `OPTIONAL_RESOURCES` | Adds `generate_public_hash` bool32 to each `ObjectExport` and `bImportOptional` bool32 to each `ObjectImport`. | Same[^1] |
 | 1005 `REMOVE_OBJECT_EXPORT_PACKAGE_GUID` | Removes `package_guid` from `ObjectExport`. | Same[^1] |
 | 1006 `TRACK_OBJECT_EXPORT_IS_INHERITED` | Adds `is_inherited_instance` bool32 to each `ObjectExport`. | Same[^1] |
@@ -244,12 +244,14 @@ refuses an unversioned package with
 
 ### Legacy file version (`-7` / `-8` / `-9`)
 
-- `-7`: omits `file_version_ue5` field (UE4 only).
-- `-8`: adds `file_version_ue5` field (introduced UE 5.0).
-- `-9`: same shape as `-8`; bumped by Epic for a non-wire change.
+- `-7`: omits `file_version_ue5` field (UE 4.14–4.27).[^11]
+- `-8`: adds `file_version_ue5` field (UE 5.0–5.5).
+- `-9` (UE 5.6+): same shape as `-8` at the same `FileVersionUE5`; bumped by
+  Epic for a non-wire change. UE 5.6's own object version (1017) is already
+  past `PACKAGE_SAVED_HASH` (1016) and paksmith's ceiling.
 
-Paksmith accepts all three; archives at `< -7` (older legacy summary
-shapes) are rejected.
+Paksmith accepts all three; archives at `> -7` (older legacy summary
+shapes, such as `-6`) or `< -9` are rejected.
 
 ## Caps & limits
 
@@ -257,8 +259,8 @@ shapes) are rejected.
 
 - **`magic`**: fixed `u32` = `0x9E2A83C1` (`PACKAGE_FILE_TAG`).
 - **`legacy_file_version`**: `i32` LE; wire-format-wise the field is unbounded (any `i32` could appear on disk). UE writers historically emit a small set of negative discriminants; paksmith's acceptance of `{-7, -8, -9}` is a parser-policy decision — see §*Implementation hardening* below.
-- **`file_version_ue4`**: `i32` LE; wire field unbounded. Paksmith's acceptance range of `[504, 522]` (UE 4.21 – 4.27) is a parser-policy decision — see §*Implementation hardening* below.
-- **`file_version_ue5`**: `i32` LE; wire field unbounded. Paksmith's acceptance range of `[1000, 1013]` is a parser-policy decision (rejecting `≥ 1014` because `METADATA_SERIALIZATION_OFFSET` adds a summary field the reader does not consume, with further summary-shape breaks at 1015/1016) — see §*Implementation hardening* below.
+- **`file_version_ue4`**: `i32` LE; wire field unbounded. Paksmith's `≥ 504` floor (UE 4.12's object version), with no upper bound, is a parser-policy decision; the Versions table gives the stock floor the legacy check sets.
+- **`file_version_ue5`**: `i32` LE; wire field unbounded. Paksmith's `≤ 1013` ceiling, with no lower bound, is a parser-policy decision (rejecting `≥ 1014` because `METADATA_SERIALIZATION_OFFSET` adds a summary field the reader does not consume, with further summary-shape breaks at 1015/1016).
 - **`package_flags`**: `u32` LE; `EPackageFlags` mask. `PKG_FilterEditorOnly = 0x8000_0000` set for cooked content; `PKG_UnversionedProperties = 0x2000` requires `.usmap` schema.
 - **`ObjectImport` row**: 28 bytes (UE4 baseline) / 32 bytes (UE5 ≥ 1003 with `bImportOptional` bool32).
 - **`ObjectExport` row**: 104 bytes (UE 4.27, `EXPORT_RECORD_SIZE_UE4_27`). UE5 conditionally adds / removes fields (1003 `+generate_public_hash`, 1005 `-package_guid`, 1006 `+is_inherited_instance`, 1010 `+script_serialization_*_offset` when not `PKG_UnversionedProperties`).
@@ -407,3 +409,4 @@ for the full enum):
 [^8]: See [`../primitive/fname.md`](../primitive/fname.md).
 [^9]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L212-L218 (detection and substitution), L235 (custom versions).
 [^10]: `gildor2/UEViewer/Unreal/UnrealPackage/UnPackage4.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L119-L139; `gildor2/UEViewer/UmodelTool/Main.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L548-L556.
+[^11]: `gildor2/UEViewer/Unreal/UnrealPackage/UnPackage4.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L84-L95 (`legacyVerToEngineVer`: `-6` from UE 4.11, `-7` from UE 4.14) and `gildor2/UEViewer/Unreal/UE4Version.h@a0bfb468d42be831b126632fd8a0ae6b3614f981` L73-L77 (UE 4.12 = 504, UE 4.14 = 508). The rest of the ranges come from real package headers in `atenfyr/UAssetAPI/UAssetAPI.Tests/TestAssets@b4e8a012939295a6fd890ddc64e57ea78b709b95`: the UE 4.27.2 editor saves in `TestEditorAssets` at `-7`; `TestUE5_1`, `TestUE5_3`, `TestUE5_4` and `TestUE5_5` at `-8`; `TestUE5_6` and `TestUE5_7` at `-9`, as are the UE 5.7.4 editor saves in `TestEditorUE5_7`. `matyalatte/Matya-Uasset-Samples@a7921caec72aca1d1a9cf28e488d702dceaf6f93` adds UE 5.0 samples at `-8`.

@@ -90,8 +90,8 @@ Phase 3 format handlers consume the resolved bytes.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| UE 4.0+ | `FByteBulkData` introduced as the shared bulk-payload header. Initial widths: `ElementCount: i32`, `SizeOnDisk: u32`, `OffsetInFile: i32`. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FByteBulkDataHeader.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| UE 4.3+ (`BULKDATA_AT_LARGE_OFFSETS`) | `OffsetInFile` widens from `i32` (4 bytes) to `i64` (8 bytes) per the version constant. Paksmith's pak v3+ accepted range starts at UE 4.4+, so paksmith always sees the 8-byte form. | Same[^1] |
+| Object version 198+ (`BULKDATA_AT_LARGE_OFFSETS`, before UE 4.0) | `OffsetInFile` widens from `i32` (4 bytes) to `i64` (8 bytes) per the version constant. Paksmith's UE 4.14+ asset floor is past this gate, so paksmith always sees the 8-byte form. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FByteBulkDataHeader.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
+| UE 4.0+ | UE4 `FByteBulkData` header baseline: `ElementCount: i32`, `SizeOnDisk: u32`, `OffsetInFile: i64`. | Same[^1] |
 | UE 4.26+ (`BULKDATA_NoOffsetFixUp`) | Flag added at bit 16. When set, the reader does NOT apply the `BulkDataStartOffset` fixup. Used for already-final-absolute offsets. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/EBulkDataFlags.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
 | UE 4.27+ | `BULKDATA_Size64Bit` flag (bit 13) starts seeing widespread use. When set, `ElementCount` widens to `i64` (8 bytes) and `SizeOnDisk` widens to `u64` (8 bytes). | Same[^1] |
 | UE 5.0+ | `IoPackage.BulkDataMap` short-circuit added (the constructor first reads a `dataIndex: i32`; if it indexes into a pre-baked `BulkDataMap` table, the inline-serial fields below are NOT read — the metadata comes from the pre-baked table). | Same[^1] |
@@ -115,7 +115,7 @@ below directly), the constructor reads:
 | 1 | `BulkDataFlags` | 4 | LE | `u32` (`EBulkDataFlags` bitmask) | Storage tier + compression + size-format selector. Bit allocations per the catalog below. |
 | 2 | `ElementCount` | 4 or 8 | LE | `i32` / `i64` | Number of elements. 8 bytes (`i64`) when `BULKDATA_Size64Bit` (bit 13) is set, otherwise 4 bytes (`i32`). Signed on both widths. For byte bulk data, equals the uncompressed byte count. |
 | 3 | `SizeOnDisk` | 4 or 8 | LE | `u32` / `u64` | Bytes occupied by the on-wire payload (post-compression if applicable). With `BULKDATA_Size64Bit` unset: 4 bytes `u32`. With set: 8 bytes read as `u64`. **Reference deviation:** CUE4Parse's reference implementation reads 8 bytes signed and truncates to the low 32 bits (`(uint) Ar.Read<long>()`), effectively capping `SizeOnDisk` at ~4 GiB. Paksmith reads the full `u64` and relies on `MAX_BULK_DATA_SIZE` (8 GiB) — and `MAX_BULK_DATA_COMPRESSED_SIZE` (512 MiB) for compressed records — to cap pathological values. The paksmith policy is strictly safer than the reference truncation: a wire value like `0x0000_0001_0000_0000` (4 GiB + 0) is interpreted as `4_294_967_296` by paksmith (caught by the 8 GiB cap on a per-record basis, or by the resolver's per-package budget) instead of silently truncated to `0` bytes. Legitimate cooked content has `SizeOnDisk` well under 4 GiB so behavior matches the reference on valid input. |
-| 4 | `OffsetInFile` | 8 or 4 | LE | `i64` / `i32` | Byte offset into the containing file. Width is gated on the `BULKDATA_AT_LARGE_OFFSETS` UE version constant (UE 4.3+): 8 bytes (`i64`) for that range and later; 4 bytes (`i32`) on older packages. Paksmith's pak v3+ accepted range starts at UE 4.4+, so paksmith readers always see 8 bytes. **Pre-fixup wire value**: a reader MUST add `Ar.Owner.Summary.BulkDataStartOffset` to the read value UNLESS `BULKDATA_NoOffsetFixUp` (bit 16) is set; an in-stream payload does not use it. |
+| 4 | `OffsetInFile` | 8 or 4 | LE | `i64` / `i32` | Byte offset into the containing file. Width is gated on the `BULKDATA_AT_LARGE_OFFSETS` UE version constant (object version 198, before UE 4.0): 8 bytes (`i64`) for that range and later; 4 bytes (`i32`) on older packages. Paksmith's UE 4.14+ asset floor is past this gate, so paksmith readers always see 8 bytes. **Pre-fixup wire value**: a reader MUST add `Ar.Owner.Summary.BulkDataStartOffset` to the read value UNLESS `BULKDATA_NoOffsetFixUp` (bit 16) is set; an in-stream payload does not use it. |
 | 5 | *(conditional)* | 2 | — | skip | When `BULKDATA_BadDataVersion` (bit 15) is set, `Ar.Position += sizeof(ushort)` (2 bytes). The reader then CLEARS the `BULKDATA_BadDataVersion` bit from `BulkDataFlags` (does not propagate to downstream consumers). |
 | 6 | *(conditional)* | 12–20 | — | skip | When `BULKDATA_DuplicateNonOptionalPayload` (bit 14) is set, three additional fields follow: `DuplicateFlags: EBulkDataFlags` (4 bytes), `DuplicateSizeOnDisk` (4 or 8 bytes gated on `BULKDATA_Size64Bit`), `DuplicateOffset` (4 or 8 bytes gated on `BULKDATA_AT_LARGE_OFFSETS`). Total additional bytes: 12 (neither gate), 16 (one gate), or 20 (both gates). |
 
@@ -186,7 +186,7 @@ and confirmed this is the honest state:
   narrower `u32`-field chunk record, not the UE4 `i64` form (see
   *Payload decompression* below), and paksmith has no in-scope UE3
   fixture to pin the exact shape. And **only UE3-era cooked content
-  emits it**, out of paksmith's UE4.13+ cooked-asset scope. No
+  emits it**, out of paksmith's UE4.14+ cooked-asset scope. No
   in-scope tool produces a
   cross-validation oracle: `trumank/repak` cannot write LZO bulk data,
   CUE4Parse reads UE4 non-ZLIB bulk payloads as raw (it never decodes
@@ -314,7 +314,7 @@ out of scope for this doc. A parser implementing only the inline
 serial path MUST validate that neither table is present before
 proceeding (CUE4Parse short-circuits at the head of the constructor).
 
-### Worked example — minimal 20-byte FByteBulkDataHeader (UE 4.4+, no special flags)
+### Worked example — minimal 20-byte FByteBulkDataHeader (UE4, no special flags)
 
 A minimal header (not a cooker's word): a `.ubulk`-routed streaming payload
 of 256 bytes located at offset 0 of the `.ubulk` companion. No
@@ -352,12 +352,13 @@ grows from 20 to 28 bytes (or larger with the conditional skip
 regions). UE writers set this flag when the payload exceeds 4 GiB
 or when the asset is built for a platform with 64-bit native sizes.
 
-### Offset-format dispatch (`BULKDATA_AT_LARGE_OFFSETS`, UE 4.3+)
+### Offset-format dispatch (`BULKDATA_AT_LARGE_OFFSETS`, pre-UE 4.0)
 
-Pre-UE-4.3, `OffsetInFile` was 4 bytes (`i32`). Post-`BULKDATA_AT_LARGE_OFFSETS`
-(UE 4.3+), it's 8 bytes (`i64`). Paksmith's pak v3+ range starts at
-UE 4.4+, so paksmith always sees the 8-byte form — but the 4-byte
-form is documented for spec completeness.
+Below `BULKDATA_AT_LARGE_OFFSETS` (object version 198, before UE 4.0),
+`OffsetInFile` was 4 bytes (`i32`); from it on, it's 8 bytes (`i64`).
+Paksmith's UE 4.14+ asset floor is past this gate, so paksmith always
+sees the 8-byte form — but the 4-byte form is documented for spec
+completeness.
 
 ### Tier routing (`.uasset` vs `.uexp` vs `.ubulk` vs `.uptnl`)
 
@@ -562,7 +563,7 @@ audio: 3f) consume the resolved bytes. The chunked zlib framing under
 [#644](https://github.com/r6e/paksmith/issues/644). LZO and BitWindow
 bulk compression are intentionally **fail-closed** rather than decoded
 — [#559](https://github.com/r6e/paksmith/issues/559) investigated both
-and resolved them so (LZO is a UE3-era codec out of paksmith's UE4.13+
+and resolved them so (LZO is a UE3-era codec out of paksmith's UE4.14+
 cooked-asset scope, with no in-scope oracle; BitWindow is a
 deprecated, inert flag with no codec to decode). See
 [LZO and BitWindow](#lzo-and-bitwindow-fail-closed) above.

@@ -55,8 +55,8 @@ asset or pak version). Four versions exist:
 | `ELocResVersion::Optimized_CRC32` (v2, UE 4.14+) | Added total entries count field (4 bytes, skipped by reference parsers). Namespace and key strings now pre-hashed with CRC32 (hash read before each `FString`). `RefCount` (`i32`) added to each strings-array entry. | Same[^1] |
 | `ELocResVersion::Optimized_CityHash64_UTF16` (v3, UE 4.20+) | Switched pre-hash function from CRC32 to CityHash64 of UTF-16-LE-encoded strings, low 32 bits. | Same[^1] |
 
-Cooked content paksmith targets uses version 3 almost exclusively
-(UE 4.21+); version 2 remains in some long-tail cooked content
+Cooked content paksmith targets uses version 3 (UE 4.20+) almost
+exclusively; version 2 remains in some long-tail cooked content
 from the UE 4.14–4.19 era.
 
 ### Hash algorithms
