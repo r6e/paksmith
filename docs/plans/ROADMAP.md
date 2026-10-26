@@ -171,7 +171,7 @@ page table to pixels) shipped for both
 the UE 5.0+ and legacy (UE 4.23-4.27) layouts — the latter via issue
 #649 (see `docs/formats/texture/virtual-textures.md`). LZO/BitWindow bulk compression was investigated
 under #559 and resolved fail-closed (LZO is a UE3-era codec, out of
-paksmith's UE4.13+ cooked-asset scope, with no in-scope oracle;
+paksmith's UE4.14+ cooked-asset scope, with no in-scope oracle;
 BitWindow is a deprecated, inert non-codec).
 
 - **3a** — `FormatHandler` trait + `HandlerRegistry` + class-name

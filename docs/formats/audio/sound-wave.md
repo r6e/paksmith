@@ -73,7 +73,7 @@ buffer passthrough with a codec-appropriate extension. An actual Opus
 | UE version range | Wire-format change | Source |
 |------------------|--------------------|--------|
 | UE 4.0+ | `USoundWave` introduced; per-platform compressed buffers via `FFormatContainer` (non-streaming path). | `CUE4Parse/UE4/Assets/Exports/Sound/USoundWave.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| UE 4.12+ (`SOUND_COMPRESSION_TYPE_ADDED`) | Dummy `FName` compression-type field inserted; removed again before `FFrameworkObjectVersion::RemoveSoundWaveCompressionName`. | Same[^1] |
+| UE 4.5+ (`SOUND_COMPRESSION_TYPE_ADDED`, 392) | Dummy `FName` compression-type field inserted; present until `FFrameworkObjectVersion::RemoveSoundWaveCompressionName`, which removes it. | Same[^1] |
 | UE 4.25+ | `FStreamedAudioPlatformData` added for large/streaming assets. | Same[^1] |
 | UE 5.4+ | `PlatformCuePoints` array (`FSoundWaveCuePoint[]`) serialized before platform data when cooked. | Same[^1] |
 

@@ -29,12 +29,13 @@ table plus a use-site reference.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| `FileVersionUE4 ≥ 504` (UE 4.21+) | Current "name table entry with hash trailers" shape. | `CUE4Parse/UE4/Objects/UObject/FNameEntrySerialized.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
+| `FileVersionUE4 ≥ 504` (UE 4.12+) | Current "name table entry with hash trailers" shape. | `CUE4Parse/UE4/Objects/UObject/FNameEntrySerialized.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
 | `FileVersionUE4 < 504` | No hash trailers — FString only. | Same source[^1] |
 
-Paksmith currently parses the UE 4.21+ layout exclusively, matching the
-`LegacyFileVersion ∈ {-9, -8, -7}` window enforced in the package summary
-parser — see [`fcustom-version.md`](fcustom-version.md) for the
+Paksmith currently parses the `FileVersionUE4 ≥ 504` layout exclusively: the
+package summary parser enforces the `LegacyFileVersion ∈ {-9, -8, -7}` window,
+which starts at UE 4.14, and refuses a recorded `FileVersionUE4` below 504 —
+see [`fcustom-version.md`](fcustom-version.md) for the
 more-negative-is-newer convention.
 
 ## Wire layout
@@ -116,7 +117,7 @@ means "no suffix" (renders as bare `"Foo"`), `number = 1` means `_0`,
 
 ## Variants
 
-- **Pre-UE 4.21 layout.** Not supported by paksmith; see Versions table.
+- **Pre-UE 4.12 layout.** Not supported by paksmith; see Versions table.
 - **UE5 "Names V2" / hash-table variants.** Some UE5 cooked builds use a
   different in-memory representation (`FNamePool` with sharded buckets);
   this is an in-memory concern, not a wire-format one. The on-disk
@@ -182,7 +183,7 @@ policy.
   name table with `name_table[0] = "None"` and `name_table[1] = "Foo"`.
 - **Cross-validation oracle:** CUE4Parse's `FNameEntrySerialized` reader[^1]
   and `unreal_asset`'s in-memory `FName` type[^2]. CUE4Parse confirms the
-  `FString + u16 + u16` row shape for UE 4.21+; `unreal_asset` exposes the
+  `FString + u16 + u16` row shape for UE 4.12+; `unreal_asset` exposes the
   reference type (the wire entry read is threaded through the asset reader,
   not a standalone method).
 - **Known divergences:** none. Both readers consume the same `FString + u16 + u16` bytes.
@@ -219,6 +220,6 @@ plus integration cases in `crates/paksmith-core-tests/`.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/UObject/FNameEntrySerialized.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FNameEntrySerialized` reader and the hash-trailer shape for UE 4.21+.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/UObject/FNameEntrySerialized.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FNameEntrySerialized` reader and the hash-trailer shape for UE 4.12+.
 [^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/types/fname.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust `FName` reference enum (in-memory type). The wire entry read in unrealmodding is threaded through the asset reader rather than exposed as a standalone `FNameEntry::read`; paksmith's row-shape cross-validation is against CUE4Parse, with the unrealmodding citation here providing the type-shape oracle.
 [^3]: See [`fstring.md`](fstring.md) for FString wire details.

@@ -230,7 +230,7 @@ later revs)
 call `DeserializeCookedPlatformData(Ar)` with the flag defaulted
 `true`, so a sibling parser must NOT consume the bool even at object
 versions ≥ 1010. Their owner `bCooked` is read unconditionally (no
-`ADD_COOKED_TO_TEXTURE2D` gate — moot at paksmith's UE 4.13+ floor),
+`ADD_COOKED_TO_TEXTURE2D` gate — moot at paksmith's UE 4.14+ floor),
 and `UTextureCube`'s UE3-era legacy branches sit below that floor.
 
 paksmith parses all three through the shared `texture2d` reader,

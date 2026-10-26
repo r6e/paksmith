@@ -84,7 +84,7 @@ skip regions, and the full `EBulkDataFlags` catalog.
 | `BulkDataFlags` | 4 | LE | `u32` | Bitfield publishing the storage tier + flags. See bit catalog below. |
 | `ElementCount` | 4 or 8 | LE | `i32` / `i64` | Number of elements (bytes for byte bulk data). 8 bytes (i64) when `BULKDATA_Size64Bit` is set, otherwise 4 bytes (i32). Signed. |
 | `SizeOnDisk` | 4 or 8 | LE | `uint` | Stored byte size (post-compression if applicable). Width is 8 bytes when `BULKDATA_Size64Bit` is set, 4 bytes otherwise. |
-| `OffsetInFile` | 8 or 4 | LE | `i64` / `i32` | Byte offset within the containing file. Width is gated on the `BULKDATA_AT_LARGE_OFFSETS` UE version constant (UE 4.3+): 8 bytes (`i64`) for that range and later; 4 bytes (`i32`) on older packages. Paksmith's pak v3+ accepted range starts at UE 4.4+, so paksmith readers always see 8 bytes. **Offset fix-up:** unless `BULKDATA_NoOffsetFixUp` (bit 16) is set, the on-wire value is a pre-fixup offset that a reader MUST adjust by adding the package summary's `BulkDataStartOffset` (see [`../asset/uasset.md`](../asset/uasset.md)) before interpretation as an absolute file offset. An in-stream payload does not use `OffsetInFile`. |
+| `OffsetInFile` | 8 or 4 | LE | `i64` / `i32` | Byte offset within the containing file. Width is gated on the `BULKDATA_AT_LARGE_OFFSETS` UE version constant (object version 198, before UE 4.0): 8 bytes (`i64`) for that range and later; 4 bytes (`i32`) on older packages. Paksmith's UE 4.14+ asset floor is past this gate, so paksmith readers always see 8 bytes. **Offset fix-up:** unless `BULKDATA_NoOffsetFixUp` (bit 16) is set, the on-wire value is a pre-fixup offset that a reader MUST adjust by adding the package summary's `BulkDataStartOffset` (see [`../asset/uasset.md`](../asset/uasset.md)) before interpretation as an absolute file offset. An in-stream payload does not use `OffsetInFile`. |
 
 The "containing file" is whichever of `.uasset` / `.uexp` / `.ubulk`
 the flags identify.
@@ -226,11 +226,11 @@ work (see [`../compression/oodle.md`](../compression/oodle.md)).
 - **`SizeOnDisk`**: `u32` (4 bytes) by default; `u64` (8 bytes)
   when `BULKDATA_Size64Bit` is set.
 - **`OffsetInFile`**: 8 bytes (`i64`) for UE versions ≥
-  `BULKDATA_AT_LARGE_OFFSETS` (UE 4.3+); 4 bytes (`i32`) on
-  older packages. Width is gated on a UE version constant, NOT
-  on `BULKDATA_Size64Bit`. Paksmith's pak v3+ range starts at
-  UE 4.4+, so paksmith always reads 8 bytes; documenting the
-  pre-4.3 case for spec completeness.
+  `BULKDATA_AT_LARGE_OFFSETS` (object version 198, before UE 4.0);
+  4 bytes (`i32`) on older packages. Width is gated on a UE version
+  constant, NOT on `BULKDATA_Size64Bit`. Paksmith's UE 4.14+ asset
+  floor is past this gate, so paksmith always reads 8 bytes;
+  documenting the older case for spec completeness.
 - **`SizeX` / `SizeY` / `SizeZ`**: `i32` fields (max
   `i32::MAX`); `SizeZ` absent pre-UE-4.20.
 

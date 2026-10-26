@@ -49,8 +49,8 @@ as `paksmith-core/src/asset/property/tag.rs`.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| `FileVersionUE4 ≥ 504` (UE 4.21+) | Current shape. `VER_UE4_STRUCT_GUID_IN_PROPERTY_TAG (441)` and `VER_UE4_PROPERTY_GUID_IN_PROPERTY_TAG (503)` are both below 504, so `struct_guid` and the optional `PropertyGuid` are unconditionally present. | `CUE4Parse/UE4/Assets/Objects/FPropertyTag.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
-| `FileVersionUE5 ∈ [1000, 1010]` | Same as UE4 ≥ 504; no UE5 changes to the tag header within paksmith's accepted range. | Same[^1] |
+| `FileVersionUE4 ≥ 504` (UE 4.12+) | Current shape, except that `SetProperty` and `MapProperty` carry their type extras only from `PROPERTY_TAG_SET_MAP_SUPPORT` (509, UE 4.15)[^4]. `VER_UE4_STRUCT_GUID_IN_PROPERTY_TAG (441)` and `VER_UE4_PROPERTY_GUID_IN_PROPERTY_TAG (503)` are both below 504, so `struct_guid` and the optional `PropertyGuid` are unconditionally present. | `CUE4Parse/UE4/Assets/Objects/FPropertyTag.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
+| `FileVersionUE5 ∈ [1000, 1010]` | Same as UE4 ≥ 504; UE5 changes nothing in the tag header before 1011. | Same[^1] |
 | `FileVersionUE5 ≥ 1011` `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` | Two additions to versioned tagged streams (#643): a per-tag `u8 EPropertyTagExtension` flags byte after the `HasPropertyGuid` block (`OverridableInformation` 0x02 carries `u8 OverrideOperation` + a bool32 `bExperimentalOverridableLogic` — 5 payload bytes, unlike the per-object byte's 1), and a per-object `u8 EClassSerializationControlExtension` byte before an export root's tagged stream (never struct-fallback bodies; 0x02 carries a `u8` operation). Paksmith consumes and discards both payloads; any other extension bit fails closed (further groups have undefined size). Never ships standalone — UE releases jump 1009 → 1012. | Same[^1] |
 | `FileVersionUE5 ≥ 1012` `PROPERTY_TAG_COMPLETE_TYPE_NAME` (UE 5.4) | Replaces everything after the tag's `Name` (#643): a pre-order `FPropertyTypeName` tree of `(FName, i32 inner_count)` nodes (read with a remaining-counter; no total prefix), then `i32 Size`, then a `u8 EPropertyTagFlags` byte — `HasArrayIndex` 0x01 → `i32`, `HasPropertyGuid` 0x02 → 16-byte guid, `HasPropertyExtensions` 0x04 → the 1011 extension byte, `HasBinaryOrNativeSerialize` 0x08 / `SkippedSerialize` 0x20 payload-free, `BoolTrue` 0x10 replaces the bool payload byte. Gone from the wire: standalone `ArrayIndex`, bool payload byte, `StructGuid`, guid-presence byte. Type extras (struct/enum/inner/value names) map from the tree (root = type; `Struct` param0 = struct name, its param0 = module path; `Byte`/`Enum` param0 = enum; `Array`/`Set`/`Optional` param0 = inner, recursive; `Map` param0/param1 = key/value). `Array<Struct>` elides its inner `FPropertyTag` — the element struct name derives from the outer tag's tree. Set/map VALUE bodies are unchanged at every version (verified — only `FPropertyTag.cs` and `UScriptArray.cs` gate on 1012 in CUE4Parse). | Same[^1] |
 
@@ -132,7 +132,7 @@ operator-readable diagnostics.
 
 ## Variants
 
-The wire shape is uniform across all property types; per-type variance lives in the *Type extras dispatch* (Wire layout §*Type extras dispatch*) and the per-version tag-tail conditionals (Versions table). The `None`-tag sentinel terminator (`name = "None"`) is documented in *Iteration* under Wire layout. The `HasPropertyGuid` byte and `struct_guid` slot are unconditional at paksmith's UE 4.21+ floor — see the Versions table.
+The wire shape is uniform across all property types; per-type variance lives in the *Type extras dispatch* (Wire layout §*Type extras dispatch*) and the per-version tag-tail conditionals (Versions table). The `None`-tag sentinel terminator (`name = "None"`) is documented in *Iteration* under Wire layout. The `HasPropertyGuid` byte and `struct_guid` slot are unconditional from paksmith's UE 4.14 floor until `FileVersionUE5` 1012 (UE 5.4) drops both — see the Versions table.
 
 ## Caps & limits
 
@@ -200,6 +200,13 @@ See `docs/security/allocation-caps.md` for the broader policy.
     (`DATA_RESOURCES`) — no oracle exists for 1011+ fixtures, so
     the 1012/1013 fixtures are paksmith-only with hand-verified
     bytes (same posture as the pak v1/v2 gap, #637).
+  - **Set/Map type extras are read below 509.** paksmith reads
+    `inner_type` (and a Map's `value_type`) on every `SetProperty`
+    and `MapProperty` tag, while CUE4Parse reads them only from
+    `PROPERTY_TAG_SET_MAP_SUPPORT` (509)[^4]. A Set or Map tag in a
+    UE 4.14 (508) package is therefore misread: the reader consumes
+    8 extra bytes (16 for a Map) and desyncs the rest of the tag and
+    its value.
   - **Parse-error → Opaque fallback.** If `read_properties` returns
     an error mid-iteration (malformed tag, unknown encoding, depth
     violation, cursor mismatch), the caller
@@ -254,3 +261,4 @@ iteration loop, the two outer caps).
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FPropertyTag.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the tag header layout, including the version-conditional UE5 1011/1012 extensions paksmith decodes as of #643.
 [^2]: See [`../primitive/fname.md`](../primitive/fname.md) for FName wire shape and `(index, number)` resolution.
 [^3]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_properties/src/lib.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle for the per-type property dispatch.
+[^4]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FPropertyTagData.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L51-L61 — the `PROPERTY_TAG_SET_MAP_SUPPORT` gate on the `SetProperty` and `MapProperty` type extras.
