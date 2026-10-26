@@ -1994,6 +1994,7 @@ mod tests {
                 parsed.summary.saved_by_engine_version.branch,
                 "{label}"
             );
+            assert_eq!(parsed.summary.version.legacy_file_version, -8, "{label}");
             let crate::asset::Asset::Generic(bag) = &parsed.payloads[0] else {
                 panic!("{label}: expected Generic payload");
             };

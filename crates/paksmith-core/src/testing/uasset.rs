@@ -2559,7 +2559,7 @@ pub fn build_minimal_ue5_legacy_neg9() -> MinimalPackage {
     })
 }
 
-/// UE 5.4/5.5 fixture family (#643): `legacy = -9`, a REAL
+/// UE 5.4/5.5 fixture family (#643): `legacy = -8`, a REAL
 /// UE5 ≥ 1012 tagged payload (per-object serialization-control byte +
 /// one complete-type-name IntProperty tag + i32 value `7` + None
 /// terminator), names `Score`/`IntProperty` appended to the default
@@ -2596,7 +2596,7 @@ fn build_minimal_ue5_tagged_1012_shape(ue5: i32, minor: u16) -> MinimalPackage {
         branch: format!("++UE5+Release-5.{minor}"),
     };
     build_minimal(MinimalPackageSpec {
-        legacy_file_version: -9,
+        legacy_file_version: -8,
         file_version_ue5: Some(ue5),
         names,
         exports,
