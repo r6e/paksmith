@@ -69,7 +69,7 @@ phases:
   (`ADDED_SEARCHABLE_NAMES`, PR #230 boundary), 516 (LocalizationId
   gate), 518/519 (`OwnerPersistentGuid` window, PR #224 boundary), UE5
   1010 (`SCRIPT_SERIALIZATION_OFFSET`, PR #224 fix), `LegacyFileVersion
-  = -9` (UE 5.4+, PR #234), multi-import / multi-export shape
+  = -9` (written by UE 5.6+, PR #224), multi-import / multi-export shape
   variations, non-empty engine-version branch, populated custom-
   version container, non-zero persistent-guid, and a licensee engine-
   version (PR #234 high-bit masking). Every fixture round-trips
@@ -212,7 +212,7 @@ phases:
   - `read_bool32` strict-rejects values other than 0/1 (matches
     CUE4Parse's `FArchive.ReadBoolean`); surfaces as
     `AssetParseFault::InvalidBool32 { field, observed }`.
-  - `legacy_file_version = -9` (UE 5.4+) now accepted alongside -7
+  - `legacy_file_version = -9` (written by UE 5.6+) now accepted alongside -7
     and -8 — forward-compat only; -9 introduces no new wire fields
     within Phase 2a's UE5 < 1011 ceiling.
 - **Supply-chain hygiene round (chore(security)):** six fixes

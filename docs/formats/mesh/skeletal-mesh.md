@@ -73,7 +73,6 @@ layouts remain fail-closed `UnsupportedFeature`s, tracked under #650.**
 | UE 4.0+ | `USkeletalMesh` + `FStaticLODModel` introduced. | `CUE4Parse/UE4/Assets/Exports/SkeletalMesh/USkeletalMesh.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
 | UE 4.13 (`FSkeletalMeshCustomVersion.CombineSectionWithChunk`) | Section and chunk merged; `FSkelMeshChunk` only present pre-this version. | Same[^1] |
 | UE 4.19 (`FSkeletalMeshCustomVersion.SplitModelAndRenderData`) | Cooked LOD records split from editor LOD model; `bCooked` gate added at `USkeletalMesh.Deserialize` level. | Same[^1] |
-| UE 4.20 (object version 504) | Skin-weight precision split; `bExtraBoneInfluences` variant. | Same[^1] |
 | UE 4.24 (`FAnimObjectVersion.IncreaseBoneIndexLimitPerChunk`) | `bUse16BitBoneIndex` added (in both `FSkelMeshSection` and `FSkinWeightVertexBuffer`). | Same[^1] |
 | UE 4.24 (`FRenderingObjectVersion ≥ MaterialShaderMapIdSerialization`) | `UseNewCookedFormat` boundary: cooked LODs switch from `SerializeRenderItem_Legacy` to `SerializeRenderItem` (`bIsLODCookedOut` + `bInlined` fields added to the LOD header). | Same[^1]; UEViewer `UnMesh4.cpp`[^2] |
 | UE 5.0+ | Optional cloth simulation data added to LOD payloads. | Same[^1] |
@@ -265,21 +264,21 @@ next LOD. Geometry is decoded from an in-stream inline payload, or resolved
 from the companion file through the context's bulk resolver (#650). See
 [Non-inlined (bulk) LOD branch](#non-inlined-bulk-lod-branch) below.
 
-#### Post-loop tail (UE4.24–4.27)
+#### Post-loop tail (UE4.24+)
 
 After the LOD loop, the following fields are consumed in wire order before the
 export payload ends. Source: oracle `USkeletalMesh.Deserialize` @ `cf74fc32`.[^1]
 
 | # | field | size | condition | notes |
 |---|-------|------|-----------|-------|
-| 1 | `numInlinedLODs` | 1 | inside `UseNewCookedFormat` block (= always for UE4.24+) | `u8`; read and discarded |
-| 2 | `numNonOptionalLODs` | 1 | same | `u8`; read and discarded |
-| 3 | `dummyObjs` | 4 + N×4 | ungated | `i32` count (capped at `MAX_DUMMY_OBJECTS`) + N × `FPackageIndex`; consumed and discarded |
-| 4 | UV-channel skip | 4 + N×4 | `FRenderingObjectVersion` PRESENT **and** `< TextureStreamingMeshUVChannelData(10)` | `SkipFixedArray(4)`: `i32` count + `count × 4` bytes; **never fires** for UE4.24+ (`is_some_and` gate; the 4.24 boundary guarantees present → `≥ 36 > 10`); kept for cursor-math completeness |
-| 5 | `FNaniteResources` | — | `Game >= UE5.5` | does NOT fire for UE4.24–4.27; a UE5.5+ asset desyncs into the sentinel |
+| 1 | `FNaniteResources` | — | `Game >= UE5.5`; inside the cooked block, before `numInlinedLODs` | does NOT fire for UE4.24–5.4; `read_typed` refuses a versioned UE5.5 asset (UE5 object version 1013) with `UnsupportedFeature` before reading it, and the summary refuses UE5.6+ |
+| 2 | `numInlinedLODs` | 1 | inside `UseNewCookedFormat` block (= always for UE4.24+) | `u8`; read and discarded |
+| 3 | `numNonOptionalLODs` | 1 | same | `u8`; read and discarded |
+| 4 | `dummyObjs` | 4 + N×4 | ungated | `i32` count (capped at `MAX_DUMMY_OBJECTS`) + N × `FPackageIndex`; consumed and discarded |
+| 5 | UV-channel skip | 4 + N×4 | `FRenderingObjectVersion` PRESENT **and** `< TextureStreamingMeshUVChannelData(10)` | `SkipFixedArray(4)`: `i32` count + `count × 4` bytes; **never fires** for UE4.24+ (`is_some_and` gate; the 4.24 boundary guarantees present → `≥ 36 > 10`); kept for cursor-math completeness |
 
 `FNaniteResources` is positionally inside the cooked block but gated on the
-`Game >= UE5.5` engine enum value — out-of-band for paksmith's UE4 range.
+`Game >= UE5.5` engine enum value, which the wire does not carry (see row 1).
 The UV-channel skip uses `is_some_and` (not `is_none_or`) so an ABSENT
 `FRenderingObjectVersion` does not fire the skip, matching CUE4Parse's
 cooked Game-map fallback which returns `≥ 10`.
@@ -422,9 +421,9 @@ here: `read_typed`'s UE4.24 `MaterialShaderMapIdSerialization` gate guarantees
 2. **`SkinWeightProfiles`** (UNCONDITIONAL): read a capped `i32 count`; skip `count × 8`
    bytes (`count` × `FName`-pair = `NameIndex i32` + `Number i32`).
 
-3. **Ray-tracing** — `HasRayTracingData && Game >= UE5.6`: never fires for the UE4 range
-   paksmith targets. A UE5.6 asset reaching here desyncs into the post-loop sentinel →
-   `Generic`.
+3. **Ray-tracing** — `HasRayTracingData && Game >= UE5.6`: never fires for a mesh
+   paksmith reads (UE 4.24–5.4; the post-loop tail's `FNaniteResources` row covers
+   UE 5.5 and later).
 
 **Worked example — UE4.25+, no cloth, adjacency present, profiles count 0:**
 
@@ -754,7 +753,8 @@ either payload source — in-stream inline payloads are captured directly;
 external `.ubulk` payloads resolve through the bulk resolver (#650) — and
 the `SerializeAvailabilityInfo` mirror is skipped byte-exactly. Cooked
 layouts BEFORE UE 4.24 remain fail-closed `UnsupportedFeature`s: the
-pre-`SplitModelAndRenderData` inline layout (UE 4.13-4.18) and the
+pre-`SplitModelAndRenderData` inline layout (UE 4.14-4.18; 4.13 is refused
+at the summary) and the
 `SerializeRenderItem_Legacy` layout (UE 4.19-4.23) are documented wire
 formats with oracle support, tracked for future implementation under
 issue #650. The LOD loop, the `BuffersSize` seek, the
