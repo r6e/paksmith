@@ -1,6 +1,8 @@
 //! `FPropertyTag` wire reader.
 //!
-//! Phase 2b layout (UE 4.21+, `FileVersionUE4 ≥ 504`):
+//! Phase 2b layout (UE 4.15–5.3, `FileVersionUE4 ≥ 509`; below 509
+//! `PROPERTY_TAG_SET_MAP_SUPPORT`, Set/Map tags carry no type extras, which
+//! this reader does not yet handle):
 //!
 //! ```text
 //! Name:            FName (i32 index, i32 number)

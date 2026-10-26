@@ -1,6 +1,6 @@
 //! `FObjectImport` table.
 //!
-//! Wire shape per record (UE 4.21+ baseline, UE5 trailer):
+//! Wire shape per record (UE 4.14+ baseline, UE5 trailer):
 //! ```text
 //! FName  class_package        // 2 × u32 (name_index + number)
 //! FName  class_name           // 2 × u32

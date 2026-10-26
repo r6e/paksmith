@@ -337,13 +337,16 @@ impl PackageSummary {
                 },
             });
         }
-        // Versions. Accepted window: -7 (UE 4.21-4.27), -8 (UE 5.0-5.3),
-        // -9 (UE 5.4+). Per CUE4Parse's FPackageFileSummary.cs HEAD
-        // (lines 115-125), -9 introduces a contract that loaders may
-        // need to early-exit on FileVersionTooNew; the wire-format
-        // changes that ride at -9 (notably PACKAGE_SAVED_HASH at UE5
-        // 1015 swapping the summary's FGuid for an FIoHash) are gated
-        // by FileVersionUE5 floors well above Phase 2a's 1010 ceiling.
+        // Versions. Accepted window: -7 (UE 4.14-4.27), -8 (UE 5.0-5.5),
+        // and -9, which UE 5.6+ writes. The checks below still refuse
+        // every UE 5.6+ package: versioned ones at the UE5 ceiling,
+        // unversioned ones as unversioned. Per CUE4Parse's
+        // FPackageFileSummary.cs@77b94fa (L138-L143), -9 introduces a
+        // contract that loaders may need to early-exit on
+        // FileVersionTooNew; the wire-format changes that ride at -9
+        // (notably PACKAGE_SAVED_HASH at UE5 1016 swapping the summary's
+        // FGuid for an FIoHash) are gated by FileVersionUE5 floors at or
+        // above the ceiling, FIRST_UNSUPPORTED_UE5_VERSION (1014).
         // -9 is therefore wire-compatible with -8 within paksmith's
         // accepted UE5 range; widening the window is forward-compat
         // only (no behavior change for existing -7/-8 inputs).
@@ -983,7 +986,7 @@ mod tests {
         assert_eq!(parsed, s);
     }
 
-    /// `legacy_file_version = -9` is the UE 5.4+ marker. Within
+    /// `legacy_file_version = -9` is the UE 5.6+ marker. Within
     /// paksmith's accepted UE5 ceiling (< 1014), -9 introduces no
     /// new wire fields beyond what -8 emits (PACKAGE_SAVED_HASH is at
     /// 1016, above the ceiling). Round-trip must accept the value.
@@ -1083,7 +1086,7 @@ mod tests {
         ));
     }
 
-    /// Upper boundary of the accepted legacy window. `-10` is unsigned
+    /// Newest end of the accepted legacy window. `-10` is unassigned
     /// in UE's writer at the time of writing; paksmith refuses to
     /// parse it rather than guess at a divergent layout.
     #[test]

@@ -1,6 +1,6 @@
 //! FName pool — the string table referenced by import/export entries.
 //!
-//! Phase 2a layout (UE 4.21+, `FileVersionUE4 ≥ 504`):
+//! Phase 2a layout (`FileVersionUE4 ≥ 504`, UE 4.12+):
 //! ```text
 //! per entry:
 //!   FString  name        // base name string (no `_NN` suffix)

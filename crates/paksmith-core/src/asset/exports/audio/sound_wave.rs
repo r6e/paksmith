@@ -463,10 +463,10 @@ fn resolve_streaming(properties: &[Property], version: AssetVersion) -> bool {
 /// `Ar.Ver >= SOUND_COMPRESSION_TYPE_ADDED && FFrameworkObjectVersion.Get(Ar) <
 /// RemoveSoundWaveCompressionName`).
 ///
-/// The lower bound (`SOUND_COMPRESSION_TYPE_ADDED`, UE 4.12) is unconditionally
-/// satisfied at paksmith's `VER_UE4_NAME_HASHES_SERIALIZED` (504 / UE 4.13)
-/// floor — it sits earlier in the append-only UE4 object-version enum — so only
-/// the framework-version upper bound is a live gate.
+/// The lower bound (`SOUND_COMPRESSION_TYPE_ADDED`, 392, UE 4.5) is unconditionally
+/// satisfied at paksmith's `VER_UE4_NAME_HASHES_SERIALIZED` (504, UE 4.12's
+/// object version) floor — it sits earlier in the append-only UE4 object-version
+/// enum — so only the framework-version upper bound is a live gate.
 ///
 /// The name is **read-and-discarded**: the 8 wire bytes (two `i32`s — name
 /// index + number) must be consumed so the platform-data reader (3f-3) starts

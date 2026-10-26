@@ -1,6 +1,6 @@
 //! `FObjectExport` table.
 //!
-//! Wire shape per record (UE 4.21+ baseline, with UE4/UE5 conditional
+//! Wire shape per record (UE 4.14+ baseline, with UE4/UE5 conditional
 //! fields). Verified against CUE4Parse's export reader
 //! (`CUE4Parse/UE4/Objects/UObject/ObjectResource.cs`); cross-validation
 //! via the unreal_asset oracle is deferred to Task 12 (fixture-gen),
@@ -77,7 +77,7 @@ fn emits_script_serialization_tail(version: AssetVersion, summary_package_flags:
         && (summary_package_flags & PKG_UNVERSIONED_PROPERTIES) == 0
 }
 
-/// Wire size of one export record at Phase 2a's UE 4.27 floor (no UE5
+/// Wire size of one export record in a UE 4.27 package (no UE5
 /// optional fields). Computed as:
 ///
 /// ```text
@@ -93,9 +93,8 @@ fn emits_script_serialization_tail(version: AssetVersion, summary_package_flags:
 /// = 104 bytes
 /// ```
 ///
-/// For UE5 assets at our accepted range (1000..=1010), the size may
-/// differ (no `package_guid` once UE5 >= 1005, plus optional
-/// `is_inherited_instance`/`generate_public_hash`). Don't use this
+/// For UE5 assets below `FIRST_UNSUPPORTED_UE5_VERSION` the size may differ;
+/// the module-level wire table lists the UE5-gated fields. Don't use this
 /// constant as a structural cap — it's a UE 4.27 fixture-test pin.
 #[cfg(any(test, feature = "__test_utils"))]
 #[allow(

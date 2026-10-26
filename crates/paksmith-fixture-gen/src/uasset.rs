@@ -1592,9 +1592,9 @@ mod tests {
         .expect("oracle must accept the UE5 1010 SCRIPT_SERIALIZATION_OFFSET fixture");
     }
 
-    /// UE5 `legacy_file_version = -9` (UE 5.4+ forward-compat,
-    /// PR #234). Same wire shape as UE5 1010 for paksmith's accepted
-    /// ceiling (PACKAGE_SAVED_HASH at UE5 1015 is above the ceiling).
+    /// UE5 `legacy_file_version = -9` (forward-compat, PR #224; UE 5.6+
+    /// writes -9). Same wire shape as UE5 1010 for paksmith's accepted
+    /// ceiling (PACKAGE_SAVED_HASH at UE5 1016 is above the ceiling).
     #[test]
     fn oracle_accepts_ue5_legacy_neg9_fixture() {
         use paksmith_core::testing::uasset::build_minimal_ue5_legacy_neg9;

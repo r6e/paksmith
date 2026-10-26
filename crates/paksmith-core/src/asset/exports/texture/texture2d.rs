@@ -154,7 +154,7 @@ const CPU_COPY_FIXED_HEADER_BYTES: u64 = 14;
 /// `DeserializeCookedPlatformData(Ar)` with the flag defaulted `true`;
 /// line cites pinned to CUE4Parse commit `b26351d`).
 /// The sibling classes' UE3-era legacy branches (`UTextureCube`'s
-/// pre-`RENDERING_REFACTOR` block) sit below paksmith's UE 4.13+ asset
+/// pre-`RENDERING_REFACTOR` block) sit below paksmith's UE 4.14+ asset
 /// floor and are not modeled.
 ///
 /// # Errors
@@ -356,8 +356,8 @@ fn reads_serialize_mip_data(ctx: &AssetContext) -> bool {
 /// at `1009` is indistinguishable from 5.2 by `file_version_ue5`
 /// alone. [`serialize_mip_data_verdict`] therefore splits the range
 /// into three bands:
-/// - **`>= 1010`** (incl. the 5.4-preview object versions paksmith
-///   accepts): unambiguous, the flag is read.
+/// - **`>= 1010`** (incl. the 5.4-preview, 5.4 and 5.5 object
+///   versions paksmith accepts): unambiguous, the flag is read.
 /// - **Exactly `1009`** — the ONLY ambiguous value: a game profile
 ///   declaring `>= 5.3` ([`AssetContext::engine_version_hint`]) makes
 ///   the flag be read; without one paksmith keeps its established 5.2
@@ -457,7 +457,7 @@ fn read_owner_bool(
 ///   `Ar.Game >= GAME_UE4_20 ? i64 : i32`; UE5 adds an unused
 ///   `AbsolutePosition` base). paksmith proxies the engine gate with
 ///   [`AssetVersion::is_ue4_20_or_later`] (object version `>= 516`), since
-///   it deliberately parses UE4.13+ cooked assets. CUE4Parse uses
+///   it deliberately parses UE4.14+ cooked assets. CUE4Parse uses
 ///   `skipOffset` to seek past alternate cooked formats; paksmith reads a
 ///   single entry and never seeks, so it is consumed but not interpreted.
 fn read_platform_data_key(
