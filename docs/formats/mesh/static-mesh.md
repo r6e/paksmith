@@ -52,7 +52,8 @@ already-parsed geometry is still returned. The pre-4.23 legacy
 (`SerializeBuffersLegacy`) LOD layout is decoded as a **deliberately
 UNVERIFIED** path (no real pre-4.23 fixture; synthetic-only — reachable
 for object ≤516, ~UE4.20; 4.21/4.22 collapse to object 517 and route to
-the new reader). UE5 / Nanite is surfaced as `UnsupportedFeature`; an
+the new reader). Below object 516 (UE4 ≤4.18) a LOD's vertex buffer is
+refused as `UnsupportedFeature`. UE5 / Nanite is surfaced as `UnsupportedFeature`; an
 unresolvable non-inlined record (no resolver, or any bulk-resolver error
 such as a missing companion or a source the decode has charged past its
 length) degrades the export to a generic property bag, except an
@@ -66,7 +67,8 @@ the package read. The glTF
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | UE 4.0+ | `UStaticMesh` + `FStaticMeshRenderData` introduced. | `CUE4Parse/UE4/Assets/Exports/StaticMesh/UStaticMesh.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| UE 4.20 (object version 504) | Section info encoding tweaks; vertex buffer layout stable. | Same[^1] |
+| UE 4.19 (object version 516) | `FStaticMeshVertexBuffer` drops `Strides`, and its one interleaved `FStaticMeshUVItem` array becomes separate tangent and UV bulk arrays (see [`vertex-formats.md`](vertex-formats.md)). Keyed on the engine version, with no object-version check. | CUE4Parse[^2]; UEViewer[^3] |
+| UE 4.20 (object version 516) | `ScreenSize[]` entries become `FPerPlatformFloat` (`u32` bool + `f32`); before, each is a plain `f32`. | CUE4Parse[^2] |
 | UE 4.23+ | `numInlinedLODs: u8` appended after the LOD array inside `FStaticMeshRenderData`. | Same[^1] |
 | UE 4.25 (`VER_UE4_RAW_MESH_BULK_DATA_REMOVED`) | Raw mesh source data removed from cooked output. | Same[^1] |
 | UE 5.0+ | `NaniteResources: FNaniteResources` added inside `FStaticMeshRenderData` after `numInlinedLODs`. Classic LOD payload still present for non-Nanite / fallback. UE 5.5+ also appends a render-data-level `bHasRayTracingProxy: u32` bool gating an `FStaticMeshRayTracingProxy` struct. | Same[^1] |
@@ -325,8 +327,8 @@ path as an inlined LOD. A present per-LOD `FDistanceFieldVolumeData` (UE4
 path) is validated-skipped, so a distance-field-bearing mesh still exports
 its geometry. The pre-4.23 legacy (`SerializeBuffersLegacy`) LOD layout is
 decoded as a **deliberately UNVERIFIED** path (no real pre-4.23 fixture;
-synthetic-only, targets object ≤516 (~UE4.20) — the lower sub-band runs the
-same code but is UNVERIFIED at sub-version boundaries and may desync). UE5
+synthetic-only, targets object 516 (~UE4.20); below 516 a LOD's vertex
+buffer is refused as `UnsupportedFeature`). UE5
 / Nanite is surfaced as `UnsupportedFeature`; an unresolvable non-inlined
 record (no resolver, or any bulk-resolver error such as a missing
 companion or a source the decode has charged past its length) degrades the
@@ -342,3 +344,5 @@ deferred; the pre-4.23 legacy path needs a real fixture for verification.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/StaticMesh/UStaticMesh.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` plus `FStaticMeshRenderData.cs`, `FStaticMeshLODResources.cs`, `FStaticMeshSection.cs` in the same directory. Primary oracle; covers every version conditional paksmith will need.
+[^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/StaticMesh/FStaticMeshVertexBuffer.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L26 (`Strides` read iff `Ar.Game < GAME_UE4_19`) and L38-L41 (the interleaved `FStaticMeshUVItem` bulk array); `FStaticMeshRenderData.cs` L219-L226 (`ScreenSize`) in the same directory; `CUE4Parse/UE4/Versions/EGame.cs` L353-L355 (`GAME_UE4_18 → 514`, `GAME_UE4_19` and `GAME_UE4_20 → 516`).
+[^3]: `gildor2/UEViewer/Unreal/UnrealMesh/UnMesh4.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L216-L219 (`Strides`, "this field disappeared in 4.19, with no version checks") and L234-L237 (the interleaved `UV` array); `Unreal/UE4Version.h` L85-L87 (`VER_UE4_18 = 514`, `VER_UE4_19 = 516`).

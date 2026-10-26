@@ -15,8 +15,9 @@ use half::f16;
 use crate::asset::AssetContext;
 use crate::asset::structs::color::FColor;
 use crate::asset::structs::vector::{FVector, FVector2D, FVector4};
+use crate::asset::version::VER_UE4_GAME_UE4_19_OBJECT_PROXY;
 use crate::asset::wire::{STRIP_FLAG_AV_DATA, read_strip_data_flags};
-use crate::error::{AssetParseFault, AssetWireField};
+use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
 
 use super::read;
 
@@ -152,18 +153,6 @@ pub(crate) fn read_color_buffer<R: Read>(
     Ok(Some(colors))
 }
 
-/// `FStaticMeshVertexBuffer` strides-removed engine-version anchor (UE 4.19).
-///
-/// **UNVERIFIED object-version boundary.** The strides field is gated on the
-/// *engine* version (`Game < UE4_19`) in CUE4Parse, but paksmith tracks *object*
-/// versions and the CUE4Parse `EGame`→object-version map / object-version enum
-/// file was not reachable to pin the exact constant. Anchored two steps below
-/// paksmith's UE4.20 proxy (516). No pre-4.19 static-mesh fixtures exist to
-/// validate against; the common 4.19+ path (strides absent) is unaffected.
-/// Pre-4.19's *interleaved* tangent/UV layout is also not decoded — this reader
-/// targets the 4.19+ separate-bulk-array format (the standard cooked layout).
-const VER_UE4_STATIC_MESH_STRIDES_REMOVED: i32 = 514;
-
 /// Decoded `FStaticMeshVertexBuffer` — per-vertex tangent basis + UV channels
 /// (Structure-of-Arrays; index `i` is vertex `i` across all fields).
 #[derive(Debug, Clone)]
@@ -192,6 +181,10 @@ pub(crate) struct StaticMeshVertexData {
 /// odd-`NumTexCoords` padding); the extra padding vertex's UVs are consumed but
 /// not stored. `vertex-formats.md` §`FStaticMeshVertexBuffer`; oracle
 /// `FStaticMeshVertexBuffer.cs`.
+///
+/// Below UE 4.19 (`file_version_ue4 < 516`) the buffer carries `Strides` and
+/// one interleaved tangent/UV array instead; that returns
+/// [`PaksmithError::UnsupportedFeature`] before any byte is read.
 #[allow(
     clippy::too_many_lines,
     reason = "single linear wire reader: strip flags → metadata → tangent bulk array → UV bulk array; splitting would scatter the byte-order contract"
@@ -201,6 +194,19 @@ pub(crate) fn read_static_mesh_vertex_buffer<R: Read>(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<StaticMeshVertexData> {
+    // Gated on file_version_ue4 alone: a recorded UE5 version must not lift it.
+    if ctx.version.file_version_ue4 < VER_UE4_GAME_UE4_19_OBJECT_PROXY {
+        return Err(PaksmithError::UnsupportedFeature {
+            context: format!(
+                "FStaticMeshVertexBuffer pre-UE4.19 layout (Strides + interleaved \
+                 FStaticMeshUVItem array) at file_version_ue4={} ({asset_path}); \
+                 requires file_version_ue4 >= {VER_UE4_GAME_UE4_19_OBJECT_PROXY} (GAME_UE4_19)",
+                ctx.version.file_version_ue4,
+                asset_path = crate::untrusted::clamp_path(asset_path)
+            ),
+        });
+    }
+
     let (strip_global, _strip_class) =
         read_strip_data_flags(reader, asset_path, AssetWireField::MeshVertexStripFlags)?;
 
@@ -216,15 +222,6 @@ pub(crate) fn read_static_mesh_vertex_buffer<R: Read>(
     // Validated `1..=4` directly above, so the sign-loss cast is exact.
     #[allow(clippy::cast_sign_loss)]
     let num_tex_coords = num_tex_coords_raw as u32;
-
-    // `Strides` (legacy, pre-UE4.19 only): read and discard.
-    if !ctx
-        .version
-        .ue4_at_least(VER_UE4_STATIC_MESH_STRIDES_REMOVED)
-    {
-        let _legacy_strides =
-            read::read_i32(reader, asset_path, AssetWireField::MeshVertexStrides)?;
-    }
 
     let num = read::read_capped_count(
         reader,
@@ -841,35 +838,35 @@ mod tests {
         );
     }
 
-    /// Pre-4.19 reads (and discards) the legacy `Strides` field — exercises the
-    /// version gate (a UE4.18 ctx, object version 510, below the 514 anchor).
+    /// Below object 516 (stock 4.18 writes 514; no release writes 515) the
+    /// buffer carries `Strides` and one interleaved tangent/UV array, so it is
+    /// refused before any read: an empty reader never reaches EOF. A recorded
+    /// UE5 version doesn't lift the gate, and the message clamps the path.
     #[test]
-    fn static_mesh_vertex_pre_4_19_consumes_strides() {
-        let ctx = make_ctx_with_version(510, None);
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&[0u8, 0u8]);
-        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords
-        bytes.extend_from_slice(&999i32.to_le_bytes()); // legacy Strides (discarded)
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // NumVertices = 0
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // full-precision UVs
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // high-precision tangents
-        // 0 vertices → empty bulk arrays, but both headers are still on the wire.
-        bytes.extend_from_slice(&8i32.to_le_bytes()); // tangent bulk itemSize
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // tangent bulk itemCount = 0
-        bytes.extend_from_slice(&4i32.to_le_bytes()); // UV bulk itemSize
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // UV bulk itemCount = 0
-        let mut cur = Cursor::new(bytes.as_slice());
-        let data = read_static_mesh_vertex_buffer(&mut cur, &ctx, "T").unwrap();
-        assert_eq!(cur.position(), bytes.len() as u64);
-        assert_eq!(data.normals.len(), 0);
-        assert_eq!(data.num_tex_coords, 1);
+    fn static_mesh_vertex_pre_4_19_is_refused() {
+        let path = "p".repeat(crate::untrusted::MAX_UNTRUSTED_PATH_CHARS + 1);
+        for (ue4, ue5) in [(514, None), (515, None), (514, Some(1004))] {
+            let ctx = make_ctx_with_version(ue4, ue5);
+            let err =
+                read_static_mesh_vertex_buffer(&mut std::io::empty(), &ctx, &path).unwrap_err();
+            let want = format!("file_version_ue4={ue4}");
+            assert!(
+                matches!(
+                    &err,
+                    crate::error::PaksmithError::UnsupportedFeature { context }
+                        if context.contains(&want) && !context.contains(&path)
+                ),
+                "ue4={ue4} ue5={ue5:?}: got {err:?}"
+            );
+        }
     }
 
     /// An audio-visual-stripped vertex buffer carries no tangent / UV bulk
     /// arrays (not even their headers) — the reader stops after the bools.
+    /// Read at object 516 (UE 4.19 and 4.20), the first without `Strides`.
     #[test]
     fn static_mesh_vertex_av_stripped_has_no_tangents_or_uvs() {
-        let ctx = make_ctx_with_version(522, None);
+        let ctx = make_ctx_with_version(516, None);
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&[STRIP_FLAG_AV_DATA, 0u8]); // AV stripped
         bytes.extend_from_slice(&2i32.to_le_bytes()); // NumTexCoords

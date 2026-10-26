@@ -31,11 +31,10 @@
 //! collapses 4.21/4.22 with 4.23 and routes to the new reader); it is **tested at
 //! object 516** (~UE4.20). Even at 516 the shared distance-field block applies its
 //! class-strip bit unconditionally where the oracle gates it on `Game >= UE4_21`
-//! (object 517+) — an un-exercised desync edge if that bit is set. The object
-//! 504–515 (UE4 ≤4.19) sub-band has two further unverified edges (see
-//! [`super::lod::read_lod_legacy`]
-//! for the full list) and may desync. Some CUE4Parse branches stay unreachable /
-//! undecoded:
+//! (object 517+) — an un-exercised desync edge if that bit is set. Below object
+//! 516 (UE4 ≤4.18) a LOD with buffers is refused as `UnsupportedFeature`; see
+//! [`super::lod::read_lod_legacy`] for the screen-size edge that remains. Some
+//! CUE4Parse branches stay unreachable / undecoded:
 //!
 //! - `minMobileLODIdx` — `StaticMesh.KeepMobileMinLODSettingOnDesktop` is `false`
 //!   for stock games, so it is never serialized.
