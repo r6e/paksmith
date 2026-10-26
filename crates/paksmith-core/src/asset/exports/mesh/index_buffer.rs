@@ -93,7 +93,7 @@ pub(crate) fn read_index_buffer<R: Read>(
     }
 
     // UE 4.25+ appends `bShouldExpandTo32Bit` after the payload (read + discard).
-    if ctx.version.is_ue4_25_or_later() {
+    if read::ue4_25_mesh_layout(ctx) {
         let _expand = crate::asset::wire::read_bool32(
             reader,
             asset_path,
@@ -165,6 +165,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+    use crate::asset::exports::mesh::lod::test_support::rendering_ctx;
     use crate::asset::property::test_utils::make_ctx_with_version;
     use crate::error::PaksmithError;
 
@@ -197,13 +198,33 @@ mod tests {
         b
     }
 
-    /// 16-bit indices widen to `u32`. UE4.24 (no trailing bShouldExpandTo32Bit).
+    /// 16-bit indices widen to `u32`. Object 514 is UE 4.18 (no trailing
+    /// bShouldExpandTo32Bit).
     #[test]
     fn index_buffer_16bit_widens() {
         let ctx = make_ctx_with_version(514, None);
         let payload: Vec<u8> = [1u16, 2, 3].iter().flat_map(|i| i.to_le_bytes()).collect();
         let idx = read_index_buffer(&mut Cursor::new(buf(false, &payload)), &ctx, "T").unwrap();
         assert_eq!(idx, vec![1, 2, 3]);
+    }
+
+    /// Object 518 is shared by UE 4.24 (rendering version 36), which has no
+    /// trailing `bShouldExpandTo32Bit`, and 4.25 (rendering version 43), which
+    /// has one.
+    #[test]
+    fn index_buffer_expand_flag_follows_rendering_version_at_518() {
+        let payload: Vec<u8> = [1u16, 2, 3].iter().flat_map(|i| i.to_le_bytes()).collect();
+        for (rendering, expand_flag) in [(36, false), (43, true)] {
+            let ctx = rendering_ctx(518, Some(rendering));
+            let mut bytes = buf(false, &payload);
+            if expand_flag {
+                bytes.extend_from_slice(&1i32.to_le_bytes()); // bShouldExpandTo32Bit
+            }
+            let mut cur = Cursor::new(bytes.as_slice());
+            let idx = read_index_buffer(&mut cur, &ctx, "T").unwrap();
+            assert_eq!(idx, vec![1, 2, 3], "{rendering}");
+            assert_eq!(cur.position(), bytes.len() as u64, "{rendering}");
+        }
     }
 
     /// 32-bit indices. UE4.27 reads + discards the trailing bShouldExpandTo32Bit.

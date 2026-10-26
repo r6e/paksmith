@@ -67,7 +67,7 @@ pub(crate) fn read_section<R: Read>(
     let enable_collision = crate::asset::wire::read_bool32(reader, asset_path, field)?;
     let cast_shadow = crate::asset::wire::read_bool32(reader, asset_path, field)?;
 
-    let force_opaque = if ctx.version.is_ue4_25_or_later() {
+    let force_opaque = if read::ue4_25_mesh_layout(ctx) {
         crate::asset::wire::read_bool32(reader, asset_path, field)?
     } else {
         false
@@ -106,6 +106,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+    use crate::asset::exports::mesh::lod::test_support::rendering_ctx;
     use crate::asset::property::test_utils::make_ctx_with_version;
 
     /// Append five `i32` section ranges + `n` bool32 flags (`1`).
@@ -120,17 +121,40 @@ mod tests {
         b
     }
 
-    /// UE4.24: only `bEnableCollision` + `bCastShadow` (no later bools).
+    /// Before 4.25 only `bEnableCollision` + `bCastShadow` follow the ranges:
+    /// UE 4.24 (object 518, rendering version 36) and UE 4.18 (object 514,
+    /// no rendering version recorded).
     #[test]
-    fn section_ue4_24_two_bools() {
-        let ctx = make_ctx_with_version(514, None);
-        let s = read_section(&mut Cursor::new(section_bytes(2)), &ctx, "T").unwrap();
-        assert_eq!(s.material_index, 7);
-        assert_eq!(s.num_triangles, 12);
-        assert_eq!(s.max_vertex_index, 40);
-        assert!(s.enable_collision && s.cast_shadow);
-        assert!(!s.force_opaque && !s.visible_in_ray_tracing);
-        assert!(!s.affect_distance_field_lighting);
+    fn section_pre_4_25_two_bools() {
+        for (ue4, rendering) in [(518, Some(36)), (514, None)] {
+            let ctx = rendering_ctx(ue4, rendering);
+            let bytes = section_bytes(2);
+            let mut cur = Cursor::new(bytes.as_slice());
+            let s = read_section(&mut cur, &ctx, "T").unwrap();
+            let case = format!("{ue4} {rendering:?}");
+            assert_eq!(cur.position(), bytes.len() as u64, "{case}");
+            assert_eq!(s.material_index, 7, "{case}");
+            assert_eq!(s.num_triangles, 12, "{case}");
+            assert_eq!(s.max_vertex_index, 40, "{case}");
+            assert!(s.enable_collision && s.cast_shadow, "{case}");
+            assert!(!s.force_opaque && !s.visible_in_ray_tracing, "{case}");
+            assert!(!s.affect_distance_field_lighting, "{case}");
+        }
+    }
+
+    /// UE 4.25 (object 518) reads `bForceOpaque`: rendering version 37 is the
+    /// field's own gate, 43 is what 4.25 records, and an unrecorded version
+    /// falls back to the object version.
+    #[test]
+    fn section_ue4_25_reads_force_opaque() {
+        for rendering in [Some(37), Some(43), None] {
+            let ctx = rendering_ctx(518, rendering);
+            let bytes = section_bytes(3);
+            let mut cur = Cursor::new(bytes.as_slice());
+            let s = read_section(&mut cur, &ctx, "T").unwrap();
+            assert_eq!(cur.position(), bytes.len() as u64, "{rendering:?}");
+            assert!(s.force_opaque && !s.visible_in_ray_tracing, "{rendering:?}");
+        }
     }
 
     /// UE4.27: + `bForceOpaque` + `bVisibleInRayTracing` (4 bools).
