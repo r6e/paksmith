@@ -172,7 +172,7 @@ wiremock = "0.6"
 # fallback device → no output, "mixer did not actually add sources sometimes").
 # For an audio-OUTPUT crate those are disqualifying, so we pin the exact patch
 # whose playback works (same patch-pin convention as thiserror/tokio above).
-rodio = { version = "0.22.2", default-features = false, features = ["playback"] }
+rodio = { version = "0.23.0", default-features = false, features = ["playback"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
