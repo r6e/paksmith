@@ -36,7 +36,9 @@ jobs:
           # vulnerability-class DoS advisories but provably non-applicable —
           # quick-xml is a Linux-only BUILD dep (via wayland-scanner) that parses
           # only bundled trusted protocol XML, never attacker input, and isn't in
-          # the runtime binary (details in deny.toml). These are per-ID ignores:
+          # the runtime binary (details in deny.toml). The zstd wave below also
+          # holds vulnerability-class IDs, accepted because only the dev-only
+          # parser oracles reach them. These are per-ID ignores:
           # a NEW advisory in any of these crates would still open an issue.
           #
           #   gtk3-rs stack via `muda 0.21.x` (default `gtk3` backend) → gtk 0.18
@@ -72,11 +74,18 @@ jobs:
           #   advisory's precondition cannot be satisfied. cryoglyph pins lru ^0.16, so
           #   the 0.18.2 fix is unreachable until iced bumps it:
           #     2026-0253
+          #   zstd 0.13.3 and zstd-safe 7.2.4 (repak) and zstd-safe 6.0.6 (unreal_asset),
+          #   the git-pinned parser oracles in paksmith-fixture-gen and, as
+          #   dev-dependencies, paksmith-bench: dev-only, run on paksmith's own fixtures,
+          #   never shipped. paksmith-core is on the fixed zstd 0.14.3 / zstd-safe 8.2.0,
+          #   and no fix exists on the oracles' zstd lines (details in deny.toml):
+          #     2026-0391 · 2026-0395 .. 2026-0406
           #
           # Removal condition: when paksmith-gui switches muda to its opt-in
           # `gtk4` backend, texture2ddecoder drops paste, wayland-scanner ships a
           # release on quick-xml 0.41+, an iced release ships a cryoglyph allowing
           # lru >= 0.18.2, and no crate in the tree pulls ttf-parser
           # (both iced's cosmic-text/fontdb path and winit's ab_glyph/owned_ttf_parser
-          # path must be gone — `cargo tree -i ttf-parser` empty).
-          ignore: RUSTSEC-2024-0370,RUSTSEC-2024-0412,RUSTSEC-2024-0413,RUSTSEC-2024-0415,RUSTSEC-2024-0416,RUSTSEC-2024-0418,RUSTSEC-2024-0419,RUSTSEC-2024-0420,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2026-0192,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0253
+          # path must be gone — `cargo tree -i ttf-parser` empty), and both
+          # parser oracles move to zstd 0.14.3+.
+          ignore: RUSTSEC-2024-0370,RUSTSEC-2024-0412,RUSTSEC-2024-0413,RUSTSEC-2024-0415,RUSTSEC-2024-0416,RUSTSEC-2024-0418,RUSTSEC-2024-0419,RUSTSEC-2024-0420,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2026-0192,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0253,RUSTSEC-2026-0391,RUSTSEC-2026-0395,RUSTSEC-2026-0396,RUSTSEC-2026-0397,RUSTSEC-2026-0398,RUSTSEC-2026-0399,RUSTSEC-2026-0400,RUSTSEC-2026-0401,RUSTSEC-2026-0402,RUSTSEC-2026-0403,RUSTSEC-2026-0404,RUSTSEC-2026-0405,RUSTSEC-2026-0406
