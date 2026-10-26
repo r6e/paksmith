@@ -148,6 +148,13 @@ pub(crate) const VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS: i32 = 507;
 /// CUE4Parse `EUnrealEngineObjectUE4Version` → `TemplateIndex_IN_COOKED_EXPORTS`.
 pub(crate) const VER_UE4_TEMPLATE_INDEX_IN_COOKED_EXPORTS: i32 = 508;
 
+/// UE 4.x: legacy `SetProperty` / `MapProperty` tags carry their
+/// `InnerType` (and a Map's `ValueType`) FName extras. Below this version
+/// such a tag goes from `ArrayIndex` straight to `HasPropertyGuid`. No
+/// stock release writes 509 (UE 4.14 = 508, UE 4.15 = 510). Source:
+/// CUE4Parse `EUnrealEngineObjectUE4Version` → `PROPERTY_TAG_SET_MAP_SUPPORT`.
+pub(crate) const VER_UE4_PROPERTY_TAG_SET_MAP_SUPPORT: i32 = 509;
+
 /// UE 4.x: `FObjectExport::SerialSize` and `SerialOffset` widened
 /// from `i32` to `i64`. Below this version, both fields are 32-bit
 /// on the wire (we widen to `i64` in memory). Source: CUE4Parse
@@ -548,6 +555,17 @@ mod tests {
             VER_UE5_ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES,
             VER_UE5_PROPERTY_TAG_COMPLETE_TYPE_NAME + 1
         );
+    }
+
+    /// `PROPERTY_TAG_SET_MAP_SUPPORT` sits between the established 508
+    /// and 510 constants in `EUnrealEngineObjectUE4Version`.
+    #[test]
+    fn set_map_support_anchors_consecutively() {
+        let neighbours = [
+            VER_UE4_TEMPLATE_INDEX_IN_COOKED_EXPORTS + 1,
+            VER_UE4_ADDED_SEARCHABLE_NAMES - 1,
+        ];
+        assert_eq!(neighbours, [VER_UE4_PROPERTY_TAG_SET_MAP_SUPPORT; 2]);
     }
 
     #[test]

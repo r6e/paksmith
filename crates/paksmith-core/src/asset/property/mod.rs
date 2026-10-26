@@ -541,6 +541,48 @@ mod tests {
         ));
     }
 
+    /// Below `PROPERTY_TAG_SET_MAP_SUPPORT` (509) a Set/Map tag names no
+    /// element types, so its value is skipped by Size and the next tag
+    /// still decodes.
+    #[test]
+    fn set_and_map_values_below_509_skip_by_tag_size() {
+        use crate::asset::property::test_utils::{
+            make_ctx_with_version_and_names, write_int_property, write_none_tag, write_tag_head,
+        };
+        let names: Vec<_> = "None F SetProperty L MapProperty S IntProperty"
+            .split(' ')
+            .collect();
+        let ctx = make_ctx_with_version_and_names(508, None, &names);
+        let mut buf = Vec::new();
+        for (name_idx, type_idx, size, body) in [
+            (1, 2, 12i32, &[0i32, 1, 0x7F][..]),
+            (3, 4, 16, &[0, 1, 1, 2][..]),
+        ] {
+            write_tag_head(&mut buf, name_idx, type_idx, size);
+            buf.push(0); // HasPropertyGuid
+            for word in body {
+                buf.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        write_int_property(&mut buf, 5, 6, 0x5EED);
+        write_none_tag(&mut buf);
+        let end = buf.len() as u64;
+        let mut cur = Cursor::new(&buf[..]);
+        let props = read_properties(&mut cur, &ctx, 0, end, "x.uasset").unwrap();
+        let unknown = |type_name: &str, skipped_bytes| PropertyValue::Unknown {
+            type_name: type_name.into(),
+            skipped_bytes,
+        };
+        let values: Vec<_> = props.into_iter().map(|p| p.value).collect();
+        let want = [
+            unknown("SetProperty", 12),
+            unknown("MapProperty", 16),
+            PropertyValue::Int(0x5EED),
+        ];
+        assert_eq!(values, want);
+        assert_eq!(cur.position(), end);
+    }
+
     #[test]
     fn depth_guard_rejects_depth_over_limit() {
         let (buf, ctx) = bool_property_then_none();

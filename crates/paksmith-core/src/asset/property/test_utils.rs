@@ -30,7 +30,7 @@ use crate::asset::{
 /// strings (in wire order), with empty import/export tables and the
 /// default `AssetVersion`. Sufficient for almost every property
 /// reader unit test — they only consume `ctx.names` for FName
-/// resolution.
+/// resolution. Its `FileVersionUE4` is 0, below the Set/Map extras' 509.
 ///
 /// Index 0 MUST be `"None"`. `read_tag` short-circuits `(0, 0)` FName
 /// pairs as the None terminator before any name lookup; if index 0
@@ -207,6 +207,14 @@ pub fn write_int_property(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, value
 /// 1), so resolving it copies a derived string.
 pub fn write_suffixed_int_property(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, value: i32) {
     write_int_property_tag(buf, (name_idx, 1), type_idx, value);
+}
+
+/// Append a legacy FPropertyTag's Name, Type, Size and `ArrayIndex` 0.
+pub fn write_tag_head(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, size: i32) {
+    write_fname(buf, name_idx, 0);
+    write_fname(buf, type_idx, 0);
+    buf.extend_from_slice(&size.to_le_bytes());
+    buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
 }
 
 fn write_int_property_tag(buf: &mut Vec<u8>, name: (i32, i32), type_idx: i32, value: i32) {
