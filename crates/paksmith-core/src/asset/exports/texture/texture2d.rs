@@ -1142,9 +1142,10 @@ mod tests {
     }
 
     #[test]
-    fn ue5_3_siblings_never_read_serialize_mip_data() {
-        // Object version 1010 (the UE 5.3 proxy that makes the 2D reader
-        // consume bSerializeMipData). The sibling wire does NOT carry the
+    fn siblings_never_read_serialize_mip_data() {
+        // Object version 1010: the lowest at which the 2D reader consumes
+        // bSerializeMipData with no engine hint (stock 5.3 stamps 1009 and 5.4
+        // stamps 1012). The sibling wire does NOT carry the
         // flag — a body without it must parse as a sibling AND still collect
         // per-mip bulk records (siblings always serialize mip data).
         let ctx = make_ctx_with_version(522, Some(VER_UE5_SCRIPT_SERIALIZATION_OFFSET));
