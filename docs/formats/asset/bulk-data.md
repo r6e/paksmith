@@ -94,8 +94,8 @@ Phase 3 format handlers consume the resolved bytes.
 | UE 4.0+ | UE4 `FByteBulkData` header baseline: `ElementCount: i32`, `SizeOnDisk: u32`, `OffsetInFile: i64`. | Same[^1] |
 | UE 4.26+ (`BULKDATA_NoOffsetFixUp`) | Flag added at bit 16. When set, the reader does NOT apply the `BulkDataStartOffset` fixup. Used for already-final-absolute offsets. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/EBulkDataFlags.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
 | UE 4.27+ | `BULKDATA_Size64Bit` flag (bit 13) starts seeing widespread use. When set, `ElementCount` widens to `i64` (8 bytes) and `SizeOnDisk` widens to `u64` (8 bytes). | Same[^1] |
-| UE 5.0+ | `IoPackage.BulkDataMap` short-circuit added (the constructor first reads a `dataIndex: i32`; if it indexes into a pre-baked `BulkDataMap` table, the inline-serial fields below are NOT read — the metadata comes from the pre-baked table). | Same[^1] |
 | UE 5.0+ | Three high-bit flags added: `BULKDATA_AlwaysAllowDiscard` (bit 28), `BULKDATA_HasAsyncReadPending` (bit 29), `BULKDATA_DataIsMemoryMapped` (bit 30). Bit 18 `BULKDATA_LazyLoadable` added in the same era. | Same[^1] |
+| UE 5.2+ (`DATA_RESOURCES`, 1009) | `IoPackage.BulkDataMap` short-circuit added (when the owning `IoPackage`'s `BulkDataMap` is non-empty, the `FByteBulkDataHeader` constructor first reads a `dataIndex: i32`; an in-range index takes the metadata from that table and the inline-serial fields below are NOT read, while on an out-of-range one CUE4Parse rewinds the 4 bytes and reparses them as the inline header (its rewind-and-reparse heuristic)). | `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FByteBulkDataHeader.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1][^5] |
 
 The `BulkDataFlags` discriminant + version-constant pair determines
 every field width and skip-region presence — there is no
@@ -301,7 +301,7 @@ deviations are all fail-closed:
   early-outs before writing the header); empty input with
   `ElementCount = 0` decodes to an empty payload.
 
-### Alternate read paths (UE 5.0+ pre-baked metadata)
+### Alternate read paths (UE 5.2+ pre-baked metadata)
 
 When the parent archive is an `IoPackage` with a non-empty
 `BulkDataMap`, or a `Package` with a non-empty `DataResourceMap`,
@@ -372,7 +372,7 @@ then `BULKDATA_PayloadAtEndOfFile` with the offset-vs-total_header_size comparis
 adds 12-20 bytes. Both are post-`OffsetInFile`. A reader unaware of
 these flags loses cursor alignment on every record carrying them.
 
-### Pre-baked metadata short-circuit (UE 5.0+)
+### Pre-baked metadata short-circuit (UE 5.2+)
 
 When the parent archive carries a `BulkDataMap` (IoPackage) or
 `DataResourceMap` (Package), the inline serial read is replaced by
@@ -482,7 +482,7 @@ A `FByteBulkDataHeader` reader MUST:
   masks data-integrity loss
   (matches [`../container/iostore-uptnl.md`](../container/iostore-uptnl.md)
   §*Implementation hardening*).
-- **For the alternate read paths** (UE 5.0+ pre-baked metadata
+- **For the alternate read paths** (UE 5.2+ pre-baked metadata
   tables): when the constructor short-circuits to a 4-byte
   `dataIndex: i32` lookup, MUST validate `0 <= dataIndex <
   BulkDataMap.Length` (or `DataResourceMap.Length`) before using
@@ -600,3 +600,5 @@ plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
 [^3]: LZO/BitWindow bulk handling across community references: `gildor2/UEViewer` `Unreal/UnCoreCompression.cpp` decodes UE3 LZO bulk via `lzo1x_decompress_safe` (`DetectCompressionMethod` notes "LZO was used only with UE3 games") and has no BitWindow branch; `FabianFG/CUE4Parse` `CUE4Parse/UE4/Assets/Objects/TBulkData.cs` decodes only `BULKDATA_SerializeCompressedZLIB` and reads every other flag as a raw payload; `trumank/repak` is a pak-container library and does not parse bulk records (its `Compression` enum has no LZO). BitWindow is documented deprecated ("platform-specific bit window") in `adrianstephens/orbiscrude` `shared/filetypes/container/unreal_types.cpp`. Pure-Rust LZO1X decoder for a future in-scope fixture: the MIT-licensed `lzokay` crate.
 
 [^4]: Separate-file dispatch: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/TBulkData.cs@2b8901c3ee9818558ad33e2496a58d50b82e99db` (`GetBulkArchive` tests `BULKDATA_PayloadInSeperateFile` at L176 before `BULKDATA_PayloadAtEndOfFile` at L215) and `gildor2/UEViewer/Unreal/UnCoreSerialize.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` (L1351 before L1360). CUE4Parse skips a record with no payload at `TBulkData.cs` L53 (UEViewer at L1338), tests for an in-stream one at L62, and reads it at the stream position after the header (L59, L137, L141). In `4.27/T_Worm_A.uexp` the `0x00000048` mip header at 0x14c ends at byte 352, and its `OffsetInFile` is 1173: the 821-byte `.uasset` plus 352. Cooked words: `matyalatte/Matya-Uasset-Samples@a7921caec72aca1d1a9cf28e488d702dceaf6f93`, where `4.18/T_Worm_A.uexp` mip 0 (at 0x100) is `0x00000501` with `OffsetInFile` equal to minus `BulkDataStartOffset`, and `4.27/T_Worm_A.uexp` mip 0 (at 0x104) is `0x00010501` with `OffsetInFile` 0. The writer side is `matyalatte/UE4-DDS-Tools/src/unreal/data_resource.py@10bf27eef8b6d3a8048bf4e226268abe07313879` L71-L82.
+
+[^5]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FByteBulkDataHeader.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L40-L54 (the `dataIndex` short-circuit: read only when the owner's `BulkDataMap` is non-empty, returning on an in-range index and otherwise rewinding 4 bytes); `CUE4Parse/UE4/Assets/IoPackage.cs` L114 (`BulkDataMap` is read only from `DATA_RESOURCES`, apart from one per-game override) and `CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs` L474 (`DataResourceOffset`, behind the same gate, which `CUE4Parse/UE4/Assets/Package.cs` L150-L156 needs before it reads `DataResourceMap`); `CUE4Parse/UE4/Versions/ObjectVersion.cs` L40 (`DATA_RESOURCES`, 1009 counted from `INITIAL_VERSION = 1000` at L13) and `CUE4Parse/UE4/Versions/EGame.cs` L257-L259 (UE 5.1 → 1008; 5.2 and 5.3 → 1009).

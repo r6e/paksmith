@@ -80,7 +80,7 @@ across UE versions due to conditional reads; the canonical sequence (UE
 | → varies | 4 | LE | `name_offset` | `i32` | Byte offset of the name-table region. |
 | (UE5 ≥ 1008) | 4 | LE | `soft_object_paths_count` | `Option<i32>` | UE5 1008+ only. |
 | (UE5 ≥ 1008) | 4 | LE | `soft_object_paths_offset` | `Option<i32>` | UE5 1008+ only. |
-| (UE4 ≥ 516 & !editor-only-stripped) | variable | — | `localization_id` | `Option<FString>` | UE 4.21+ AND `PKG_FilterEditorOnly` not set. Cooked archives almost never have this. |
+| (UE4 ≥ 516 & !editor-only-stripped) | variable | — | `localization_id` | `Option<FString>` | UE 4.19+[^12] AND `PKG_FilterEditorOnly` not set. Cooked archives almost never have this. |
 | → varies | 4 | LE | `gatherable_text_data_count` | `i32` | |
 | → varies | 4 | LE | `gatherable_text_data_offset` | `i32` | |
 | → varies | 4 | LE | `export_count` | `i32` | Number of rows in the export table. |
@@ -93,8 +93,8 @@ across UE versions due to conditional reads; the canonical sequence (UE
 | (UE4 ≥ 510) | 4 | LE | `searchable_names_offset` | `Option<i32>` | Absent below UE4 510; present and unconditional at UE 4.27 (522). |
 | → varies | 4 | LE | `thumbnail_table_offset` | `i32` | |
 | → varies | 16 | — | `guid` | `FGuid`[^5] | Package identifier. UE5 1016 replaces this with `FIoHash` (outside paksmith's range). |
-| (UE4 ≥ 518 & !editor-only-stripped) | 16 | — | `persistent_guid` | `Option<FGuid>` | UE 4.22+ editor builds. |
-| (UE4 ∈ [518, 520) & !editor-only-stripped) | 16 | — | `owner_persistent_guid` | `Option<FGuid>` | UE 4.22–4.23 editor builds; removed at UE4 520. |
+| (UE4 ≥ 518 & !editor-only-stripped) | 16 | — | `persistent_guid` | `Option<FGuid>` | UE 4.24+[^12] editor builds. |
+| (UE4 ∈ [518, 520) & !editor-only-stripped) | 16 | — | `owner_persistent_guid` | `Option<FGuid>` | UE 4.24–4.25[^12] editor builds; removed at UE4 520. |
 | → varies | 4 | LE | `generation_count` | `i32` | Capped at 1024. |
 | → varies | `generation_count × 8` | — | `generations` | `FGenerationInfo[]` | Each: `export_count: i32 + name_count: i32`. |
 | → varies | variable | — | `saved_by_engine_version` | `FEngineVersion`[^6] | |
@@ -399,7 +399,7 @@ for the full enum):
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle. Covers `FPackageFileSummary.Serialize`, `ObjectImport.Serialize`, `ObjectExport.Serialize`, and the UE5 1000–1016 version dispatch.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle. Covers the `FPackageFileSummary` constructor and its UE5 version dispatch up to 1018 (`IMPORT_TYPE_HIERARCHIES`); `FObjectImport` and `FObjectExport` are read in `ObjectResource.cs` in the same directory.
 [^2]: `AstroTechies/unrealmodding/unreal_asset/src/asset.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — paksmith's fixture-gen oracle. Cross-validated against every `minimal_uasset_v5*` fixture at fixture-gen time.
 [^3]: See [`../primitive/fcustom-version.md`](../primitive/fcustom-version.md).
 [^4]: See [`../primitive/fstring.md`](../primitive/fstring.md).
@@ -410,3 +410,4 @@ for the full enum):
 [^9]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L212-L218 (detection and substitution), L235 (custom versions).
 [^10]: `gildor2/UEViewer/Unreal/UnrealPackage/UnPackage4.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L119-L139; `gildor2/UEViewer/UmodelTool/Main.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L548-L556.
 [^11]: `gildor2/UEViewer/Unreal/UnrealPackage/UnPackage4.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L84-L95 (`legacyVerToEngineVer`: `-6` from UE 4.11, `-7` from UE 4.14) and `gildor2/UEViewer/Unreal/UE4Version.h@a0bfb468d42be831b126632fd8a0ae6b3614f981` L73-L77 (UE 4.12 = 504, UE 4.14 = 508). The rest of the ranges come from real package headers in `atenfyr/UAssetAPI/UAssetAPI.Tests/TestAssets@b4e8a012939295a6fd890ddc64e57ea78b709b95`: the UE 4.27.2 editor saves in `TestEditorAssets` at `-7`; `TestUE5_1`, `TestUE5_3`, `TestUE5_4` and `TestUE5_5` at `-8`; `TestUE5_6` and `TestUE5_7` at `-9`, as are the UE 5.7.4 editor saves in `TestEditorUE5_7`. `matyalatte/Matya-Uasset-Samples@a7921caec72aca1d1a9cf28e488d702dceaf6f93` adds UE 5.0 samples at `-8`.
+[^12]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Versions/ObjectVersion.cs@ecc4878950336126f125af0747190edf474b2a21` L912, L916 and L920 (`ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID` = 516, `ADDED_PACKAGE_OWNER` = 518, `NON_OUTER_PACKAGE_IMPORT` = 520, counted from `OLDEST_LOADABLE_PACKAGE = 214` at L299) and `CUE4Parse/UE4/Versions/EGame.cs` L290-L298 (UE 4.18 → 514; 4.19 → 516; 4.23 → 517; 4.24 and 4.25 → 518; 4.26 → 522).

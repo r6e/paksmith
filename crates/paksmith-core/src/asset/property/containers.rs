@@ -281,8 +281,8 @@ fn read_array_value<R: Read + Seek>(
     let count_usize = count as usize;
 
     if is_struct {
-        // Struct elements take a dedicated path: an inline FPropertyTag
-        // header precedes the element bodies. The body bound is the
+        // Struct elements take a dedicated path: below UE5 1012 an inline
+        // FPropertyTag header precedes the element bodies. The body bound is the
         // outer ArrayProperty `expected_end`; per-element delimitation
         // comes from each body's tagged-property None terminator.
         return read_array_of_struct(
@@ -399,11 +399,12 @@ fn is_recoverable_struct_element_error(e: &PaksmithError) -> bool {
     )
 }
 
-/// Decodes `Array<StructProperty>` element bodies via the inner
-/// FPropertyTag header that UE writes immediately after the element
-/// count.
+/// Decodes `Array<StructProperty>` element bodies. Below UE5 1012
+/// (`PROPERTY_TAG_COMPLETE_TYPE_NAME`) an inner FPropertyTag header
+/// follows the element count; from 1012 it is elided and the struct
+/// name comes from the outer tag's type-name tree.
 ///
-/// Wire layout (versioned UE4 ≥ `VER_UE4_INNER_ARRAY_TAG_INFO = 500`,
+/// Wire layout below 1012 (versioned UE4 ≥ `VER_UE4_INNER_ARRAY_TAG_INFO = 500`,
 /// always met for paksmith's UE4 floor of 504): full `FPropertyTag`
 /// describing the element struct's name + GUID + per-element size +
 /// `count × struct_body`. `count_usize` is read and bound-checked by
@@ -588,13 +589,14 @@ fn read_struct_property<R: Read + Seek>(
 /// struct tree can't blow the stack and a runaway tagged stream
 /// can't read past the struct's declared size.
 ///
-/// `struct_name` is taken as `&str` (not a borrowed `PropertyTag`) so
-/// this helper can serve both the top-level `StructProperty` dispatch
-/// (`&tag.struct_name`) AND Phase 2g's collection-of-struct element
-/// decoders, which derive the struct name from a separate source
-/// (`Array<Struct>` reads it from an inline header; `Map<Struct, *>`
-/// / `Set<Struct>` get `""` because the wire carries no source for
-/// the struct type without `.usmap` mappings).
+/// `struct_name` is taken as an `Arc<str>` (not a borrowed `PropertyTag`)
+/// so this helper can serve both the top-level `StructProperty` dispatch
+/// (`Arc::clone(&tag.struct_name)`) AND Phase 2g's collection-of-struct
+/// element decoders, which derive the struct name from a separate source
+/// (`Array<Struct>` reads it from an inline header, or from the outer
+/// tag's type-name tree at UE5 ≥ 1012; `Map<Struct, *>` / `Set<Struct>`
+/// get `""`: below 1012 the wire names no struct type, and paksmith
+/// takes only slot types, not struct names, from the 1012 tree).
 fn read_struct_value<R: Read + Seek>(
     struct_name: Arc<str>,
     reader: &mut R,
@@ -636,9 +638,8 @@ fn read_map_set_slot<R: Read + Seek>(
     asset_path: &str,
 ) -> crate::Result<PropertyValue> {
     if is_struct {
-        // Map<Struct, *> / Set<Struct> have no wire source for the
-        // struct type name (no inline FPropertyTag header like
-        // Array<Struct>); pass the shared empty Arc<str> so the
+        // Map/Set slots get no struct name (see read_struct_value's
+        // doc); pass the shared empty Arc<str> so the
         // resulting PropertyValue::Struct.struct_name is a known
         // marker for "unknown" rather than a guessed name. Refcount
         // bump rather than a fresh allocation per slot.

@@ -55,7 +55,7 @@ section "Format inventory" for column semantics.
 | `property/tagged.md` | complete | complete | `asset/property/tag.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` | `25d452a` |
 | `property/unversioned.md` | complete | partial | `asset/property/unversioned.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `property/primitives.md` | complete | complete | `asset/property/primitives.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
-| `property/containers.md` | complete | complete | `asset/property/containers.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
+| `property/containers.md` | complete | complete | `asset/property/containers.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `91456be` |
 | `property/struct.md` | complete | partial | `asset/property/containers.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `property/text.md` | complete | partial | `asset/property/text.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `primitive/fstring.md` | complete | complete | `container/pak/index/fstring.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `8f56038` |

@@ -97,8 +97,8 @@ Offset  Bytes (LE)                                          Field
 ### Format-defined limits (wire-imposed)
 
 - **`major` / `minor` / `patch`:** `u16` each. Wire-imposed range
-  `0..=65_535` per field. UE's actual release range is far narrower
-  (UE4: 0-27, UE5: 0-5 at time of writing).
+  `0..=65_535` per field; UE's actual release numbers are far
+  smaller.
 - **`changelist`:** `u32`. Wire-imposed range `0..=u32::MAX`. The
   licensee-bit packing (bit 31) means the "real" changelist range is
   `0..=0x7FFF_FFFF`; the high bit is metadata, not part of the
@@ -142,12 +142,10 @@ divergences for the full description.)
   Any conformant parser fed these byte sequences MUST produce the
   decoded values shown in the Worked examples above.
 - **Cross-validation oracle:** CUE4Parse's `FEngineVersion` constructor
-  (reads via successive `Ar.Read<>` calls)[^1] and the `unreal_asset`
-  version-constants enum[^2]. CUE4Parse confirms the
+  (reads via successive `Ar.Read<>` calls)[^1] and `unreal_asset`'s
+  crate-private `FEngineVersion::read`[^2]. CUE4Parse confirms the
   `u16+u16+u16+u32+FString` wire layout and the licensee-bit packing in
-  `FEngineVersionBase`; `unreal_asset`'s engine_version.rs is the catalog of
-  UE version constants paksmith aligns its `LegacyFileVersion` floor
-  against (no standalone wire reader in that crate).
+  `FEngineVersionBase`; `unreal_asset` reads the same layout.
 - **Known divergences:**
   - **Empty-branch display.** UE's `FEngineVersion::ToString` suppresses
     `+branch` when `branch.IsEmpty()`. Paksmith always emits `+branch` so
@@ -189,5 +187,5 @@ inherits `FSTRING_MAX_LEN = 65_536` from `container/pak/index/fstring.rs`.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Misc/FEngineVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FEngineVersion` class (and its base `FEngineVersionBase` in the same directory) including the wire constructor and `IsLicenseeVersion`.
-[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/engine_version.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust catalog of UE version constants. The crate does not expose a standalone `FEngineVersion::read`; the wire payload is read inline by the package summary parser.
+[^2]: `AstroTechies/unrealmodding/unreal_asset/src/fengineversion.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` L39-L49, which the package summary reader calls.
 [^3]: See [`fstring.md`](fstring.md) for FString wire details.
