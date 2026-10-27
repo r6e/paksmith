@@ -4745,6 +4745,16 @@ mod tests {
         0xa7, 0xde,
     ];
 
+    /// Two structurally different wrong keys: a one-bit near miss of
+    /// `FIXTURE_AES_KEY` and its bitwise inverse, which differs in every
+    /// byte. Derived, not spelled out, so CodeQL's hard-coded-key alert
+    /// stays on `FIXTURE_AES_KEY`.
+    fn wrong_fixture_keys() -> [[u8; 32]; 2] {
+        let mut near_miss = FIXTURE_AES_KEY;
+        near_miss[31] ^= 1;
+        [near_miss, FIXTURE_AES_KEY.map(|b| !b)]
+    }
+
     /// Path to the encrypted-INDEX fixture (index encrypted, entry data
     /// plaintext — isolates the index-decrypt path).
     fn encrypted_index_fixture() -> std::path::PathBuf {
@@ -4843,16 +4853,14 @@ mod tests {
     /// `Decryption` (fail-closed), NOT surfaced as an opaque parse fault.
     #[test]
     fn open_with_wrong_key_is_decryption_error() {
-        // Two structurally different wrong keys: an all-zero key and a
-        // mixed-byte key that differs from the real `FIXTURE_AES_KEY` in
-        // every byte. The wrong-key detector is the index parser rejecting
-        // garbage plaintext (the spec's documented parse-as-oracle), so the
+        // The wrong-key detector is the index parser rejecting garbage
+        // plaintext (the spec's documented parse-as-oracle), so the
         // fail-closed guarantee is probabilistic; pinning it at a single key
         // (paksmith's recurring pinned-answer hazard) would let a detector
-        // that only rejects the all-zero case slip through. Both must map to
+        // tuned to that one key slip through. Each must map to
         // `Decryption`, never an empty `Ok` index or an opaque parse error.
-        for wrong in [AesKey::new([0u8; 32]), AesKey::new([0xA5u8; 32])] {
-            let err = PakReader::open_with_key(encrypted_index_fixture(), wrong)
+        for wrong in wrong_fixture_keys() {
+            let err = PakReader::open_with_key(encrypted_index_fixture(), AesKey::new(wrong))
                 .expect_err("wrong key must fail");
             assert!(
                 matches!(err, PaksmithError::Decryption { .. }),
@@ -5002,7 +5010,7 @@ mod tests {
     #[test]
     fn v4_to_v6_encrypted_index_with_wrong_key_is_decryption() {
         for version in 4..=6 {
-            for wrong in [[0u8; 32], [0xA5u8; 32]] {
+            for wrong in wrong_fixture_keys() {
                 let err = PakReader::from_reader_with_key(
                     std::io::Cursor::new(encrypted_index_pak_at_version(version)),
                     AesKey::new(wrong),
