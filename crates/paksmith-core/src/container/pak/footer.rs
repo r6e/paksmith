@@ -152,12 +152,6 @@ impl PakFooter {
             if file_size < size {
                 continue;
             }
-            // `size` is one of the `FOOTER_SIZE_*` constants (all < 100);
-            // the `as i64` cast for `SeekFrom::End(-size)` is bit-
-            // preserving by construction.
-            #[allow(clippy::cast_possible_wrap)]
-            let size_i64 = size as i64;
-            let _ = reader.seek(SeekFrom::End(-size_i64))?;
             // Bytes ahead of the magic: none (v1-v3), the encrypted flag
             // (v4-v6), encryption_uuid(16) + encrypted(1) (v7+).
             let (probe_offset_for_magic, is_v7_plus) = match size {
@@ -165,7 +159,8 @@ impl PakFooter {
                 FOOTER_SIZE_V4_TO_V6 => (1, false),
                 _ => (17, true),
             };
-            // Same bounded-constant argument as above.
+            // `size` is one of the `FOOTER_SIZE_*` constants (at most
+            // `FOOTER_SIZE_V9` = 222), so the `as i64` cast is bit-preserving.
             #[allow(clippy::cast_possible_wrap)]
             let probe_offset_i64 = (size - probe_offset_for_magic) as i64;
             let _ = reader.seek(SeekFrom::End(-probe_offset_i64))?;
@@ -196,7 +191,7 @@ impl PakFooter {
             //      match for the corrupted-version case).
             if expected_versions.contains(&probe_version) {
                 debug!(label, version = probe_version, "matched footer candidate");
-                // Same bounded-constant argument as the probe seeks above.
+                // Same bounded-constant argument as the probe seek above.
                 #[allow(clippy::cast_possible_wrap)]
                 let size_i64 = size as i64;
                 let _ = reader.seek(SeekFrom::End(-size_i64))?;
@@ -914,8 +909,8 @@ mod tests {
 
     #[test]
     // Three `FOOTER_SIZE_*` (u64) → `usize` casts. The constants are
-    // small (< 100 bytes); truncation is impossible on any supported
-    // target.
+    // small (at most 222 bytes); truncation is impossible on any
+    // supported target.
     #[allow(clippy::cast_possible_truncation)]
     fn reject_bad_magic() {
         let mut data = build_v8b_plus_footer(11, 0, 0, 100);
