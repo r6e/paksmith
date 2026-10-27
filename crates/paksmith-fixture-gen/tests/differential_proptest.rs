@@ -422,8 +422,9 @@ proptest! {
             None => match ue4 {
                 v if v >= 522 => unreal_asset::engine_version::EngineVersion::VER_UE4_27,
                 v if v >= 518 => unreal_asset::engine_version::EngineVersion::VER_UE4_25,
-                v if v >= 516 => unreal_asset::engine_version::EngineVersion::VER_UE4_23,
-                v if v >= 510 => unreal_asset::engine_version::EngineVersion::VER_UE4_22,
+                v if v >= 517 => unreal_asset::engine_version::EngineVersion::VER_UE4_23,
+                v if v >= 516 => unreal_asset::engine_version::EngineVersion::VER_UE4_19,
+                v if v >= 510 => unreal_asset::engine_version::EngineVersion::VER_UE4_15,
                 v if v >= 507 => unreal_asset::engine_version::EngineVersion::VER_UE4_14,
                 _ => unreal_asset::engine_version::EngineVersion::VER_UE4_12,
             },

@@ -40,9 +40,9 @@
 //! - `minMobileLODIdx` — `StaticMesh.KeepMobileMinLODSettingOnDesktop` is `false`
 //!   for stock games, so it is never serialized.
 //! - the streaming-texture-factor block (UE4 path) — gated on
-//!   `FRenderingObjectVersion < TextureStreamingMeshUVChannelData` (added UE4.15),
-//!   so it is absent at object 516 (~UE4.20) and 4.23+. A UE4.14 asset (below the
-//!   gate) would carry it — an UNVERIFIED lower-edge limitation.
+//!   `FRenderingObjectVersion < TextureStreamingMeshUVChannelData` (10). Stock
+//!   UE4.14 already writes 12, so no stock package in paksmith's UE4.14+ range
+//!   carries it.
 //! - the pre-4.14 trailing bool.
 //!
 //! Per-LOD distance-field data (`bValid == true`, UE4 path) is validated-skipped:

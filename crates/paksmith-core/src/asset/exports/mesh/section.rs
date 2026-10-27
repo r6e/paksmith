@@ -39,7 +39,7 @@ pub struct MeshSection {
     pub cast_shadow: bool,
     /// `bForceOpaque` (UE 4.25+; `false` below).
     pub force_opaque: bool,
-    /// `bVisibleInRayTracing` (UE 4.27+; `false` below).
+    /// `bVisibleInRayTracing` (UE 4.26+; `false` below).
     pub visible_in_ray_tracing: bool,
     /// `bAffectDistanceFieldLighting` (UE 5.1+; `false` below).
     pub affect_distance_field_lighting: bool,
@@ -50,7 +50,7 @@ pub struct MeshSection {
 /// Wire: `MaterialIndex`, `FirstIndex`, `NumTriangles`, `MinVertexIndex`,
 /// `MaxVertexIndex` (5 × `i32`), then the bool32 (`ReadBoolean`, strict 0/1)
 /// render flags: `bEnableCollision`, `bCastShadow` (always), then
-/// `bForceOpaque` (UE 4.25+), `bVisibleInRayTracing` (UE 4.27+),
+/// `bForceOpaque` (UE 4.25+), `bVisibleInRayTracing` (UE 4.26+),
 /// `bAffectDistanceFieldLighting` (UE 5.1+). Stock-UE layout — the oracle's
 /// game-specific skips (PUBG / BlueProtocol / …) are out of scope.
 pub(crate) fn read_section<R: Read>(
@@ -79,7 +79,7 @@ pub(crate) fn read_section<R: Read>(
     };
     // `bAffectDistanceFieldLighting` is gated on the *engine* version (UE 5.1+);
     // `ADD_SOFTOBJECTPATH_LIST` (1008) is a 5.1-era package-version anchor that
-    // cleanly separates UE5.0 (≤ 1006) from UE5.1+ — exact-boundary-approximate.
+    // cleanly separates UE5.0 (1004) from UE5.1+ (>= 1008) — exact-boundary-approximate.
     let affect_distance_field_lighting =
         if ctx.version.ue5_at_least(VER_UE5_ADD_SOFTOBJECTPATH_LIST) {
             crate::asset::wire::read_bool32(reader, asset_path, field)?

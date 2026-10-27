@@ -452,7 +452,7 @@ impl ObjectExport {
             // i32. Truncation is structural (the wire format itself
             // mandates i32) and only fires when the caller built an
             // export carrying values that wouldn't have been
-            // representable in the pre-UE4-507 format — outside the
+            // representable in the pre-UE4-511 format — outside the
             // round-trip's design envelope.
             #[allow(clippy::cast_possible_truncation)]
             let size_i32 = self.serial_size as i32;
@@ -650,7 +650,7 @@ mod tests {
         }
     }
 
-    fn ue5_1() -> AssetVersion {
+    fn ue5_2() -> AssetVersion {
         AssetVersion {
             legacy_file_version: -8,
             file_version_ue4: 522,
@@ -696,7 +696,7 @@ mod tests {
         }
     }
 
-    fn sample_export_ue5_1() -> ObjectExport {
+    fn sample_export_ue5_2() -> ObjectExport {
         ObjectExport {
             class_index: PackageIndex::Import(0),
             super_index: PackageIndex::Null,
@@ -894,8 +894,8 @@ mod tests {
 
     #[test]
     fn ue5_round_trip() {
-        let v = ue5_1();
-        let original = sample_export_ue5_1();
+        let v = ue5_2();
+        let original = sample_export_ue5_2();
         let mut buf = Vec::new();
         original.write_to(&mut buf, v, TEST_COOKED_FLAGS).unwrap();
         // UE5 1009 record size:
@@ -923,7 +923,7 @@ mod tests {
         // PKG_FilterEditorOnly only (no PKG_UnversionedProperties =
         // 0x2000 bit) — so the script-serialization fields are written.
         let summary_flags = 0x8000_0000u32;
-        let mut original = sample_export_ue5_1();
+        let mut original = sample_export_ue5_2();
         original.script_serialization_start_offset = Some(0xDEAD_BEEF);
         original.script_serialization_end_offset = Some(0xFEED_F00D);
         let mut buf = Vec::new();
@@ -954,7 +954,7 @@ mod tests {
             file_version_licensee_ue4: 0,
         };
         let summary_flags = 0x8000_0000u32; // PKG_FilterEditorOnly, no PKG_UnversionedProperties
-        let mut e = sample_export_ue5_1();
+        let mut e = sample_export_ue5_2();
         // Hand-built struct: gate fires but the field is left None.
         e.script_serialization_start_offset = None;
         e.script_serialization_end_offset = Some(0);
@@ -975,7 +975,7 @@ mod tests {
         };
         // PKG_FilterEditorOnly | PKG_UnversionedProperties.
         let summary_flags = 0x8000_2000u32;
-        let original = sample_export_ue5_1();
+        let original = sample_export_ue5_2();
         let mut buf = Vec::new();
         original.write_to(&mut buf, v, summary_flags).unwrap();
         // 96 — same as UE5 1009; the gate suppresses both i64s.
@@ -992,7 +992,7 @@ mod tests {
         // Serialize-shape pin. Spot-check a few key fields rather than
         // pinning the full string — the field set is large and order
         // matters less than presence.
-        let e = sample_export_ue5_1();
+        let e = sample_export_ue5_2();
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains(r#""class_index":"Import(0)""#), "got: {json}");
         assert!(json.contains(r#""package_guid":null"#), "got: {json}");

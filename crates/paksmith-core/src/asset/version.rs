@@ -101,7 +101,7 @@ pub const PACKAGE_FILE_TAG: u32 = 0x9E2A_83C1;
 /// Rejected by paksmith — we don't support BE-encoded uassets.
 pub const PACKAGE_FILE_TAG_SWAPPED: u32 = 0xC183_2A9E;
 
-/// UE 4.12 historical gate (file_version_ue4 = 482): when an
+/// UE 4.12 historical gate (file_version_ue4 = 500): when an
 /// `ArrayProperty` declares `inner_type == "StructProperty"`, the
 /// element stream is preceded by a one-shot `FPropertyTag` header
 /// (the "inner-array-tag-info" block) carrying the struct's name,
@@ -111,8 +111,8 @@ pub const PACKAGE_FILE_TAG_SWAPPED: u32 = 0xC183_2A9E;
 /// struct type — paksmith does not support that path (out of range).
 ///
 /// paksmith's accepted UE4 floor is `VER_UE4_NAME_HASHES_SERIALIZED
-/// = 504`, well above this gate; the inner header is structurally
-/// always present for in-range versioned `Array<Struct>` reads. The
+/// = 504`, above this gate, so the inner header is always present for in-range
+/// versioned `Array<Struct>` reads below UE5 1012 (which elides it). The
 /// constant exists so Phase 2g's `Array<Struct>` decoder can document
 /// the version-gated branch intent in code, even though the
 /// false-branch path is unreachable for any asset paksmith accepts.
@@ -254,7 +254,7 @@ pub(crate) const VER_UE4_GAME_UE4_25_OBJECT_PROXY: i32 = 518;
 /// GAME_UE4_27` (`GAME_UE4_27 → FileVersionUE4 522` per the `EGame` map —
 /// `522` is the final UE4 object version, and UE5 packages carry it too).
 /// Gates `FVirtualTextureDataChunk::CodecPayloadOffset` widening from `u16`
-/// (pre-4.27) to `u32` (4.27+/UE5). Anchored two object versions above the
+/// (pre-4.27) to `u32` (4.27+/UE5). Anchored five object versions above the
 /// `517`/`GAME_UE4_23` proxy. Per the `EGame` first-match map `522` spans
 /// `{GAME_UE4_26, GAME_UE4_27}` (`< GAME_UE4_27 => 522` catches 4.26;
 /// `GAME_UE4_27 => 522` itself), with the intermediate `519`-`521` unassigned
@@ -313,12 +313,12 @@ pub(crate) const VER_UE5_OPTIONAL_RESOURCES: i32 = 1003;
 /// fields Phase 2a reads).
 pub(crate) const VER_UE5_LARGE_WORLD_COORDINATES: i32 = 1004;
 
-/// UE 5.0+: `package_guid` FGuid removed from `FObjectExport`.
+/// UE 5.1+: `package_guid` FGuid removed from `FObjectExport`.
 /// Below this version, the export carries 16 GUID bytes; at or above,
 /// it does not.
 pub(crate) const VER_UE5_REMOVE_OBJECT_EXPORT_PACKAGE_GUID: i32 = 1005;
 
-/// UE 5.0+: `is_inherited_instance` (i32 bool) added to `FObjectExport`.
+/// UE 5.1+: `is_inherited_instance` (i32 bool) added to `FObjectExport`.
 pub(crate) const VER_UE5_TRACK_OBJECT_EXPORT_IS_INHERITED: i32 = 1006;
 
 /// UE 5.1+ (`FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES`): the leading
@@ -330,14 +330,14 @@ pub(crate) const VER_UE5_TRACK_OBJECT_EXPORT_IS_INHERITED: i32 = 1006;
 /// `Ar.Ver >= FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES` branch).
 pub(crate) const VER_UE5_FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES: i32 = 1007;
 
-/// UE 5.0+: `SoftObjectPath` list added to the summary
+/// UE 5.1+: `SoftObjectPath` list added to the summary
 /// (`soft_object_paths_count` + `soft_object_paths_offset`).
 pub(crate) const VER_UE5_ADD_SOFTOBJECTPATH_LIST: i32 = 1008;
 
-/// UE 5.0+: `data_resource_offset` (i32) added to the summary.
+/// UE 5.2+: `data_resource_offset` (i32) added to the summary.
 pub(crate) const VER_UE5_DATA_RESOURCES: i32 = 1009;
 
-/// UE 5.0+: per-export `ScriptSerializationStartOffset` and
+/// UE 5.4+: per-export `ScriptSerializationStartOffset` and
 /// `ScriptSerializationEndOffset` (both `i64`) added to
 /// `FObjectExport` for saved, versioned packages. The fields are
 /// emitted only when `!PKG_UnversionedProperties` AND
@@ -483,9 +483,9 @@ impl AssetVersion {
         self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_23_OBJECT_PROXY)
     }
 
-    /// True iff the asset is UE 4.27+ (or any UE5): any UE5 asset, or a UE4
-    /// asset at the `VER_UE4_GAME_UE4_27_OBJECT_PROXY` (`522`, crate-private)
-    /// boundary or above. Proxies CUE4Parse's `Ar.Game >= GAME_UE4_27` — the
+    /// True iff the asset is UE5 or a UE4 asset at the
+    /// `VER_UE4_GAME_UE4_27_OBJECT_PROXY` (`522`, crate-private) boundary or
+    /// above, which UE 4.26 also writes. Proxies CUE4Parse's `Ar.Game >= GAME_UE4_27` — the
     /// boundary at which `FVirtualTextureDataChunk::CodecPayloadOffset` widens
     /// from `u16` to `u32`. The `FVirtualTextureDataChunk` reader (3e-VT-b2)
     /// consults this for the per-layer offset width.
