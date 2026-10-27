@@ -359,16 +359,23 @@ fn profile_test_reports_verified_for_correct_key() {
         .args(["profile", "key", "add", "g", "--key", KEY])
         .assert()
         .success();
-    let out = paksmith_table(cfg.path())
-        .args(["profile", "test", "g"])
-        .arg(fixture("real_v8b_encrypted_index.pak"))
-        .assert()
-        .success();
-    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(
-        txt.to_lowercase().contains("verified"),
-        "correct key reports verified: {txt}"
-    );
+    // The v8b footer records a zero key GUID and the v5 (45-byte) footer
+    // records none, so both resolve the profile's default zero-GUID key.
+    for pak in [
+        "real_v8b_encrypted_index.pak",
+        "real_v5_encrypted_index.pak",
+    ] {
+        let out = paksmith_table(cfg.path())
+            .args(["profile", "test", "g"])
+            .arg(fixture(pak))
+            .assert()
+            .success();
+        let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+        assert!(
+            txt.to_lowercase().contains("verified"),
+            "{pak}: correct key reports verified: {txt}"
+        );
+    }
 }
 
 #[test]

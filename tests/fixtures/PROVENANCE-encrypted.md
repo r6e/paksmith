@@ -11,12 +11,16 @@ repository and excluded from the CI `rm + regenerate` cycle.
 - `real_v11_encrypted_index.pak` (14132 bytes)
 - `real_v8b_encrypted_compressed.pak` (9315 bytes) — issue #634
 - `real_v11_encrypted_compressed.pak` (9674 bytes) — issue #634
+- `real_v5_encrypted_index.pak` (13924 bytes)
 
 ## Origin
 
 These are byte-identical copies of `pack_v8b_encrypt*.pak` (and, for the
 `_encrypted_compressed` pair, `pack_v8b_compress_encrypt.pak` /
-`pack_v11_compress_encrypt.pak`) from the
+`pack_v11_compress_encrypt.pak`; for `real_v11_encrypted_index.pak`,
+`pack_v11_encryptindex.pak`; for `real_v5_encrypted_index.pak`,
+`pack_v5_encryptindex.pak`, sha1 `20a64d47ac9a88d277f20f054b946820afa5922a`)
+from the
 [trumank/repak](https://github.com/trumank/repak) test suite, licensed under
 MIT OR Apache-2.0. They were originally produced by UnrealPak (Unreal Engine's
 pak packaging tool) and are used by repak's own test suite to validate
@@ -32,7 +36,7 @@ possible. These files are kept as committed binaries.
 
 ## Decryption Key
 
-All six fixtures use the same AES-256 key:
+All of these fixtures use the same AES-256 key:
 
 - Base64: `lNJbw660IOC+kU7cnVQ1oeqrXyhk4J6UAZrCBbcnp94=`
 - Hex: `94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de`
@@ -55,6 +59,14 @@ key paksmith opens it, lists its entries, reads a file, and verifies its index
 hash; a wrong key fails closed as `Decryption`. The v10 half of that coverage
 patches this fixture's footer version u32 (11→10) in-memory — v10/v11 share an
 identical footer and index wire layout, and `fnv64_path` is version-agnostic.
+
+`real_v5_encrypted_index.pak` holds `real_v8b_encrypted_index.pak`'s encrypted
+index behind a 45-byte v5 footer, whose encrypted-index flag precedes the
+magic. Their first 13879 bytes are identical; only the footer differs. It anchors the
+v4-v6 encrypted-index tests, whose v4 and v6 halves patch its footer version
+u32 (5→4, 5→6) in-memory. All four entries are uncompressed with flags 0, so
+v5's entry-relative block offsets and v6's delete-record flag bit leave these
+bytes unchanged.
 
 The `_encrypted_compressed` pair (issue #634) carries the same four-entry
 corpus, AES-256-ECB encrypted, behind plaintext indexes (legacy v8b and

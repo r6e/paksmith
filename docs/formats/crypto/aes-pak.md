@@ -14,10 +14,8 @@
 UE optionally encrypts pak archive content with AES-256 in **ECB mode**
 (no IV, no chaining). Encryption can be applied at two granularities:
 
-- **Index encryption** (V4+, gated by the footer's `encrypted` byte
-  (present V4+; paksmith reads it only in V7+ archives because the
-  V1–V6 legacy footer probe is 44 bytes)): the whole index region
-  (the bytes between
+- **Index encryption** (V4+, gated by the footer's `encrypted` byte):
+  the whole index region (the bytes between
   `index_offset` and `index_offset + index_size`) is ciphertext. The
   reader must decrypt before parsing entry records.
 - **Per-entry encryption** (V3+, gated by bit 0 of each entry's
@@ -56,7 +54,7 @@ verification no longer skips them.
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | Wire version 3 (UE 4.4) | Per-entry encryption introduced. Encryption signaled by bit 0 of the entry header's `flags` byte; no index encryption yet. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
-| Wire version 4 (UE 4.16, `IndexEncryption`) | Index encryption introduced. The whole index region is AES-encrypted when the writer enables it; reader must decrypt before parsing entries. The footer gains a 1-byte `encrypted` field. (paksmith does not currently read this byte for V4-V6 archives — see Wire layout §Footer fields for the gap.) | Same[^1] |
+| Wire version 4 (UE 4.16, `IndexEncryption`) | Index encryption introduced. The whole index region is AES-encrypted when the writer enables it; reader must decrypt before parsing entries. The footer gains a 1-byte `encrypted` field. | Same[^1] |
 | Wire version 7 (UE 4.22, `EncryptionKeyGuid`) | 16-byte `encryption_key_guid` field added to the footer. Identifies which key the archive uses when a project ships multiple. Zero GUID = no specific key assigned. | Same[^1] |
 
 The AES-256 ECB primitive itself has been stable across the whole
@@ -68,32 +66,20 @@ only → index → keyed) and *how* the consumer locates the key.
 This doc covers the encryption *metadata* on the wire. The encrypted
 content itself is opaque to paksmith.
 
-### Footer fields (V7+ layout)
+### Footer fields (V4+)
 
-Offsets below are for the V7+ footer shape. V4-V6 have a different
-layout — the encrypted byte sits at the very start of the footer with
-no preceding `encryption_key_guid` (see *V4-V6 gap* paragraph below).
+Offsets below are for the V7+ footer shape; V4–V6 follow the table.
 
 | offset (in footer) | size | endian | name | type | semantics |
 |--------------------|------|--------|------|------|-----------|
 | 0 | 16 | — | `encryption_key_guid` | `[u8; 16]` | (V7+ only.) Identifies the key used to encrypt this archive's index / entries. Zero-filled when no specific key is assigned. The 4-u32 partition matches `FGuid`'s convention (see [`../primitive/fguid.md`](../primitive/fguid.md)). |
 | 16 | 1 | — | `encrypted` | `u8` | (V7+; V4-V6 also have this byte but at footer offset 0.) `1` = the index region is AES-encrypted; `0` = the index is plaintext. |
 
-Wire versions 4–6 also include a 1-byte `encrypted` field in the
-footer (introduced with `IndexEncryption` in V4) but paksmith's
-legacy footer parser (`read_legacy`) covers V1–V6 and always sets
-`encrypted = false`. The root cause is architectural: paksmith's
-legacy probe window is `FOOTER_SIZE_LEGACY = 44` bytes, beginning at
-`EOF - 44`. On V4–V6 archives, the wire layout is
-`encrypted(1) + magic(4) + version(4) + index_offset(8) + index_size(8) + hash(20) = 45 bytes`;
-the encrypted byte sits at `EOF - 45`, one byte before the probe
-window begins. The probe lands on the magic byte and never reads the
-preceding encrypted flag — `read_legacy` therefore hardcodes
-`encrypted = false`. Any V4–V6 archive with index encryption is
-therefore treated as plaintext by paksmith (no decryption, potentially
-corrupt index parse). This is a known gap; V4–V6 encrypted archives
-are rare in practice. V7+ footers carry both the 16-byte GUID and the
-encrypted byte, and paksmith reads both correctly.
+Wire versions 4–6 have no `encryption_key_guid`. Their 45-byte footer
+is
+`encrypted(1) + magic(4) + version(4) + index_offset(8) + index_size(8) + hash(20)`,
+so the flag sits at `EOF - 45` and the magic at `EOF - 44`, where V1–V3
+and V7 also put it[^4].
 
 ### Per-entry encryption flag
 
@@ -247,7 +233,7 @@ per-entry flag tables above):
 
 - **Plaintext** — `footer.encrypted == 0` and no entry sets bit 0 of its `flags` byte.
 - **Per-entry-only** — `footer.encrypted == 0`; one or more entries set bit 0 of their `flags` byte. Index is plaintext; individual payloads are ciphertext.
-- **Index-only** — `footer.encrypted == 1`; no entry sets bit 0 of its `flags` byte. Index is ciphertext; payloads are plaintext. (Index encryption does not exist before wire version 4. For how paksmith handles each class, and the V4-V6 footer gap, see *Paksmith implementation* and *Known divergences* below.)
+- **Index-only** — `footer.encrypted == 1`; no entry sets bit 0 of its `flags` byte. Index is ciphertext; payloads are plaintext. (Index encryption does not exist before wire version 4. For how paksmith handles each class, see *Paksmith implementation* and *Known divergences* below.)
 - **Whole-archive** — `footer.encrypted == 1` and entries set bit 0 of their `flags` byte. Both index and payloads are ciphertext.
 
 See Paksmith implementation for the precise rejection points per combination.
@@ -270,9 +256,10 @@ doesn't yet act on it.
 
 ### Format-defined limits (wire-imposed)
 
-- **Footer `encrypted` byte:** `u8`. Values `0` and `1` are the only
-  semantically meaningful values; other values are wire-valid but
-  undefined. The byte itself has no overflow surface.
+- **Footer `encrypted` byte:** `u8`. repak's writer emits only `0` and
+  `1`; readers disagree on other values (see `../container/pak.md`,
+  Verification → Known divergences). The byte itself has no overflow
+  surface.
 - **Footer `encryption_key_guid`:** fixed `[u8; 16]` — no length to
   bound.
 - **Per-entry `flags` byte (inline form):** `u8` bitfield; bit 0 =
@@ -316,14 +303,15 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixtures:** six vendored UnrealPak-produced archives (see
+- **Fixtures:** vendored UnrealPak-produced archives (see
   `tests/fixtures/PROVENANCE-encrypted.md`): the phase-5a quartet
   (`real_v8b_encrypted_{entries,index,both}.pak`,
   `real_v11_encrypted_index.pak`) plus the issue-#634 pair
   (`real_v{8b,11}_encrypted_compressed.pak`) whose entries are
   AES-encrypted — all four entries zlib-compressed in the v8b fixture,
   and `test.png`/`zeros.bin` compressed while `test.txt`/`nested.txt`
-  are stored uncompressed in the v11 fixture.
+  are stored uncompressed in the v11 fixture. `real_v5_encrypted_index.pak`
+  carries an encrypted index behind a 45-byte V5 footer.
 - **Cross-validation oracle:** repak (paksmith's primary pak oracle):
   the per-entry-flag and footer-flag detection mirror repak's on-wire
   encryption-metadata parsing[^1]; the aligned-read + ECB-decrypt entry
@@ -349,8 +337,11 @@ See `docs/security/allocation-caps.md` for the broader policy.
   AES-256-ECB encrypted in place and 16-aligned on disk; verify decrypts
   before hashing (issue #635). Anchored empirically to
   `real_v11_encrypted_index.pak`.
+- **V4–V6 encrypted index.** The flag sits at `EOF - 45`, ahead of the
+  magic (Wire layout §*Footer fields*). Anchored to
+  `real_v5_encrypted_index.pak`, whose index paksmith decrypts and
+  verifies with the key.
 - **Known divergences:**
-  - **V4–V6 index encryption gap.** Paksmith treats any V4–V6 archive as plaintext — see Wire layout §*Footer fields* for the root cause (`FOOTER_SIZE_LEGACY = 44` probe window excludes the `encrypted` byte). repak reads it; we don't.
   - **Multi-block encrypted entries: self-consistency covered
     synthetically; first-party fixture deferred.** Paksmith's own
     decrypt-then-decompress multi-block walk — 2+ blocks read across the
@@ -409,12 +400,13 @@ above).
 decryption (primary/PHI/FDI regions, with key-required region
 verification — issue #635), entry decryption (uncompressed and
 compressed), and keyless verification of encrypted entries are complete.
-V4-V6 index-encryption detection is a known gap.
+First-party UnrealPak multi-block and encrypted+LZ4 fixtures remain
+outstanding (issue #688).
 
 **Public surface:**
 - `PakFooter::encryption_key_guid() -> Option<&[u8; 16]>` — Some for
   V7+ archives, None for legacy.
-- `PakFooter::is_encrypted() -> bool` — index-encryption flag. Returns true only for V7+ archives where the writer set the bit; always returns false for V1-V3 (no field on wire) and V4-V6 (parser gap; see Wire layout §Footer fields).
+- `PakFooter::is_encrypted() -> bool` — index-encryption flag, read from the V4+ footer; always false for V1-V3 (no field on wire). A flag other than `0` or `1` fails the footer as `PaksmithError::InvalidFooter`.
 - `PakEntryHeader::is_encrypted() -> bool` — per-entry flag.
 - `PakReader::open()` / `from_reader()` returns
   `PaksmithError::Decryption { path: Option<String> }` for any
@@ -459,10 +451,11 @@ V4-V6 index-encryption detection is a known gap.
 
 **Phase plan:**
 - Detection: `docs/plans/phase-1-foundation.md` (shipped as part of pak footer + entry-header parsing).
-- AES decryption + key management: shipped in Phase 5 — index and uncompressed-entry decryption in Phase 5a (#589), the profile-owned key registry and key store in Phase 5b (#590) — extended by #634 with decrypt-then-decompress for zlib/LZ4 compressed entries and by #635 with v10/v11 path-hash index decryption. The remaining gap (V4–V6 detection) is tracked under Known divergences above.
+- AES decryption + key management: shipped in Phase 5 — index and uncompressed-entry decryption in Phase 5a (#589), the profile-owned key registry and key store in Phase 5b (#590) — extended by #634 with decrypt-then-decompress for zlib/LZ4 compressed entries and by #635 with v10/v11 path-hash index decryption.
 
 ## References
 
 [^1]: `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` plus `repak/src/lib.rs` — primary oracle for the on-wire encryption metadata. paksmith's detection paths mirror repak's exactly.
 [^2]: `FabianFG/CUE4Parse/CUE4Parse/Encryption/Aes/Aes.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — secondary oracle for the AES-256 ECB block-cipher specifics (confirms ECB mode, no padding, no IV, 16-byte block size). `FabianFG/CUE4Parse/CUE4Parse/Encryption/Aes/FAesKey.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — key-wrapping type; implements the `0x`-prefixed hex-string parser and 32-byte validation cited in the `Crypto.json` §Key field encoding. NIST FIPS 197 is the upstream reference for AES itself; not cited inline as it is external to UE.
 [^3]: `trumank/repak/repak/src/entry.rs@e215472c51db69328b1ce77be2db24d24c1d646b::read_file` — oracle for the read-side decrypt-then-decompress entry framing (aligned ciphertext read, ECB-decrypt, truncate to `compressed_size`, per-block inflate). This is the git-dep rev pinned in `crates/paksmith-fixture-gen/Cargo.toml` and the source commit recorded in `tests/fixtures/PROVENANCE-encrypted.md`; the vendored encrypted+compressed fixtures were produced against it.
+[^4]: `trumank/repak/repak/src/lib.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` L68-L92 — `Version::size`: 44 bytes, one more from V4 for the flag, 16 more from V7 for the GUID. `repak/src/footer.rs` L26-L30 at the same revision reads the GUID (V7+), then the flag (V4+), then the magic.

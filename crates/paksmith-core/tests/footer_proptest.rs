@@ -1,8 +1,8 @@
 //! Property-based tests for footer parsing.
 //!
 //! Two properties:
-//! 1. **Round-trip**: any valid v6/v11 footer we synthesise round-trips through
-//!    `PakFooter::read_from` to the same field values.
+//! 1. **Round-trip**: any valid v1-v3, v4-v6 or v11 footer we synthesise
+//!    round-trips through `PakFooter::read_from` to the same field values.
 //! 2. **No-panic on garbage**: random bytes never panic the parser; they either
 //!    return `Ok(...)` (rare) or `Err(...)` (typical). Validates the
 //!    "no panics in core" rule from CLAUDE.md.
@@ -20,6 +20,23 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use paksmith_core::container::pak::footer::PakFooter;
 use paksmith_core::container::pak::version::PAK_MAGIC;
 use proptest::prelude::*;
+
+/// Append the v1-v3 footer layout (magic, version, index offset and size,
+/// hash) to `prefix`. A v4-v6 caller pushes the flag byte onto `prefix` first.
+fn append_legacy_footer(
+    mut prefix: Vec<u8>,
+    version: u32,
+    index_offset: u64,
+    index_size: u64,
+    index_hash: &[u8; 20],
+) -> Vec<u8> {
+    prefix.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    prefix.write_u32::<LittleEndian>(version).unwrap();
+    prefix.write_u64::<LittleEndian>(index_offset).unwrap();
+    prefix.write_u64::<LittleEndian>(index_size).unwrap();
+    prefix.extend_from_slice(index_hash);
+    prefix
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {
@@ -65,24 +82,26 @@ proptest! {
         prop_assert_eq!(parsed.encryption_key_guid(), Some(&encryption_key_guid));
     }
 
-    /// Round-trip property for legacy footers (versions 1-6).
+    /// Round-trip property for v1-v3 footers (44 bytes, no flag). A random
+    /// nonzero payload fill makes any read of the byte at EOF-45 visible: it
+    /// would flip `is_encrypted` or fail the strict flag check.
     #[test]
-    fn legacy_footer_roundtrip(
-        version in 1u32..=6,
+    fn v1_to_v3_footer_roundtrip(
+        version in 1u32..=3,
         index_offset in 0u64..1_000_000,
         index_size in 0u64..1_000_000,
         index_hash in any::<[u8; 20]>(),
         prefix_len in 0usize..256,
+        fill in 1u8..=u8::MAX,
     ) {
         let payload_max = index_offset.saturating_add(index_size).max(prefix_len as u64);
-        let payload = vec![0xAAu8; payload_max as usize];
-
-        let mut data = payload;
-        data.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-        data.write_u32::<LittleEndian>(version).unwrap();
-        data.write_u64::<LittleEndian>(index_offset).unwrap();
-        data.write_u64::<LittleEndian>(index_size).unwrap();
-        data.extend_from_slice(&index_hash);
+        let data = append_legacy_footer(
+            vec![fill; payload_max as usize],
+            version,
+            index_offset,
+            index_size,
+            &index_hash,
+        );
 
         let mut cursor = Cursor::new(data);
         let parsed = PakFooter::read_from(&mut cursor).unwrap();
@@ -93,6 +112,32 @@ proptest! {
         prop_assert_eq!(parsed.index_offset(), index_offset);
         prop_assert_eq!(parsed.index_size(), index_size);
         prop_assert_eq!(parsed.is_encrypted(), false);
+        prop_assert!(parsed.encryption_key_guid().is_none());
+    }
+
+    /// Round-trip property for v4-v6 footers (45 bytes: the encrypted-index
+    /// flag, then the v1-v3 layout).
+    #[test]
+    fn v4_to_v6_footer_roundtrip(
+        version in 4u32..=6,
+        index_offset in 0u64..1_000_000,
+        index_size in 0u64..1_000_000,
+        encrypted in any::<bool>(),
+        index_hash in any::<[u8; 20]>(),
+        prefix_len in 0usize..256,
+    ) {
+        let payload_max = index_offset.saturating_add(index_size).max(prefix_len as u64);
+        let mut prefix = vec![0xAAu8; payload_max as usize];
+        prefix.push(u8::from(encrypted));
+        let data = append_legacy_footer(prefix, version, index_offset, index_size, &index_hash);
+
+        let mut cursor = Cursor::new(data);
+        let parsed = PakFooter::read_from(&mut cursor).unwrap();
+        prop_assert_eq!(parsed.version().wire_version(), version);
+        prop_assert_eq!(parsed.index_offset(), index_offset);
+        prop_assert_eq!(parsed.index_size(), index_size);
+        prop_assert_eq!(parsed.is_encrypted(), encrypted);
+        prop_assert_eq!(parsed.index_hash(), paksmith_core::Sha1Digest::from(index_hash));
         prop_assert!(parsed.encryption_key_guid().is_none());
     }
 

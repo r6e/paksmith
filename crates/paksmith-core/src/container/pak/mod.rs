@@ -4745,6 +4745,16 @@ mod tests {
         0xa7, 0xde,
     ];
 
+    /// Two structurally different wrong keys: a one-bit near miss of
+    /// `FIXTURE_AES_KEY` and its bitwise inverse, which differs in every
+    /// byte. Derived, not spelled out, so CodeQL's hard-coded-key alert
+    /// stays on `FIXTURE_AES_KEY`.
+    fn wrong_fixture_keys() -> [[u8; 32]; 2] {
+        let mut near_miss = FIXTURE_AES_KEY;
+        near_miss[31] ^= 1;
+        [near_miss, FIXTURE_AES_KEY.map(|b| !b)]
+    }
+
     /// Path to the encrypted-INDEX fixture (index encrypted, entry data
     /// plaintext — isolates the index-decrypt path).
     fn encrypted_index_fixture() -> std::path::PathBuf {
@@ -4843,16 +4853,14 @@ mod tests {
     /// `Decryption` (fail-closed), NOT surfaced as an opaque parse fault.
     #[test]
     fn open_with_wrong_key_is_decryption_error() {
-        // Two structurally different wrong keys: an all-zero key and a
-        // mixed-byte key that differs from the real `FIXTURE_AES_KEY` in
-        // every byte. The wrong-key detector is the index parser rejecting
-        // garbage plaintext (the spec's documented parse-as-oracle), so the
+        // The wrong-key detector is the index parser rejecting garbage
+        // plaintext (the spec's documented parse-as-oracle), so the
         // fail-closed guarantee is probabilistic; pinning it at a single key
         // (paksmith's recurring pinned-answer hazard) would let a detector
-        // that only rejects the all-zero case slip through. Both must map to
+        // tuned to that one key slip through. Each must map to
         // `Decryption`, never an empty `Ok` index or an opaque parse error.
-        for wrong in [AesKey::new([0u8; 32]), AesKey::new([0xA5u8; 32])] {
-            let err = PakReader::open_with_key(encrypted_index_fixture(), wrong)
+        for wrong in wrong_fixture_keys() {
+            let err = PakReader::open_with_key(encrypted_index_fixture(), AesKey::new(wrong))
                 .expect_err("wrong key must fail");
             assert!(
                 matches!(err, PaksmithError::Decryption { .. }),
@@ -4942,6 +4950,80 @@ mod tests {
         );
     }
 
+    /// Path to the UnrealPak v5 encrypted-index fixture (45-byte footer).
+    fn encrypted_index_v5_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v5_encrypted_index.pak")
+    }
+
+    /// The v5 encrypted-index fixture with its footer version rewritten to
+    /// `version`. Faithful for v4 and v6: every entry is uncompressed with
+    /// flags 0, so v5's relative block offsets and v6's delete-record bit
+    /// leave the bytes unchanged.
+    fn encrypted_index_pak_at_version(version: u32) -> Vec<u8> {
+        let mut bytes = std::fs::read(encrypted_index_v5_fixture()).expect("read fixture bytes");
+        assert_eq!(
+            crate::test_patch::swap_footer_version(&mut bytes, version),
+            5
+        );
+        bytes
+    }
+
+    #[test]
+    fn v4_to_v6_encrypted_index_opens_with_key_and_lists_entries() {
+        for version in 4..=6 {
+            let reader = PakReader::from_reader_with_key(
+                std::io::Cursor::new(encrypted_index_pak_at_version(version)),
+                AesKey::new(FIXTURE_AES_KEY),
+            )
+            .unwrap_or_else(|e| panic!("v{version}: decrypt + parse index: {e:?}"));
+            assert_eq!(reader.version().wire_version(), version);
+            let mut paths: Vec<String> = reader.entries().map(|e| e.path().to_string()).collect();
+            paths.sort();
+            assert_eq!(
+                paths,
+                ["directory/nested.txt", "test.png", "test.txt", "zeros.bin"],
+                "v{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn v4_to_v6_encrypted_index_without_key_is_decryption() {
+        for version in 4..=6 {
+            let bytes = encrypted_index_pak_at_version(version);
+            let err = PakReader::from_reader(std::io::Cursor::new(bytes))
+                .expect_err("encrypted index without key must fail");
+            assert!(
+                matches!(err, PaksmithError::Decryption { path: None }),
+                "v{version}: got {err:?}"
+            );
+        }
+        let err = PakReader::open(encrypted_index_v5_fixture())
+            .expect_err("encrypted index without key must fail");
+        assert!(
+            matches!(err, PaksmithError::Decryption { path: Some(_) }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn v4_to_v6_encrypted_index_with_wrong_key_is_decryption() {
+        for version in 4..=6 {
+            for wrong in wrong_fixture_keys() {
+                let err = PakReader::from_reader_with_key(
+                    std::io::Cursor::new(encrypted_index_pak_at_version(version)),
+                    AesKey::new(wrong),
+                )
+                .expect_err("wrong key must fail");
+                assert!(
+                    matches!(err, PaksmithError::Decryption { .. }),
+                    "v{version}: wrong key must fail closed as Decryption, got {err:?}"
+                );
+            }
+        }
+    }
+
     /// Path of the v11 (path-hash index) encrypted-index fixture.
     fn encrypted_v11_index_fixture() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -5028,17 +5110,11 @@ mod tests {
     #[test]
     fn open_with_key_decrypts_v10_path_hash_index_and_reads() {
         let mut bytes = std::fs::read(encrypted_v11_index_fixture()).expect("read v11 fixture");
-        // Locate the footer via its magic bytes (as the other tests in this
-        // module do) rather than hardcoding the footer size; the version u32
-        // sits immediately after the 4-byte magic. The "reads 11" sanity
-        // assert below still guards the offset math either way.
-        let ver_off = crate::test_patch::footer_magic_pos(&bytes) + 4;
         assert_eq!(
-            u32::from_le_bytes(bytes[ver_off..ver_off + 4].try_into().unwrap()),
+            crate::test_patch::swap_footer_version(&mut bytes, 10),
             11,
             "sanity: patch target must be the version field currently reading 11"
         );
-        bytes[ver_off..ver_off + 4].copy_from_slice(&10u32.to_le_bytes());
 
         let key = AesKey::new(FIXTURE_AES_KEY);
         let reader = PakReader::from_reader_with_key(std::io::Cursor::new(bytes), key)

@@ -53,6 +53,17 @@ pub(crate) fn footer_magic_pos(bytes: &[u8]) -> usize {
         .expect("footer magic must be present in fixture")
 }
 
+/// Overwrite the footer's version `u32` (right after the magic) with
+/// `version` and return the value it replaced.
+#[must_use]
+pub(crate) fn swap_footer_version(bytes: &mut [u8], version: u32) -> u32 {
+    let pos = footer_magic_pos(bytes) + 4;
+    let field: &mut [u8; 4] = (&mut bytes[pos..pos + 4])
+        .try_into()
+        .expect("footer version field is 4 bytes");
+    u32::from_le_bytes(std::mem::replace(field, version.to_le_bytes()))
+}
+
 /// Byte range of the footer's stored `index_hash`, for tests that patch
 /// or inspect it.
 ///

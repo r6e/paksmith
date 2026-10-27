@@ -8,11 +8,14 @@ use tracing::debug;
 use crate::container::pak::index::CompressionMethod;
 use crate::container::pak::version::{
     COMPRESSION_SLOT_BYTES, COMPRESSION_SLOTS_V8A, COMPRESSION_SLOTS_V8B_PLUS, FOOTER_SIZE_LEGACY,
-    FOOTER_SIZE_V7_PLUS, FOOTER_SIZE_V8A, FOOTER_SIZE_V8B_PLUS, FOOTER_SIZE_V9, PAK_MAGIC,
-    PakVersion,
+    FOOTER_SIZE_V4_TO_V6, FOOTER_SIZE_V7_PLUS, FOOTER_SIZE_V8A, FOOTER_SIZE_V8B_PLUS,
+    FOOTER_SIZE_V9, PAK_MAGIC, PakVersion,
 };
 use crate::digest::Sha1Digest;
 use crate::error::{InvalidFooterFault, PaksmithError};
+
+/// Versions whose footer leads with the encrypted-index flag and has no key GUID.
+const V4_TO_V6: &[u32] = &[4, 5, 6];
 
 /// Parsed pak file footer containing archive metadata.
 #[derive(Debug, Clone)]
@@ -60,7 +63,9 @@ impl PakFooter {
         self.index_hash
     }
 
-    /// Whether the index is encrypted.
+    /// Whether the index is encrypted, read from the encrypted-index
+    /// flag byte of a v4+ footer. Always `false` for v1-v3, whose
+    /// footer has no flag.
     pub fn is_encrypted(&self) -> bool {
         self.encrypted
     }
@@ -108,10 +113,10 @@ impl PakFooter {
     ///
     /// Dispatch is **size-then-version**: probe candidate footer sizes from
     /// largest to smallest, validate magic + version field at each, and
-    /// dispatch to the appropriate parser on the first match. The size
-    /// candidates are mutually exclusive given a version-field check, so
-    /// the procedure is unambiguous despite v8 and v10/v11 sharing the
-    /// 221-byte size (their version fields differ).
+    /// dispatch to the appropriate parser on the first match. Size alone
+    /// doesn't pick the layout: v1-v7 all put the magic at EOF-44, and
+    /// v8 and v10/v11 share the 221-byte size. Each candidate's version
+    /// list decides, so the procedure is unambiguous.
     ///
     /// Larger footers come first so a v9 file isn't misread as v8b
     /// (v9 = v8b + 1 frozen byte; if we tried v8b first the frozen byte
@@ -126,7 +131,8 @@ impl PakFooter {
             (FOOTER_SIZE_V8B_PLUS, &[8, 10, 11], "v8b/v10/v11"),
             (FOOTER_SIZE_V8A, &[8], "v8a"),
             (FOOTER_SIZE_V7_PLUS, &[7], "v7"),
-            (FOOTER_SIZE_LEGACY, &[1, 2, 3, 4, 5, 6], "legacy"),
+            (FOOTER_SIZE_V4_TO_V6, V4_TO_V6, "v4-v6"),
+            (FOOTER_SIZE_LEGACY, &[1, 2, 3], "v1-v3"),
         ];
 
         // Track the most-specific failure mode so we can return a typed
@@ -146,21 +152,15 @@ impl PakFooter {
             if file_size < size {
                 continue;
             }
-            // `size` is one of the `FOOTER_SIZE_*` constants (all < 100);
-            // the `as i64` cast for `SeekFrom::End(-size)` is bit-
-            // preserving by construction.
-            #[allow(clippy::cast_possible_wrap)]
-            let size_i64 = size as i64;
-            let _ = reader.seek(SeekFrom::End(-size_i64))?;
-            // Legacy footer: magic at offset 0, version at offset 4.
-            // V7+ footers: encryption_uuid(16) + encrypted(1) precedes magic
-            // at offset 17, version at offset 21. Detect by candidate size.
-            let (probe_offset_for_magic, is_v7_plus) = if size == FOOTER_SIZE_LEGACY {
-                (0u64, false)
-            } else {
-                (17u64, true)
+            // Bytes ahead of the magic: none (v1-v3), the encrypted flag
+            // (v4-v6), encryption_uuid(16) + encrypted(1) (v7+).
+            let (probe_offset_for_magic, is_v7_plus) = match size {
+                FOOTER_SIZE_LEGACY => (0u64, false),
+                FOOTER_SIZE_V4_TO_V6 => (1, false),
+                _ => (17, true),
             };
-            // Same bounded-constant argument as above.
+            // `size` is one of the `FOOTER_SIZE_*` constants (at most
+            // `FOOTER_SIZE_V9` = 222), so the `as i64` cast is bit-preserving.
             #[allow(clippy::cast_possible_wrap)]
             let probe_offset_i64 = (size - probe_offset_for_magic) as i64;
             let _ = reader.seek(SeekFrom::End(-probe_offset_i64))?;
@@ -168,6 +168,19 @@ impl PakFooter {
             let probe_version = reader.read_u32::<LittleEndian>()?;
             if probe_magic != PAK_MAGIC {
                 continue;
+            }
+            // v1-v7 all put the magic at EOF-44. A v4-v6 file of >= 45
+            // bytes already returned Ok or Err at the 45-byte candidate,
+            // so a v4-v6 version reaches this candidate only when the
+            // file is too short for its 45-byte footer.
+            if size == FOOTER_SIZE_LEGACY && V4_TO_V6.contains(&probe_version) {
+                return Err(PaksmithError::InvalidFooter {
+                    fault: InvalidFooterFault::OtherUnpromoted {
+                        reason: format!(
+                            "file too small ({file_size} bytes) for a v{probe_version} footer ({FOOTER_SIZE_V4_TO_V6} bytes)"
+                        ),
+                    },
+                });
             }
             // Magic matched. Two sub-cases:
             //   a. Version is in the expected list for this size →
@@ -178,14 +191,14 @@ impl PakFooter {
             //      match for the corrupted-version case).
             if expected_versions.contains(&probe_version) {
                 debug!(label, version = probe_version, "matched footer candidate");
-                // Same bounded-constant argument as the probe seeks above.
+                // Same bounded-constant argument as the probe seek above.
                 #[allow(clippy::cast_possible_wrap)]
                 let size_i64 = size as i64;
                 let _ = reader.seek(SeekFrom::End(-size_i64))?;
                 let footer = if is_v7_plus {
                     Self::read_v7_plus(reader, size)?
                 } else {
-                    Self::read_legacy(reader)?
+                    Self::read_legacy(reader, size)?
                 };
                 Self::validate_index_bounds(&footer, file_size)?;
                 return Ok(footer);
@@ -231,7 +244,7 @@ impl PakFooter {
     fn read_v7_plus<R: Read>(reader: &mut R, footer_size: u64) -> crate::Result<Self> {
         let mut encryption_key_guid = [0u8; 16];
         reader.read_exact(&mut encryption_key_guid)?;
-        let encrypted = reader.read_u8()? != 0;
+        let encrypted = read_encrypted_flag(reader)?;
 
         let magic = reader.read_u32::<LittleEndian>()?;
         if magic != PAK_MAGIC {
@@ -292,7 +305,12 @@ impl PakFooter {
         })
     }
 
-    fn read_legacy<R: Read>(reader: &mut R) -> crate::Result<Self> {
+    /// Read a v1-v6 footer from the current reader position, which must
+    /// be `EOF - footer_size`. Only the 45-byte v4-v6 footer carries the
+    /// encrypted-index flag ahead of the magic.
+    fn read_legacy<R: Read>(reader: &mut R, footer_size: u64) -> crate::Result<Self> {
+        let encrypted = footer_size == FOOTER_SIZE_V4_TO_V6 && read_encrypted_flag(reader)?;
+
         let magic = reader.read_u32::<LittleEndian>()?;
         if magic != PAK_MAGIC {
             return Err(PaksmithError::InvalidFooter {
@@ -319,7 +337,7 @@ impl PakFooter {
             index_offset,
             index_size,
             index_hash,
-            encrypted: false,
+            encrypted,
             encryption_key_guid: None,
             frozen_index: false,
             compression_methods: Vec::new(),
@@ -396,6 +414,20 @@ fn read_compression_method_table<R: Read>(
         out.push(Some(CompressionMethod::from_name(name)));
     }
     Ok(out)
+}
+
+/// Encrypted-index flag (v4+). repak's writer emits only 0 or 1; any other
+/// byte fails closed, as in repak's reader.
+fn read_encrypted_flag<R: Read>(reader: &mut R) -> crate::Result<bool> {
+    let flag = reader.read_u8()?;
+    if flag > 1 {
+        return Err(PaksmithError::InvalidFooter {
+            fault: InvalidFooterFault::OtherUnpromoted {
+                reason: format!("footer encrypted-index flag is {flag}, expected 0 or 1"),
+            },
+        });
+    }
+    Ok(flag == 1)
 }
 
 #[cfg(test)]
@@ -513,6 +545,32 @@ mod tests {
         buf
     }
 
+    /// The `reason` of an `InvalidFooter::OtherUnpromoted` result; panics,
+    /// naming `label`, on anything else.
+    fn other_unpromoted_reason(result: crate::Result<PakFooter>, label: &str) -> String {
+        match result {
+            Err(PaksmithError::InvalidFooter {
+                fault: InvalidFooterFault::OtherUnpromoted { reason },
+            }) => reason,
+            other => panic!("{label}: expected InvalidFooter::OtherUnpromoted, got {other:?}"),
+        }
+    }
+
+    /// Build a v4-v6 footer (45 bytes): the encrypted-index `flag` byte
+    /// followed by the v1-v3 layout.
+    fn build_v4_to_v6_footer(
+        version: u32,
+        flag: u8,
+        index_offset: u64,
+        index_size: u64,
+        payload_bytes: usize,
+    ) -> Vec<u8> {
+        let mut buf = vec![0xAA; payload_bytes];
+        buf.push(flag);
+        buf.extend_from_slice(&build_legacy_footer(version, index_offset, index_size, 0));
+        buf
+    }
+
     /// V11 footers (`PathHashIndex` v11 = `Fnv64BugFix`) share the
     /// 221-byte V8B+ shape — the version field is the only
     /// disambiguator. PakReader::open rejects v11 because the index
@@ -622,19 +680,10 @@ mod tests {
         data[161] = 0xFF;
         data[162] = b'X'; // make sure end-detection doesn't stop at 0
         let utf8_error = std::str::from_utf8(&data[161..163]).unwrap_err();
-        let mut cursor = Cursor::new(data);
-        let err = PakFooter::read_from(&mut cursor).unwrap_err();
-        match err {
-            PaksmithError::InvalidFooter {
-                fault: InvalidFooterFault::OtherUnpromoted { reason },
-            } => {
-                assert_eq!(
-                    reason,
-                    format!("compression slot 0 name is not valid UTF-8 ({utf8_error})")
-                );
-            }
-            other => panic!("expected InvalidFooter::OtherUnpromoted, got {other:?}"),
-        }
+        assert_eq!(
+            other_unpromoted_reason(PakFooter::read_from(&mut Cursor::new(data)), "slot 0"),
+            format!("compression slot 0 name is not valid UTF-8 ({utf8_error})")
+        );
     }
 
     /// A slot with no NUL in its 32 bytes is `InvalidFooter` (#132),
@@ -760,11 +809,97 @@ mod tests {
     }
 
     #[test]
+    fn parse_v4_to_v6_footer_reads_the_encrypted_flag() {
+        for version in 4..=6 {
+            for (flag, encrypted) in [(0, false), (1, true)] {
+                let data = build_v4_to_v6_footer(version, flag, 7, 11, 100);
+                let footer = PakFooter::read_from(&mut Cursor::new(data)).unwrap();
+
+                assert_eq!(footer.version().wire_version(), version);
+                assert_eq!(footer.is_encrypted(), encrypted, "v{version} flag {flag}");
+                assert_eq!(footer.index_offset(), 7);
+                assert_eq!(footer.index_size(), 11);
+                assert!(footer.encryption_key_guid().is_none());
+                assert_eq!(footer.compression_methods(), []);
+            }
+        }
+    }
+
+    #[test]
+    fn reject_encrypted_flag_other_than_0_or_1() {
+        for flag in [2u8, 0xFF] {
+            let mut v7 = build_v7_footer(0, 0, 100);
+            v7[100 + 16] = flag;
+            let cases = [
+                ("v4", build_v4_to_v6_footer(4, flag, 0, 0, 100)),
+                ("v6", build_v4_to_v6_footer(6, flag, 0, 0, 100)),
+                ("v7", v7),
+            ];
+            for (label, data) in cases {
+                assert_eq!(
+                    other_unpromoted_reason(
+                        PakFooter::read_from(&mut Cursor::new(data)),
+                        &format!("{label} flag {flag}")
+                    ),
+                    format!("footer encrypted-index flag is {flag}, expected 0 or 1")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_footer_size_boundaries() {
+        let v3 = PakFooter::read_from(&mut Cursor::new(build_legacy_footer(3, 0, 0, 0))).unwrap();
+        assert_eq!(v3.version().wire_version(), 3);
+
+        let v4 =
+            PakFooter::read_from(&mut Cursor::new(build_v4_to_v6_footer(4, 1, 0, 0, 0))).unwrap();
+        assert_eq!(v4.version().wire_version(), 4);
+        assert!(v4.is_encrypted());
+
+        for version in 4..=6 {
+            let data = build_legacy_footer(version, 0, 0, 0);
+            assert_eq!(
+                other_unpromoted_reason(
+                    PakFooter::read_from(&mut Cursor::new(data)),
+                    &format!("44-byte v{version}")
+                ),
+                format!("file too small (44 bytes) for a v{version} footer (45 bytes)")
+            );
+        }
+    }
+
+    /// repak, an independent writer, ends the index 44 bytes before EOF
+    /// for v3 and 45 bytes before it for v4-v6.
+    #[test]
+    fn repak_written_v4_to_v6_footers_are_45_bytes() {
+        for (version, footer_size) in [
+            (3, FOOTER_SIZE_LEGACY),
+            (4, FOOTER_SIZE_V4_TO_V6),
+            (5, FOOTER_SIZE_V4_TO_V6),
+            (6, FOOTER_SIZE_V4_TO_V6),
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../tests/fixtures/real_v{version}_minimal.pak"));
+            let mut file = std::fs::File::open(&path).unwrap();
+            let len = file.metadata().unwrap().len();
+            let footer = PakFooter::read_from(&mut file).unwrap();
+
+            assert_eq!(footer.version().wire_version(), version);
+            assert!(!footer.is_encrypted(), "v{version}");
+            assert_eq!(
+                footer.index_offset() + footer.index_size(),
+                len - footer_size,
+                "v{version}"
+            );
+        }
+    }
+
+    #[test]
     fn legacy_footer_in_file_large_enough_for_v7_is_not_misread() {
-        // File >= 61 bytes (so v7+ probe runs) but actually a legacy v3 footer.
-        // The v7+ probe reads bytes from `file_end - 61` through `file_end - 53`
-        // looking for magic. For a legacy file, those bytes are payload, not magic.
-        // The v7+ probe must reject and fall through to legacy.
+        // File >= 61 bytes (so the v7 candidate runs) but actually a v3 footer.
+        // The v7 and v4-v6 candidates find the magic at EOF-44 but see version
+        // 3, which is not in their lists, so they fall through to v1-v3.
         let data = build_legacy_footer(3, 0, 0, 200);
         let mut cursor = Cursor::new(data);
         let footer = PakFooter::read_from(&mut cursor).unwrap();
@@ -774,8 +909,8 @@ mod tests {
 
     #[test]
     // Three `FOOTER_SIZE_*` (u64) → `usize` casts. The constants are
-    // small (< 100 bytes); truncation is impossible on any supported
-    // target.
+    // small (at most 222 bytes); truncation is impossible on any
+    // supported target.
     #[allow(clippy::cast_possible_truncation)]
     fn reject_bad_magic() {
         let mut data = build_v8b_plus_footer(11, 0, 0, 100);
