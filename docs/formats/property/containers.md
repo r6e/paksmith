@@ -43,9 +43,8 @@ as `paksmith-core/src/asset/property/containers.rs`.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| `FileVersionUE4 ≥ 504` | Container shapes stable. Set and Map tags name their element types only from `PROPERTY_TAG_SET_MAP_SUPPORT` (509; see [`tagged.md`](tagged.md)); below it the body names no element type. | `CUE4Parse/UE4/Assets/Objects/Properties/{Array,Map,Set}Property.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
-
-No UE5 changes to container shapes within paksmith's accepted range.
+| `FileVersionUE4 ≥ 504` | Container shapes stable until `FileVersionUE5` 1012 (next row). Set and Map tags name their element types only from `PROPERTY_TAG_SET_MAP_SUPPORT` (509; see [`tagged.md`](tagged.md)); below it the body names no element type. | `CUE4Parse/UE4/Assets/Objects/Properties/{Array,Map,Set}Property.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
+| `FileVersionUE5 ≥ 1012` `PROPERTY_TAG_COMPLETE_TYPE_NAME` (UE 5.4) | `Array<StructProperty>` drops its inline `inner_header` tag; the element struct comes from the outer tag (see [`tagged.md`](tagged.md)). | `CUE4Parse/UE4/Assets/Objects/UScriptArray.cs@ecc4878950336126f125af0747190edf474b2a21`[^3] |
 
 ## Wire layout
 
@@ -61,9 +60,10 @@ Element body shape: per-type (see Element-form section below).
 **Array of StructProperty.** When `tag.inner_type == "StructProperty"`,
 an `FPropertyTag` inline header (`inner_header`) precedes all element
 bodies. This header is present for `FileVersionUE4 ≥ 500`
-(`VER_UE4_INNER_ARRAY_TAG_INFO`), always true for paksmith's UE4 floor
-of 504. The `inner_header.size` field holds the **total byte count for
-all N element bodies combined**, not a per-element size — per CUE4Parse
+(`VER_UE4_INNER_ARRAY_TAG_INFO`), which paksmith's UE4 floor of 504
+always meets, and absent for `FileVersionUE5 ≥ 1012`. The
+`inner_header.size` field holds the **total byte count for all N
+element bodies combined**, not a per-element size — per CUE4Parse
 `UScriptArray.cs` spec (PR #390 cross-validated this). Paksmith parses
 `inner_header` (enforcing the 16 MiB `MAX_PROPERTY_TAG_SIZE` cap) then
 ignores `inner_header.size`; element delimitation comes from each struct
@@ -75,7 +75,7 @@ Extended wire layout for `Array<StructProperty>`:
 | field | size | type | semantics |
 |-------|------|------|-----------|
 | `count` | 4 | `i32` LE | Element count (same guard as above). |
-| `inner_header` | variable | `FPropertyTag` | Struct name, GUID, and TOTAL size across all elements. `inner_header.size` unused as a per-element bound. |
+| `inner_header` | variable | `FPropertyTag` | Below `FileVersionUE5` 1012 only. Struct name, GUID, and TOTAL size across all elements. `inner_header.size` unused as a per-element bound. |
 | `elements` | variable | `Struct[count]` | Tagged-property trees, each terminated by a `None` property tag. |
 
 ### SetProperty
@@ -130,13 +130,16 @@ When `tag.inner_type == "StructProperty"` (Array), or
 "StructProperty"` (Map/Set), the element body is a recursive
 tagged-property tree terminated by a `None` property tag.
 
-**Array<Struct>** uses the `inner_header` pre-element header documented
-in Wire layout — see the extended ArrayProperty wire table above.
+Below `FileVersionUE5` 1012, **Array<Struct>** uses the `inner_header`
+pre-element header documented in Wire layout — see the extended
+ArrayProperty wire table above.
 
 **Map<Struct, *>** / **Map<*, Struct>** / **Set<Struct>** carry no inline
-element header. The struct name on these slots is empty (`""`); there is
-no source for the struct type on the wire without `.usmap` schema
-mappings. Element bodies are bounded only by the outer tag's
+element header. Below `FileVersionUE5` 1012 nothing on the wire names
+their struct type; from 1012 the outer tag's type-name tree names it
+([`tagged.md`](tagged.md)). Paksmith takes only the slot types from that
+tree, not their struct names, so on the tagged path the struct name on
+these slots is empty (`""`) at every version. Element bodies are bounded only by the outer tag's
 `expected_end`.
 
 Paksmith handles all cases via `read_struct_value` recursion through
@@ -183,7 +186,7 @@ need to absorb errors at the collection level.
 
 - **Count prefixes**: every counted field is `i32` LE — `ArrayProperty.count`, `SetProperty.{num_elements_to_remove, count}`, `MapProperty.{num_keys_to_remove, count}`.
 - **Element body widths**: per the element-form dispatch (see Wire layout §*Element-form*); typically matches the per-type widths from [`primitives.md`](primitives.md) §*Caps & limits — Format-defined limits*. Notable delta: `BoolProperty` is 1 byte in element form (vs 0 bytes in tagged form).
-- **`Array<StructProperty>` inner_header**: a single shared `FPropertyTag` (variable size per [`tagged.md`](tagged.md)) covering all N element bodies.
+- **`Array<StructProperty>` inner_header**: below `FileVersionUE5` 1012, a single shared `FPropertyTag` (variable size per [`tagged.md`](tagged.md)) covering all N element bodies.
 
 ### Implementation hardening (recommended for any parser)
 
@@ -245,3 +248,4 @@ need to absorb errors at the collection level.
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/Properties/{Array,Map,Set}Property.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for each container type.
 [^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_properties/src/{array,map,set}_property.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle. paksmith's discard-delta-prefix behavior matches.
+[^3]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/UScriptArray.cs@ecc4878950336126f125af0747190edf474b2a21` L49-L58 — from `PROPERTY_TAG_COMPLETE_TYPE_NAME` the `Array<StructProperty>` element type comes from the outer tag; the inline `FPropertyTag` is read only from `INNER_ARRAY_TAG_INFO` below it. `CUE4Parse/UE4/Versions/ObjectVersion.cs` L51 (`PROPERTY_TAG_COMPLETE_TYPE_NAME`, 1012 counted from `INITIAL_VERSION = 1000` at L13) and `CUE4Parse/UE4/Versions/EGame.cs` L260 (UE 5.4 → 1012) at the same commit.
