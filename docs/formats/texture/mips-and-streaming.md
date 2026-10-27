@@ -53,7 +53,7 @@ single serialized mip.
 |------------------|---------------------|--------|
 | UE 4.0+ | Three-tier (inline / uexp / ubulk) streaming introduced. | `CUE4Parse/UE4/Assets/Objects/FByteBulkData.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
 | UE 4.20+ | `SizeZ` field added to `FTexture2DMipMap` for volume/array textures. | `CUE4Parse/UE4/Assets/Exports/Texture/FTexture2DMipMap.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| UE 5.0+ | `FBulkDataCookedIndex` introduced for some bulk-data records; mostly applies to runtime-virtual-texture chunks. | Same[^1] |
+| `EObjectDataResourceVersion::AddedCookedIndex` | `FBulkDataCookedIndex` (`u8`) joins the pre-baked bulk-data metadata that `DATA_RESOURCES` (1009, UE 5.2) introduced: a `DataResourceMap` record carries it from `AddedCookedIndex`, and an IoStore `BulkDataMap` entry in the first of the 4 bytes after `Flags`: CUE4Parse's UE 5.2 reader declared those 4 bytes padding, and its pinned reader reads the first as the index in every entry. | CUE4Parse[^2] |
 
 ## Wire layout
 
@@ -330,3 +330,5 @@ The Phase 3 plan should:
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Texture/FTexture2DMipMap.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`, `CUE4Parse/UE4/Assets/Objects/FByteBulkData.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`, and `CUE4Parse/UE4/Assets/Objects/EBulkDataFlags.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — primary oracle for the per-mip + bulk-data records and the flag-bit catalog.
+
+[^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/UObject/FObjectDataResource.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L17-L21 (`AddedCookedIndex` follows `Initial`) and L41-L44 (`CookedIndex` read iff `EObjectDataResourceVersion >= AddedCookedIndex`); `CUE4Parse/UE4/IO/Objects/FBulkDataMapEntry.cs` L13-L16 (`CookedIndex` and 3 pad bytes after `Flags` in every `BulkDataMap` entry). Both tables exist only from `DATA_RESOURCES`, apart from one per-game override: `CUE4Parse/UE4/Assets/IoPackage.cs` L114 and `CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs` L474 (the `DataResourceOffset` that `CUE4Parse/UE4/Assets/Package.cs` L150-L156 needs). `CUE4Parse/UE4/Versions/ObjectVersion.cs` L40 (`DATA_RESOURCES`, 1009 counted from `INITIAL_VERSION = 1000` at L13) and `CUE4Parse/UE4/Versions/EGame.cs` L257-L259 (UE 5.1 → 1008; `GAME_TheFirstDescendant` → 1002; 5.2 and 5.3 → 1009). Those 4 bytes after `Flags` are a `uint Pad` in `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FBulkDataMapEntry.cs@1bb6ec4f878baa97f2b5dbf372b18b9970efd8ca` ("ue 5.2 changes") L14.

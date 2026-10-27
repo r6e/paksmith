@@ -66,7 +66,7 @@ section "Format inventory" for column semantics.
 | `primitive/fengine-version.md` | complete | complete | `asset/engine_version.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `8f56038` |
 | `texture/texture2d.md` | complete | partial | `asset/exports/texture/texture2d.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
 | `texture/pixel-formats.md` | complete | partial | `asset/exports/texture/pixel_format.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
-| `texture/mips-and-streaming.md` | complete | partial | `asset/exports/texture/texture2d.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
+| `texture/mips-and-streaming.md` | complete | partial | `asset/exports/texture/texture2d.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `91456be` |
 | `texture/virtual-textures.md` | complete | complete | `asset/exports/texture/virtual_textures.rs` | CUE4Parse @ `b26351df6e4dfe5cf68f1aa83a85353eb8c961fa` | `2960ec2` |
 | `mesh/static-mesh.md` | complete | partial | `asset/exports/mesh/` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `61057be` |
 | `mesh/skeletal-mesh.md` | complete | partial | `asset/exports/mesh/skeletal_mesh.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `91456be` |

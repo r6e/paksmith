@@ -14,9 +14,9 @@ payload carrying the per-bone-track keyframes encoded via one of
 several codecs.
 
 Seven `ACF_*` codecs cover the UE4 legacy path (uncompressed,
-packed, identity); see Per-codec key wire shapes table below. UE
-4.21+ added the ACL-codec variant (`FACLCompressedAnimData`, backed
-by the Animation Compression Library by Nicholas Frechette); ACL
+packed, identity); see Per-codec key wire shapes table below. An
+ACL-codec variant (`FACLCompressedAnimData`, backed by the Animation
+Compression Library by Nicholas Frechette) also exists; ACL
 detection is supported but decoding requires the upstream ACL
 library or a Rust binding.
 
@@ -38,21 +38,23 @@ separate UObject classes and explicitly out of scope.
 
 ## Versions
 
-> Note: UE version numbers in the table are derived from community
-> knowledge (UE release history). The oracle names gating constants
+> Note: `GAME_UE4_*` rows follow CUE4Parse's `Ar.Game` checks, and
+> the 4.12[^3] and 5.0 rows give CUE4Parse's fallback releases for their
+> custom versions. Real packages record their own custom-version stamps, so
+> Phase 3 implementation should anchor against the named constants
 > (`FFrameworkObjectVersion::MoveCompressedAnimDataToTheDDC`,
-> `FUE5MainStreamObjectVersion::RemovingSourceAnimationData`, etc.)
-> but not their UE-release version. Phase 3 implementation should
-> anchor against the named constants, not the version numbers.
+> `FUE5MainStreamObjectVersion::RemovingSourceAnimationData`, etc.),
+> not the version numbers.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | UE 4.0+ | `UAnimSequence` introduced with the seven legacy `ACF_*` codecs; compressed data serialized inline via `SerializeCompressedData()` (pre-4.23 path). | `CUE4Parse/UE4/Assets/Exports/Animation/UAnimSequence.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
 | UE 4.12+ | Compressed data moved out of inline serialization into a DDC-backed blob (`FFrameworkObjectVersion::MoveCompressedAnimDataToTheDDC`). | Same[^1] |
-| UE 4.21+ | ACL codec (`FACLCompressedAnimData`) added as the recommended default; bone-compression settings object introduced. | Same[^1] |
+| UE 4.21–4.22 (`GAME_UE4_21`) | `SerializeCompressedData()` gains a `CompressedSegments` array after `CompressedScaleOffsets`; the 4.23 `SerializeCompressedData2()` layout drops it. | Same[^1] |
+| UE 4.22 (`GAME_UE4_22`) | `SerializeCompressedData()` replaces the `RawCurveTracks` struct with a `CompressedCurveNames` array and adds `CompressedNumberOfFrames`, `CurveCodecPath` and `CompressedCurveByteStream`. | Same[^1] |
 | UE 4.23 (`GAME_UE4_23`) | Dispatch switches from `SerializeCompressedData()` to `SerializeCompressedData2()` — outer wrapper + `FUECompressedAnimData.SerializeCompressedData` (length sentinels) + `ReadSerializedByteStream` + `CurveCodecPath` + `CompressedCurveByteStream`. | Same[^1] |
 | UE 4.25 (`GAME_UE4_25`) | Dispatch switches to `SerializeCompressedData3()` — same outer structure as 4.23-4.24 with base fields serialized before codec fields inside the `FUECompressedAnimData` section. | Same[^1] |
-| UE 5.0+ (`RemovingSourceAnimationData`) | Source raw animation data stripped; curve-compression streams added. | Same[^1] |
+| UE 5.0+ (`FUE5MainStreamObjectVersion::RemovingSourceAnimationData`, per CUE4Parse's fallback[^2]) | The editor-only `SourceRawAnimationData` track array is no longer serialized. | Same[^1] |
 
 ## Wire layout
 
@@ -72,8 +74,8 @@ Properties come from `UAnimationAsset` (base), `UAnimSequenceBase`
 | `RateScale` | `UAnimSequenceBase` | `FloatProperty` | Playback rate multiplier; default `1.0`. |
 | `Notifies` | `UAnimSequenceBase` | `ArrayProperty<StructProperty(FAnimNotifyEvent)>` | Time-coded notify events. |
 | `NumFrames` | `UAnimSequence` | `IntProperty` | Total frame count (used before 4.12+; may be absent in newer cooked content). |
-| `BoneCompressionSettings` | `UAnimSequence` | `ObjectProperty` (`UAnimBoneCompressionSettings`) | UE 4.21+; per-bone codec + mask settings. |
-| `CurveCompressionSettings` | `UAnimSequence` | `ObjectProperty` (`UAnimCurveCompressionSettings`) | UE 4.21+; curve-channel codec settings. |
+| `BoneCompressionSettings` | `UAnimSequence` | `ObjectProperty` (`UAnimBoneCompressionSettings`) | Bone-track codec settings (a `Codecs` list); from UE 4.25 the compressed data's `BoneCodecDDCHandle` names one of its codecs. |
+| `CurveCompressionSettings` | `UAnimSequence` | `ObjectProperty` (`UAnimCurveCompressionSettings`) | Curve-channel codec settings; from UE 4.22 the compressed data's `CurveCodecPath` is resolved through its `Codec`. |
 | `AdditiveAnimType` | `UAnimSequence` | `ByteProperty` / `EnumProperty` (`EAdditiveAnimationType`) | `AAT_None` / `AAT_LocalSpaceBase` / `AAT_MeshSpaceAdditive`. |
 | `RefPoseType` | `UAnimSequence` | `ByteProperty` / `EnumProperty` (`EAnimationMode`) | Reference pose type. |
 | `RefPoseSeq` | `UAnimSequence` | `ObjectProperty` | Reference pose animation sequence. |
@@ -386,3 +388,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Animation/UAnimSequence.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — primary oracle. Supporting files in the same directory: `AnimSequenceBase.cs`, `UAnimationAsset.cs`, `AnimCompressionTypes.cs` (codec types, `FUECompressedAnimData`, `FCompressedOffsetData`), `AnimationCompressionFormat.cs` (codec enum), `AnimationKeyFormat.cs`, `AnimBoneCompressionCodec.cs`, `AnimBoneCompressionSettings.cs`, `AnimCurveCompressionCodec.cs`, `AnimCurveCompressionSettings.cs`, and the `ACL/` subdirectory for the ACL codec adapters (`AnimBoneCompressionCodec_ACLBase.cs` etc.).
+
+[^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Versions/FUE5MainStreamObjectVersion.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L21 (`RemovingSourceAnimationData` = 3) and L403-L404 (fallback: below UE 5.0 → `BeforeCustomVersionWasAdded`, 0; UE 5.0 → `TextureDoScaleMipsForAlphaCoverage`, 59).
+
+[^3]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Versions/FFrameworkObjectVersion.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L28 (`MoveCompressedAnimDataToTheDDC` = 5) and L149-L150 (fallback: below UE 4.12 → `BeforeCustomVersionWasAdded`, 0; UE 4.12 → `FixNonTransactionalPins`, 6).
