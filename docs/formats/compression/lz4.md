@@ -123,7 +123,7 @@ further strict-direction mechanism
 difference: trailing junk after a valid stream WITHIN one block is
 ignored by zlib (the decoder stops at stream end) but rejected by
 LZ4 (`decompress_into` parses the whole input) — fail-closed, so
-not a compatibility risk. Whether real UE 4.26-era v10 archives
+not a compatibility risk. Whether real UE 4.26+ encoded-entry archives
 emit a truncated single-block `compression_block_size` (and would
 thus need the references' normalization on the encoded-parse path)
 is unconfirmed and tracked in issue #685.
