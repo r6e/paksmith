@@ -419,15 +419,15 @@ fn read_compression_method_table<R: Read>(
 /// Encrypted-index flag (v4+). repak's writer emits only 0 or 1; any other
 /// byte fails closed, as in repak's reader.
 fn read_encrypted_flag<R: Read>(reader: &mut R) -> crate::Result<bool> {
-    match reader.read_u8()? {
-        0 => Ok(false),
-        1 => Ok(true),
-        other => Err(PaksmithError::InvalidFooter {
+    let flag = reader.read_u8()?;
+    if flag > 1 {
+        return Err(PaksmithError::InvalidFooter {
             fault: InvalidFooterFault::OtherUnpromoted {
-                reason: format!("footer encrypted-index flag is {other}, expected 0 or 1"),
+                reason: format!("footer encrypted-index flag is {flag}, expected 0 or 1"),
             },
-        }),
+        });
     }
+    Ok(flag == 1)
 }
 
 #[cfg(test)]
