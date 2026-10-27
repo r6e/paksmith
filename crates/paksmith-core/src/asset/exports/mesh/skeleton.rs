@@ -130,7 +130,7 @@ pub(crate) fn read_reference_skeleton<R: Read + Seek + ?Sized>(
         bind_pose.push(FTransform::read_from(r, ctx, start + ft_size, asset_path)?);
     }
 
-    // --- FinalNameToIndexMap (present for UE 4.13+; consume + validate) ---
+    // --- FinalNameToIndexMap (object >= 310, so every UE4/UE5 skeleton; consume + validate) ---
     let map_count = read_count_eq(
         r,
         bone_count,

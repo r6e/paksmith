@@ -2742,10 +2742,11 @@ pub enum AssetParseFault {
         /// The class name whose schema lookup returned no properties.
         class_name: String,
     },
-    /// An `ArrayProperty` whose `inner_type == "StructProperty"`
+    /// Below UE5 1012 (`PROPERTY_TAG_COMPLETE_TYPE_NAME`, which elides the
+    /// header), an `ArrayProperty` whose `inner_type == "StructProperty"`
     /// declared in its outer tag must be followed (per the
     /// inner-array-tag-info wire format gated on
-    /// `VER_UE4_INNER_ARRAY_TAG_INFO = 482`; paksmith's UE4 floor is
+    /// `VER_UE4_INNER_ARRAY_TAG_INFO = 500`; paksmith's UE4 floor is
     /// 504, so the gate is structurally always met) by a one-shot
     /// `FPropertyTag` header describing the struct's name, GUID,
     /// per-element size, and `has_property_guid` flag. Reading that

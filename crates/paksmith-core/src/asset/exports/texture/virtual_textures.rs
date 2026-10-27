@@ -2964,8 +2964,8 @@ mod tests {
         b.extend_from_slice(&0u16.to_le_bytes()); // CodecPayloadOffset (u16: pre-4.27)
         push_byte_bulk_data(&mut b);
 
-        // Object version 521 = the UE 4.26-era proxy (below the 522 gate
-        // that widens codec payload offsets to u32).
+        // Object version 521: one below the 522 gate that widens codec payload
+        // offsets to u32 (no stock release stamps 519-521; 4.26 stamps 522).
         let ctx = make_ctx_with_version(521, None);
         let mut cur = Cursor::new(b.as_slice());
         let mut records = Vec::new();

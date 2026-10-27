@@ -452,7 +452,7 @@ impl ObjectExport {
             // i32. Truncation is structural (the wire format itself
             // mandates i32) and only fires when the caller built an
             // export carrying values that wouldn't have been
-            // representable in the pre-UE4-507 format — outside the
+            // representable in the pre-UE4-511 format — outside the
             // round-trip's design envelope.
             #[allow(clippy::cast_possible_truncation)]
             let size_i32 = self.serial_size as i32;

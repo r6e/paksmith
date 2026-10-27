@@ -9,7 +9,7 @@
 //! i32    import_optional      // bool32; only if UE5 ≥ VER_UE5_OPTIONAL_RESOURCES (1003)
 //! ```
 //!
-//! Wire format verified against CUE4Parse's `FObjectImport.cs`.
+//! Wire format verified against CUE4Parse's `FObjectImport` (`ObjectResource.cs`).
 //! Cross-validation via the unreal_asset oracle is deferred to Task 12
 //! (fixture-gen), which adds unreal_asset as a fixture-gen dev-dep.
 //! An earlier draft used a `u8` for `import_optional` — that
@@ -77,7 +77,7 @@ impl ObjectImport {
     /// `PKG_FilterEditorOnly` set). Uncooked editor assets at
     /// `file_version_ue4 ≥ VER_UE4_NON_OUTER_PACKAGE_IMPORT` carry an
     /// additional `FName PackageName` field per record (8 wire bytes)
-    /// per CUE4Parse's `FObjectImport.cs` gate `Ar.Ver >=
+    /// per CUE4Parse's `FObjectImport` (`ObjectResource.cs`) gate `Ar.Ver >=
     /// NON_OUTER_PACKAGE_IMPORT && !Ar.IsFilterEditorOnly`. This reader
     /// does NOT consume that field and will silently mis-align all
     /// subsequent bytes on uncooked input.
@@ -106,7 +106,7 @@ impl ObjectImport {
         let object_name_number = reader.read_u32::<LittleEndian>()?;
 
         // UE writes bImportOptional as a 4-byte bool32 (i32), not a single
-        // byte. Verified against CUE4Parse's FObjectImport.cs reader. An
+        // byte. Verified against CUE4Parse's FObjectImport (ObjectResource.cs). An
         // earlier draft of this plan read a `u8`, mis-advancing the cursor
         // by 3 bytes. Cross-validation via the unreal_asset oracle is
         // deferred to Task 12 (fixture-gen). read_bool32 strict-rejects
@@ -309,9 +309,10 @@ mod tests {
         // 3 FNames (3 × 8) + i32 outer_index (4) = 28 bytes for UE4.
         // (Plan-defect fix: spec asserted 32 bytes, a stale arithmetic
         // from an earlier draft that included PackageName unconditionally.
-        // CUE4Parse FObjectImport.cs gates PackageName on
-        // Ar.Ver >= NON_OUTER_PACKAGE_IMPORT (~533); UE4.27=522 is below
-        // the gate so the record is 28 bytes.)
+        // CUE4Parse's FObjectImport (ObjectResource.cs) reads PackageName from
+        // a UE4 package only at Ar.Ver >= NON_OUTER_PACKAGE_IMPORT (520) &&
+        // !Ar.IsFilterEditorOnly. UE4.27=522 passes the version check, but the
+        // summary refuses uncooked packages at 520 and above, so the record is 28 bytes.)
         assert_eq!(buf.len(), 28);
         let parsed = ObjectImport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap();
         assert_eq!(parsed, original);

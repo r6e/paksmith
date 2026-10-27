@@ -529,7 +529,7 @@ pub(crate) mod test_support {
 
     /// The UE5.0 variant of [`push_lod_header_ue4_23`]: the section carries the
     /// four-bool layout (collision, shadow, `bForceOpaque` [4.25+],
-    /// `bVisibleInRayTracing` [4.27+]) instead of two bools.
+    /// `bVisibleInRayTracing` [4.26+]) instead of two bools.
     fn push_lod_header_ue5_0(b: &mut Vec<u8>, b_inlined: bool) {
         b.push(0); // outer FStripDataFlags global
         b.push(0); // outer FStripDataFlags class
@@ -882,7 +882,7 @@ pub(crate) mod test_support {
     /// `(0,0,0)/(1,0,0)/(0,1,0)`, a `[0,1,2]` triangle, no per-vertex color. The
     /// UE5 deltas vs [`inlined_lod_ue4_23`]: the section carries the four-bool
     /// layout (collision, shadow, `bForceOpaque` [4.25+], `bVisibleInRayTracing`
-    /// [4.27+]; no `bAffectDistanceFieldLighting`, which is 5.1+), the index
+    /// [4.26+]; no `bAffectDistanceFieldLighting`, which is 5.1+), the index
     /// buffers use the 4.25+ form (trailing `bShouldExpandTo32Bit`), and the inner
     /// strip strips reversed + ray-tracing buffers (class `12`) while leaving
     /// `CDSF_AdjacencyData` (1) CLEAR — so the adjacency buffer is gated purely by

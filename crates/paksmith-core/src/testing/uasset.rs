@@ -2994,7 +2994,7 @@ mod tests {
                 assert_eq!((data.size_x, data.size_y), (4, 4));
                 assert_eq!(data.mips.len(), 1);
                 assert_eq!((data.mips[0].size_x, data.mips[0].size_y), (4, 4));
-                // The body's trailing bIsVirtual = 0 (UE 4.27 gate) decodes as
+                // The body's trailing bIsVirtual = 0 (UE 4.23+ gate) decodes as
                 // a standard texture — pins that append's value.
                 assert!(!data.is_virtual());
             }

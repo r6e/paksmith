@@ -370,8 +370,8 @@ pub struct ReferenceSkeleton {
     pub bind_pose: Vec<structs::transform::FTransform>,
 }
 
-/// One bone's metadata (`FMeshBoneInfo`, cooked subset — UE 4.13+ has only
-/// `Name` + `ParentIndex`; `BoneColor`/`ExportName` are pre-4.12 / editor-only).
+/// One bone's metadata (`FMeshBoneInfo`, cooked subset — only `Name` + `ParentIndex`;
+/// `BoneColor` predates UE 4.0 (object < 310) and `ExportName` is editor-only).
 /// Phase 3h.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]

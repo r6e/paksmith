@@ -2072,7 +2072,8 @@ mod tests {
     /// cooked, stripped, mip-serialized entry; these edge/error tests need
     /// to vary the bytes). `global0` is the `UTexture`-base
     /// `GlobalStripFlags`; `serialize` is the UE 5.3+ `bSerializeMipData`
-    /// `u32`, or `None` to omit it (pre-1010).
+    /// `u32`, or `None` to omit it (for a `UTexture2D` entry: below 1009, or at
+    /// 1009 without a >= 5.3 engine hint; sibling-kind entries never carry it).
     fn write_entry(buf: &mut Vec<u8>, global0: u8, bcooked: u32, serialize: Option<u32>) {
         buf.push(global0); // UTexture GlobalStripFlags
         buf.push(0); // UTexture ClassStripFlags

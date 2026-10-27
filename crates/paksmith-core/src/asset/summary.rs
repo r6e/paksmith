@@ -161,7 +161,7 @@ pub struct PackageSummary {
     /// Per-save `FGuid` identifier. UE writers generate a fresh GUID on
     /// every save.
     pub guid: FGuid,
-    /// `PersistentGuid` — stable across saves (UE 4.27+). Editor-only:
+    /// `PersistentGuid` — stable across saves (UE 4.24+). Editor-only:
     /// present on the wire iff BOTH `PKG_FilterEditorOnly` is clear in
     /// `package_flags` AND `file_version_ue4 >= VER_UE4_ADDED_PACKAGE_OWNER (518)`.
     /// Verified against CUE4Parse's `FPackageFileSummary` reader
