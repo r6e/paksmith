@@ -24,6 +24,8 @@
 
 use byteorder::{LittleEndian, WriteBytesExt};
 
+use crate::container::pak::version::{PAK_MAGIC, PakVersion};
+
 /// Write an FString (length-prefixed ASCII, null-terminated) to
 /// `buf`. Length sign convention: positive = UTF-8 bytes, negative
 /// = UTF-16 code units (this helper only writes UTF-8). The length
@@ -111,6 +113,34 @@ pub const fn pak_entry_wire_size(n: u64) -> u64 {
     57 + 16 * n
 }
 
+/// Write a v1-v6 pak footer to `buf`: magic, version, index offset,
+/// index size and index hash (44 bytes). v4-v6 lead it with the
+/// encrypted-index flag, written clear, for 45 bytes.
+///
+/// # Panics
+///
+/// If `version` is 7 or later: v7 adds a key GUID ahead of the flag.
+pub fn write_legacy_footer(
+    buf: &mut Vec<u8>,
+    version: u32,
+    index_offset: u64,
+    index_size: u64,
+    index_hash: &[u8; 20],
+) {
+    assert!(
+        version < PakVersion::EncryptionKeyGuid.wire_version(),
+        "write_legacy_footer writes v1-v6 footers; got v{version}"
+    );
+    if version >= PakVersion::IndexEncryption.wire_version() {
+        buf.push(0);
+    }
+    buf.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    buf.write_u32::<LittleEndian>(version).unwrap();
+    buf.write_u64::<LittleEndian>(index_offset).unwrap();
+    buf.write_u64::<LittleEndian>(index_size).unwrap();
+    buf.extend_from_slice(index_hash);
+}
+
 /// Build a synthetic v8b pak with one LZ4-compressed entry carrying a
 /// REAL entry hash. The repak-written v11 fixture uses the v10+
 /// encoded index, which has no per-entry SHA1 field, so it can never
@@ -194,8 +224,7 @@ pub fn build_v8b_lz4_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size
 
     pak.extend_from_slice(&[0u8; 16]); // encryption GUID
     pak.push(0); // not encrypted
-    pak.write_u32::<LittleEndian>(crate::container::pak::version::PAK_MAGIC)
-        .unwrap();
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
     pak.write_u32::<LittleEndian>(8).unwrap();
     pak.write_u64::<LittleEndian>(index_offset).unwrap();
     pak.write_u64::<LittleEndian>(index_size).unwrap();
@@ -261,6 +290,46 @@ mod tests {
         assert_eq!(&buf[28..48], &[0xAA; 20]);
         // flags byte + block_size LE
         assert_eq!(&buf[48..53], &[0, 0x00, 0x00, 0x01, 0x00]);
+    }
+
+    /// Given each repak-written fixture's own index bounds and an
+    /// independently computed index hash, the helper must reproduce
+    /// every byte after the index: 44 bytes for v3, 45 for v4-v6.
+    #[test]
+    fn write_legacy_footer_matches_repak_fixture_tails() {
+        use crate::container::pak::version::FOOTER_SIZE_LEGACY;
+        use sha1::{Digest, Sha1};
+
+        for (name, version) in [
+            ("real_v3_minimal.pak", 3),
+            ("real_v4_minimal.pak", 4),
+            ("real_v5_minimal.pak", 5),
+            ("real_v6_minimal.pak", 6),
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures")
+                .join(name);
+            let pak = std::fs::read(&path).unwrap();
+            // v1-v7 footers all end with the v1-v3 layout, so the magic
+            // sits FOOTER_SIZE_LEGACY bytes before EOF.
+            let magic = pak.len() - usize::try_from(FOOTER_SIZE_LEGACY).unwrap();
+            let field = |at: usize| u64::from_le_bytes(pak[at..at + 8].try_into().unwrap());
+            let index_offset = field(magic + 8);
+            let index_size = field(magic + 16);
+            let index_start = usize::try_from(index_offset).unwrap();
+            let index_end = index_start + usize::try_from(index_size).unwrap();
+            let index_hash: [u8; 20] = Sha1::digest(&pak[index_start..index_end]).into();
+
+            let mut footer = Vec::new();
+            write_legacy_footer(&mut footer, version, index_offset, index_size, &index_hash);
+            assert_eq!(footer, pak[index_end..], "{name}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "got v7")]
+    fn write_legacy_footer_rejects_v7() {
+        write_legacy_footer(&mut Vec::new(), 7, 0, 0, &[0; 20]);
     }
 
     /// Compressed variant pins that the block list is present

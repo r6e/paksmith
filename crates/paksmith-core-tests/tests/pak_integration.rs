@@ -26,45 +26,40 @@ use paksmith_core::testing::bench::zlib_stream;
 // Issue #140: shared v3+ wire-format synthesizers, lifted out of
 // the per-file copies that used to live below this import block.
 use paksmith_core::testing::wire::{
-    LZ4_SYNTH_PATH, build_v8b_lz4_pak, pak_entry_wire_size, write_fstring, write_pak_entry,
+    LZ4_SYNTH_PATH, build_v8b_lz4_pak, pak_entry_wire_size, write_fstring, write_legacy_footer,
+    write_pak_entry,
 };
 use sha1::{Digest, Sha1};
 use std::fmt::Write as _;
 use std::num::NonZeroU32;
 
-/// Read `index_offset` and `index_size` from a v6 legacy footer (44
-/// bytes). Avoids hard-coded offset constants that go stale whenever
-/// the fixture's entry sizes change. Asserts the magic so this won't
-/// silently misread a v7+ footer (which is 61 bytes and shifts every
-/// field) — it's a test helper, not a generic footer parser.
+/// Read `index_offset` and `index_size` from a v6 footer (45 bytes:
+/// encrypted-index flag + magic + version + index offset/size/hash).
+/// Avoids hard-coded offset constants that go stale whenever the
+/// fixture's entry sizes change. Asserts the flag is clear, the magic,
+/// the version and that the index ends where the footer starts, so it
+/// can't misread another footer layout — it's a test helper, not a
+/// generic footer parser.
 fn read_legacy_v6_index_bounds(file_bytes: &[u8]) -> (usize, usize) {
-    let footer_size = usize::try_from(FOOTER_SIZE_LEGACY).unwrap();
-    let footer_start = file_bytes.len() - footer_size;
-    let magic = u32::from_le_bytes(
-        file_bytes[footer_start..footer_start + 4]
-            .try_into()
-            .unwrap(),
-    );
+    let magic_at = file_bytes.len() - usize::try_from(FOOTER_SIZE_LEGACY).unwrap();
+    let footer_start = magic_at - 1;
     assert_eq!(
-        magic, PAK_MAGIC,
-        "legacy v6 footer magic must match (helper rejects v7+ footers)"
+        file_bytes[footer_start], 0,
+        "v6 encrypted-index flag must be clear"
     );
-    let version = u32::from_le_bytes(
-        file_bytes[footer_start + 4..footer_start + 8]
-            .try_into()
-            .unwrap(),
-    );
+    let magic = u32::from_le_bytes(file_bytes[magic_at..magic_at + 4].try_into().unwrap());
+    assert_eq!(magic, PAK_MAGIC, "v6 footer magic must match");
+    let version = u32::from_le_bytes(file_bytes[magic_at + 4..magic_at + 8].try_into().unwrap());
     assert_eq!(version, 6, "helper only supports v6; got v{version}");
-    let offset = u64::from_le_bytes(
-        file_bytes[footer_start + 8..footer_start + 16]
-            .try_into()
-            .unwrap(),
-    ) as usize;
-    let size = u64::from_le_bytes(
-        file_bytes[footer_start + 16..footer_start + 24]
-            .try_into()
-            .unwrap(),
-    ) as usize;
+    let offset =
+        u64::from_le_bytes(file_bytes[magic_at + 8..magic_at + 16].try_into().unwrap()) as usize;
+    let size =
+        u64::from_le_bytes(file_bytes[magic_at + 16..magic_at + 24].try_into().unwrap()) as usize;
+    assert_eq!(
+        offset + size,
+        footer_start,
+        "the index must end where the 45-byte v6 footer starts"
+    );
     (offset, size)
 }
 
@@ -606,12 +601,8 @@ fn read_entry_returns_last_entry_bytes_on_duplicate_path() {
 
     let mut pak = data;
     pak.extend_from_slice(&index);
-    // v6 legacy footer.
-    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-    pak.write_u32::<LittleEndian>(6).unwrap();
-    pak.write_u64::<LittleEndian>(index_offset).unwrap();
-    pak.write_u64::<LittleEndian>(index_size).unwrap();
-    pak.extend_from_slice(&[0u8; 20]); // index hash zeroed (no integrity claim)
+    // Index hash zeroed: no integrity claim.
+    write_legacy_footer(&mut pak, 6, index_offset, index_size, &[0u8; 20]);
 
     let reader = PakReader::from_bytes(pak).unwrap();
     let bytes = reader.read_entry(path_in_archive).unwrap();
@@ -880,12 +871,7 @@ fn verify_entry_rejects_mixed_zero_entry_hash_when_index_has_hash() {
     let index_size = index_section.len() as u64;
     let mut pak = data_section;
     pak.extend_from_slice(&index_section);
-    // v6 legacy footer.
-    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-    pak.write_u32::<LittleEndian>(6).unwrap();
-    pak.write_u64::<LittleEndian>(index_offset).unwrap();
-    pak.write_u64::<LittleEndian>(index_size).unwrap();
-    pak.extend_from_slice(&index_hash);
+    write_legacy_footer(&mut pak, 6, index_offset, index_size, &index_hash);
 
     let reader = PakReader::from_bytes(pak).unwrap();
     // Index hash matches.
@@ -958,11 +944,7 @@ fn verify_entry_integrity_strip_check_applies_to_encrypted_entries() {
     let index_size = index_section.len() as u64;
     let mut pak = data_section;
     pak.extend_from_slice(&index_section);
-    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-    pak.write_u32::<LittleEndian>(6).unwrap();
-    pak.write_u64::<LittleEndian>(index_offset).unwrap();
-    pak.write_u64::<LittleEndian>(index_size).unwrap();
-    pak.extend_from_slice(&index_hash);
+    write_legacy_footer(&mut pak, 6, index_offset, index_size, &index_hash);
 
     let reader = PakReader::from_bytes(pak).unwrap();
     // Encryption no longer short-circuits; the strip check fires.
@@ -1194,11 +1176,7 @@ fn is_fully_verified_requires_at_least_one_verified_entry() {
     pak.extend_from_slice(&index_section);
     let index_offset = 0u64;
     let index_size = index_section.len() as u64;
-    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-    pak.write_u32::<LittleEndian>(6).unwrap();
-    pak.write_u64::<LittleEndian>(index_offset).unwrap();
-    pak.write_u64::<LittleEndian>(index_size).unwrap();
-    pak.extend_from_slice(&index_hash);
+    write_legacy_footer(&mut pak, 6, index_offset, index_size, &index_hash);
 
     let reader = PakReader::from_bytes(pak).unwrap();
     let stats = reader.verify().unwrap();
@@ -1245,11 +1223,7 @@ fn open_handles_non_canonical_mount_points() {
         let mut pak = Vec::new();
         pak.extend_from_slice(&index_section);
         let index_size = index_section.len() as u64;
-        pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-        pak.write_u32::<LittleEndian>(6).unwrap();
-        pak.write_u64::<LittleEndian>(0).unwrap();
-        pak.write_u64::<LittleEndian>(index_size).unwrap();
-        pak.extend_from_slice(&index_hash);
+        write_legacy_footer(&mut pak, 6, 0, index_size, &index_hash);
 
         let reader = PakReader::from_bytes(pak).unwrap_or_else(|e| {
             panic!("PakReader::open failed for mount_point=\"{mount}\": {e:?}")
@@ -1285,12 +1259,7 @@ fn zero_entry_archive_read_paths_are_well_behaved() {
 
     let mut pak = Vec::new();
     pak.extend_from_slice(&index_section);
-    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-    pak.write_u32::<LittleEndian>(6).unwrap();
-    pak.write_u64::<LittleEndian>(0).unwrap();
-    pak.write_u64::<LittleEndian>(index_section.len() as u64)
-        .unwrap();
-    pak.extend_from_slice(&index_hash);
+    write_legacy_footer(&mut pak, 6, 0, index_section.len() as u64, &index_hash);
 
     let reader = PakReader::from_bytes(pak).unwrap();
 
@@ -1347,14 +1316,14 @@ fn verify_index_fails_when_stored_hash_corrupted() {
     let original = std::fs::read(fixture_path("minimal_v6.pak")).unwrap();
     let mut corrupted = original.clone();
 
-    // v6 legacy footer is 44 bytes; the index_hash is the trailing 20 bytes,
-    // so byte (file_size - 20 + 5) is mid-hash.
+    // The index_hash is the footer's trailing 20 bytes, so byte
+    // (file_size - 20 + 5) is mid-hash.
     let target = corrupted.len() - 20 + 5;
     corrupted[target] ^= 0xFF;
 
     // Derive index bounds + the independent SHA1 BEFORE `from_bytes`
     // consumes `corrupted` — avoids a fixture-sized clone (the test's
-    // upstream `corrupted` came from `fs::read(real_v10_minimal.pak)`).
+    // upstream `corrupted` came from `fs::read(minimal_v6.pak)`).
     let (index_offset, index_size) = read_legacy_v6_index_bounds(&corrupted);
     let independent_hex = independent_sha1_hex(&corrupted[index_offset..index_offset + index_size]);
 
@@ -1500,9 +1469,10 @@ fn build_single_entry_pak(
 /// position, since the synthetic data section starts at file offset 0).
 /// `Some(o)` writes `o` regardless of where the in-data record sits.
 ///
-/// **Pre-v7 only (v1-v6)**: this helper writes a legacy 44-byte
-/// footer. v1/v2 are accepted because the wire layout is identical
-/// to v3-v6 (the version byte just routes downstream); the
+/// **Pre-v7 only (v1-v6)**: this helper writes the 44-byte v1-v3
+/// footer, or for v4-v6 the 45-byte one that adds the encrypted-index
+/// flag. v1/v2 are accepted because their footer matches v3's (the
+/// version just routes downstream); the
 /// `open_rejects_pre_v3_versions` test below relies on this to
 /// trigger `PakReader::open`'s pre-v3 rejection at the version
 /// gate without needing a separate helper.
@@ -1526,10 +1496,9 @@ fn build_single_entry_pak_with_flags(
     encrypted: bool,
     index_offset_override: Option<u64>,
 ) -> Vec<u8> {
-    // Issue #97: this helper only emits the legacy 44-byte footer
-    // (v1-v6 — same wire layout). Fail loudly if a caller asks for
-    // v7+ — see the doc comment for the wire-layout bug history;
-    // use `build_v7_pak` for v7+ entries.
+    // Issue #97: this helper only emits v1-v6 footers. Fail loudly if
+    // a caller asks for v7+ — see the doc comment for the wire-layout
+    // bug history; use `build_v7_pak` for v7+ entries.
     assert!(
         footer_version <= 6,
         "build_single_entry_pak_with_flags only supports v1-v6 (pre-v7) footers; \
@@ -1573,18 +1542,13 @@ fn build_single_entry_pak_with_flags(
 
     let mut pak = data_section;
     pak.extend_from_slice(&index_section);
-
-    // Legacy 44-byte footer (v1-v6): magic + version + index_offset
-    // + index_size + index_hash. v7+ requires a different layout
-    // (uuid + encrypted prefix BEFORE magic); this helper rejects
-    // v7+ at the assertion above. Issue #97 — see doc comment for
-    // the wire-layout bug history that motivated removing the
-    // pre-existing buggy v7+ branch.
-    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-    pak.write_u32::<LittleEndian>(footer_version).unwrap();
-    pak.write_u64::<LittleEndian>(index_offset).unwrap();
-    pak.write_u64::<LittleEndian>(index_size).unwrap();
-    pak.extend_from_slice(&[0u8; 20]);
+    write_legacy_footer(
+        &mut pak,
+        footer_version,
+        index_offset,
+        index_size,
+        &[0u8; 20],
+    );
 
     pak
 }

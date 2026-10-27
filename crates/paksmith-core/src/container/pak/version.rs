@@ -205,11 +205,8 @@ impl TryFrom<u32> for PakVersion {
 
 /// Pak file magic number identifying valid archives.
 ///
-/// `pub` (not `pub(super)`) because three test consumers import it:
-/// `tests/pak_integration.rs`, `tests/footer_proptest.rs`, and the
-/// synthetic-fixture generator at `tests/fixtures/generate.rs` (compiled
-/// as a `paksmith-core` example, so it imports the public const rather
-/// than redefining it).
+/// `pub` (not `pub(super)`) because integration tests
+/// (`pak_integration.rs`, `footer_proptest.rs`) import it.
 pub const PAK_MAGIC: u32 = 0x5A6F_12E1;
 
 #[cfg(test)]

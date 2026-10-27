@@ -21,9 +21,8 @@ use std::fs::File;
 use std::io::Write;
 
 use byteorder::{LittleEndian, WriteBytesExt};
-use paksmith_core::container::pak::version::PAK_MAGIC;
 use paksmith_core::testing::bench::zlib_stream;
-use paksmith_core::testing::wire::{write_fstring, write_pak_entry};
+use paksmith_core::testing::wire::{write_fstring, write_legacy_footer, write_pak_entry};
 use sha1::{Digest, Sha1};
 
 /// Wire size of an in-data FPakEntry record (v3+). Mirrors
@@ -50,19 +49,6 @@ fn in_data_header_size(compressed: bool, block_count: usize) -> u64 {
     }
     size += 1 + 4;
     size
-}
-
-fn write_v6_legacy_footer(
-    buf: &mut Vec<u8>,
-    index_offset: u64,
-    index_size: u64,
-    index_hash: &[u8; 20],
-) {
-    buf.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-    buf.write_u32::<LittleEndian>(6).unwrap();
-    buf.write_u64::<LittleEndian>(index_offset).unwrap();
-    buf.write_u64::<LittleEndian>(index_size).unwrap();
-    buf.extend_from_slice(index_hash);
 }
 
 /// Description of one entry to embed in the generated pak.
@@ -269,7 +255,7 @@ fn main() {
     let mut pak_file = Vec::new();
     pak_file.extend_from_slice(&data_section);
     pak_file.extend_from_slice(&index_section);
-    write_v6_legacy_footer(&mut pak_file, index_offset, index_size, &index_hash);
+    write_legacy_footer(&mut pak_file, 6, index_offset, index_size, &index_hash);
 
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/minimal_v6.pak");
