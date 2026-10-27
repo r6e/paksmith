@@ -2478,10 +2478,10 @@ pub fn build_minimal_ue5_1010() -> MinimalPackage {
     let (exports, imports, payloads) = ue5_1010_export_import(vec![0xAA; 16]);
     let engine = EngineVersion {
         major: 5,
-        minor: 0,
+        minor: 4,
         patch: 0,
         changelist: 0,
-        branch: "++UE5+Release-5.0".to_string(),
+        branch: "++UE5+Release-5.4".to_string(),
     };
     build_minimal(MinimalPackageSpec {
         legacy_file_version: -8,
