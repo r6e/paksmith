@@ -265,7 +265,7 @@ mod tests {
         }
     }
 
-    fn ue5_1() -> AssetVersion {
+    fn ue5_2() -> AssetVersion {
         AssetVersion {
             legacy_file_version: -8,
             file_version_ue4: 522,
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn ue5_round_trip() {
-        let v = ue5_1();
+        let v = ue5_2();
         let original = sample_import_ue5();
         let mut buf = Vec::new();
         original.write_to(&mut buf, v).unwrap();
@@ -337,7 +337,7 @@ mod tests {
         // Pin the i32 != 0 → true branch of import_optional decoding.
         // ue5_round_trip exercises Some(false); this completes the bool
         // round-trip coverage.
-        let v = ue5_1();
+        let v = ue5_2();
         let original = ObjectImport {
             import_optional: Some(true),
             ..sample_import_ue5()

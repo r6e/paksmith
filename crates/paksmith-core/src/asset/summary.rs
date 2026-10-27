@@ -968,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn ue5_1_minimal_round_trip() {
+    fn ue5_2_minimal_round_trip() {
         let mut s = minimal_ue4_27_summary();
         s.version.legacy_file_version = -8;
         s.version.file_version_ue5 = Some(1009);
