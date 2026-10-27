@@ -52,10 +52,8 @@ implemented.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| UE 4.0+ | `USkeleton` + `FReferenceSkeleton` introduced. | `CUE4Parse/UE4/Assets/Exports/Animation/USkeleton.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| UE 4.12+ (`REFERENCE_SKELETON_REFACTOR`) | `FinalNameToIndexMap` added; `FMeshBoneInfo.BoneColor` dropped from cooked output. This is a UE4 object version constant. | Same[^1] |
+| Object version 310+ (`REFERENCE_SKELETON_REFACTOR`, before UE 4.0)[^2] | `FinalNameToIndexMap` added; `FMeshBoneInfo.BoneColor` dropped; `USkeleton` serializes its `FReferenceSkeleton` only from here. Every UE4 or UE5 package (object version 342 or later) is past it, so each carries the map and no `BoneColor`. | `CUE4Parse/UE4/Assets/Exports/Animation/USkeleton.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
 | UE 4.16+ | `FBoneNode` (per-bone metadata) added; `FReferenceSkeleton` shape stable. | Same[^1] |
-| UE 4.25+ | Virtual bones (`FVirtualBone`) added; reference skeleton's `Compute*` helpers internal. | Same[^1] |
 | UE 5.0+ | LWC (`FTransform` double-precision variant); ref-pose transform width may differ. | Same[^1] |
 
 ## Wire layout
@@ -65,7 +63,7 @@ implemented.
 | Property name | Type | Semantics |
 |---------------|------|-----------|
 | `BoneTree` | `ArrayProperty<StructProperty(FBoneNode)>` | Per-bone metadata (translation-retargeting mode, etc.). |
-| `VirtualBones` | `ArrayProperty<StructProperty(FVirtualBone)>` | UE 4.25+. |
+| `VirtualBones` | `ArrayProperty<StructProperty(FVirtualBone)>` | See [Virtual bones](#virtual-bones). |
 | `Sockets` | `ArrayProperty<ObjectProperty(USkeletalMeshSocket)>` | |
 | `Notifies` | `ArrayProperty<NameProperty>` | Anim-notify name slots. |
 
@@ -103,11 +101,13 @@ The `BoneTree` array's length equals the bone count in the parent
 bones, established in Segment 2 below). Because `BoneTree` is an
 `ArrayProperty<StructProperty(FBoneNode)>`, the wire layout follows
 the `Array<StructProperty>` extended shape from
-[`../property/containers.md`](../property/containers.md): a single
-shared `inner_header` (`FPropertyTag`) precedes all N element
-bodies (its `size` field covers the combined byte total, not a
-per-element bound), then each `FBoneNode` body is a tagged-property
-tree containing one `ByteProperty`/`EnumProperty` field
+[`../property/containers.md`](../property/containers.md): from
+`FileVersionUE4` 500 (`INNER_ARRAY_TAG_INFO`) and below `FileVersionUE5`
+1012, a single shared `inner_header` (`FPropertyTag`) precedes all N
+element bodies (its `size` field covers the combined byte total, not a
+per-element bound); outside that range there is no inner header[^3].
+Each `FBoneNode` body is a tagged-property tree
+containing one `ByteProperty`/`EnumProperty` field
 (`TranslationRetargetingMode`) terminated by the standard `None`
 property tag. The 1-byte enum value in the table above is the
 payload of that inner property's tag within the per-element tree —
@@ -124,7 +124,7 @@ fields.[^1]
 |-------|------|--------|------|-----------|
 | `FinalRefBoneInfo` | variable | — | `FMeshBoneInfo[]` | Counted-array prefix + per-bone metadata. |
 | `FinalRefBonePose` | variable | — | `FTransform[]` | Per-bone reference-pose transform. |
-| `FinalNameToIndexMap` | variable | — | `Map<FName, i32>` | FName→bone-index lookup. Present when `Ver ≥ REFERENCE_SKELETON_REFACTOR` (UE 4.12+); cooked content typically includes this. |
+| `FinalNameToIndexMap` | variable | — | `Map<FName, i32>` | FName→bone-index lookup. Present when `Ver ≥ REFERENCE_SKELETON_REFACTOR` (object version 310, before UE 4.0), so every UE4 or UE5 package carries it. |
 
 ### `FMeshBoneInfo` (per-bone record)
 
@@ -132,7 +132,7 @@ fields.[^1]
 |-------|------|--------|------|-----------|
 | `Name` | 8 | LE | `FName` | Bone name. |
 | `ParentIndex` | 4 | LE | `i32` | Index of parent bone in this array; `-1` for root. |
-| `BoneColor` (pre-refactor) | 4 | LE | `FColor` | Present only when `Ver < REFERENCE_SKELETON_REFACTOR` (pre-UE 4.12); absent in all modern cooked content. |
+| `BoneColor` (pre-refactor) | 4 | LE | `FColor` | Present only when `Ver < REFERENCE_SKELETON_REFACTOR` (object version 310, before UE 4.0); absent from every UE4 or UE5 package. |
 | `ExportName` (editor-only) | variable | — | `FString` | Original DCC name. Stripped from cooked content. |
 
 ### `FTransform` (per-bone reference pose)
@@ -192,9 +192,9 @@ wire), leaving only `CurveMetaDataMap` when its own gate is met.
 | 2 | `LinkedBones` | variable | LE | `FName[]` (counted) | Bones whose animation drives this curve. `i32` count prefix + per-entry FName. |
 | 3 | `MaxLOD` | 1 (typical) or 4 (KingdomHearts3) | LE | `u8` (or `i32`) | **Conditional:** read when `FAnimPhysObjectVersion >= AddLODToCurveMetaData`. Maximum LOD level at which the curve is evaluated. |
 
-### Worked example — minimal 2-bone `FReferenceSkeleton` body (112 bytes, UE 4.12+ single-precision)
+### Worked example — 2-bone `FReferenceSkeleton` core (112 bytes, UE4 single-precision; `FinalNameToIndexMap` follows)
 
-A `FReferenceSkeleton` for a 2-bone hierarchy at UE 4.12+ (post-
+A `FReferenceSkeleton` for a 2-bone hierarchy in a UE4 package (post-
 `REFERENCE_SKELETON_REFACTOR`, so no per-bone `BoneColor`; cooked
 content, so no `ExportName`; single-precision `FTransform`). The
 bones are "Root" (parent=-1) and "Hip" (parent=0). Each
@@ -212,21 +212,21 @@ Offset (within body)  Bytes (LE)                                                
 +28                   02 00 00 00                                                                  FinalRefBonePose count = 2 (i32 prefix)
 +32                   <FTransform[0]: 40 bytes — Quat 16 + Vector 12 + Vector 12>                 FMeshBoneInfo[0] reference pose
 +72                   <FTransform[1]: 40 bytes>                                                     FMeshBoneInfo[1] reference pose
-+112                  <(end of FReferenceSkeleton core; FinalNameToIndexMap follows when present)>
++112                  <(end of FReferenceSkeleton core; FinalNameToIndexMap follows)>
 ```
 
 Total fixed body = 4 + 12 + 12 + 4 + 40 + 40 = **112 bytes**.
 
-When `FinalNameToIndexMap` is present (UE 4.12+, gated by
-`REFERENCE_SKELETON_REFACTOR`), it follows the `FinalRefBonePose`
+`FinalNameToIndexMap` (gated by `REFERENCE_SKELETON_REFACTOR`, so in every
+UE4 or UE5 package) follows the `FinalRefBonePose`
 array: 4-byte `i32` map count + per-entry `FName` (8 bytes) + `i32`
 bone index. For the 2-bone example: 4 + 2 × (8 + 4) = 28 bytes,
 bringing the total to **140 bytes**.
 
 Under UE 5.x with LWC (`Ver ≥ LARGE_WORLD_COORDINATES`), each
 `FTransform` widens from 40 to 80 bytes (f64 components), pushing
-the core body to 4 + 12 + 12 + 4 + 80 + 80 = **192 bytes** (or
-220 with the optional name-to-index map).
+the core to 4 + 12 + 12 + 4 + 80 + 80 = **192 bytes**, and the total
+to 220 with the `FinalNameToIndexMap` that follows it.
 
 ### Worked example — identity `FTransform` (40 bytes, UE4 single-precision)
 
@@ -245,7 +245,7 @@ Offset (within transform)  Bytes (LE)                                       Fiel
 
 ## Variants
 
-### Virtual bones (UE 4.25+)
+### Virtual bones
 
 `FVirtualBone` lets retargeting target a bone derived from two
 existing bones (e.g. "midpoint between left-hand and head"). The
@@ -273,7 +273,7 @@ on another.
 
 - **`FMeshBoneInfo.Name`**: 8-byte `FName` (i32 index + i32 number per [`../primitive/fname.md`](../primitive/fname.md)).
 - **`FMeshBoneInfo.ParentIndex`**: `i32`; max representable `i32::MAX`.
-- **`FMeshBoneInfo.BoneColor`** (pre-UE 4.12 only): 4-byte `FColor`.
+- **`FMeshBoneInfo.BoneColor`** (only below object version 310, before UE 4.0): 4-byte `FColor`.
 - **`FTransform`**: 40 bytes UE4 (single-precision) or 80 bytes UE5 LWC (double-precision; gated on `Ver ≥ LARGE_WORLD_COORDINATES`).
 - **`FReferenceSkeleton` array count prefixes**: `i32` for `FinalRefBoneInfo`, `FinalRefBonePose`, and `FinalNameToIndexMap`.
 - **`Guid`** (top-level skeleton identifier): fixed 16-byte `FGuid` (4-u32-LE layout per [`../primitive/fguid.md`](../primitive/fguid.md)); present when `Ver ≥ SKELETON_GUID_SERIALIZATION`.
@@ -284,7 +284,7 @@ A reader of the embedded `FReferenceSkeleton` blob (paksmith's lives in
 `asset/exports/mesh/skeleton.rs`) MUST:
 
 - **Cap `MAX_BONES_PER_SKELETON`** at `2^16 = 65,536` to match the 16-bit-bone-index ceiling from `FStaticLODModel`. Direct cap on `FinalRefBoneInfo.Length`.
-- **Enforce the parity invariant**: `FinalRefBonePose.Length` MUST equal `FinalRefBoneInfo.Length` (per-bone pose array is 1:1 with the bone metadata array). When `FinalNameToIndexMap` is present (UE 4.12+, gated by `REFERENCE_SKELETON_REFACTOR`), its size MUST also equal `FinalRefBoneInfo.Length`. **The `BoneTree` tagged-property array's length MUST also equal `FinalRefBoneInfo.Length`** — the Segment 1 `BoneTree` and the Segment 2 `FinalRefBoneInfo` are bone-indexed in parallel, so a mismatch lets attacker-controlled data in one array reference bones from a different index space in the other. Reader MUST reject content where any of these counts disagree — divergence allows attacker-controlled count amplification past the cap and cross-array index confusion.
+- **Enforce the parity invariant**: `FinalRefBonePose.Length` MUST equal `FinalRefBoneInfo.Length` (per-bone pose array is 1:1 with the bone metadata array). `FinalNameToIndexMap`'s size (present from `REFERENCE_SKELETON_REFACTOR`, object version 310, so in every UE4 or UE5 package) MUST also equal `FinalRefBoneInfo.Length`. **The `BoneTree` tagged-property array's length MUST also equal `FinalRefBoneInfo.Length`** — the Segment 1 `BoneTree` and the Segment 2 `FinalRefBoneInfo` are bone-indexed in parallel, so a mismatch lets attacker-controlled data in one array reference bones from a different index space in the other. Reader MUST reject content where any of these counts disagree — divergence allows attacker-controlled count amplification past the cap and cross-array index confusion.
 - **Validate `FMeshBoneInfo.ParentIndex`**: MUST be either `-1` (root) or a strictly smaller index than the bone's own position in `FinalRefBoneInfo`. Reject cycles, self-references, and forward references — any bone-traversal algorithm walking parent links without these guards will infinite-loop. Combined with `MAX_BONES_PER_SKELETON` this bounds the worst-case parent-walk depth.
 - **Validate `FinalNameToIndexMap` values**: each `i32` value MUST fall in `[0, FinalRefBoneInfo.Length)` before any name→index lookup uses it as an array index — attacker-controlled out-of-range values would cause OOB reads.
 - **Verify all `i32` count prefixes are non-negative** before reserving capacity. The following are all `i32` on the wire and MUST be verified: `AnimRetargetSources` outer-map count, `NameMappings` outer-map count, `ExistingMarkerNames` array count, and the inner maps inside each `FSmartNameMapping` value (`GuidMap` count, `UidMap` count, `CurveMetaDataMap` count) plus the `LinkedBones` array count inside each `FCurveMetaData`. A negative count cast to `usize` in Rust produces `usize::MAX`-adjacent values that bypass per-collection sanity checks before hitting the file-residual-bytes backstop.
@@ -295,7 +295,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** The 112-byte `FReferenceSkeleton` Worked example above is byte-exact and self-contained for a 2-bone UE 4.12+ single-precision body (excluding the optional `FinalNameToIndexMap`). A skeleton fixture paired with a skeletal-mesh fixture is a Phase 3 deliverable.
+- **Fixture:** The `FReferenceSkeleton` Worked example above is byte-exact and self-contained for the 112-byte core of a 2-bone UE4 single-precision body. A skeleton fixture paired with a skeletal-mesh fixture is a Phase 3 deliverable.
 - **Hex anchor commands:**
   ```
   # Synthesize the 40-byte identity FTransform from the Worked example
@@ -322,3 +322,7 @@ smart-name mappings) is not yet implemented.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Animation/USkeleton.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` plus `FReferenceSkeleton.cs` and `FMeshBoneInfo.cs` in the same directory. Primary oracle; the `FinalRef*` field names reflect CUE4Parse's post-virtual-bone-merge representation.
+
+[^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Versions/ObjectVersion.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L494 (`REFERENCE_SKELETON_REFACTOR`, 310 counted from `OLDEST_LOADABLE_PACKAGE = 214` at L299) and `CUE4Parse/UE4/Versions/EGame.cs` L272 (UE 4.0 → 342).
+
+[^3]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/UScriptArray.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L49-L58 (from `PROPERTY_TAG_COMPLETE_TYPE_NAME` the element type comes from the outer tag; below it, from `INNER_ARRAY_TAG_INFO`, one inline `FPropertyTag` is read) and `CUE4Parse/UE4/Versions/ObjectVersion.cs` L51 (`PROPERTY_TAG_COMPLETE_TYPE_NAME`, 1012 counted from `INITIAL_VERSION = 1000` at L13) and L880 (`INNER_ARRAY_TAG_INFO`, 500 counted from `OLDEST_LOADABLE_PACKAGE = 214` at L299).

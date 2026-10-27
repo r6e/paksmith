@@ -72,10 +72,10 @@ layouts remain fail-closed `UnsupportedFeature`s, tracked under #650.**
 |------------------|---------------------|--------|
 | UE 4.0+ | `USkeletalMesh` + `FStaticLODModel` introduced. | `CUE4Parse/UE4/Assets/Exports/SkeletalMesh/USkeletalMesh.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
 | UE 4.13 (`FSkeletalMeshCustomVersion.CombineSectionWithChunk`) | Section and chunk merged; `FSkelMeshChunk` only present pre-this version. | Same[^1] |
-| UE 4.19 (`FSkeletalMeshCustomVersion.SplitModelAndRenderData`) | Cooked LOD records split from editor LOD model; `bCooked` gate added at `USkeletalMesh.Deserialize` level. | Same[^1] |
-| UE 4.24 (`FAnimObjectVersion.IncreaseBoneIndexLimitPerChunk`) | `bUse16BitBoneIndex` added (in both `FSkelMeshSection` and `FSkinWeightVertexBuffer`). | Same[^1] |
+| UE 4.19 (`FSkeletalMeshCustomVersion.SplitModelAndRenderData`, per CUE4Parse's fallback[^3]) | Cooked LOD records split from editor LOD model; `bCooked` gate added at `USkeletalMesh.Deserialize` level. | Same[^1] |
 | UE 4.24 (`FRenderingObjectVersion ≥ MaterialShaderMapIdSerialization`) | `UseNewCookedFormat` boundary: cooked LODs switch from `SerializeRenderItem_Legacy` to `SerializeRenderItem` (`bIsLODCookedOut` + `bInlined` fields added to the LOD header). | Same[^1]; UEViewer `UnMesh4.cpp`[^2] |
-| UE 5.0+ | Optional cloth simulation data added to LOD payloads. | Same[^1] |
+| UE 4.25 (`FAnimObjectVersion.IncreaseBoneIndexLimitPerChunk`, per CUE4Parse's fallback[^3]) | `bUse16BitBoneIndex` added: in `FSkelMeshSection`'s non-render-item serialization (cooked render items never carry it) and in `FSkinWeightVertexBuffer` on its `UnlimitedBoneInfluences` metadata path. | Same[^1] |
+| UE 5.0+ (`FUE5ReleaseStreamObjectVersion.AddClothMappingLODBias`, per CUE4Parse's fallback[^3]) | Cloth mappings gain an LOD bias: each section's `ClothMappingDataLODs` becomes an array of arrays, and the cloth buffer carries 4 more bytes per `ClothIndexMapping` entry. | Same[^1]; `FSkeletalMeshVertexClothBuffer.cs`[^3] |
 
 The per-version conditionals are dense; full enumeration is a
 Phase 3 deliverable.
@@ -158,8 +158,9 @@ reaches after the `bCooked` gate. Sources: CUE4Parse `FStaticLODModel.cs`
 `UnMesh4.cpp`.[^2]
 
 Pre-4.24 cooked LODs use two earlier layouts — the pre-split inline
-`FStaticLODModel` (4.13–4.18, before `SplitModelAndRenderData`) and the
-**separate** `SerializeRenderItem_Legacy` path (4.19–4.23), whose header has
+`FStaticLODModel` (4.18 and earlier, before `SplitModelAndRenderData`)
+and the **separate** `SerializeRenderItem_Legacy` path (4.19–4.23; the
+4.18/4.19 split is per CUE4Parse's fallback[^3]), whose header has
 no `bIsLODCookedOut` or `bInlined` fields — and are not documented here. See
 the [4.24 format boundary](#ue424-new-cooked-format-boundary)
 subsection below.
@@ -540,7 +541,9 @@ read item 10 (the version-gated tail); the `blob_start + BuffersSize` seek in
 **Cloth buffer shape (item 8, skipped):** inner `FStripDataFlags` (2×`u8`); if
 AV-stripped, done; else `SkipBulkArrayData` (the cloth vertex bulk array); then —
 when `FSkeletalMeshCustomVersion ≥ CompactClothVertexBuffer` (always true for
-UE 4.24+) — `ClothIndexMapping`: `i32` count + `count × u64`.
+UE 4.24+) — `ClothIndexMapping`: `i32` count + `count × u64`; then, from
+`FUE5ReleaseStreamObjectVersion ≥ AddClothMappingLODBias` (UE 5.0 per
+CUE4Parse's fallback[^3]), `count × 4` more bytes.
 
 ### `FMultisizeIndexContainer`
 
@@ -671,9 +674,11 @@ may use 8 for higher-fidelity characters.
 
 ### 8-bit vs 16-bit bone indices
 
-UE 4.24+ supports 16-bit bone indices for meshes referencing more
-than 256 bones. The flag appears in both `FSkelMeshSection` and
-`FSkinWeightVertexBuffer`, gated on `FAnimObjectVersion.IncreaseBoneIndexLimitPerChunk`.
+From `FAnimObjectVersion.IncreaseBoneIndexLimitPerChunk` (UE 4.25 per
+CUE4Parse's fallback[^3]), bone indices can be 16-bit, lifting the
+256-bone limit per section. The flag appears in `FSkelMeshSection`'s
+non-render-item serialization and in `FSkinWeightVertexBuffer`'s
+`UnlimitedBoneInfluences` metadata.
 
 ### Cloth simulation
 
@@ -866,3 +871,5 @@ for the rationale.
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/SkeletalMesh/USkeletalMesh.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` plus `FStaticLODModel.cs`, `FSkelMeshSection.cs`, `FSkinWeightVertexBuffer.cs` in the same directory. Primary oracle; covers every version conditional paksmith will need. Note: CUE4Parse uses `FStaticLODModel` for the cooked LOD record; there is no `FSkeletalMeshRenderData` wrapper class or `FSkeletalMeshLODRenderData`/`FSkelMeshRenderSection` at this SHA.
 
 [^2]: `gildor/UEViewer` (Gildor's UModel) — `Unreal/UnrealMesh/UnMesh4.cpp`. Secondary oracle for cooked `FStaticLODModel` LOD header layout (`SerializeRenderItem` field order, `RequiredBones` position, `UseNewCookedFormat` boundary). Consulted to cross-validate CUE4Parse field ordering for the PR3/PR4 wire facts.
+
+[^3]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Versions/FAnimObjectVersion.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L24 (`IncreaseBoneIndexLimitPerChunk` = 4) and L75-L77 (fallback: UE 4.21-4.24 → `StoreMarkerNamesOnSkeleton`, 2; UE 4.25 → `NotifyAndSyncMarkerGuids`, 7); `CUE4Parse/UE4/Versions/FUE5ReleaseStreamObjectVersion.cs` L57 (`AddClothMappingLODBias` = 15) and L214-L215 (fallback: before UE 5.0 → `BeforeCustomVersionWasAdded`; UE 5.0 → `SerializeFloatPinDefaultValuesAsSinglePrecision`, 36); `CUE4Parse/UE4/Assets/Exports/SkeletalMesh/FSkeletalMeshVertexClothBuffer.cs` L20-L23 (4 more bytes per `ClothIndexMapping` entry); `CUE4Parse/UE4/Versions/FSkeletalMeshCustomVersion.cs` L42 (`SplitModelAndRenderData` = 12) and L84-L85 (fallback: UE 4.18 → `CompactClothVertexBuffer`, 10; UE 4.19 → `DeprecateSectionDisabledFlag`, 15).
