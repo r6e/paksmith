@@ -413,7 +413,7 @@ fn main() {
             entries: mixed_path_entries,
             compression: None,
         },
-        // V10 — UE 4.26. PathHashIndex: wholly new index format
+        // V10 — no stock release. PathHashIndex: wholly new index format
         // (mount + count + seed + path-hash table + full directory
         // index + encoded entries blob). V10 had an FNV-64 bug that
         // mishandled non-ASCII lowercasing — irrelevant for ASCII
@@ -439,7 +439,7 @@ fn main() {
             entries: mixed_path_entries,
             compression: None,
         },
-        // V11 — UE 4.27+. Same shape as V10, with the FNV-64 bug fixed.
+        // V11 — UE 4.26-5.6. Same shape as V10, with the FNV-64 bug fixed.
         // For ASCII paths the two are hash-identical, so the cross-
         // parser tests cover both via the same code path.
         Fixture {
