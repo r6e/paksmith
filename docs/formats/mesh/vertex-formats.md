@@ -51,7 +51,7 @@ The skeletal-mesh merged/skin buffers remain a later deliverable.
 | UE 4.0+ | Packed vertex formats introduced. | `CUE4Parse/UE4/Objects/Meshes/FPositionVertexBuffer.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
 | UE 4.12+ | `bUseHighPrecisionTangentBasis` opt-in added to `FStaticMeshVertexBuffer`. | Same[^1] |
 | UE 4.19+ | `FStaticMeshVertexBuffer` `Strides` field dropped from the wire; tangents and UV coords serialized as separate bulk arrays. | Same[^1] |
-| UE 4.20+ | `FPackedNormal` raw `u32` XORed with `0x80808080` before component extraction (`FRenderingObjectVersion.IncreaseNormalPrecision` gate). `FPackedRGBA16N` each `u16` XORed with `0x8000`. High-precision-UV opt-in (`bUseFullPrecisionUVs`). | Same[^1] |
+| UE 4.20+ | `FPackedNormal` raw `u32` XORed with `0x80808080` before component extraction (`FRenderingObjectVersion.IncreaseNormalPrecision` gate, UE 4.20 per CUE4Parse's fallback[^2]). `FPackedRGBA16N` each `u16` XORed with `0x8000` (`GAME_UE4_20`). | Same[^1] |
 | UE 5.0+ | LWC widens `FPositionVertexBuffer` vertex positions from f32 to f64. | Same[^1] |
 
 ## Wire layout
@@ -374,3 +374,5 @@ remain).
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Meshes/FPositionVertexBuffer.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` (position buffer); `CUE4Parse/UE4/Assets/Exports/StaticMesh/FStaticMeshVertexBuffer.cs` and `FStaticMeshUVItem.cs` (normal-tangent + UV buffer); `CUE4Parse/UE4/Objects/Meshes/FColorVertexBuffer.cs` (color buffer); `CUE4Parse/UE4/Assets/Exports/StaticMesh/FRawStaticIndexBuffer.cs` (index buffer); `CUE4Parse/UE4/Objects/RenderCore/FPackedNormal.cs` and `FPackedRGBA16N.cs` (bit-packing). Note: `FPositionVertexBuffer` and `FColorVertexBuffer` live under `UE4/Objects/Meshes/`; `FPackedNormal` and `FPackedRGBA16N` live under `UE4/Objects/RenderCore/`; `FStaticMeshVertexBuffer` and `FStaticMeshUVItem` live under `UE4/Assets/Exports/StaticMesh/`.
+
+[^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Versions/FRenderingObjectVersion.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L75 (`IncreaseNormalPrecision` = 26) and L167-L168 (fallback: UE 4.19 → `ShaderPermutationId`, 25; UE 4.20 → `IncreaseNormalPrecision`, 26).

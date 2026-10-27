@@ -55,7 +55,7 @@ section "Format inventory" for column semantics.
 | `property/tagged.md` | complete | complete | `asset/property/tag.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` | `25d452a` |
 | `property/unversioned.md` | complete | partial | `asset/property/unversioned.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `property/primitives.md` | complete | complete | `asset/property/primitives.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
-| `property/containers.md` | complete | complete | `asset/property/containers.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
+| `property/containers.md` | complete | complete | `asset/property/containers.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `91456be` |
 | `property/struct.md` | complete | partial | `asset/property/containers.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `property/text.md` | complete | partial | `asset/property/text.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `primitive/fstring.md` | complete | complete | `container/pak/index/fstring.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `8f56038` |
@@ -69,7 +69,7 @@ section "Format inventory" for column semantics.
 | `texture/mips-and-streaming.md` | complete | partial | `asset/exports/texture/texture2d.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `91456be` |
 | `texture/virtual-textures.md` | complete | complete | `asset/exports/texture/virtual_textures.rs` | CUE4Parse @ `b26351df6e4dfe5cf68f1aa83a85353eb8c961fa` | `2960ec2` |
 | `mesh/static-mesh.md` | complete | partial | `asset/exports/mesh/` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `61057be` |
-| `mesh/skeletal-mesh.md` | complete | partial | `asset/exports/mesh/skeletal_mesh.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
+| `mesh/skeletal-mesh.md` | complete | partial | `asset/exports/mesh/skeletal_mesh.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `91456be` |
 | `mesh/skeleton.md` | complete | partial | `asset/exports/mesh/skeleton.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
 | `mesh/vertex-formats.md` | complete | partial | `asset/exports/mesh/` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
 | `mesh/nanite-resources.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |

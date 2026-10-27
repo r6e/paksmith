@@ -180,7 +180,7 @@ Per-buffer wire layouts live in [`vertex-formats.md`](vertex-formats.md).
 | `bEnableCollision` | 4 | LE | `u32` (bool) | |
 | `bCastShadow` | 4 | LE | `u32` (bool) | |
 | `bForceOpaque` (UE 4.25+) | 4 | LE | `u32` (bool) | Per `FRenderingObjectVersion ≥ StaticMeshSectionForceOpaqueField`. |
-| `bVisibleInRayTracing` (UE 4.27+) | 4 | LE | `u32` (bool) | Per `Ar.Versions["StaticMesh.HasVisibleInRayTracing"]`. |
+| `bVisibleInRayTracing` (UE 4.26+) | 4 | LE | `u32` (bool) | Per `Ar.Versions["StaticMesh.HasVisibleInRayTracing"]`, which CUE4Parse sets from `GAME_UE4_26`[^8]. |
 | `bAffectDistanceFieldLighting` (UE 5.1+) | 4 | LE | `u32` (bool) | Per `Ar.Game >= EGame.GAME_UE5_1`. |
 
 ### Worked example — `FStaticMeshSection` at UE 5.1+ (40 bytes)
@@ -202,13 +202,13 @@ Offset (within section)  Bytes (LE)        Field
 +20                      01 00 00 00       bEnableCollision = 1 (u32 bool)
 +24                      01 00 00 00       bCastShadow = 1 (u32 bool)
 +28                      01 00 00 00       bForceOpaque = 1 (u32 bool; UE 4.25+)
-+32                      01 00 00 00       bVisibleInRayTracing = 1 (u32 bool; UE 4.27+)
++32                      01 00 00 00       bVisibleInRayTracing = 1 (u32 bool; UE 4.26+)
 +36                      01 00 00 00       bAffectDistanceFieldLighting = 1 (u32 bool; UE 5.1+)
 +40                                         (end of section record)
 ```
 
 Each UE-version step removes the last conditional bool field: at
-UE 4.27 (no `bAffectDistanceFieldLighting`) the section is
+UE 4.26-5.0 (no `bAffectDistanceFieldLighting`) the section is
 36 bytes; at UE 4.25 (no `bVisibleInRayTracing`) it's 32 bytes;
 at UE 4.0-4.24 (no `bForceOpaque`) it's 28 bytes. The header
 fields (`MaterialIndex` through `bCastShadow`) are always present.
@@ -350,3 +350,4 @@ deferred; the pre-4.23 legacy path needs a real fixture for verification.
 [^5]: `gildor2/UEViewer/Unreal/UnrealMesh/UnMesh4.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L2222-L2225 (`bForceOpaque`), L2266-L2270 (`bShouldExpandTo32Bit`, `Game >= GAME_UE4(25)`) and L2583-L2587 (the ray-tracing array); `Unreal/UE4Version.h` L401-L403 (`UE4.24 = 36`, `StaticMeshSectionForceOpaqueField = 37`, `UE4.25 = 43`).
 [^6]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/StaticMesh/FStaticMeshRenderData.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L219-L226 (`ScreenSize` as `FPerPlatformFloat` iff `Ar.Game >= GAME_UE4_20`); `CUE4Parse/UE4/Versions/EGame.cs` L354-L355 (4.19 and 4.20 → 516); `CUE4Parse/UE4/Versions/FRenderingObjectVersion.cs` L167-L168 (4.19 → `ShaderPermutationId`, 25; 4.20 → `IncreaseNormalPrecision`, 26).
 [^7]: `gildor2/UEViewer/Unreal/UnrealMesh/UnMesh4.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L2834-L2840 (`bFloatCooked` iff `Ar.Game >= GAME_UE4(20)`); `Unreal/UE4Version.h` L87-L88 (`VER_UE4_19` and `VER_UE4_20` = 516) and L395-L397 (`UE4.19 = 25`, `UE4.20 = 26`, `IncreaseNormalPrecision = 26`).
+[^8]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Versions/VersionContainer.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L86 (`StaticMesh.HasVisibleInRayTracing = Game >= GAME_UE4_26`).
