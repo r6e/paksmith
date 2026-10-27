@@ -8,7 +8,7 @@ use crate::error::PaksmithError;
 ///   + index_offset(8) + index_size(8) + index_hash(20) = 61
 pub(super) const FOOTER_SIZE_V7_PLUS: u64 = 61;
 
-/// On-disk size of the legacy (pre-v7) footer in bytes.
+/// On-disk size of the v1-v3 footer in bytes.
 ///
 /// magic(4) + version(4) + index_offset(8) + index_size(8) + index_hash(20) = 44
 ///
@@ -16,6 +16,9 @@ pub(super) const FOOTER_SIZE_V7_PLUS: u64 = 61;
 /// `tests/pak_integration.rs` reads it to locate the footer in
 /// hand-rolled fixture bytes.
 pub const FOOTER_SIZE_LEGACY: u64 = 44;
+
+/// On-disk size of the v4-v6 footer: encrypted_flag(1) + the v1-v3 layout = 45.
+pub(super) const FOOTER_SIZE_V4_TO_V6: u64 = FOOTER_SIZE_LEGACY + 1;
 
 /// V8A footer size: v7 layout + 4 × 32-byte compression-method FName slots.
 /// Used by the brief UE 4.22 V8A variant — `Version::V8A` in trumank/repak.

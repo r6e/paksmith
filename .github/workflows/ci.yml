@@ -116,7 +116,7 @@ jobs:
           # Wipe before generating so a zero-write generator leaves the
           # working tree missing fixtures (caught by `git diff` as
           # deleted) instead of silently passing on stale committed
-          # bytes. The vendored encrypted fixtures (real_v8b_encrypted_*.pak)
+          # bytes. The vendored encrypted fixtures (real_v*_encrypted_*.pak)
           # are STATIC — not regenerated — so they are excluded from the wipe.
           find tests/fixtures -maxdepth 1 -name '*.pak' -type f \
             ! -name 'real_v*_encrypted_*.pak' -delete
@@ -138,10 +138,12 @@ jobs:
           # + 2 issue-#634 encrypted+compressed
           #   (real_v{8b,11}_encrypted_compressed.pak, VENDORED-STATIC)
           # + 1 issue-#651 unversioned uasset (real_v8b_unversioned.pak)
-          # = 49.
+          # + 1 v4-v6-footer encrypted index
+          #   (real_v5_encrypted_index.pak, VENDORED-STATIC)
+          # = 50.
           # The pre-run rm + this count assertion together catch zero-write
           # bugs that the diff alone would miss.
-          expected=49
+          expected=50
           actual=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f | wc -l | tr -d ' ')
           # Emit the gate's verdict to the job-summary panel so reviewers
           # can see what was checked without scrolling raw step logs.

@@ -34,7 +34,7 @@ per-version field widths and presence-of-field flags account for the
 remaining variance.
 
 **Document status: complete.** Wire format documented in full for
-the pak v1–v11 footer family (legacy v1–v6 / V7+ / V8A / V8B / V9 /
+the pak v1–v11 footer family (v1–v3 / v4–v6 / V7+ / V8A / V8B / V9 /
 V10+ shape variants), the flat index (v3–v9), the path-hash + encoded
 directory index (v10+), per-entry `PakEntryHeader` records in both
 the `Inline` form (v3–v9 and v10+ non-encoded records) and the v10+
@@ -85,18 +85,24 @@ exactly what it says.
 ### Footer (tail-anchored)
 
 The footer's size depends on the version, and so does the offset to seek to
-from the file end. The parser determines version by reading the magic at a
-candidate offset, falling through size candidates until one matches.
+from the file end. The parser reads the magic and version at each candidate
+offset, largest footer first, and takes the first candidate whose magic matches
+and whose version list holds the version field.
 
 | Variant | Total size | When |
 |---------|------------|------|
-| Legacy (`< V7`) | 44 bytes | Wire version 1–6. |
+| V1–V3 | 44 bytes | Wire version 1–3. |
+| V4–V6 | 45 bytes | Wire version 4–6: the V1–V3 layout led by the 1-byte `encrypted` flag[^6][^7]. |
 | V7+ | 61 bytes | Wire version 7. |
 | V8A | 189 bytes | V7+ base + 4 × 32-byte compression-slot table. |
 | V8B / V10 / V11 | 221 bytes | V7+ base + 5 × 32-byte compression-slot table. |
 | V9 | 222 bytes | V7+ base + 1-byte frozen-index flag + 5 × 32-byte compression-slot table. |
 
-#### Legacy footer (44 bytes, wire version 1–6)
+#### Legacy footer (44 bytes for v1–v3, 45 for v4–v6)
+
+V4–V6 prepend the 1-byte `encrypted` flag (as in the V7+ table) and every
+offset below shifts by one[^6]. The magic sits at `EOF - 44` for v1–v7, so
+the `version` field, not the magic's position, picks the layout.
 
 | offset (from footer start) | size | endian | name | type | semantics |
 |---------------------------|------|--------|------|------|-----------|
@@ -104,7 +110,7 @@ candidate offset, falling through size candidates until one matches.
 | 4 | 4 | LE | `version` | `u32` | Wire version (1–6). |
 | 8 | 8 | LE | `index_offset` | `u64` | Byte offset where index begins. |
 | 16 | 8 | LE | `index_size` | `u64` | Byte length of the index region. |
-| 24 | 20 | — | `index_hash` | `Sha1Digest` | SHA1 of the index bytes. Fixed-width and always present; the format assigns no distinguished meaning to an all-zero value. What paksmith reads INTO a zero here is policy, not format — see [Paksmith implementation](#paksmith-implementation). |
+| 24 | 20 | — | `index_hash` | `Sha1Digest` | SHA1 of the index bytes. For an encrypted (v4–v6) index this covers the PLAINTEXT, so a verifier must decrypt first, as for V7+. Fixed-width and always present; the format assigns no distinguished meaning to an all-zero value. What paksmith reads INTO a zero here is policy, not format — see [Paksmith implementation](#paksmith-implementation). |
 
 #### V7+ footer (61 bytes, wire version 7)
 
@@ -326,7 +332,7 @@ variant — see Verification → Known divergences.
 - **`magic`**: fixed `u32` = `0x5A6F12E1`.
 - **`version`**: `u32` LE; the wire field is unbounded by the format itself (any `u32` could appear on disk). Paksmith's acceptance range of `1–11` is a parser-policy decision — see §*Implementation hardening* below — not a wire-imposed limit.
 - **`index_offset` / `index_size`**: `u64` LE in the footer; range is the addressable file space (subject to `<= file_size` constraint enforced by the footer parser).
-- **`encrypted`**: `u8`; only `0` / `1` semantically valid (strict, the V7+ footer reader does not coerce).
+- **`encrypted`** (V4+): `u8`. repak's writer emits only `0` / `1`[^6], and every fixture on hand holds one of them (a corpus observation); readers disagree on other values — see Verification → Known divergences.
 - **`compression_methods`** (V8+ table): `N × 32`-byte fixed slots, NUL-padded UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11.
 - **`frozen_index`** (V9 only): `u8`; writer flag, read but not interpreted.
 - **`PakEntryHeader.compression`**: `u8` (V8A) or `u32` LE (V8B / V9+); 1-based index into the compression-method table (0 = `None`).
@@ -418,9 +424,9 @@ policy.
       paksmith is the only implementation that has parsed those bytes,
       so cite them for what repak's WRITER emitted, never as
       independent read-back corroboration.
-  - `real_v8b_encrypted_*.pak` and `real_v11_encrypted_*.pak` (six
-    files) — UnrealPak-produced binaries vendored from repak's test
-    suite; repak's writer at the rev this workspace locks
+  - `real_v5_encrypted_index.pak`, `real_v8b_encrypted_*.pak` and
+    `real_v11_encrypted_*.pak` — UnrealPak-produced binaries vendored
+    from repak's test suite; repak's writer at the rev this workspace locks
     (`e215472c51db69328b1ce77be2db24d24c1d646b`, per `Cargo.lock`, which
     is where this was verified — [^1] cites a different SHA) does not
     support writing
@@ -455,6 +461,14 @@ policy.
     cooked archives use ASCII-only paths, so the practical impact is nil
     — but a non-ASCII fixture would fail to open. See
     `crates/paksmith-core/src/container/pak/index/mod.rs` `fn fnv64_path`.
+  - **Footer `encrypted` values other than `0` / `1`.** repak rejects
+    the footer[^6], and paksmith returns `InvalidFooter`. CUE4Parse[^7] and
+    UEViewer[^8] take any nonzero byte as set. For v1–v7 both read the
+    GUID and flag from a 61-byte window before they know the version, so
+    the flag comes from `EOF - 45`, which in a v1–v3 pak is the byte
+    before the footer; they clear it afterwards for versions below 4.
+    CUE4Parse marks that read "Do not replace by ReadFlag". Paksmith
+    reads the byte only once the version says it exists.
   - **PHI and FDI flags.** CUE4Parse[^2] reads each flag with
     `FArchive.ReadBoolean` (`CUE4Parse/UE4/Readers/FArchive.cs` at the
     same revision), which throws on a value other than `0` or `1`, and it
@@ -609,3 +623,20 @@ fixtures generated by `paksmith-fixture-gen` and cross-validated against
 [^5]: `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` —
     the per-entry index decode (`0` is none, `n` is slot `n - 1`) and
     the unchecked slot lookup in `read_file`.
+[^6]: `trumank/repak/repak/src/footer.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` —
+    L26-L29 (`Footer::read`: the GUID from V7, then the flag from V4 via
+    `read_bool`, both ahead of the magic) and L90-L92 (the writer emits
+    the flag from V4); at the same revision, `repak/src/lib.rs` L68-L92
+    (`Version::size`: one byte more from V4, 16 more from V7) and
+    `repak/src/ext.rs` L35-L41 (`read_bool`: `1` or `0`, anything else
+    an error) and L91-L97 (`write_bool` emits only `1` or `0`).
+[^7]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakInfo.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` —
+    L368-L369 (the GUID, then the flag as `!= 0`), L563-L566 (the flag
+    cleared below `PakFile_Version_IndexEncryption`) and L576 (the
+    61-byte `Size` probe).
+[^8]: `gildor2/UEViewer/Unreal/FileSystem/UnArchivePak.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` —
+    L20-L21 (the GUID, then the flag, ahead of the magic), L58-L61 (the
+    flag cleared below `PakFile_Version_IndexEncryption`) and L488 (any
+    nonzero flag counts as set); at the same revision,
+    `Unreal/FileSystem/UnArchivePak.h` L42 (`byte bEncryptedIndex`) and
+    L48 (the 61-byte `Size`).

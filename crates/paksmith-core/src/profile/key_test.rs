@@ -104,6 +104,14 @@ mod tests {
         assert_eq!(guid, None, "pre-v7 paks have no encryption-key GUID field");
     }
 
+    /// The index hash covers the padded plaintext behind a 45-byte v5 footer.
+    #[test]
+    fn test_key_verified_on_v5_encrypted_index() {
+        let key = AesKey::from_hex(KEY).unwrap();
+        let out = test_key(fixture("real_v5_encrypted_index.pak"), &key);
+        assert_eq!(out, KeyTestOutcome::Verified);
+    }
+
     /// Zeroing the footer `index_hash` field (without touching ciphertext) causes
     /// `verify_index` to see a zero hash and return `SkippedNoHash`, which
     /// `test_key` maps to `Decrypted` (not `Verified` — integrity cannot be confirmed).

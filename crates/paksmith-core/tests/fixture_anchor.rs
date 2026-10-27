@@ -72,9 +72,9 @@ fn sha1_hex(bytes: &[u8]) -> String {
 ///    - All 35 `cross_parser_agreement_*` tests still pass against the
 ///      regenerated fixtures
 ///      (`cargo test -p paksmith-fixture-gen --test cross_validation`).
-///    - For v3-v9: the trailing 44-byte legacy footer (or 61-byte v7+
-///      footer, or 189/221-byte v8a/v8b/v9 footer) starts with the
-///      magic `e1 12 6f 5a` (PAK_MAGIC = 0x5A6F12E1 little-endian).
+///    - For v3-v9: the magic `e1 12 6f 5a` (PAK_MAGIC = 0x5A6F12E1
+///      little-endian) sits 44 bytes before EOF for v3-v7, and 172/204/205
+///      bytes before it for v8a/v8b/v9.
 ///    - For v10/v11: the trailing 221-byte footer + path-hash + FDI
 ///      sections are sane. `xxd tests/fixtures/real_v11_minimal.pak |
 ///      head` to confirm the file starts with data records.
@@ -172,6 +172,17 @@ fn anchor_real_v11_minimal_fixture_bytes() {
     anchor_fixture_sha1(
         "real_v11_minimal.pak",
         "be13d5d9769831db06ffe54ae0c0826972f6612e",
+    );
+}
+
+#[test]
+fn anchor_real_v5_encrypted_index_fixture_bytes() {
+    // VENDORED-STATIC from repak's `pack_v5_encryptindex.pak` (UnrealPak
+    // output); see `tests/fixtures/PROVENANCE-encrypted.md`. Never
+    // regenerated, so a change here is an accidental touch.
+    anchor_fixture_sha1(
+        "real_v5_encrypted_index.pak",
+        "20a64d47ac9a88d277f20f054b946820afa5922a",
     );
 }
 
