@@ -36,14 +36,15 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
-use paksmith_core::container::pak::version::PAK_MAGIC;
 use paksmith_core::error::{AllocationContext, DecompressionFault, IndexParseFault};
 use paksmith_core::testing::bench::zlib_stream;
 use paksmith_core::testing::oom::{PakSeam, SeamSite, arm_at};
 use paksmith_core::testing::v10::{V10Fixture, build_v10_buffer};
 use paksmith_core::testing::wire::{LZ4_SYNTH_PATH, build_v8b_lz4_pak};
 // Issue #140: shared v3+ wire-format synthesizers.
-use paksmith_core::testing::wire::{write_fstring, write_fstring_utf16, write_pak_entry};
+use paksmith_core::testing::wire::{
+    write_fstring, write_fstring_utf16, write_legacy_footer, write_pak_entry,
+};
 
 /// Build a single-entry v6 pak with a zlib-compressed payload.
 /// Returns the assembled bytes for routing through
@@ -102,13 +103,7 @@ fn build_v6_zlib_pak(decompressed: &[u8]) -> Vec<u8> {
 
     let mut pak = data_section;
     pak.extend_from_slice(&index_section);
-
-    // Legacy 44-byte v6 footer.
-    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-    pak.write_u32::<LittleEndian>(6).unwrap();
-    pak.write_u64::<LittleEndian>(index_offset).unwrap();
-    pak.write_u64::<LittleEndian>(index_size).unwrap();
-    pak.extend_from_slice(&[0u8; 20]); // index hash
+    write_legacy_footer(&mut pak, 6, index_offset, index_size, &[0u8; 20]);
 
     pak
 }
