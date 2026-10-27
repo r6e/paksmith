@@ -1,9 +1,9 @@
 # Pak (`.pak`)
 
-> Unreal Engine's primary archive format — eleven wire versions (V1–V11)
-> covering UE 4.0 through UE 5.x. Single-file container with a tail-anchored
-> footer, two index layouts, optional AES-256 encryption, and per-entry
-> compression-block framing.
+> Unreal Engine's primary archive format — wire versions V1–V11, covering
+> UE 4.0 through UE 5.6 (UE 5.7 moved to V12). Single-file container with a
+> tail-anchored footer, two index layouts, optional AES-256 encryption, and
+> per-entry compression-block framing.
 
 ## Overview
 
@@ -49,20 +49,20 @@ as `paksmith-core/src/container/pak/`.
 
 ## Versions
 
-| Wire version | Paksmith variant | UE version | Wire-format change | Source |
+| Wire version | Paksmith variant | UE version[^9] | Wire-format change | Source |
 |--------------|------------------|------------|---------------------|--------|
-| 1 | `Initial` | UE 4.0 | Initial pak format. | `trumank/repak/repak/src/pak.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
-| 2 | `NoTimestamps` | UE 4.3 | Removed per-entry timestamps. | Same[^1] |
-| 3 | `CompressionEncryption` | UE 4.4 | Added compression-block framing and AES-256 ECB entry encryption. | Same[^1] |
-| 4 | `IndexEncryption` | UE 4.16 | Added index-region encryption (toggle in footer). | Same[^1] |
+| 1 | `Initial` | — (no stock release) | Initial pak format. | `trumank/repak/repak/src/pak.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
+| 2 | `NoTimestamps` | UE 4.0 – 4.2 | Removed per-entry timestamps. | Same[^1] |
+| 3 | `CompressionEncryption` | UE 4.3 – 4.15 | Added compression-block framing and AES-256 ECB entry encryption. | Same[^1] |
+| 4 | `IndexEncryption` | UE 4.16 – 4.19 | Added index-region encryption (toggle in footer). | Same[^1] |
 | 5 | `RelativeChunkOffsets` | UE 4.20 | Compression-block offsets became entry-relative instead of file-relative. | Same[^1] |
-| 6 | `DeleteRecords` | UE 4.21 | Added entry delete markers (used during patching). | Same[^1] |
-| 7 | `EncryptionKeyGuid` | UE 4.22 | Added 16-byte encryption-key GUID to the footer. | Same[^1] |
+| 6 | `DeleteRecords` | — (no stock release) | Added entry delete markers (used during patching). | Same[^1] |
+| 7 | `EncryptionKeyGuid` | UE 4.21 | Added 16-byte encryption-key GUID to the footer. | Same[^1] |
 | 8 | `V8A` | UE 4.22 (brief) | Added 4-slot compression-method FName table; per-entry compression byte is `u8`. | Same[^1] |
 | 8 | `V8B` | UE 4.23 – 4.24 | Compression-method table grew to 5 slots; compression byte returned to `u32`. | Same[^1] |
-| 9 | `FrozenIndex` | UE 4.25 | Added 1-byte frozen-index writer flag (parser treats frozen identically). | Same[^1] |
-| 10 | `PathHashIndex` | UE 4.26 | Replaced flat index with FNV-1a-64 path-hash index + encoded directory index. | Same[^1] |
-| 11 | `Fnv64BugFix` | UE 4.27 | Fixed Unicode-aware lowercasing bug in path-hash hashing (ASCII paths byte-equivalent to v10). | Same[^1] |
+| 9 | `FrozenIndex` | UE 4.25 | Added 1-byte frozen-index writer flag. | Same[^1] |
+| 10 | `PathHashIndex` | — (no stock release) | Replaced flat index with FNV-1a-64 path-hash index + encoded directory index. | Same[^1] |
+| 11 | `Fnv64BugFix` | UE 4.26 – 5.6 | Fixed Unicode-aware lowercasing bug in path-hash hashing (ASCII paths byte-equivalent to v10). | Same[^1] |
 
 **Wire-version 8 ambiguity.** V8A and V8B both serialize as `version = 8`;
 disambiguation is footer-parse-time, by the compression-method FName
@@ -330,11 +330,11 @@ variant — see Verification → Known divergences.
 ### Format-defined limits (wire-imposed)
 
 - **`magic`**: fixed `u32` = `0x5A6F12E1`.
-- **`version`**: `u32` LE; the wire field is unbounded by the format itself (any `u32` could appear on disk). Paksmith's acceptance range of `1–11` is a parser-policy decision — see §*Implementation hardening* below — not a wire-imposed limit.
+- **`version`**: `u32` LE; the wire field is unbounded by the format itself (any `u32` could appear on disk). Paksmith reads `3–11`: its footer parser accepts `1–11`, and `PakReader` refuses V1 and V2 at open (#637). That is a parser-policy decision, not a wire-imposed limit.
 - **`index_offset` / `index_size`**: `u64` LE in the footer; range is the addressable file space (subject to `<= file_size` constraint enforced by the footer parser).
 - **`encrypted`** (V4+): `u8`. repak's writer emits only `0` / `1`[^6], and every fixture on hand holds one of them (a corpus observation); readers disagree on other values — see Verification → Known divergences.
 - **`compression_methods`** (V8+ table): `N × 32`-byte fixed slots, NUL-padded UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11.
-- **`frozen_index`** (V9 only): `u8`; writer flag, read but not interpreted.
+- **`frozen_index`** (V9 only): `u8`; writer flag. Paksmith refuses an archive with it set (#637).
 - **`PakEntryHeader.compression`**: `u8` (V8A) or `u32` LE (V8B / V9+); 1-based index into the compression-method table (0 = `None`).
 - **`CompressionBlock`** (`Inline` form): 16 bytes (`u64 start + u64 end`).
 - **Encoded-entry bit-fields** (V10+): per [`../compression/pak-block-framing.md`](../compression/pak-block-framing.md) §*Encoded entries (v10+)* — 32-bit bit-packed header with offset / size width hints + compression-method index (6 bits) + encryption flag (1 bit) + block count (16 bits) + block-size encoding (6 bits).
@@ -566,10 +566,13 @@ policy.
 
 **Error variants** (selected — see `crates/paksmith-core/src/error.rs` for
 the full enum):
-- `PaksmithError::UnsupportedVersion { version }` — version outside 1–11.
+- `PaksmithError::UnsupportedVersion { version }` — a version or
+  version-specific feature paksmith does not read: for example a version
+  outside 3–11, a frozen V9 index, or a zlib-compressed entry in a V3/V4
+  archive.
 - `PaksmithError::InvalidFooter { fault: InvalidFooterFault::* }` —
-  `OtherUnpromoted { reason }` (catch-all currently used for magic mismatch
-  / version-unsupported until promoted to typed variants),
+  `OtherUnpromoted { reason }` (catch-all for magic mismatch and the other
+  footer faults not yet promoted to typed variants),
   `IndexRegionOffsetOverflow { offset, size }`,
   `IndexRegionPastFileSize { offset, size, file_size }`.
 - `PaksmithError::InvalidIndex { fault: IndexParseFault::* }` —
@@ -640,3 +643,11 @@ fixtures generated by `paksmith-fixture-gen` and cross-validated against
     nonzero flag counts as set); at the same revision,
     `Unreal/FileSystem/UnArchivePak.h` L42 (`byte bEncryptedIndex`) and
     L48 (the 61-byte `Size`).
+[^9]: `trumank/repak/README.md@355b5f62f51959c7cc6dd5a51708646ef483065d` —
+    L61-L74, the compatibility table the UE-version column follows. It
+    names no release for V1, V6 or V10 and gives V11 as 4.26-5.3 "as of
+    writing" (L85). CUE4Parse ends V11 at UE 5.6:
+    `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/PakFileReader.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7`
+    L59-L63 log a version above 11 as unsupported before `GAME_UE5_7`, and
+    `CUE4Parse/UE4/Pak/Objects/FPakInfo.cs` L28 at the same revision makes
+    V12 `Utf8PakDirectory`.

@@ -53,9 +53,9 @@ verification no longer skips them.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| Wire version 3 (UE 4.4) | Per-entry encryption introduced. Encryption signaled by bit 0 of the entry header's `flags` byte; no index encryption yet. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
+| Wire version 3 (UE 4.3) | Per-entry encryption introduced. Encryption signaled by bit 0 of the entry header's `flags` byte; no index encryption yet. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
 | Wire version 4 (UE 4.16, `IndexEncryption`) | Index encryption introduced. The whole index region is AES-encrypted when the writer enables it; reader must decrypt before parsing entries. The footer gains a 1-byte `encrypted` field. | Same[^1] |
-| Wire version 7 (UE 4.22, `EncryptionKeyGuid`) | 16-byte `encryption_key_guid` field added to the footer. Identifies which key the archive uses when a project ships multiple. Zero GUID = no specific key assigned. | Same[^1] |
+| Wire version 7 (UE 4.21, `EncryptionKeyGuid`) | 16-byte `encryption_key_guid` field added to the footer. Identifies which key the archive uses when a project ships multiple. Zero GUID = no specific key assigned. | Same[^1] |
 
 The AES-256 ECB primitive itself has been stable across the whole
 wire-version range; the variance is in *what* is encrypted (per-entry

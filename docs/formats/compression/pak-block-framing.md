@@ -49,7 +49,7 @@ intentionally rejected with `PaksmithError::UnsupportedVersion`.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| Wire version 3 (`CompressionEncryption`, UE 4.4) | Block framing introduced; offsets are **file-relative**. Paksmith rejects these with `UnsupportedVersion` — see Implementation note. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
+| Wire version 3 (`CompressionEncryption`, UE 4.3) | Block framing introduced; offsets are **file-relative**. Paksmith rejects these with `UnsupportedVersion` — see Implementation note. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
 | Wire version 5+ (`RelativeChunkOffsets`, UE 4.20+) | Block offsets became **entry-record-relative** (start is from the entry's record start, not the file start). Paksmith's `stream_zlib_to` normalizes to absolute by adding the entry record's offset. | Same[^1] |
 | Wire version 8+ | Per-entry `compression` field became a 1-based index into the footer's compression-method table (instead of a raw method ID): `u8` in V8A, `u32` from V8B, 6 bits in a v10+ encoded entry. Block framing itself unchanged. | Same[^1] |
 | Wire version 10+ (`PathHashIndex`) | Encoded entry format: block boundaries move from explicit `(start: u64, end: u64)` pairs to per-block `u32` compressed sizes; synthesized into block ranges during parsing. See Variants. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/PakFileReader.cs@ecc4878950336126f125af0747190edf474b2a21`[^2] |
@@ -184,7 +184,7 @@ V3 and V4 archives published block offsets relative to the file start.
 Paksmith's `stream_zlib_to` explicitly rejects these with
 `PaksmithError::UnsupportedVersion` rather than
 attempting normalization. Pre-v5 compressed archives are rare in
-practice (UE 4.4 through early UE 4.20 era), and supporting the
+practice (UE 4.3 through UE 4.19 era), and supporting the
 normalization adds surface area for off-by-one bugs. The rejection is
 intentional and documented in the module-level `//! It does NOT yet
 handle:` list.

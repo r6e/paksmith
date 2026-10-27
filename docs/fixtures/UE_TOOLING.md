@@ -138,7 +138,7 @@ follow [repak's compatibility table][repak] and [CUE4Parse][cue4parse].
 | 1 | `Initial` | — (no stock release) | First pak format |
 | 2 | `NoTimestamps` | UE 4.0–4.2 | Per-entry timestamps removed |
 | 3 | `CompressionEncryption` | UE 4.3–4.15 | Compression + AES support |
-| 4 | `IndexEncryption` | UE 4.16 | Index encryption |
+| 4 | `IndexEncryption` | UE 4.16–4.19 | Index encryption |
 | 5 | `RelativeChunkOffsets` | UE 4.20 | Compression block offsets become entry-relative |
 | 6 | `DeleteRecords` | — (no stock release) | Delete records (patching) |
 | 7 | `EncryptionKeyGuid` | UE 4.21 | Encryption-key GUID in footer |
