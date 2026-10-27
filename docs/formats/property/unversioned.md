@@ -49,7 +49,7 @@ silently mis-decoding the property stream as tagged bytes.
 | `EUsmapVersion::PackageVersioning` (byte 1) | Adds an optional versioning block (object version, custom version array, netCL) before the compression header. | Same[^1] |
 | `EUsmapVersion::LongFName` (byte 2) | Widens name-table entry length field from `u8` to `u16` (needed for names > 255 bytes). | Same[^1] |
 | `EUsmapVersion::LargeEnums` (byte 3) | Widens per-enum value count from `u8` to `u16`. | Same[^1] |
-| `EUsmapVersion::ExplicitEnumValues` (byte 4, latest) | Enum entries carry explicit `u64` ordinals instead of positional indices. Supports sparse enums (`A = 0, C = 2`). | Same[^1] |
+| `EUsmapVersion::ExplicitEnumValues` (byte 4) | Enum entries carry explicit `u64` ordinals instead of positional indices. Supports sparse enums (`A = 0, C = 2`). | Same[^1] |
 
 ## Wire layout
 
