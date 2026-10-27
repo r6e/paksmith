@@ -439,7 +439,7 @@ mod tests {
         //   0=None, 1=Slots, 2=MapProperty, 3=NameProperty,
         //   4=StructProperty, 5=ItemId, 6=IntProperty,
         //   7=first, 8=second, 9=Sentinel.
-        let ctx = make_ctx(&[
+        let mut ctx = make_ctx(&[
             "None",
             "Slots",
             "MapProperty",
@@ -451,6 +451,7 @@ mod tests {
             "second",
             "Sentinel",
         ]);
+        ctx.version.file_version_ue4 = 522; // a wire Map tag's type extras need >= 509
 
         // Build the Map body: 2 entries.
         // Entry 0 = valid tagged struct ({ItemId: 42, None}).

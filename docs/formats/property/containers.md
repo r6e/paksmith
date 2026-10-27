@@ -43,7 +43,7 @@ as `paksmith-core/src/asset/property/containers.rs`.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| `FileVersionUE4 ≥ 504` | Container shapes stable. | `CUE4Parse/UE4/Assets/Objects/Properties/{Array,Map,Set}Property.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
+| `FileVersionUE4 ≥ 504` | Container shapes stable. Set and Map tags name their element types only from `PROPERTY_TAG_SET_MAP_SUPPORT` (509; see [`tagged.md`](tagged.md)); below it the body names no element type. | `CUE4Parse/UE4/Assets/Objects/Properties/{Array,Map,Set}Property.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
 
 No UE5 changes to container shapes within paksmith's accepted range.
 

@@ -71,8 +71,9 @@ as `paksmith-core/src/asset/property/tag.rs`.
 Tag header size depends on `Type`:
 
 - Minimum (no extras, no GUID): 25 bytes (`8 + 8 + 4 + 4 + 1`).
-- Maximum (MapProperty + GUID): 57 bytes (`8 + 8 + 4 + 4 + 16 + 1 + 16`), where
-  the 16-byte extras slot is two 8-byte FNames for `inner_type` and `value_type`.
+- Maximum (StructProperty + GUID): 65 bytes (`8 + 8 + 4 + 4 + 24 + 1 + 16`), where
+  the 24-byte extras slot is the `struct_name` FName and the 16-byte `struct_guid`;
+  UE5 ≥ 1011 adds up to 6 extension bytes (see Versions).
 
 ### Type extras dispatch
 
@@ -84,13 +85,16 @@ type-specific extra fields:
 | `BoolProperty` | `bool_val: u8` | 1 |
 | `StructProperty` | `struct_name: FName` + `struct_guid: [u8; 16]` | 8 + 16 = 24 |
 | `ByteProperty` / `EnumProperty` | `enum_name: FName` | 8 |
-| `ArrayProperty` / `SetProperty` | `inner_type: FName` | 8 |
-| `MapProperty` | `inner_type: FName` + `value_type: FName` | 16 |
+| `ArrayProperty` | `inner_type: FName` | 8 |
+| `SetProperty` | `inner_type: FName` (from `FileVersionUE4` 509) | 8; 0 below 509 |
+| `MapProperty` | `inner_type: FName` + `value_type: FName` (from `FileVersionUE4` 509) | 16; 0 below 509 |
 | any other type | (no extras) | 0 |
 
 These fields are populated on every tag regardless of whether the
 matching value reader is implemented — Phase 2c's container readers
-rely on `inner_type` being resolved at tag-read time.
+rely on `inner_type` being resolved at tag-read time. A Set or Map tag
+below 509 carries none, so its value names no element type; a reader
+without out-of-band type information skips it by `Size`.
 
 ### Iteration
 
@@ -138,12 +142,12 @@ The wire shape is uniform across all property types; per-type variance lives in 
 
 ### Format-defined limits (wire-imposed)
 
-- **`FPropertyTag` header**: variable size (min 25 bytes, max 57 bytes — see Wire layout §*Tag header* for the per-`Type` extras dispatch).
+- **`FPropertyTag` header**: variable size (min 25 bytes, max 65 bytes before the UE5 ≥ 1011 extension bytes — see Wire layout §*Tag header* for the per-`Type` extras dispatch).
 - **`Size`**: `i32` LE. `0` is wire-valid only for `BoolProperty` (value carried in tag-extras).
 - **`ArrayIndex`**: `i32` LE.
 - **`HasPropertyGuid`**: `u8`; non-zero triggers the following 16-byte `PropertyGuid` read.
 - **`PropertyGuid`**: fixed 16 bytes.
-- **`Type` extras** widths per Wire layout §*Type extras dispatch*: 0 bytes (most types), 1 byte (`BoolProperty`), 8 bytes (`ByteProperty`/`EnumProperty`/`ArrayProperty`/`SetProperty`), 16 bytes (`MapProperty`), 24 bytes (`StructProperty`).
+- **`Type` extras** widths per Wire layout §*Type extras dispatch*: 0 bytes (most types), 1 byte (`BoolProperty`), 8 bytes (`ByteProperty`/`EnumProperty`/`ArrayProperty`/`SetProperty`), 16 bytes (`MapProperty`), 24 bytes (`StructProperty`); `SetProperty` and `MapProperty` carry 0 below `FileVersionUE4` 509.
 
 ### Implementation hardening (recommended for any parser)
 
@@ -200,13 +204,10 @@ See `docs/security/allocation-caps.md` for the broader policy.
     (`DATA_RESOURCES`) — no oracle exists for 1011+ fixtures, so
     the 1012/1013 fixtures are paksmith-only with hand-verified
     bytes (same posture as the pak v1/v2 gap, #637).
-  - **Set/Map type extras are read below 509.** paksmith reads
-    `inner_type` (and a Map's `value_type`) on every `SetProperty`
-    and `MapProperty` tag, while CUE4Parse reads them only from
-    `PROPERTY_TAG_SET_MAP_SUPPORT` (509)[^4]. A Set or Map tag in a
-    UE 4.14 (508) package is therefore misread: the reader consumes
-    8 extra bytes (16 for a Map) and desyncs the rest of the tag and
-    its value.
+  - **`unreal_asset` reads Set/Map type extras below 509.** Its Set
+    and Map readers have no 509 gate, so it disagrees with paksmith and
+    CUE4Parse[^4] on a UE 4.14 (508) Set or Map tag, which no oracle
+    cross-validates.
   - **Parse-error → Opaque fallback.** If `read_properties` returns
     an error mid-iteration (malformed tag, unknown encoding, depth
     violation, cursor mismatch), the caller

@@ -1,8 +1,6 @@
 //! `FPropertyTag` wire reader.
 //!
-//! Phase 2b layout (UE 4.15–5.3, `FileVersionUE4 ≥ 509`; below 509
-//! `PROPERTY_TAG_SET_MAP_SUPPORT`, Set/Map tags carry no type extras, which
-//! this reader does not yet handle):
+//! Phase 2b layout (`FileVersionUE4 ≥ 504` through UE 5.3):
 //!
 //! ```text
 //! Name:            FName (i32 index, i32 number)
@@ -13,8 +11,9 @@
 //! [type extras]    (BoolProperty: u8 boolVal;
 //!                   StructProperty: FName struct_name + [u8; 16] struct_guid;
 //!                   ByteProperty|EnumProperty: FName enum_name;
-//!                   ArrayProperty|SetProperty: FName inner_type;
-//!                   MapProperty: FName inner_type + FName value_type)
+//!                   ArrayProperty: FName inner_type;
+//!                   SetProperty (≥ 509): FName inner_type;
+//!                   MapProperty (≥ 509): FName inner_type + FName value_type)
 //! HasPropertyGuid: u8
 //! [PropertyGuid]:  [u8; 16] if HasPropertyGuid != 0
 //! ```
@@ -29,6 +28,7 @@ use std::sync::{Arc, LazyLock};
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::asset::AssetContext;
+use crate::asset::version::VER_UE4_PROPERTY_TAG_SET_MAP_SUPPORT;
 use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
 
 use super::{read_fname_pair, unexpected_eof};
@@ -56,7 +56,10 @@ pub const MAX_PROPERTY_TAG_SIZE: i32 = 16 * 1024 * 1024;
 /// All type-specific fields (`struct_name`, `enum_name`, etc.) are
 /// populated during tag reading regardless of whether the type is
 /// handled — Phase 2c's container readers rely on `inner_type`
-/// already being resolved.
+/// already being resolved. A legacy (pre-UE5-1012) Set/Map tag below
+/// `FileVersionUE4` 509 (`PROPERTY_TAG_SET_MAP_SUPPORT`) carries no type
+/// extras, so its `inner_type` and `value_type` stay empty and its value
+/// is skipped by size.
 ///
 /// String fields are `Arc<str>` rather than `String` (#365): the wire
 /// source is the `Arc<str>`-backed FName pool, so a refcount-bump
@@ -127,12 +130,13 @@ impl PropertyTag {
         &self.enum_name
     }
     /// Inner element type for `ArrayProperty` / `SetProperty` /
-    /// `MapProperty` key.
+    /// `MapProperty` key; empty for a legacy Set/Map tag below `FileVersionUE4` 509.
     #[must_use]
     pub fn inner_type(&self) -> &str {
         &self.inner_type
     }
-    /// Value type for `MapProperty`; empty otherwise.
+    /// Value type for `MapProperty` (empty for a legacy Map tag below
+    /// `FileVersionUE4` 509); empty otherwise.
     #[must_use]
     pub fn value_type(&self) -> &str {
         &self.value_type
@@ -433,6 +437,9 @@ pub fn read_tag<R: Read>(
     let mut enum_name: Arc<str> = Arc::clone(&EMPTY_ARC_STR);
     let mut inner_type: Arc<str> = Arc::clone(&EMPTY_ARC_STR);
     let mut value_type: Arc<str> = Arc::clone(&EMPTY_ARC_STR);
+    let set_map_extras = ctx
+        .version
+        .ue4_at_least(VER_UE4_PROPERTY_TAG_SET_MAP_SUPPORT);
 
     match type_name.as_ref() {
         "BoolProperty" => {
@@ -456,6 +463,9 @@ pub fn read_tag<R: Read>(
             enum_name =
                 read_fname_pair(reader, ctx, asset_path, AssetWireField::PropertyTagEnumName)?;
         }
+        // Set/Map extras begin at PROPERTY_TAG_SET_MAP_SUPPORT; without them
+        // the value names no element type and is skipped by Size.
+        "SetProperty" | "MapProperty" if !set_map_extras => {}
         "ArrayProperty" | "SetProperty" => {
             inner_type = read_fname_pair(
                 reader,
@@ -813,7 +823,7 @@ mod tests {
     use super::*;
     use crate::asset::property::test_utils::{
         assert_derived_budget_exceeded, make_ctx, make_ctx_with_version_and_names,
-        with_derived_budget, write_fname,
+        with_derived_budget, write_fname, write_tag_head,
     };
     use std::io::Cursor;
 
@@ -832,6 +842,70 @@ mod tests {
 
     fn ue5_1012_ctx(names: &[&str]) -> crate::asset::AssetContext {
         make_ctx_with_version_and_names(522, Some(1012), names)
+    }
+
+    const LEGACY_EXTRAS_NAMES: &[&str] = &[
+        "None",
+        "P",
+        "SetProperty",
+        "MapProperty",
+        "ArrayProperty",
+        "NameProperty",
+        "IntProperty",
+    ];
+
+    /// Legacy (pre-1012) tag through `ArrayIndex`: Name `P`, Type
+    /// `LEGACY_EXTRAS_NAMES[type_idx]`, Size 8, ArrayIndex 0 (24 bytes).
+    fn legacy_tag_head(type_idx: i32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        write_tag_head(&mut buf, 1, type_idx, 8);
+        buf
+    }
+
+    fn read_legacy_tag(ue4: i32, buf: &[u8]) -> (PropertyTag, u64) {
+        let ctx = make_ctx_with_version_and_names(ue4, None, LEGACY_EXTRAS_NAMES);
+        let mut cur = Cursor::new(buf);
+        let tag = read_tag(&mut cur, &ctx, "x.uasset").unwrap().unwrap();
+        (tag, cur.position())
+    }
+
+    /// Below `PROPERTY_TAG_SET_MAP_SUPPORT` (509) a Set/Map tag goes from
+    /// `ArrayIndex` straight to `HasPropertyGuid` (CUE4Parse
+    /// `FPropertyTagData.cs@77b94fa` L51-L61).
+    #[test]
+    fn set_and_map_tags_carry_no_type_extras_below_509() {
+        for ue4 in [504, 508] {
+            for type_idx in [2, 3] {
+                let mut buf = legacy_tag_head(type_idx);
+                buf.push(1); // HasPropertyGuid
+                buf.extend_from_slice(&[0x11; 16]);
+                let (tag, pos) = read_legacy_tag(ue4, &buf);
+                let label = format!("ue4 {ue4}, type {type_idx}");
+                assert_eq!((tag.inner_type(), tag.value_type()), ("", ""), "{label}");
+                assert_eq!(tag.guid, Some([0x11; 16]), "{label}");
+                assert_eq!(pos, 41, "{label}");
+            }
+        }
+    }
+
+    /// The boundary partner of the test above: Set/Map extras are read from
+    /// 509, and Array's (its own gate is 282) below it too.
+    #[test]
+    fn type_extras_read_from_their_gates() {
+        for (ue4, type_idx, extras, want) in [
+            (509, 2, &[5][..], ("NameProperty", "", 33)),
+            (509, 3, &[5, 6][..], ("NameProperty", "IntProperty", 41)),
+            (508, 4, &[6][..], ("IntProperty", "", 33)),
+        ] {
+            let mut buf = legacy_tag_head(type_idx);
+            for &name_idx in extras {
+                write_fname(&mut buf, name_idx, 0);
+            }
+            buf.push(0); // HasPropertyGuid
+            let (tag, pos) = read_legacy_tag(ue4, &buf);
+            let got = (tag.inner_type(), tag.value_type(), pos);
+            assert_eq!(got, want, "ue4 {ue4}, type {type_idx}");
+        }
     }
 
     /// Write one `(FName index, inner_count)` tree node. #643.
