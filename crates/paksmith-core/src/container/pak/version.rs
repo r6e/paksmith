@@ -116,7 +116,7 @@ pub enum PakVersion {
     NoTimestamps,
     /// Added compression and AES encryption support. UE 4.3-4.15. Wire version 3.
     CompressionEncryption,
-    /// Added index encryption. UE 4.16. Wire version 4.
+    /// Added index encryption. UE 4.16-4.19. Wire version 4.
     IndexEncryption,
     /// Switched compression block offsets to be relative to the entry.
     /// UE 4.20. Wire version 5.
