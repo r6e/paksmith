@@ -47,8 +47,7 @@ const _: () = assert!(
 );
 
 /// V8B / V10 / V11 footer size: v7 layout + 5 × 32-byte compression-method
-/// FName slots. UE 4.23-4.24 (V8B), 4.26 (V10), 4.27+ (V11) all share this
-/// layout; the version field (8 vs 10 vs 11) disambiguates which the file is.
+/// FName slots; the version field (8 vs 10 vs 11) disambiguates which the file is.
 ///
 /// `pub` (not `pub(super)`) because the integration test
 /// `tests/pak_integration.rs` reads it to locate the index_hash
@@ -108,20 +107,20 @@ pub(super) const COMPRESSION_SLOT_BYTES: usize = 32;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum PakVersion {
-    /// Initial pak format. UE 4.0. Wire version 1.
+    /// Initial pak format. No stock release. Wire version 1.
     Initial,
-    /// Removed per-entry timestamps. UE 4.3. Wire version 2.
+    /// Removed per-entry timestamps. UE 4.0-4.2. Wire version 2.
     NoTimestamps,
-    /// Added compression and AES encryption support. UE 4.4. Wire version 3.
+    /// Added compression and AES encryption support. UE 4.3-4.15. Wire version 3.
     CompressionEncryption,
     /// Added index encryption. UE 4.16. Wire version 4.
     IndexEncryption,
     /// Switched compression block offsets to be relative to the entry.
     /// UE 4.20. Wire version 5.
     RelativeChunkOffsets,
-    /// Added delete records (used during patching). UE 4.21. Wire version 6.
+    /// Added delete records (used during patching). No stock release. Wire version 6.
     DeleteRecords,
-    /// Added per-archive encryption key GUID to the footer. UE 4.22.
+    /// Added per-archive encryption key GUID to the footer. UE 4.21.
     /// Wire version 7.
     EncryptionKeyGuid,
     /// UE 4.22 V8A: FName compression table with **4** slots; per-entry
@@ -136,9 +135,9 @@ pub enum PakVersion {
     /// Added optional frozen index format. UE 4.25. Wire version 9.
     FrozenIndex,
     /// Replaced the flat index with a path-hash + encoded directory
-    /// index. UE 4.26. Wire version 10.
+    /// index. No stock release. Wire version 10.
     PathHashIndex,
-    /// Fixed an FNV-64 hashing bug in the path-hash index. UE 4.27.
+    /// Fixed an FNV-64 hashing bug in the path-hash index. UE 4.26-5.6.
     /// Wire version 11.
     Fnv64BugFix,
 }

@@ -46,7 +46,7 @@ that pins a specific wire-format edge case.
 
 This doc covers fixture generation for:
 
-- All 11 pak format versions (V1 through V11) — see
+- Pak format versions V3 through V11 — see
   [`crates/paksmith-core/src/container/pak/version.rs`][src-pak-version]
   for the in-tree mapping.
 - All paksmith-supported UE asset versions —
@@ -130,28 +130,28 @@ internal source of truth for both axes is:
 
 ### Pak version → UE engine version → key change
 
-Pulled from [`PakVersion`][src-pak-version] (definitive). See
-[CUE4Parse `EGame`][cue4parse-egame] for the parser-side mirror.
+Pulled from [`PakVersion`][src-pak-version] (definitive); release ranges
+follow [repak's compatibility table][repak] and [CUE4Parse][cue4parse].
 
 | Wire | `PakVersion` variant | UE version | Key change |
 |------|----------------------|------------|------------|
-| 1 | `Initial` | UE 4.0 | First pak format |
-| 2 | `NoTimestamps` | UE 4.3 | Per-entry timestamps removed |
-| 3 | `CompressionEncryption` | UE 4.4 | Compression + AES support |
+| 1 | `Initial` | — (no stock release) | First pak format |
+| 2 | `NoTimestamps` | UE 4.0–4.2 | Per-entry timestamps removed |
+| 3 | `CompressionEncryption` | UE 4.3–4.15 | Compression + AES support |
 | 4 | `IndexEncryption` | UE 4.16 | Index encryption |
 | 5 | `RelativeChunkOffsets` | UE 4.20 | Compression block offsets become entry-relative |
-| 6 | `DeleteRecords` | UE 4.21 | Delete records (patching) |
-| 7 | `EncryptionKeyGuid` | UE 4.22 | Encryption-key GUID in footer |
+| 6 | `DeleteRecords` | — (no stock release) | Delete records (patching) |
+| 7 | `EncryptionKeyGuid` | UE 4.21 | Encryption-key GUID in footer |
 | 8 | `V8A` | UE 4.22 (brief window) | 4-slot FName comp table, **u8** per-entry compression byte |
 | 8 | `V8B` | UE 4.23–4.24 | 5-slot FName comp table, **u32** per-entry compression byte |
 | 9 | `FrozenIndex` | UE 4.25 | Optional frozen-index format |
-| 10 | `PathHashIndex` | UE 4.26 | Path-hash + encoded directory index replaces flat index |
-| 11 | `Fnv64BugFix` | UE 4.27 → UE 5.x | FNV-64 hashing bug fix; current format |
+| 10 | `PathHashIndex` | — (no stock release) | Path-hash + encoded directory index replaces flat index |
+| 11 | `Fnv64BugFix` | UE 4.26 → UE 5.6 | FNV-64 hashing bug fix |
 
 V8A and V8B share the on-disk version byte (`8`); see the
 [`PakVersion` doc comment][src-pak-version] for how the footer's
-slot-count post-corrects the variant. UE 5.0 through UE 5.x continue
-emitting V11 pak files — Epic has not bumped the format since 4.27. [^v11-still-current]
+slot-count post-corrects the variant. UE 5.0 through UE 5.6 continue
+emitting V11 pak files; UE 5.7 writes V12 (`Utf8PakDirectory`). [^v11-range]
 
 ### UE engine version → `FileVersionUE4` / `FileVersionUE5`
 
@@ -165,6 +165,13 @@ existing UE4 axis.
 
 | UE version | `FileVersionUE4` | `FileVersionUE5` | `LegacyFileVersion` | Notable object-version constants introduced |
 |------------|------------------|------------------|---------------------|-------------------------------------|
+| UE 4.14 | 508 | — | -7 | `COMPRESSED_SHADER_RESOURCES` (506), `PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS` (507), `TemplateIndex_IN_COOKED_EXPORTS` (508); LegacyFileVersion drops to -7 |
+| UE 4.15 | 510 | — | -7 | `PROPERTY_TAG_SET_MAP_SUPPORT` (509), `ADDED_SEARCHABLE_NAMES` (510) |
+| UE 4.16 | 513 | — | -7 | `64BIT_EXPORTMAP_SERIALSIZES` (511), `SKYLIGHT_MOBILE_IRRADIANCE_MAP` (512), `ADDED_SWEEP_WHILE_WALKING_FLAG` (513) |
+| UE 4.17 | 513 | — | -7 | (no new gate vs 4.16) |
+| UE 4.18 | 514 | — | -7 | `ADDED_SOFT_OBJECT_PATH` (514) |
+| UE 4.19 | 516 | — | -7 | `POINTLIGHT_SOURCE_ORIENTATION` (515), `ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID` (516) |
+| UE 4.20 | 516 | — | -7 | (no new gate vs 4.19) |
 | UE 4.21 | 517 | — | -7 | `FIX_WIDE_STRING_CRC` (517) |
 | UE 4.22 | 517 | — | -7 | (no new gate vs 4.21) |
 | UE 4.23 | 517 | — | -7 | (no new gate vs 4.22) |
@@ -544,22 +551,22 @@ known-good reference parser.**
 
 | # | Phase | Fixture | UE ver | Tool | Command summary | Output | Source | Verify? |
 |--:|-------|---------|--------|------|-----------------|--------|--------|---------|
-| 1 | 1 | `real_v3_minimal.pak` | 4.4–4.15 | UnrealPak | `-Create=resp -compress=none` (V3) | `*.pak` | already in tree (repak) | no |
-| 2 | 1 | `real_v6_minimal.pak` | 4.21 | UnrealPak | `-Create=resp` (V6) | `*.pak` | already in tree (repak) | no |
-| 3 | 1 | `real_v7_minimal.pak` | 4.22 | UnrealPak | `-Create=resp` (V7) | `*.pak` | already in tree (repak) | no |
+| 1 | 1 | `real_v3_minimal.pak` | 4.3–4.15 | UnrealPak | `-Create=resp -compress=none` (V3) | `*.pak` | already in tree (repak) | no |
+| 2 | 1 | `real_v6_minimal.pak` | — | repak | `Version::V6` | `*.pak` | already in tree (repak) | no |
+| 3 | 1 | `real_v7_minimal.pak` | 4.21 | UnrealPak | `-Create=resp` (V7) | `*.pak` | already in tree (repak) | no |
 | 4 | 1 | `real_v8a_minimal.pak` | 4.22 (window) | UnrealPak | `-Create=resp` (V8A, 4-slot table) | `*.pak` | already in tree (repak) | no |
 | 5 | 1 | `real_v8b_minimal.pak` | 4.23–4.24 | UnrealPak | `-Create=resp` (V8B, 5-slot table) | `*.pak` | already in tree (repak) | no |
 | 6 | 1 | `real_v9_minimal.pak` | 4.25 | UnrealPak | `-Create=resp` (V9) | `*.pak` | already in tree (repak) | no |
-| 7 | 1 | `real_v10_minimal.pak` | 4.26 | UnrealPak | `-Create=resp` (V10, path-hash index) | `*.pak` | already in tree (repak) | no |
-| 8 | 1 | `real_v11_minimal.pak` | 4.27+ | UnrealPak | `-Create=resp` (V11) | `*.pak` | already in tree (repak) | no |
+| 7 | 1 | `real_v10_minimal.pak` | — | repak | `Version::V10` (path-hash index) | `*.pak` | already in tree (repak) | no |
+| 8 | 1 | `real_v11_minimal.pak` | 4.26–5.6 | UnrealPak | `-Create=resp` (V11) | `*.pak` | already in tree (repak) | no |
 | 9 | 1 | `cooked_v11_zlib.pak` | 4.27 | UE cook + UnrealPak | `RunUAT BuildCookRun -pak -compressed` with `PakFileCompressionFormats=Zlib` | `*.pak` | needs cook | UE install |
-| 10 | 1 | `cooked_v11_oodle.pak` | 4.27+ | UE cook + UnrealPak | `RunUAT BuildCookRun -pak -compressed` with `PakFileCompressionFormats=Oodle,Zlib` | `*.pak` | needs cook | UE install |
-| 11 | 1 | `cooked_v11_encrypted_index.pak` | 4.27+ | UnrealPak | `-Create=resp -encryptindex -cryptokeys=Crypto.json` | `*.pak` | needs cook | UE install |
-| 12 | 1 | `cooked_v11_encrypted_entries.pak` | 4.27+ | UnrealPak | `-Create=resp -encrypt -cryptokeys=Crypto.json` | `*.pak` | needs cook | UE install |
-| 13 | 2a | `minimal_ue4_504.uasset` | 4.22 | UE cook | `-targetplatform=LinuxNoEditor` | `*.uasset`/`.uexp` | synthetic in tree; cook needed for ground-truth | UE install |
-| 14 | 2a | `minimal_ue4_507.uasset` | 4.23 | UE cook | `-targetplatform=LinuxNoEditor` | `*.uasset`/`.uexp` | synthetic in tree | UE install |
-| 15 | 2a | `minimal_ue4_510.uasset` | 4.25 | UE cook | `-targetplatform=LinuxNoEditor` | `*.uasset`/`.uexp` | synthetic in tree | UE install |
-| 16 | 2a | `minimal_ue4_516.uasset` | 4.26 | UE cook | `-targetplatform=LinuxNoEditor` | `*.uasset`/`.uexp` | synthetic in tree | UE install |
+| 10 | 1 | `cooked_v11_oodle.pak` | 4.27–5.6 | UE cook + UnrealPak | `RunUAT BuildCookRun -pak -compressed` with `PakFileCompressionFormats=Oodle,Zlib` | `*.pak` | needs cook | UE install |
+| 11 | 1 | `cooked_v11_encrypted_index.pak` | 4.27–5.6 | UnrealPak | `-Create=resp -encryptindex -cryptokeys=Crypto.json` | `*.pak` | needs cook | UE install |
+| 12 | 1 | `cooked_v11_encrypted_entries.pak` | 4.27–5.6 | UnrealPak | `-Create=resp -encrypt -cryptokeys=Crypto.json` | `*.pak` | needs cook | UE install |
+| 13 | 2a | `minimal_ue4_504.uasset` | 4.12 | — | — | `*.uasset` | synthetic in tree (`build_minimal_ue4_504`) | no |
+| 14 | 2a | `minimal_ue4_507.uasset` | — | — | — | `*.uasset` | synthetic in tree (`build_minimal_ue4_507`) | no |
+| 15 | 2a | `minimal_ue4_510.uasset` | 4.15 | UE cook | `-targetplatform=LinuxNoEditor` | `*.uasset` (+ `.uexp` if split) | synthetic in tree | UE install |
+| 16 | 2a | `minimal_ue4_516.uasset` | 4.19 / 4.20 | UE cook | `-targetplatform=LinuxNoEditor` | `*.uasset`/`.uexp` | synthetic in tree | UE install |
 | 17 | 2a | `minimal_ue4_522.uasset` | 4.27 | UE cook | `-targetplatform=LinuxNoEditor` | `*.uasset`/`.uexp` | synthetic in tree (canonical reference) | no |
 | 18 | 2a | `minimal_ue5_1009.uasset` | 5.2 / 5.3 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | synthetic in tree | UE install |
 | 19 | 2a | `minimal_ue5_1012.uasset` | 5.4 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | needs cook — paksmith support landed (#643); synthetic 1012/1013 builders exist (`build_minimal_ue5_1012/1013`), real-cook fixture still valuable | UE install |
@@ -583,7 +590,7 @@ known-good reference parser.**
 | 34 | 3 | `dt_simple.uasset` | 4.27 | UE cook | author DataTable w/ 1 row, cook | `*.uasset`/`.uexp` | needs cook | UE install |
 | 35 | 5 | `profile_demo_v11.pak` | 4.27 | UnrealPak | `-Create -encryptindex -cryptokeys=demo.json` | `*.pak` | needs cook (paired with Phase 5 demo profile) | UE install |
 | 36 | 6/7 | (reuses Phase 1 + Phase 3 fixtures) | — | — | — | — | — | — |
-| 37 | 8 | `cooked_v11_iostore.{utoc,ucas}` | 4.27+ | `UnrealEditor-Cmd … -run=IoStore` or `RunUAT … -iostore` | see [IoStore](#iostore-utoc--ucas--uptnl) | `*.utoc`/`*.ucas`/`*.uptnl`/`global.utoc`/`global.ucas` | needs cook | UE install |
+| 37 | 8 | `cooked_v11_iostore.{utoc,ucas}` | 4.27–5.6 | `UnrealEditor-Cmd … -run=IoStore` or `RunUAT … -iostore` | see [IoStore](#iostore-utoc--ucas--uptnl) | `*.utoc`/`*.ucas`/`*.uptnl`/`global.utoc`/`global.ucas` | needs cook | UE install |
 | 38 | 8 | `cooked_ue5_iostore_oodle.{utoc,ucas}` | 5.0+ (any UE5) | `RunUAT … -iostore -compressed` | `*.utoc`/`*.ucas` | needs cook | UE install + Oodle |
 | 39 | 8 | `cooked_ue5_iostore_encrypted.{utoc,ucas}` | 5.0+ (any UE5) | `RunUAT … -iostore -encryptini -signpak=…` | `*.utoc`/`*.ucas` | needs cook | UE install |
 | 40 | 9 | (reuses Phase 3 mesh + texture fixtures) | — | — | viewport reads Phase 3 outputs | — | reuses rows 30–33 | — |
@@ -617,7 +624,7 @@ separate UE-cook row.) These repak fixtures give wire-version coverage but
 **lack real cooked-UE provenance**.
 
 The four `cooked_v11_*` rows (9–12) are the UE-cooked complement:
-they exercise V11 (the only pak version any current UE ships) with
+they exercise V11 (the pak version UE 4.26–5.6 writes) with
 the four compression × encryption permutations.
 
 **Recipe for row 9 (cooked V11, zlib):**
@@ -677,8 +684,11 @@ To produce the UE-cooked complement of row 17 (UE 4.27 canonical):
    `Saved/Cooked/LinuxNoEditor/PaksmithFixtures/Content/...`.
 6. Copy the pair into `tests/fixtures/` and verify against paksmith.
 
-Earlier UE versions (rows 13–16) follow the same flow with the
-matching `EngineAssociation`. UE5 rows use the matching UE 5.x
+Rows 15–16 follow the same flow with `EngineAssociation` 4.15 and 4.19
+(or 4.20); for row 15, copy a `.uexp` only if the cook wrote one.
+Rows 13–14 have no paksmith-readable stock cook: UE 4.12 writes
+LegacyFileVersion -6, which paksmith refuses, and no release writes
+507. UE5 rows use the matching UE 5.x
 release + `-targetplatform=Linux`: row 18 uses UE 5.2 or 5.3 (both
 emit `FileVersionUE5 = 1009`); rows 19/19b/19c/19d use UE 5.4
 (1012), 5.5 (1013), 5.6 (1017), and 5.7/5.8 (1018) respectively.
@@ -1342,7 +1352,7 @@ External references:
 14. [UE 4.25 Unversioned Property Serialization deck (EpicGamesJapan)](https://www.slideshare.net/EpicGamesJapan/new-loadingsystem-unversionedpropertyserializationv2) — unversioned property serialization design.
 15. [trumank/repak (Rust)](https://github.com/trumank/repak) — pak reader/writer; version support table.
 16. [trumank/retoc (Rust)](https://github.com/trumank/retoc) — IoStore CLI; supports UE 5.3+.
-17. [FabianFG/CUE4Parse (C#)](https://github.com/FabianFG/CUE4Parse) — reference parser; `EGame` enum spans UE4.0–UE5.8.
+17. [FabianFG/CUE4Parse (C#)](https://github.com/FabianFG/CUE4Parse) — reference parser.
 18. [4sval/FModel discussion: unversioned mappings missing](https://github.com/4sval/FModel/discussions/418) — mapping-file requirements for UE5.
 19. [UE4SS dumpers documentation](https://docs.ue4ss.com/feature-overview/dumpers.html) — `.usmap` generation via UE4SS.
 20. [UnrealMappingsDumper / Dumper-7 (TheNaeem)](https://github.com/TheNaeem/UnrealMappingsDumper) — external `.usmap` dumper for UE5.
@@ -1397,4 +1407,4 @@ External references:
 
 [^oodle-licensing]: Per Epic's [Oodle integration blog post][epic-oodle-blog] (2021-04-01), Oodle is "free to use in Unreal Engine" — but the SDK redistribution outside an Epic-licensed pipeline is still governed by RAD/Epic's licensing terms. Treat the shared library as user-supplied.
 
-[^v11-still-current]: Verified by [repak's version-support table][repak] ("Version 11: UE 4.26–5.3+"). Epic has not bumped the pak wire-format version since UE 4.27; UE5's wire-format evolution lives entirely in the `FileVersionUE5` axis instead.
+[^v11-range]: [repak's compatibility table][repak] maps V11 to UE 4.26–5.3 and calls later releases "likely supported but untested". [CUE4Parse][cue4parse]'s `PakFileReader.cs` (@77b94fa L59) treats pak versions above 11 as unsupported before UE 5.7; commit a06d37d8 moved that cutoff from UE 5.8 to UE 5.7 while V12 (`Utf8PakDirectory`) was its newest version.
