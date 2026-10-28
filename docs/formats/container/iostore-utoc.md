@@ -5,7 +5,7 @@
 
 ## Overview
 
-IoStore is Unreal Engine's replacement for `.pak`, introduced in UE 4.27
+IoStore is Unreal Engine's replacement for `.pak`, introduced in UE 4.25[^2]
 and the dominant shipped-game container format from UE 5.x onward. A single
 IoStore container comprises two coupled files (always at the same path
 prefix):
@@ -43,15 +43,15 @@ Known versions (per `FIoStoreTocHeader.cs`[^1]):
 | Value | `EIoStoreTocVersion` name | Wire-format change |
 |-------|---------------------------|---------------------|
 | 0 | `Invalid` | Sentinel — never on disk. |
-| 1 | `Initial` | First shipping format (UE 4.27). Header + chunk-IDs + offset+length + compression-blocks + compression-methods + (optional) signature. |
+| 1 | `Initial` | First format (retoc maps no release to it[^2]). Header + chunk-IDs + offset+length + compression-blocks + compression-methods + (optional) signature. |
 | 2 | `DirectoryIndex` | Adds an optional directory-index buffer (when `EIoContainerFlags::Indexed` is set). |
 | 3 | `PartitionSize` | Adds `PartitionCount: u32` and `PartitionSize: u64` to the header. Pre-`PartitionSize` readers MUST default `PartitionCount = 1` and `PartitionSize = u64::MAX`. |
 | 4 | `PerfectHash` | Adds a `ChunkPerfectHashSeeds: i32[TocChunkPerfectHashSeedsCount]` array between offset+length and compression-blocks. |
 | 5 | `PerfectHashWithOverflow` | Adds a `ChunkIndicesWithoutPerfectHash: i32[TocChunksWithoutPerfectHashCount]` overflow array immediately after the perfect-hash seeds. |
 | 6 | `OnDemandMetaData` | Adds (when `EIoContainerFlags::OnDemand` is set, ONLY at this exact version) two trailing FSHAHash arrays: per-chunk and per-compressed-block on-demand metadata. |
 | 7 | `RemovedOnDemandMetaData` | Removes the v6 on-demand trailers; header schema unchanged otherwise. |
-| 8 | `ReplaceIoChunkHashWithIoHash` (current Latest) | `FIoStoreTocEntryMeta.ChunkHash` switches from `FIoChunkHash` (32 bytes) to `FSHAHash` (20 bytes); a 3-byte pad follows the flags byte to preserve the per-meta record alignment. |
-| 9 | `LatestPlusOne` | Sentinel — never on disk. |
+| 8 | `ReplaceIoChunkHashWithIoHash` | `FIoStoreTocEntryMeta.ChunkHash` switches from `FIoChunkHash` (32 bytes) to `FSHAHash` (20 bytes); a 3-byte pad follows the flags byte to preserve the per-meta record alignment. |
+| 9 | `LatestPlusOne` | Sentinel at the pinned SHA[^1]. Newer CUE4Parse[^3] gives 9 to `AddedSourceHashes` and 10 to `ContainerEncryptionMethod` and moves `LatestPlusOne` to 11; retoc maps no release to either[^2]. |
 
 A reader MUST reject `Version == 0` or `Version >= LatestPlusOne`
 as wire-format-invalid; intermediate values are forward-readable
@@ -70,7 +70,7 @@ big-endian — see below).
 | offset | size | endian | name | type | semantics |
 |--------|------|--------|------|------|-----------|
 | 0 | 16 | — | `TocMagic` | `[u8; 16]` | MUST equal `2D 3D 3D 2D 2D 3D 3D 2D 2D 3D 3D 2D 2D 3D 3D 2D` (ASCII `-==--==--==--==-`). |
-| 16 | 1 | — | `Version` | `u8` | `EIoStoreTocVersion` discriminant (1-8 valid per §*Versions*). |
+| 16 | 1 | — | `Version` | `u8` | `EIoStoreTocVersion` discriminant (1-8 valid at the pinned SHA[^1], per §*Versions*). |
 | 17 | 1 | — | `_reserved0` | `u8` | Padding; readers ignore. |
 | 18 | 2 | LE | `_reserved1` | `u16` | Padding; readers ignore. |
 | 20 | 4 | LE | `TocHeaderSize` | `u32` | Self-check field. Currently `144`; a reader MUST reject mismatches. |
@@ -340,8 +340,10 @@ discriminant.
 ### Format-defined limits (wire-imposed)
 
 - **`TocMagic`**: fixed 16 bytes; any deviation is wire-invalid.
-- **`Version`**: `u8` discriminant; valid range `1..=8` currently
-  (see §*Versions* table). `0` and `>=9` are wire-invalid.
+- **`Version`**: `u8` discriminant; valid range `1..=8` at the pinned
+  SHA[^1] (see §*Versions* table), where `0` and `>= 9` are
+  wire-invalid. Newer revisions define 9 and 10, whose layout this doc
+  does not describe.
 - **`TocHeaderSize`**: must equal `144` (fixed by the header schema).
 - **`TocCompressedBlockEntrySize`**: must equal `12` (matches the
   packed `FIoStoreTocCompressedBlockEntry` layout).
@@ -437,9 +439,9 @@ the planned Phase 8 caps will follow.
   `FIoStoreTocHeader`, `FIoChunkId`, `FIoOffsetAndLength`,
   `FIoStoreTocCompressedBlockEntry`, and `FIoStoreTocEntryMeta`[^1]
   — the full layout cited row-by-row in §*Wire layout* above.
-  `trumank/repak` has no IoStore coverage; CUE4Parse is the
-  sole external Rust-adjacent oracle (the project is C# but its
-  byte layouts are wire-faithful).
+  `trumank/repak` has no IoStore coverage; CUE4Parse (C#, with
+  wire-faithful byte layouts) is the wire-layout oracle, and retoc[^2]
+  is cited for its release-to-TOC-version mapping.
 - **Known divergences:** none — no paksmith implementation to
   diverge.
 
@@ -458,3 +460,5 @@ for the implementation work.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@ecc4878950336126f125af0747190edf474b2a21` (header + `EIoStoreTocVersion` + `EIoContainerFlags`), `FIoChunkId.cs` (chunk-ID + `EIoChunkType` / `EIoChunkType5`), `FIoOffsetAndLength.cs` (BE 40-bit pair), `FIoStoreTocCompressedBlockEntry.cs` (packed 12-byte entry), `FIoStoreTocResource.cs` (top-level read order + section gating), `FIoStoreTocEntryMeta.cs` (per-chunk metadata variant under TOC v8), all at the same pinned SHA. `IoStoreReader.cs` covers the end-to-end open flow.
+[^2]: `trumank/retoc/retoc/src/version.rs@885a8dae740cb1ce1e41ff2e74f67f9f0c118237` L10-L22 and L25-L40 — `EngineVersion` starts at `UE4_25`, and `toc_version` maps UE 4.25 and 4.26 to `DirectoryIndex` (v2), UE 4.27 to `PartitionSize` (v3) and UE 5.5-5.7 to `ReplaceIoChunkHashWithIoHash` (v8), the newest version it maps. retoc's `README.md` at the same revision (L40) says overrides may be required for some games, usually pre-5.0 ones, where the IoStore version was not well defined.
+[^3]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L8-L24 — `AddedSourceHashes` (9) and `ContainerEncryptionMethod` (10) follow `ReplaceIoChunkHashWithIoHash`, and `LatestPlusOne` is 11. `FIoStoreTocResource.cs` L76-L80 at the same revision gates the container encryption method on v10.

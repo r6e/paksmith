@@ -213,7 +213,7 @@ always uncompressed:
 | field | size | type | semantics |
 |-------|------|------|-----------|
 | magic | 2 | `u16` LE | Must equal `0x30C4` (on-disk bytes `C4 30`). |
-| version | 1 | `u8` | `EUsmapVersion` discriminant (0–4; see Versions table). |
+| version | 1 | `u8` | `EUsmapVersion` discriminant (0–4 at the pinned SHA[^1]; see Versions table). |
 | [versioning block] | variable | — | Present iff `version ≥ 1`. Starts with `has_versioning`, an `FArchive` bool: an `i32` LE that must be 0 or 1. If it is 1: `object_version i32`, `object_version_ue5 i32`, `custom_version_count i32`, `custom_version_count × 20` bytes (GUID + i32), `net_cl u32`. |
 | compression | 1 | `u8` | `0` = None, `1` = Oodle (unsupported), `2` = Brotli, `3` = ZStandard. |
 | compressed_size | 4 | `u32` LE | Byte count of the compressed payload. Capped at `MAX_USMAP_COMPRESSED_SIZE = 64 MiB`. |
@@ -245,8 +245,11 @@ format itself has no version discriminant.
   `value_num` is 7 bits (max 127). Per-fragment a maximum of
   127 + 127 = 254 schema slots are touched.
 - **`.usmap` discriminant** (`EUsmapVersion`): wire-imposed range
-  `0..=4` (5 variants documented). Future versions extend this; a
-  reader gates compatibility on the value.
+  `0..=4` at the pinned SHA[^1] (5 variants documented); newer
+  CUE4Parse[^3] adds 5 (`EngineVersioning`), which starts the
+  versioning block with an `FEngineVersion` this doc does not
+  describe. Future versions extend this; a reader gates
+  compatibility on the value.
 - **`.usmap` compression byte**: `0..=3` (None / Oodle / Brotli /
   ZStandard). Other values are wire-imposed-invalid.
 
@@ -359,3 +362,4 @@ tests can read the live value without duplicating the literal.
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapParser.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the `.usmap` wire format and `EUsmapVersion` discriminants. `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/Unversioned/FUnversionedHeader.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the fragment-header bitstream.
 [^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/unversioned/header.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle; bit-mask constants cross-referenced against `UnversionedHeaderFragment`. The `EPropertyType` discriminant table is pinned at the same SHA.
+[^3]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/EUsmapVersion.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L20-L24 — `EngineVersioning` (5) follows `ExplicitEnumValues` and is `Latest`; `UsmapParser.cs` at the same revision rejects only versions above `Latest` (L37-L39) and, from v5, reads an `FEngineVersion` at the head of the versioning block (L46-L49).

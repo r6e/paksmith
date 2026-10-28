@@ -33,7 +33,7 @@ the `.utoc` and walking the compression-block table.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| UE 4.27+ | No on-stream version field — `.ucas` is unstructured bytes. All version-conditional shape lives in `.utoc`. | `CUE4Parse/UE4/IO/IoStoreReader.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
+| UE 4.25+[^2] | No on-stream version field — `.ucas` is unstructured bytes. All version-conditional shape lives in `.utoc`. | `CUE4Parse/UE4/IO/IoStoreReader.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
 
 ## Wire layout
 
@@ -215,3 +215,4 @@ the planned Phase 8 caps will follow.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/IoStoreReader.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle. The `.ucas` reading happens inline with `.utoc` chunk lookup in this file's `ReadAsync`.
+[^2]: `trumank/retoc/retoc/src/version.rs@885a8dae740cb1ce1e41ff2e74f67f9f0c118237` L10-L22 — `EngineVersion` starts at `UE4_25`, and `toc_version` (L25-L40) maps UE 4.25 and 4.26 to TOC v2 (`DirectoryIndex`).
