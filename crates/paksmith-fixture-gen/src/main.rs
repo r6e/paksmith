@@ -711,6 +711,16 @@ fn main() {
             std::fs::metadata(&external_v4_path).map_or(0, |m| m.len())
         );
     }
+    let external_v5_path = out_dir.join("external_minimal_v5.usmap");
+    if let Err(e) = external_usmap::write_external_minimal_v5_usmap(&external_v5_path) {
+        failures.push(("external_minimal_v5.usmap", e.to_string().into()));
+    } else {
+        println!(
+            "  {} ({} bytes)",
+            external_v5_path.display(),
+            std::fs::metadata(&external_v5_path).map_or(0, |m| m.len())
+        );
+    }
 
     // Phase 2f cross-validation against `unreal_asset` was removed:
     // the oracle shares paksmith's pre-fix usmap bugs (byte-inverted

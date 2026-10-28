@@ -303,6 +303,22 @@ fn anchor_external_minimal_v4_usmap_fixture_bytes() {
 }
 
 #[test]
+fn anchor_external_minimal_v5_usmap_fixture_bytes() {
+    // Issue #376: externally-produced `.usmap` fixture at version 5
+    // (`EngineVersioning`), with `has_versioning` = 1. Exercises the
+    // FEngineVersion block (u16 major/minor/patch, u32 changelist, ANSI
+    // branch FString) before the object versions, a one-entry
+    // custom-version array and a non-zero NetCL, over the v4 payload.
+    //
+    // To regenerate: `cargo run -p paksmith-fixture-gen`, then
+    // `shasum tests/fixtures/external_minimal_v5.usmap` and paste below.
+    anchor_fixture_sha1(
+        "external_minimal_v5.usmap",
+        "1e35abd5df5cdd92fb9239e4c77463b72d469c7a",
+    );
+}
+
+#[test]
 fn anchor_real_v8b_split_fixture_bytes() {
     // Phase 2e split-asset integration (`read_from_pak_split_asset_round_trip`
     // in `asset_integration.rs`) depends on the exact bytes of this
