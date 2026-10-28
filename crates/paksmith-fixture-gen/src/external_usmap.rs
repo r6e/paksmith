@@ -162,9 +162,9 @@ pub fn write_external_minimal_v4_usmap(path: &Path) -> io::Result<()> {
     push_i32_le(&mut payload, 2); // name_idx = "Health"
     payload.push(EPROP_INT32);
     // Prop 1: Color EnumProperty(EColor) — wire shape per CUE4Parse
-    // `UsmapProperties.ParseProperty` enum arm: type byte, then inner
-    // property byte (always ByteProperty in practice), then enum-name
-    // index.
+    // `UsmapProperties.ParsePropertyType` enum arm: type byte, then the
+    // underlying property's type tree (a bare ByteProperty here), then
+    // enum-name index.
     push_u16_le(&mut payload, 1); // schema_index
     payload.push(1); // array_size
     push_i32_le(&mut payload, 3); // name_idx = "Color"

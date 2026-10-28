@@ -18,7 +18,7 @@
 //!   `asset::mappings`'s in-source tests.
 //! - [`build_hero_usmap_with_enum_speed`] — `Speed: EnumProperty`
 //!   with an enum table. Structurally distinct from the parameterized
-//!   form (byte 26 needs an inner type byte + enum-name index in the
+//!   form (byte 26 needs an underlying type tree + enum-name index in the
 //!   schema entry + a non-empty enum-table entry).
 //! - [`build_hero_usmap_with_struct_speed`] — `Speed:
 //!   StructProperty(struct_name)` with NO matching `struct_name`
@@ -31,6 +31,9 @@
 //!   `serial_count` (the slice length). Used to exercise non-zero,
 //!   non-contiguous, and out-of-order `schema_index` values that the
 //!   Hero fixture's hard-coded indices `[0, 1]` cannot reach.
+//! - [`build_hero_usmap_with_leading_gear`] — a `Gear` row of any
+//!   type tree ahead of `Health` and `Speed`, so a reader that
+//!   consumes the wrong number of bytes for the tree misreads them.
 //!
 //! ### `.uasset` byte builder
 //!
@@ -61,11 +64,11 @@ pub fn build_minimal_usmap_bytes() -> Vec<u8> {
 /// - `3u8` (FloatProperty) — the canonical happy path; see
 ///   [`build_minimal_usmap_bytes`].
 /// - `27u8` (FieldPathProperty, unsupported leaf) — exercises the
-///   partial-tree-stop contract. (Byte 24/25 are Map/Set, decoded as
-///   of #639, and are NOT single-byte leaves — they read inner types.)
+///   partial-tree-stop contract. (Bytes 24/25/26/28 — Map, Set, Enum,
+///   Optional — are NOT single-byte leaves: they read inner types.)
 ///
-/// For EnumProperty (which needs an enum table entry + inner type
-/// byte), see [`build_hero_usmap_with_enum_speed`] — the wire shape
+/// For EnumProperty (which needs an enum table entry + underlying
+/// type tree), see [`build_hero_usmap_with_enum_speed`] — the wire shape
 /// is structurally different.
 #[must_use]
 pub fn build_hero_usmap_bytes(speed_type_byte: u8) -> Vec<u8> {
@@ -113,7 +116,7 @@ pub fn build_hero_usmap_bytes(speed_type_byte: u8) -> Vec<u8> {
 ///
 /// Used to exercise the unversioned `MT::Enum` decode arm (which the
 /// parameterized [`build_hero_usmap_bytes`] cannot cover: byte 26
-/// requires an inner type byte + enum-name index in the schema
+/// requires an underlying type tree + enum-name index in the schema
 /// entry, plus a non-empty enum table entry to resolve the ordinal).
 ///
 /// # Panics
@@ -184,7 +187,7 @@ pub fn build_hero_usmap_with_enum_speed(enum_name: &str, enum_values: &[&str]) -
     data.push(1u8);
     data.extend_from_slice(&3i32.to_le_bytes()); // "Speed"
     data.push(26u8); // EnumProperty
-    data.push(0u8); // inner type byte = ByteProperty (always in practice)
+    data.push(0u8); // underlying type tree = ByteProperty, a bare tag
     data.extend_from_slice(&4i32.to_le_bytes()); // enum_name idx = 4
 
     wrap_usmap_header(&data)
@@ -340,6 +343,43 @@ pub fn build_sparse_schema_usmap_bytes(
     wrap_usmap_header(&data)
 }
 
+/// `.usmap` bytes for class `Hero` with `Gear: <gear_type>` at schema_index 0,
+/// then `Health: IntProperty` (1) and `Speed: FloatProperty` (2). `gear_type`
+/// is a whole type tree, so a reader that consumes a different number of bytes
+/// for it misreads the rows behind it. Names: 0 "Hero", 1 "None", 2 "Gear",
+/// 3 "Health", 4 "Speed", 5 "EGear" — a tree may name 0 as a struct and 5 as
+/// an enum. Version `Initial`, compression `None`, empty enum table.
+///
+/// # Panics
+///
+/// When `gear_type` takes the data block past `u32::MAX` bytes.
+#[must_use]
+pub fn build_hero_usmap_with_leading_gear(gear_type: &[u8]) -> Vec<u8> {
+    let mut data: Vec<u8> = Vec::new();
+    data.extend_from_slice(&6u32.to_le_bytes());
+    for name in ["Hero", "None", "Gear", "Health", "Speed", "EGear"] {
+        data.push(u8::try_from(name.len()).expect("name within a u8 length"));
+        data.extend_from_slice(name.as_bytes());
+    }
+    data.extend_from_slice(&0u32.to_le_bytes()); // enum table: empty
+    data.extend_from_slice(&1u32.to_le_bytes()); // schema table: one class
+    data.extend_from_slice(&0i32.to_le_bytes()); // name = "Hero"
+    data.extend_from_slice(&1i32.to_le_bytes()); // super = "None"
+    data.extend_from_slice(&3u16.to_le_bytes()); // prop_count
+    data.extend_from_slice(&3u16.to_le_bytes()); // serial_count
+    for (schema_index, name_idx, type_tree) in [
+        (0u16, 2i32, gear_type),
+        (1, 3, &[2u8][..]),
+        (2, 4, &[3u8][..]),
+    ] {
+        data.extend_from_slice(&schema_index.to_le_bytes());
+        data.push(1u8); // array_size
+        data.extend_from_slice(&name_idx.to_le_bytes());
+        data.extend_from_slice(type_tree);
+    }
+    wrap_usmap_header(&data)
+}
+
 /// Wrap a `.usmap` data block in the magic + version + compression +
 /// size header (`Initial` version, `None` compression). Shared by
 /// the public byte builders.
@@ -438,6 +478,35 @@ mod tests {
             "asset bytes don't end with MINIMAL_UNVERSIONED_PAYLOAD_HEX; \
              builder may be padding/truncating the payload (bytes.len() = {})",
             bytes.len()
+        );
+    }
+
+    /// The builder's every field, for an `Optional<Int>` Gear, against bytes
+    /// assembled by hand from CUE4Parse's `UsmapParser` header and
+    /// `UsmapProperties` schema reads.
+    #[test]
+    fn hero_usmap_with_leading_gear_matches_hex_pin() {
+        assert_eq!(
+            build_hero_usmap_with_leading_gear(&[28, 2]),
+            [
+                0xC4, 0x30, 0x00, 0x00, // magic, Initial, uncompressed
+                0x53, 0x00, 0x00, 0x00, 0x53, 0x00, 0x00, 0x00, // 83-byte block
+                0x06, 0x00, 0x00, 0x00, // 6 names
+                0x04, 0x48, 0x65, 0x72, 0x6F, // "Hero"
+                0x04, 0x4E, 0x6F, 0x6E, 0x65, // "None"
+                0x04, 0x47, 0x65, 0x61, 0x72, // "Gear"
+                0x06, 0x48, 0x65, 0x61, 0x6C, 0x74, 0x68, // "Health"
+                0x05, 0x53, 0x70, 0x65, 0x65, 0x64, // "Speed"
+                0x05, 0x45, 0x47, 0x65, 0x61, 0x72, // "EGear"
+                0x00, 0x00, 0x00, 0x00, // no enums
+                0x01, 0x00, 0x00, 0x00, // one schema
+                0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // Hero : None
+                0x03, 0x00, 0x03, 0x00, // 3 props, 3 serialized
+                0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, // Gear @0
+                0x1C, 0x02, // Optional<Int>
+                0x01, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x02, // Health @1: Int
+                0x02, 0x00, 0x01, 0x04, 0x00, 0x00, 0x00, 0x03, // Speed @2: Float
+            ]
         );
     }
 

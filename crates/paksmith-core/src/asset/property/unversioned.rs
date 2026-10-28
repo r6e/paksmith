@@ -642,9 +642,11 @@ fn read_unversioned_value(
             PropertyValue::Text(text)
         }
         MT::Enum { enum_name } => {
-            // Per CUE4Parse's EnumProperty constructor (`HasUnversionedProperties
-            // && type == NORMAL`): a single u8 ordinal — the default ByteProperty
-            // storage. Non-byte underlying types are rare and deferred.
+            // A single u8 ordinal: the ByteProperty storage nearly every enum
+            // uses. CUE4Parse@77b94fa reads the value as the underlying type
+            // from the mappings (`EnumProperty.cs` L27-L32), so an enum with a
+            // wider underlying type is misread here, and so is every slot
+            // after it.
             let idx = cur.read_u8().map_err(|_| value_eof())?;
             // A name the `.usmap` has is shared; an ordinal it has no name
             // for keeps the enum's name by refcount rather than formatting a
@@ -1784,6 +1786,54 @@ mod tests {
         let props = read_unversioned_properties(&mut cur, "C", &usmap, &ctx, "t", 0)
             .expect("partial-tree stop returns Ok");
         assert!(props.is_empty(), "unknown struct must partial-tree-stop");
+    }
+
+    /// An Optional slot from a parsed `.usmap` (`Gear: Optional<Int>` ahead of
+    /// `Health` and `Speed`): left out of the export, the slots behind it
+    /// decode; serialized, the walk stops at it on its own type byte.
+    #[cfg(feature = "__test_utils")]
+    #[tracing_test::traced_test]
+    #[test]
+    fn unversioned_optional_slot_skips_or_stops_without_desync() {
+        let usmap = Usmap::from_bytes(&crate::testing::usmap::build_hero_usmap_with_leading_gear(
+            &[28, 2],
+        ))
+        .expect("usmap parse");
+        let ctx = make_ctx(&["None"]);
+        let read = |wire: &[u8]| {
+            read_unversioned_properties(&mut Cursor::new(wire), "Hero", &usmap, &ctx, "t", 0)
+                .unwrap()
+        };
+        let tail = [100i32.to_le_bytes(), 600f32.to_le_bytes()].concat();
+
+        // Gear left out (skip 1, value_num 2, last = 0x0501).
+        let skipped = read(&[&[0x01, 0x05][..], &tail].concat());
+        let decoded: Vec<_> = skipped
+            .iter()
+            .map(|p| (p.name.as_ref(), &p.value))
+            .collect();
+        assert_eq!(
+            decoded,
+            [
+                ("Health", &PropertyValue::Int(100)),
+                ("Speed", &PropertyValue::Float(600.0))
+            ]
+        );
+        assert!(!logs_contain("unsupported type byte"));
+
+        // Gear serialized (value_num 3, last = 0x0700).
+        let stopped = read(&[&[0x00, 0x07, 0x01][..], &tail].concat());
+        assert!(stopped.is_empty(), "{stopped:?}");
+        assert!(logs_contain("unsupported type byte 28"));
+
+        let gear = usmap.schemas["Hero"].properties[0].prop_type.clone();
+        assert!(matches!(
+            read_value(gear, &[], &usmap, 0),
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::UnversionedTypeNotSupported { type_byte: 28, .. },
+                ..
+            })
+        ));
     }
 
     /// Unversioned `MT::Text` with a `StringTableEntry (11)` history

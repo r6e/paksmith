@@ -2721,11 +2721,12 @@ pub enum AssetParseFault {
     UnversionedWithoutMappings,
     /// An unversioned property's schema-declared type byte is one
     /// paksmith doesn't yet decode (the `type_byte` names the specific
-    /// one — currently delegates, interfaces, field paths, and
-    /// weak/lazy/asset-object references; Array / Map / Set / Struct /
-    /// scalars all decode). The decoder stops the property walk and
-    /// returns the partial tree rather than mis-decoding subsequent
-    /// properties whose offsets depend on the failed read's byte count.
+    /// one — currently delegates, interfaces, field paths, optionals,
+    /// weak/lazy/asset-object references and type bytes above 28;
+    /// Array / Map / Set / Struct / scalars all decode). The decoder
+    /// stops the property walk and returns the partial tree rather than
+    /// mis-decoding subsequent properties whose offsets depend on the
+    /// failed read's byte count.
     UnversionedTypeNotSupported {
         /// The unsupported `EPropertyType` discriminant byte.
         type_byte: u8,
@@ -5501,7 +5502,9 @@ pub enum MappingsParseFault {
     /// `read_mapped_type` recursion depth exceeded
     /// `MAX_USMAP_ARRAY_NESTING_DEPTH`. The wire's `ArrayProperty`
     /// type byte (`0x08`) is followed by its inner type byte, which
-    /// itself may be `0x08` — a recursive structure. A `.usmap`
+    /// itself may be `0x08` — a recursive structure. Set, Map, Optional
+    /// and an Enum's underlying type recurse the same way and count
+    /// against the same cap. A `.usmap`
     /// claiming a few thousand sequential `0x08` bytes inside the
     /// 256 MiB `MAX_USMAP_DECOMPRESSED_SIZE` budget walks the
     /// default 8 MiB runner stack to SIGSEGV. The cap fires before
