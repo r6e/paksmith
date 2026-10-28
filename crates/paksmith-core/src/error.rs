@@ -175,7 +175,7 @@ pub enum PaksmithError {
     /// Issue #64 promoted the index-bounds-check sites to typed
     /// [`InvalidFooterFault::IndexRegionOffsetOverflow`] and
     /// [`InvalidFooterFault::IndexRegionPastFileSize`] variants;
-    /// the magic / version / FName-table sites still use
+    /// the magic / FName-table sites still use
     /// [`InvalidFooterFault::OtherUnpromoted`] until they justify
     /// their own typed variants (likely when the iostore `.utoc`
     /// footer parser lands and creates a second site for each).
@@ -347,7 +347,7 @@ pub enum PaksmithError {
 /// log greps and dashboards keep working.
 ///
 /// `#[non_exhaustive]` because new categories will be added as the
-/// remaining magic / version / FName-table sites get promoted out
+/// remaining magic / FName-table sites get promoted out
 /// of [`Self::OtherUnpromoted`] (likely when iostore's `.utoc`
 /// footer parser lands a second site for each).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,7 +355,7 @@ pub enum PaksmithError {
 pub enum InvalidFooterFault {
     /// Transitional free-form reason for footer faults that haven't
     /// been promoted to typed variants yet (magic-not-found,
-    /// version-unsupported, FName-table malformations, etc.). Each
+    /// file-too-small, FName-table malformations, etc.). Each
     /// remaining call site is a candidate for promotion when a
     /// second instance of the same shape lands.
     ///

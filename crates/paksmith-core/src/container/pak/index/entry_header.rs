@@ -33,7 +33,7 @@ const ENTRY_FLAG_ENCRYPTED: u8 = 0x01;
 /// possible widths in the v3+ FPakEntry record:
 ///
 /// - V8A (UE 4.22 brief variant): `u8`.
-/// - v3-v7 and V8B+ (UE 4.4 onward except V8A): `u32`.
+/// - v3-v7 and V8B+ (UE 4.3 onward except V8A): `u32`.
 ///
 /// Two variants encode the closed set explicitly so a wrong
 /// assignment is a type error rather than a semantic surprise.

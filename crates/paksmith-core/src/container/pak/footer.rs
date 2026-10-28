@@ -27,8 +27,8 @@ pub struct PakFooter {
     encrypted: bool,
     encryption_key_guid: Option<[u8; 16]>,
     /// V9 only: a writer flag indicating the index was frozen at archive
-    /// creation. We surface it for round-trip introspection but the parser
-    /// treats frozen identically to non-frozen.
+    /// creation. The footer parser records it; `PakReader` refuses an
+    /// archive with it set (#637).
     frozen_index: bool,
     /// V8+ compression-method FName table. Length is 0 (v3-v7), 4 (V8A),
     /// or 5 (V8B / V9 / V10 / V11). Slot index 0 in this vec maps to
@@ -573,9 +573,8 @@ mod tests {
 
     /// V11 footers (`PathHashIndex` v11 = `Fnv64BugFix`) share the
     /// 221-byte V8B+ shape — the version field is the only
-    /// disambiguator. PakReader::open rejects v11 because the index
-    /// format is Phase 2-B (#7), but the footer parser correctly
-    /// returns the parsed footer with version + 5-slot table populated.
+    /// disambiguator. The footer parser returns the parsed footer with
+    /// version + 5-slot table populated.
     #[test]
     fn parse_v8b_plus_footer_at_version_11() {
         let data = build_v8b_plus_footer(11, 0, 0, 100);
