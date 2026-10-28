@@ -41,7 +41,7 @@ const USMAP_VERSION_PACKAGE_VERSIONING: u8 = 1;
 const USMAP_VERSION_LONG_FNAME: u8 = 2;
 const USMAP_VERSION_LARGE_ENUMS: u8 = 3;
 const USMAP_VERSION_EXPLICIT_ENUM_VALUES: u8 = 4;
-const MAX_USMAP_VERSION: u8 = USMAP_VERSION_EXPLICIT_ENUM_VALUES; // EUsmapVersion::Latest
+const MAX_USMAP_VERSION: u8 = USMAP_VERSION_EXPLICIT_ENUM_VALUES;
 
 /// The large-window extension's first byte, whose window code RFC 7932 §9.1
 /// leaves invalid. With its top bit set it is invalid to every decoder.
