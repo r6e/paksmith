@@ -144,8 +144,8 @@ or deprecated properties that occupy schema slots but are absent from
 | 23 (`Int8Property`) | `Int8` | 1 byte |
 | 24 (`MapProperty`) | `Map` | schema encodes key type then value type; body = `i32` num_keys_to_remove + that many removed key bodies + `i32` count + `count` × (key body, value body) |
 | 25 (`SetProperty`) | `Set` | schema encodes one element type; body = `i32` num_to_remove + that many removed element bodies + `i32` count + `count` element bodies |
-| 26 (`EnumProperty`) | `Enum` | 1 byte (`u8` ordinal; resolved via `.usmap` enum table) |
-| 6, 12–16, 27 | `Unknown(byte)` | not decoded — triggers `UnversionedTypeNotSupported` |
+| 26 (`EnumProperty`) | `Enum` | the underlying type's body: 1 byte (`u8` ordinal) for the usual `ByteProperty`; resolved via the `.usmap` enum table |
+| 6, 12–16, 27 and above | `Unknown(byte)` | not decoded — triggers `UnversionedTypeNotSupported` |
 
 ### Worked example — minimal export body (1-fragment, no zeros, 2 properties)
 
@@ -224,7 +224,7 @@ After decompression, the schema data is parsed as:
 
 1. **Name table** — `u32` name count, then per entry: name length (`u8` for version < 2, `u16` for version ≥ 2) + that many UTF-8 bytes (no null terminator).
 2. **Enum table** — `u32` enum count (capped at `MAX_USMAP_ENUM_COUNT = 4096`), then per enum: name-table index (`i32`) + value count (`u8` for version < 3, `u16` for version ≥ 3; capped at `MAX_USMAP_VALUES_PER_ENUM = 1024`) + per value: for version ≥ 4 an explicit `u64` ordinal then a name-table index, otherwise just a name-table index (ordinal = positional index).
-3. **Schema table** — `u32` schema count, then per schema: name index, super-type name index (the sentinel `"None"` means no superclass), `prop_count u16` (total slots including gaps), `serial_count u16` (serializable slot count), then `serial_count` property entries. Each entry: `schema_index u16`, `array_size u8`, name index (`i32`), type byte (recursively decoded).
+3. **Schema table** — `u32` schema count, then per schema: name index, super-type name index (the sentinel `"None"` means no superclass), `prop_count u16` (total slots including gaps), `serial_count u16` (serializable slot count), then `serial_count` property entries. Each entry: `schema_index u16`, `array_size u8`, name index (`i32`), then a type tree[^4]: the type byte, then for ArrayProperty (8), SetProperty (25) and OptionalProperty (28) one inner tree; for MapProperty (24) a key tree, then a value tree; for StructProperty (9) a struct-name index (`i32`); for EnumProperty (26) the underlying type's tree, then an enum-name index (`i32`); for every other type byte, nothing.
 
 ## Variants
 
@@ -343,7 +343,9 @@ tests can read the live value without duplicating the literal.
   as the property maps described in the Worked example.
 - **Cross-validation oracle:** CUE4Parse[^1] (primary) and `unreal_asset`[^2].
 - **Known divergences:**
-  - Delegate (`6`), Interface (`12`/`13`), MulticastDelegate (same), WeakObject (`14`), LazyObject (`15`), AssetObject (`16`), and FieldPath (`27`) are decoded as `Unknown(byte)`, triggering `UnversionedTypeNotSupported`. The decoder stops the property walk at the first unsupported slot and returns the partial tree collected up to that point. (Map `24` and Set `25` are decoded as of #639.)
+  - Delegate (`6`), Interface (`12`), MulticastDelegate (`13`), WeakObject (`14`), LazyObject (`15`), AssetObject (`16`), FieldPath (`27`), Optional (`28`) and every type byte above 28 are decoded as `Unknown(byte)`, triggering `UnversionedTypeNotSupported`. The decoder stops the property walk at the first unsupported slot and returns the partial tree collected up to that point. (Map `24` and Set `25` are decoded as of #639.)
+  - Enum (`26`) values are always read as a `u8` ordinal and the underlying type's tree is discarded. CUE4Parse[^4] reads the value as the underlying type, so for an enum backed by a wider integer type paksmith misreads the value and reads every later property of the export from the wrong offset.
+  - `unreal_asset`[^2] has no type byte above FieldPath (`27`) other than `0xFF` and refuses a file with an Optional (`28`) row. Paksmith follows CUE4Parse[^4] and reads the Optional's inner tree.
   - Brotli bytes after the stream's final meta-block but inside `compressed_size` are refused as `MappingsParseFault::BrotliTrailingBytes`. `unreal_asset`'s brotli decode stops at the stream's end and accepts them.
 
 ## Paksmith implementation
@@ -361,5 +363,6 @@ tests can read the live value without duplicating the literal.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapParser.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the `.usmap` wire format and `EUsmapVersion` discriminants. `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/Unversioned/FUnversionedHeader.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the fragment-header bitstream.
-[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/unversioned/header.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle; bit-mask constants cross-referenced against `UnversionedHeaderFragment`. The `EPropertyType` discriminant table is pinned at the same SHA.
+[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/unversioned/header.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle; bit-mask constants cross-referenced against `UnversionedHeaderFragment`. Its `EPropertyType` discriminant table (0-27 and `Unknown = 0xFF`) is `unreal_asset_base/src/unversioned/properties/mod.rs` at the same SHA (L31-L91; `UsmapPropertyData::new` refuses other bytes at L165).
 [^3]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/EUsmapVersion.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L20-L24 — `EngineVersioning` (5) follows `ExplicitEnumValues` and is `Latest`; `UsmapParser.cs` at the same revision rejects only versions above `Latest` (L37-L39) and, from v5, reads an `FEngineVersion` at the head of the versioning block (L46-L49).
+[^4]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapProperties.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` (`ParsePropertyType`, L36-L67) and `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/EPropertyType.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` (`OptionalProperty` = 28, L33) — the schema type-tree layout. `CUE4Parse/UE4/Assets/Objects/Properties/EnumProperty.cs` (L27-L32) and `CUE4Parse/UE4/Assets/Objects/FPropertyTagData.cs` (L115-L124) at the same revision read an unversioned enum value as the underlying type from the mappings.

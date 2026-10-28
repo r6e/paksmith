@@ -162,7 +162,8 @@ const MAX_USMAP_NAME_COUNT: u32 = 131_072;
 const MAX_USMAP_FLATTENED_TOTAL_ENTRIES: u64 = 4_194_304;
 
 /// Hard cap on type-tree nodes summed across a whole schema table. Every
-/// node but a row's root is one `Arc` allocation of a few dozen bytes and
+/// node but a tree's root (a row's, an Optional's inner or an Enum's
+/// underlying) is one `Arc` allocation of a few dozen bytes and
 /// can cost a single wire byte, so the decompressed-size cap alone allowed gigabytes of type
 /// trees. Real rows run to a few nodes each; 4 Mi nodes keeps the worst
 /// case near 160 MiB.
@@ -206,7 +207,9 @@ const MAX_USMAP_CV_COUNT: u32 = 1_024;
 /// Hard cap on the recursive nesting depth in `read_mapped_type`.
 /// `ArrayProperty` type byte (`0x08`) recursively reads its inner
 /// type, so a wire schema row with type bytes `08 08 08 ... <leaf>`
-/// exercises one stack frame per byte. Without this cap a `.usmap`
+/// exercises one stack frame per byte; so do Set, Map, Optional and an
+/// Enum's underlying type, and every such inner read counts one level
+/// against this cap. Without this cap a `.usmap`
 /// claiming a few thousand `0x08` bytes inside the 256 MiB
 /// `MAX_USMAP_DECOMPRESSED_SIZE` budget walks the default 8 MiB
 /// runner stack to SIGSEGV.
@@ -352,8 +355,10 @@ pub enum MappedPropertyType {
     Name,
     /// `TextProperty` — localized `FText`.
     Text,
-    /// `EnumProperty` — stores a `u8` ordinal on the wire; the resolved
-    /// string comes from `Usmap::enums[enum_name]`.
+    /// `EnumProperty` — on the wire, a value of the enum's underlying type;
+    /// paksmith reads it as a `u8` ordinal, the `ByteProperty` storage
+    /// nearly every enum uses. The resolved string comes from
+    /// `Usmap::enums[enum_name]`.
     Enum {
         /// The enum's class name; key into [`Usmap::enums`].
         ///
@@ -510,8 +515,9 @@ pub struct Usmap {
     /// load; treat `Usmap` as immutable.
     pub schemas: HashMap<String, ClassSchema>,
     /// Enum name -> `(u64 ordinal -> value name)` map. Required for
-    /// unversioned `EnumProperty` reads: the asset stores a byte
-    /// ordinal, and the resolved string comes from this table.
+    /// unversioned `EnumProperty` reads: the asset stores an ordinal (a
+    /// byte for the usual `ByteProperty` storage), and the resolved string
+    /// comes from this table.
     ///
     /// Keyed by `u64` rather than positional `Vec` index because
     /// `.usmap` versions ≥ `ExplicitEnumValues` (4) store explicit
@@ -878,10 +884,8 @@ impl Usmap {
             names.push(Arc::from(name));
         }
 
-        // Enum table — REQUIRED for unversioned `EnumProperty` reads
-        // (per CUE4Parse's EnumProperty constructor for unversioned mode:
-        // wire stream stores a u8 index; the resolved value name comes
-        // from this table).
+        // Enum table — REQUIRED for unversioned `EnumProperty` reads; see
+        // `Usmap::enums`.
         let enum_count = read_or_truncated(&mut cur, |c| c.read_u32::<LE>())?;
         if enum_count > MAX_USMAP_ENUM_COUNT {
             return Err(fault(MappingsParseFault::EnumCountTooLarge {
@@ -1420,9 +1424,10 @@ fn read_mapped_type(
     }
     ledger.type_nodes.charge(1)?;
     let type_byte = read_or_truncated(cur, |c| c.read_u8())?;
-    // EPropertyType discriminants per the oracle's `pub enum EPropertyType`
-    // at `unreal_asset_base/src/unversioned/properties/mod.rs`. Pinned
-    // revision `f4df5d8e` — re-verify if the oracle pin moves.
+    // EPropertyType discriminants per CUE4Parse
+    // `MappingsProvider/Usmap/EPropertyType.cs` (L5-L46), and each type's
+    // trailing fields per `UsmapProperties.cs` `ParsePropertyType`
+    // (L36-L67). Pinned revision `77b94fa2` — re-verify if the pin moves.
     Ok(match type_byte {
         0 => MappedPropertyType::UInt8,                        // ByteProperty
         1 => MappedPropertyType::Bool,                         // BoolProperty
@@ -1480,13 +1485,21 @@ fn read_mapped_type(
             }
         }
         26 => {
-            // EnumProperty: inner type byte (always ByteProperty (0) in
-            // practice), then enum name
-            let _inner_byte = read_or_truncated(cur, |c| c.read_u8())?;
+            // EnumProperty — the underlying type's tree (a bare ByteProperty
+            // in practice), then the enum name. The tree is read only to stay
+            // aligned: unversioned enum values decode as a `u8` ordinal.
+            let _ = read_mapped_type(cur, names, depth + 1, ledger)?;
             let enum_name = read_name_arc(cur, names)?;
             MappedPropertyType::Enum { enum_name }
         }
         27 => MappedPropertyType::Unknown(type_byte), // FieldPathProperty
+        28 => {
+            // OptionalProperty — one inner tree, as ArrayProperty and
+            // SetProperty. Read only to stay aligned: there is no unversioned
+            // Optional decode, so the slot stays Unknown.
+            let _ = read_mapped_type(cur, names, depth + 1, ledger)?;
+            MappedPropertyType::Unknown(type_byte)
+        }
         other => MappedPropertyType::Unknown(other),
     })
 }
@@ -1917,6 +1930,7 @@ fn usmap_fixture(name: &str) -> std::path::PathBuf {
 #[cfg(all(test, feature = "__test_utils"))]
 mod tests {
     use super::*;
+    use crate::testing::usmap::build_hero_usmap_with_leading_gear;
     use crate::testing::usmap::build_minimal_usmap_bytes as minimal_usmap_none;
 
     #[test]
@@ -2903,6 +2917,153 @@ mod tests {
         );
     }
 
+    /// `Gear`'s type in `Hero` parsed from [`build_hero_usmap_with_leading_gear`],
+    /// after checking that `Health` and `Speed` behind it kept their names, slots
+    /// and types: a reader that consumed a different number of bytes for `gear`
+    /// misreads them.
+    fn gear_after_aligned_rows(gear: &[u8]) -> MappedPropertyType {
+        let usmap = Usmap::from_bytes(&build_hero_usmap_with_leading_gear(gear))
+            .unwrap_or_else(|e| panic!("{gear:?}: {e}"));
+        let props = &usmap.schemas["Hero"].properties;
+        let rows: Vec<_> = props
+            .iter()
+            .map(|p| (p.name.as_ref(), p.schema_index, &p.prop_type))
+            .collect();
+        assert_eq!(
+            rows[1..],
+            [
+                ("Health", 1, &MappedPropertyType::Int32),
+                ("Speed", 2, &MappedPropertyType::Float)
+            ],
+            "{gear:?}"
+        );
+        assert_eq!((rows[0].0, rows[0].1), ("Gear", 0), "{gear:?}");
+        props[0].prop_type.clone()
+    }
+
+    /// An `Optional<Int>` row (`28, 2`) ahead of two more: OptionalProperty
+    /// carries one inner type tree, as Array and Set do (CUE4Parse
+    /// `UsmapProperties.ParsePropertyType`), so it must be read for the rows
+    /// behind it to parse.
+    #[test]
+    fn parse_usmap_optional_property_consumes_inner_no_desync() {
+        assert_eq!(
+            gear_after_aligned_rows(&[28, 2]),
+            MappedPropertyType::Unknown(28)
+        );
+    }
+
+    /// The Optional inner and the Enum's underlying type each sit one level
+    /// below their parent: read at the cap, both trip it exactly one level
+    /// past; read one level up, both parse whole.
+    #[test]
+    fn read_mapped_type_optional_and_enum_inners_increment_depth() {
+        let cap = MAX_USMAP_ARRAY_NESTING_DEPTH;
+        let names: Vec<Arc<str>> = vec![Arc::from("E")];
+        let read = |bytes: &[u8], depth: usize| {
+            let mut cur = Cursor::new(bytes);
+            let parsed = read_mapped_type(&mut cur, &names, depth, &mut UNLIMITED.ledger());
+            (parsed, cur.position())
+        };
+        let optional = &[28u8, 2][..];
+        let enumerated = &[26u8, 0, 0, 0, 0, 0][..];
+        for bytes in [optional, enumerated] {
+            let (parsed, _) = read(bytes, cap);
+            assert!(
+                matches!(
+                    &parsed,
+                    Err(crate::PaksmithError::MappingsParse {
+                        fault: MappingsParseFault::ArrayNestingTooDeep { depth, limit },
+                    }) if *depth == cap + 1 && *limit == cap
+                ),
+                "{bytes:?}: {parsed:?}"
+            );
+        }
+        let (parsed, end) = read(optional, cap - 1);
+        assert_eq!((parsed.unwrap(), end), (MappedPropertyType::Unknown(28), 2));
+        let (parsed, end) = read(enumerated, cap - 1);
+        assert_eq!(
+            (parsed.unwrap(), end),
+            (
+                MappedPropertyType::Enum {
+                    enum_name: Arc::from("E")
+                },
+                6
+            )
+        );
+    }
+
+    /// An Optional nests inside and around the containers, its inner tree
+    /// read whole wherever it sits.
+    #[test]
+    fn parse_usmap_optional_nests_inside_and_around_containers() {
+        let optional = || Arc::new(MappedPropertyType::Unknown(28));
+        for (gear, expected) in [
+            // Optional<Array<Struct Hero>>
+            (
+                &[28u8, 8, 9, 0, 0, 0, 0][..],
+                MappedPropertyType::Unknown(28),
+            ),
+            // Array<Optional<Int>>
+            (
+                &[8, 28, 2][..],
+                MappedPropertyType::Array { inner: optional() },
+            ),
+            // Map<Name, Optional<Int>>
+            (
+                &[24, 5, 28, 2][..],
+                MappedPropertyType::Map {
+                    key: Arc::new(MappedPropertyType::Name),
+                    value: optional(),
+                },
+            ),
+            // Set<Optional<Struct Hero>>
+            (
+                &[25, 28, 9, 0, 0, 0, 0][..],
+                MappedPropertyType::Set { inner: optional() },
+            ),
+        ] {
+            assert_eq!(gear_after_aligned_rows(gear), expected, "{gear:?}");
+        }
+    }
+
+    /// An Optional chain is bounded by the nesting cap: nested exactly to the
+    /// cap it parses and keeps the rows aligned, one level further it is
+    /// refused at that level.
+    #[test]
+    fn parse_usmap_optional_nesting_depth_exceeded_rejected() {
+        let cap = max_usmap_array_nesting_depth();
+        let nest = |n: usize| [vec![28u8; n], vec![2]].concat();
+        assert_eq!(
+            gear_after_aligned_rows(&nest(cap)),
+            MappedPropertyType::Unknown(28)
+        );
+        assert_eq!(
+            parse_fault(&build_hero_usmap_with_leading_gear(&nest(cap + 1))),
+            MappingsParseFault::ArrayNestingTooDeep {
+                depth: cap + 1,
+                limit: cap
+            }
+        );
+    }
+
+    /// An EnumProperty's underlying type is a whole type tree, read before
+    /// the enum name: an Array or Struct there keeps the rows behind it
+    /// aligned, as the bare Byte that real files carry does.
+    #[test]
+    fn parse_usmap_enum_property_reads_its_underlying_type_tree() {
+        let expected = MappedPropertyType::Enum {
+            enum_name: Arc::from("EGear"),
+        };
+        for gear in [
+            &[26u8, 0, 5, 0, 0, 0][..],           // Enum<Byte>
+            &[26, 8, 0, 5, 0, 0, 0][..],          // Enum<Array<Byte>>
+            &[26, 9, 0, 0, 0, 0, 5, 0, 0, 0][..], // Enum<Struct Hero>
+        ] {
+            assert_eq!(gear_after_aligned_rows(gear), expected, "{gear:?}");
+        }
+    }
+
     #[test]
     fn parse_usmap_oodle_rejected() {
         let mut bytes = minimal_usmap_none();
@@ -2940,6 +3101,14 @@ mod tests {
         type_nodes: u64::MAX,
         heap_bytes: u64::MAX,
     };
+
+    /// [`UNLIMITED`] but for a type-node budget of `type_nodes`.
+    fn type_nodes(type_nodes: u64) -> SchemaBudgets {
+        SchemaBudgets {
+            type_nodes,
+            ..UNLIMITED
+        }
+    }
 
     /// [`UNLIMITED`] but for a heap budget of `heap_bytes`.
     fn heap(heap_bytes: u64) -> SchemaBudgets {
@@ -3946,19 +4115,35 @@ mod tests {
         for class in [0, 1] {
             push_map_row_schema(&mut data, class, 2, 3, 1);
         }
-        let budgets = |type_nodes| SchemaBudgets {
-            type_nodes,
-            ..UNLIMITED
-        };
-
-        assert!(parse_schema(&data, 0, budgets(10)).is_ok());
+        assert!(parse_schema(&data, 0, type_nodes(10)).is_ok());
         assert_eq!(
-            schema_fault(&data, 0, budgets(7)),
+            schema_fault(&data, 0, type_nodes(7)),
             crate::error::MappingsParseFault::TypeNodesExceeded {
                 requested: 8,
                 limit: 7
             }
         );
+    }
+
+    /// Every node of an Optional's inner tree and of an Enum's underlying
+    /// tree is charged to the type-node budget, though neither tree is kept.
+    #[test]
+    fn optional_and_enum_inners_count_toward_the_type_node_budget() {
+        for (row_type, nodes) in [(&[28u8, 8, 2][..], 3u64), (&[26, 0, 2, 0, 0, 0][..], 2)] {
+            let data = single_schema_data(&[b"Hero", b"None", b"x"], &[1], row_type);
+            assert!(
+                parse_schema(&data, 0, type_nodes(nodes)).is_ok(),
+                "{row_type:?}"
+            );
+            assert_eq!(
+                schema_fault(&data, 0, type_nodes(nodes - 1)),
+                MappingsParseFault::TypeNodesExceeded {
+                    requested: nodes,
+                    limit: nodes - 1
+                },
+                "{row_type:?}"
+            );
+        }
     }
 
     /// `from_bytes` applies the flattened-cache cap to the whole file. The

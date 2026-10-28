@@ -8,6 +8,8 @@
 >
 > **Later wire-format correction (#817):** `has_versioning` is a bool32, an `i32` that must be 0 or 1 (was `[bool u8]`).
 >
+> **Later wire-format correction (type trees):** an EnumProperty row carries its underlying type's whole type tree before the enum-name index (was `[u8 inner EPropertyType]`), and OptionalProperty (28) carries one inner tree. See `docs/formats/property/unversioned.md` for the current layout.
+>
 > **Post-Phase-2 decoder-correctness fixes (#391, #392):** the `is_serialized` signature shown later in this plan (`schema_idx, zero_mask_idx, frag_idx`) is now stale — the `zero_mask_idx` parameter was removed in #392. The current shape is `is_serialized(schema_idx, frag_idx)`; the per-fragment `Fragment::zero_mask_base` lets the lookup compute the bit index per slot. Likewise the `enumerate()`-based `schema_idx` and per-class-schema-only `get_all_properties` shape shown here are now stale: #358's sparse-schema fix made the return carry wire-declared indices and #391's inheritance-offset fix returns `ResolvedProperty<'_>` with child-first-concat absolute indices. Canonical source: `crates/paksmith-core/src/asset/{mappings.rs,property/unversioned.rs}`.
 
 **Goal:** Parse assets with `PKG_UnversionedProperties` flag set by loading a companion `.usmap` schema file, replacing the current hard rejection with real property deserialization.
