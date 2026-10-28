@@ -399,7 +399,7 @@ RunUAT BuildCookRun -project=<abs-path-to-uproject> \
 | `-build` | Compile the project's code module. |
 | `-stage` | Copy cooked output into a staging dir. |
 | `-pak` | Package staged content into a `.pak`. |
-| `-iostore` | Also produce IoStore containers (UE 4.27+; requires `-pak`). |
+| `-iostore` | Also produce IoStore containers (requires `-pak`). |
 | `-skippak` | Use existing pak file. |
 | `-compressed` | Enable pak compression (uses `PakFileCompressionFormats` from project settings). |
 | `-encryptini` | Encrypt `.ini` files inside the pak. |
@@ -1352,7 +1352,7 @@ External references:
 13. [UE 4.25 IoStore deck (EpicGamesJapan, slideshare)](https://www.slideshare.net/slideshow/ue425iostore/239108822) — IoStore introduction; `.utoc`/`.ucas`/`.uptnl` formats.
 14. [UE 4.25 Unversioned Property Serialization deck (EpicGamesJapan)](https://www.slideshare.net/EpicGamesJapan/new-loadingsystem-unversionedpropertyserializationv2) — unversioned property serialization design.
 15. [trumank/repak (Rust)](https://github.com/trumank/repak) — pak reader/writer; version support table.
-16. [trumank/retoc (Rust)](https://github.com/trumank/retoc) — IoStore CLI; supports UE 5.3+.
+16. [trumank/retoc (Rust)](https://github.com/trumank/retoc) — IoStore CLI; UE 4.25–5.7, well supported from UE 5.3.
 17. [FabianFG/CUE4Parse (C#)](https://github.com/FabianFG/CUE4Parse) — reference parser.
 18. [4sval/FModel discussion: unversioned mappings missing](https://github.com/4sval/FModel/discussions/418) — mapping-file requirements for UE5.
 19. [UE4SS dumpers documentation](https://docs.ue4ss.com/feature-overview/dumpers.html) — `.usmap` generation via UE4SS.
