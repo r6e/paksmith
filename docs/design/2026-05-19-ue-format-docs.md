@@ -207,9 +207,11 @@ to one doc file. No family-level duplicate tables.
 - **Parser status:** `not impl`, `partial`, `complete`. This column is the
   source of truth for each doc's `## Paksmith implementation` sidebar — they
   must agree.
-- **Last verified:** the commit SHA where the doc was last cross-checked
-  against the oracle plus fixtures. Bumped only when verification was
-  actually re-run, not on every edit.
+- **Last verified:** the commit SHA where the doc's wire claims were last
+  cross-checked against the `Reference oracle` SHA. Bumped on substantive
+  content edits and on explicit audit passes that re-verify the wire claims
+  against the oracle, never for formatting-only edits. The rule in
+  `docs/formats/README.md` governs, including which SHA to write.
 
 The phase plans under `docs/plans/` are scheduling artifacts. They are
 deliberately not represented in this table — the inventory is a reference
