@@ -8,9 +8,9 @@
 //! ### `.usmap` byte builders
 //!
 //! - [`build_hero_usmap_bytes`] — parameterized over Speed's
-//!   `EPropertyType` byte. The canonical source of truth for the
-//!   wire-format assembly; all other byte builders delegate here or
-//!   share its private `wrap_usmap_header` tail. Use this for any
+//!   `EPropertyType` byte. The canonical `Hero` schema; the other
+//!   byte builders delegate here, share its private `hero_schema_data`
+//!   body, or share the private `wrap_usmap_header` tail. Use this for any
 //!   shape where Speed is a primitive (Float, Int, Map, Set, etc.).
 //! - [`build_minimal_usmap_bytes`] — named alias for
 //!   `build_hero_usmap_bytes(3u8)` (FloatProperty); the canonical
@@ -34,6 +34,9 @@
 //! - [`build_hero_usmap_with_leading_gear`] — a `Gear` row of any
 //!   type tree ahead of `Health` and `Speed`, so a reader that
 //!   consumes the wrong number of bytes for the tree misreads them.
+//! - [`build_minimal_v5_usmap_bytes`] — the minimal `Hero` schema at
+//!   version 5 behind a caller-supplied versioning block; the
+//!   `V5_*` constants are its pinned parts.
 //!
 //! ### `.uasset` byte builder
 //!
@@ -72,6 +75,53 @@ pub fn build_minimal_usmap_bytes() -> Vec<u8> {
 /// is structurally different.
 #[must_use]
 pub fn build_hero_usmap_bytes(speed_type_byte: u8) -> Vec<u8> {
+    wrap_usmap_header(
+        0,
+        &[],
+        &hero_schema_data(speed_type_byte, NameLengthWidth::U8),
+    )
+}
+
+/// The engine version that follows `has_versioning` in a v5 file: `u16` major 5,
+/// minor 4 and patch 3, then the `u32` changelist 34_507_850.
+pub const V5_ENGINE_VERSION_FIELDS: [u8; 10] =
+    [0x05, 0x00, 0x04, 0x00, 0x03, 0x00, 0x4a, 0x8c, 0x0e, 0x02];
+
+/// The engine version's branch: an ANSI FString of length 18, which counts
+/// the terminator.
+pub const V5_BRANCH_FSTRING: [u8; 22] = *b"\x12\x00\x00\x00++UE5+Release-5.4\0";
+
+/// The rest of a versioning block: `FileVersionUE4` 522, `FileVersionUE5`
+/// 1012, two zeroed custom versions and NetCL 0.
+pub const V5_PACKAGE_VERSIONS: [u8; 56] = [
+    0x0a, 0x02, 0x00, 0x00, // FileVersionUE4
+    0xf4, 0x03, 0x00, 0x00, // FileVersionUE5
+    0x02, 0x00, 0x00, 0x00, // two custom versions, a GUID and an i32 each
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
+    0x00, 0x00, 0x00, 0x00, // NetCL
+];
+
+/// `.usmap` bytes at version 5 (`EngineVersioning`): magic, the version
+/// byte, `versioning` from the `has_versioning` flag onward, no compression,
+/// then [`build_minimal_usmap_bytes`]'s `Hero` schema with the `u16` name
+/// lengths a version ≥ 2 file carries.
+#[must_use]
+pub fn build_minimal_v5_usmap_bytes(versioning: &[u8]) -> Vec<u8> {
+    // Speed: FloatProperty, as in `build_minimal_usmap_bytes`.
+    wrap_usmap_header(5, versioning, &hero_schema_data(3, NameLengthWidth::U16))
+}
+
+/// The width of a name-table entry's length: `u8` before `LongFName` (2),
+/// `u16` from it.
+#[derive(Clone, Copy)]
+enum NameLengthWidth {
+    U8,
+    U16,
+}
+
+/// [`build_hero_usmap_bytes`]'s schema data, its name lengths `width` wide.
+fn hero_schema_data(speed_type_byte: u8, width: NameLengthWidth) -> Vec<u8> {
     let mut data: Vec<u8> = Vec::new();
     // Name table: ["Hero", "None", "Health", "Speed"]. "None" is UE's
     // sentinel for "no superclass" (see Usmap parser's super_type
@@ -84,7 +134,10 @@ pub fn build_hero_usmap_bytes(speed_type_byte: u8) -> Vec<u8> {
         (6u8, "Health"),
         (5u8, "Speed"),
     ] {
-        data.push(len);
+        match width {
+            NameLengthWidth::U8 => data.push(len),
+            NameLengthWidth::U16 => data.extend_from_slice(&u16::from(len).to_le_bytes()),
+        }
         data.extend_from_slice(name.as_bytes());
     }
     // Enum table: empty
@@ -106,8 +159,7 @@ pub fn build_hero_usmap_bytes(speed_type_byte: u8) -> Vec<u8> {
     data.push(1u8);
     data.extend_from_slice(&3i32.to_le_bytes()); // name idx = "Speed"
     data.push(speed_type_byte);
-
-    wrap_usmap_header(&data)
+    data
 }
 
 /// `.usmap` bytes for class `Hero` with `Health: IntProperty` at
@@ -190,7 +242,7 @@ pub fn build_hero_usmap_with_enum_speed(enum_name: &str, enum_values: &[&str]) -
     data.push(0u8); // underlying type tree = ByteProperty, a bare tag
     data.extend_from_slice(&4i32.to_le_bytes()); // enum_name idx = 4
 
-    wrap_usmap_header(&data)
+    wrap_usmap_header(0, &[], &data)
 }
 
 /// `.usmap` bytes for class `Hero` with `Health: IntProperty` at
@@ -253,7 +305,7 @@ pub fn build_hero_usmap_with_struct_speed(struct_name: &str) -> Vec<u8> {
     data.push(9u8); // StructProperty
     data.extend_from_slice(&4i32.to_le_bytes()); // struct_name idx = 4
 
-    wrap_usmap_header(&data)
+    wrap_usmap_header(0, &[], &data)
 }
 
 /// `.usmap` bytes for an arbitrary class with serializable properties
@@ -340,7 +392,7 @@ pub fn build_sparse_schema_usmap_bytes(
         data.extend_from_slice(&name_idx(name).to_le_bytes());
         data.push(*type_byte);
     }
-    wrap_usmap_header(&data)
+    wrap_usmap_header(0, &[], &data)
 }
 
 /// `.usmap` bytes for class `Hero` with `Gear: <gear_type>` at schema_index 0,
@@ -377,13 +429,14 @@ pub fn build_hero_usmap_with_leading_gear(gear_type: &[u8]) -> Vec<u8> {
         data.extend_from_slice(&name_idx.to_le_bytes());
         data.extend_from_slice(type_tree);
     }
-    wrap_usmap_header(&data)
+    wrap_usmap_header(0, &[], &data)
 }
 
-/// Wrap a `.usmap` data block in the magic + version + compression +
-/// size header (`Initial` version, `None` compression). Shared by
-/// the public byte builders.
-fn wrap_usmap_header(data: &[u8]) -> Vec<u8> {
+/// Wrap a `.usmap` data block in its header: magic, `version`,
+/// `versioning` (the bytes from the `has_versioning` flag on; empty below
+/// version 1), `None` compression and the sizes. Shared by the public
+/// byte builders.
+fn wrap_usmap_header(version: u8, versioning: &[u8], data: &[u8]) -> Vec<u8> {
     let data_len = u32::try_from(data.len()).expect("usmap data within u32");
     let mut out: Vec<u8> = Vec::new();
     // CUE4Parse `FileMagic = 0x30C4` read via little-endian u16 → on-disk
@@ -391,7 +444,8 @@ fn wrap_usmap_header(data: &[u8]) -> Vec<u8> {
     // a byte-inverted reader; #352 corrected the reader, so the writer
     // must also flip.
     out.extend_from_slice(&[0xC4u8, 0x30u8]); // magic LE → 0x30C4
-    out.push(0u8); // version = Initial
+    out.push(version);
+    out.extend_from_slice(versioning);
     out.push(0u8); // compression = None
     out.extend_from_slice(&data_len.to_le_bytes()); // compressed_size
     out.extend_from_slice(&data_len.to_le_bytes()); // decompressed_size
@@ -507,6 +561,64 @@ mod tests {
                 0x01, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x02, // Health @1: Int
                 0x02, 0x00, 0x01, 0x04, 0x00, 0x00, 0x00, 0x03, // Speed @2: Float
             ]
+        );
+    }
+
+    /// The v5 pins' every field, and the v5 builder's bytes against the v0
+    /// builder's schema with its four name lengths widened to `u16`.
+    #[test]
+    fn minimal_v5_usmap_fields_match_their_pins() {
+        let u16_at = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]);
+        let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let i32_at = |b: &[u8], at: usize| i32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+
+        let fields = V5_ENGINE_VERSION_FIELDS;
+        assert_eq!(
+            (
+                u16_at(&fields, 0),
+                u16_at(&fields, 2),
+                u16_at(&fields, 4),
+                u32_at(&fields, 6)
+            ),
+            (5, 4, 3, 34_507_850)
+        );
+        assert_eq!(i32_at(&V5_BRANCH_FSTRING, 0), 18);
+        assert_eq!(&V5_BRANCH_FSTRING[4..], b"++UE5+Release-5.4\0");
+        let versions = V5_PACKAGE_VERSIONS;
+        assert_eq!(
+            (
+                i32_at(&versions, 0),
+                i32_at(&versions, 4),
+                u32_at(&versions, 8)
+            ),
+            (522, 1012, 2)
+        );
+        assert_eq!(versions[12..52], [0; 40]);
+        assert_eq!(u32_at(&versions, 52), 0);
+
+        let v0 = build_minimal_usmap_bytes();
+        let mut data = v0[12..16].to_vec();
+        let mut at = 16;
+        for _ in 0..4 {
+            let len = usize::from(v0[at]);
+            data.extend_from_slice(&u16::try_from(len).unwrap().to_le_bytes());
+            data.extend_from_slice(&v0[at + 1..at + 1 + len]);
+            at += 1 + len;
+        }
+        data.extend_from_slice(&v0[at..]);
+        let size = u32::try_from(data.len()).unwrap().to_le_bytes();
+        let versioning = [&1i32.to_le_bytes()[..], &fields, &V5_BRANCH_FSTRING].concat();
+        assert_eq!(
+            build_minimal_v5_usmap_bytes(&versioning),
+            [
+                &[0xC4, 0x30, 0x05][..],
+                &versioning,
+                &[0x00],
+                &size,
+                &size,
+                &data
+            ]
+            .concat()
         );
     }
 

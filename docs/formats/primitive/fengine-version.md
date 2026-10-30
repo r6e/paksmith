@@ -9,9 +9,11 @@ three-part semantic version (`major.minor.patch`), a Perforce-style integer
 changelist with a top-bit flag for licensee builds, and an FString[^3] branch
 name (e.g. `"++UE4+Release-4.27"`, `"++UE5+Release-5.1"`).
 
-It appears in the package summary's compatibility section and in pak entry
-metadata for newer pak versions. The changelist field packs a licensee-build
-flag into bit 31 (see *Changelist licensee-bit packing* below).
+It appears in the package summary's compatibility section and in the
+versioning block of a version-5+ `.usmap` (see
+[`unversioned.md`](../property/unversioned.md)). The changelist
+field packs a licensee-build flag into bit 31 (see *Changelist licensee-bit
+packing* below).
 
 **Document status: complete.** Wire format documented in full against
 CUE4Parse[^1] with worked examples below covering both the standard
@@ -111,9 +113,11 @@ Offset  Bytes (LE)                                          Field
 
 - **`branch` length cap SHOULD be enforced.** The embedded `FString`
   inherits the parser's FString length cap; lengths beyond the cap
-  MUST be rejected at the FString reader level. Paksmith caps at
-  `FSTRING_MAX_LEN = 65_536`
-  (`container/pak/index/fstring.rs`). Real branches are typically
+  MUST be rejected at the FString reader level. Paksmith's package-summary
+  reader caps at `FSTRING_MAX_LEN = 65_536`
+  (`container/pak/index/fstring.rs`); its `.usmap` reader caps the branch
+  at `MAX_USMAP_BRANCH_LEN` before reading it (see
+  [`unversioned.md`](../property/unversioned.md)). Real branches are typically
   20-40 characters (`"++UE5+Release-5.1"`, `"++Fortnite+Release-29.40"`).
 - **Licensee-flag preservation.** A reader MUST preserve the raw
   `changelist` u32 verbatim if round-trip fidelity is required (writing
@@ -179,6 +183,8 @@ divergences for the full description.)
 
 **Cap constants:** none specific to `EngineVersion`; the branch FString
 inherits `FSTRING_MAX_LEN = 65_536` from `container/pak/index/fstring.rs`.
+The `.usmap` reader reads past its copy without decoding it; that path's
+cap and fault are in [`unversioned.md`](../property/unversioned.md).
 
 **Test files:** `crates/paksmith-core/src/asset/engine_version.rs` `mod tests`.
 

@@ -25,7 +25,8 @@ use zstd::zstd_safe::DCtx;
 
 use crate::PaksmithError;
 use crate::error::{
-    MappingsAllocationContext, MappingsParseFault, check_mappings_reserve, mappings_alloc_failed,
+    FStringEncoding, FStringFault, MappingsAllocationContext, MappingsParseFault,
+    check_mappings_reserve, mappings_alloc_failed,
 };
 use crate::seams::MappingsSeam;
 
@@ -34,14 +35,15 @@ use crate::seams::MappingsSeam;
 // little-endian `Read<ushort>()` — so on-disk bytes are `C4 30`.
 const USMAP_MAGIC: u16 = 0x30C4;
 
-// `EUsmapVersion` byte values, per CUE4Parse `EUsmapVersion.cs`. Each
-// constant marks the FIRST version that introduces the named
-// wire-format change.
+// `EUsmapVersion` byte values, per CUE4Parse `EUsmapVersion.cs` at
+// 77b94fa26cde08d34e80be2ced29c8f8885ff0a7. Each constant marks the FIRST
+// version that introduces the named wire-format change.
 const USMAP_VERSION_PACKAGE_VERSIONING: u8 = 1;
 const USMAP_VERSION_LONG_FNAME: u8 = 2;
 const USMAP_VERSION_LARGE_ENUMS: u8 = 3;
 const USMAP_VERSION_EXPLICIT_ENUM_VALUES: u8 = 4;
-const MAX_USMAP_VERSION: u8 = USMAP_VERSION_EXPLICIT_ENUM_VALUES;
+const USMAP_VERSION_ENGINE_VERSIONING: u8 = 5;
+const MAX_USMAP_VERSION: u8 = USMAP_VERSION_ENGINE_VERSIONING; // EUsmapVersion::Latest
 
 /// The large-window extension's first byte, whose window code RFC 7932 §9.1
 /// leaves invalid. With its top bit set it is invalid to every decoder.
@@ -204,6 +206,16 @@ const ARC_TYPE_NODE_BYTES: u64 = ARC_HEADER_BYTES + size_of::<MappedPropertyType
 /// Exposed via [`max_usmap_cv_count`].
 const MAX_USMAP_CV_COUNT: u32 = 1_024;
 
+/// Hard cap on the engine-version branch's wire length, in code units: bytes
+/// for a positive length, UTF-16 units for a negative one. The same 65,536 the
+/// pak, asset and locres FString readers cap at; real branches run to a few
+/// dozen. CUE4Parse has no fixed cap and checks the length only against the
+/// bytes left in the file, so this is stricter than the oracle. Refused
+/// before the bytes are read.
+///
+/// Exposed via [`max_usmap_branch_len`].
+const MAX_USMAP_BRANCH_LEN: u32 = 65_536;
+
 /// Hard cap on the recursive nesting depth in `read_mapped_type`.
 /// `ArrayProperty` type byte (`0x08`) recursively reads its inner
 /// type, so a wire schema row with type bytes `08 08 08 ... <leaf>`
@@ -304,6 +316,14 @@ pub fn max_usmap_array_nesting_depth() -> usize {
 #[must_use]
 pub fn max_usmap_cv_count() -> u32 {
     MAX_USMAP_CV_COUNT
+}
+
+/// Test-only accessor for `MAX_USMAP_BRANCH_LEN`. Same rationale as
+/// [`max_usmap_enum_count`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_branch_len() -> u32 {
+    MAX_USMAP_BRANCH_LEN
 }
 
 /// Compression method byte values from the .usmap wire format.
@@ -667,9 +687,10 @@ impl Usmap {
     /// # Errors
     ///
     /// Returns [`PaksmithError::MappingsParse`] on any wire-format fault:
-    /// invalid magic, unsupported version or compression method, size
-    /// caps or the heap budget exceeded, decompression mismatch, or
-    /// truncated data; and on a refused reservation, as
+    /// invalid magic, unsupported version or compression method, a
+    /// malformed engine-version branch, size caps or the heap budget
+    /// exceeded, decompression mismatch, or truncated data; and on a
+    /// refused reservation, as
     /// [`MappingsParseFault::AllocationFailed`] with its
     /// [`MappingsAllocationContext`].
     pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
@@ -709,6 +730,9 @@ impl Usmap {
                 }
             };
             if has_versioning {
+                if version >= USMAP_VERSION_ENGINE_VERSIONING {
+                    skip_engine_version(&mut cur)?;
+                }
                 // object_version + object_version_ue5 + custom_version array + net_cl
                 let _obj_ver = read_or_truncated(&mut cur, |c| c.read_i32::<LE>())?;
                 let _obj_ver_ue5 = read_or_truncated(&mut cur, |c| c.read_i32::<LE>())?;
@@ -1890,6 +1914,46 @@ fn read_slice<'a>(cur: &mut Cursor<&'a [u8]>, len: usize) -> crate::Result<&'a [
     Ok(bytes)
 }
 
+/// Reads past the `FEngineVersion` that follows `has_versioning` in a version-5
+/// file:
+/// `u16` major, minor and patch, a `u32` changelist, then the branch. It is
+/// discarded, like the rest of the block.
+fn skip_engine_version(cur: &mut Cursor<&[u8]>) -> crate::Result<()> {
+    let _major = read_or_truncated(cur, |c| c.read_u16::<LE>())?;
+    let _minor = read_or_truncated(cur, |c| c.read_u16::<LE>())?;
+    let _patch = read_or_truncated(cur, |c| c.read_u16::<LE>())?;
+    let _changelist = read_or_truncated(cur, |c| c.read_u32::<LE>())?;
+    skip_branch(cur)
+}
+
+/// Reads past the engine version's branch, framed as CUE4Parse's
+/// `FArchive.ReadFString` frames an FString: length 0 is empty with nothing
+/// after it, a positive length counts bytes and a negative one UTF-16 units,
+/// the terminator included, and the last unit must be zero. The bytes are
+/// borrowed, so nothing is allocated or charged.
+fn skip_branch(cur: &mut Cursor<&[u8]>) -> crate::Result<()> {
+    let malformed = |kind| fault(MappingsParseFault::EngineBranchMalformed { kind });
+    let len = read_or_truncated(cur, |c| c.read_i32::<LE>())?;
+    let (encoding, nul): (FStringEncoding, &[u8]) = match len {
+        0 => return Ok(()),
+        i32::MIN => return Err(malformed(FStringFault::LengthIsI32Min)),
+        1.. => (FStringEncoding::Utf8, &[0]),
+        _ => (FStringEncoding::Utf16, &[0, 0]),
+    };
+    let units = len.unsigned_abs();
+    if units > MAX_USMAP_BRANCH_LEN {
+        return Err(malformed(FStringFault::LengthExceedsMaximum {
+            length: units,
+            maximum: MAX_USMAP_BRANCH_LEN,
+        }));
+    }
+    let bytes = read_slice(cur, units as usize * nul.len())?;
+    if !bytes.ends_with(nul) {
+        return Err(malformed(FStringFault::MissingNullTerminator { encoding }));
+    }
+    Ok(())
+}
+
 /// Returns the cursor's byte offset as a `usize` for use in
 /// `MappingsParseFault::*` `offset` fields. The cast is safe because
 /// the cursor is constructed over an `&[u8]` whose length is bounded
@@ -1932,6 +1996,10 @@ mod tests {
     use super::*;
     use crate::testing::usmap::build_hero_usmap_with_leading_gear;
     use crate::testing::usmap::build_minimal_usmap_bytes as minimal_usmap_none;
+    use crate::testing::usmap::{
+        V5_BRANCH_FSTRING, V5_ENGINE_VERSION_FIELDS, V5_PACKAGE_VERSIONS,
+        build_minimal_v5_usmap_bytes,
+    };
 
     #[test]
     fn parse_minimal_usmap_none_schema() {
@@ -3718,10 +3786,188 @@ mod tests {
         }
     }
 
+    /// A v5 file whose versioning block holds [`V5_ENGINE_VERSION_FIELDS`]
+    /// with `branch`, then [`V5_PACKAGE_VERSIONS`].
+    fn v5_versioned(branch: &[u8]) -> Vec<u8> {
+        build_minimal_v5_usmap_bytes(
+            &[
+                &1i32.to_le_bytes()[..],
+                &V5_ENGINE_VERSION_FIELDS,
+                branch,
+                &V5_PACKAGE_VERSIONS,
+            ]
+            .concat(),
+        )
+    }
+
+    /// A v5 versioned header that ends with the branch length `len`.
+    fn v5_cut_after_branch_length(len: i32) -> Vec<u8> {
+        [
+            &[0xC4, 0x30, USMAP_VERSION_ENGINE_VERSIONING][..],
+            &1i32.to_le_bytes(),
+            &V5_ENGINE_VERSION_FIELDS,
+            &len.to_le_bytes(),
+        ]
+        .concat()
+    }
+
+    /// The engine version that follows `has_versioning` in a v5 file is read past
+    /// exactly: a byte too many or too few misreads the package versions or
+    /// the compression header behind it.
+    #[test]
+    fn parse_usmap_v5_versioned_skips_the_engine_version() {
+        let bytes = v5_versioned(&V5_BRANCH_FSTRING);
+        assert_matches_uncompressed(&Usmap::from_bytes(&bytes).unwrap());
+    }
+
+    /// With `has_versioning` 0, a v5 file is laid out as a v4 one.
+    #[test]
+    fn parse_usmap_v5_unversioned_is_the_v4_layout() {
+        let bytes = build_minimal_v5_usmap_bytes(&0i32.to_le_bytes());
+        assert_matches_uncompressed(&Usmap::from_bytes(&bytes).unwrap());
+
+        let v4_bytes = std::fs::read(usmap_fixture("external_minimal_v4.usmap")).unwrap();
+        let mut v5_bytes = v4_bytes.clone();
+        v5_bytes[2] = 5;
+        let v4 = Usmap::from_bytes(&v4_bytes).unwrap();
+        let v5 = Usmap::from_bytes(&v5_bytes).unwrap();
+        assert!(v4.schemas.contains_key("Hero") && v4.enums.contains_key("EColor"));
+        assert_eq!(v5.schemas.len(), v4.schemas.len());
+        assert_eq!(
+            format!("{:?}", v5.schemas.get("Hero")),
+            format!("{:?}", v4.schemas.get("Hero"))
+        );
+        assert_eq!(v5.enums.len(), v4.enums.len());
+        assert_eq!(v5.enums.get("EColor"), v4.enums.get("EColor"));
+    }
+
+    /// Version 5 is the newest accepted, and only it opens the versioning
+    /// block with an engine version: the block without one parses at 4.
+    #[test]
+    fn the_newest_usmap_version_is_engine_versioning() {
+        let mut v4 =
+            build_minimal_v5_usmap_bytes(&[&1i32.to_le_bytes()[..], &V5_PACKAGE_VERSIONS].concat());
+        v4[2] = 4;
+        assert_matches_uncompressed(&Usmap::from_bytes(&v4).unwrap());
+        let v5 = v5_versioned(&V5_BRANCH_FSTRING);
+        assert_matches_uncompressed(&Usmap::from_bytes(&v5).unwrap());
+        for found in [6, u8::MAX] {
+            let mut bytes = v5.clone();
+            bytes[2] = found;
+            assert_eq!(
+                parse_fault(&bytes),
+                MappingsParseFault::UnsupportedVersion { found },
+                "{found}"
+            );
+        }
+    }
+
+    /// Every branch framing CUE4Parse accepts parses: the three encodings of
+    /// an empty branch, a UTF-16 branch, and a branch whose body holds an
+    /// embedded NUL and a byte that is not UTF-8 (CUE4Parse checks only the
+    /// last code unit, so the body is not validated here either).
+    #[test]
+    fn parse_usmap_v5_branch_encodings_parse() {
+        let units: Vec<u8> = "++UE5+Release-5.4\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(units.len(), 36);
+        let utf16 = [&(-18i32).to_le_bytes()[..], &units].concat();
+        for (label, branch) in [
+            ("length 0", &0i32.to_le_bytes()[..]),
+            ("ANSI empty", &[1, 0, 0, 0, 0]),
+            ("UTF-16 empty", &[0xFF, 0xFF, 0xFF, 0xFF, 0, 0]),
+            ("UTF-16", &utf16),
+            ("unvalidated body", &[4, 0, 0, 0, 0x41, 0x00, 0xFF, 0x00]),
+        ] {
+            let usmap =
+                Usmap::from_bytes(&v5_versioned(branch)).unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_matches_uncompressed(&usmap);
+        }
+    }
+
+    /// A branch whose last code unit is not zero is refused, with the rest
+    /// of the file behind it so the fault is no truncation. Each UTF-16 row
+    /// zeroes one of the last unit's two bytes.
+    #[test]
+    fn parse_usmap_v5_branch_without_terminator_rejected() {
+        for (branch, encoding) in [
+            (&[0x02, 0, 0, 0, 0x41, 0x42][..], FStringEncoding::Utf8),
+            (
+                &[0xFD, 0xFF, 0xFF, 0xFF, 0x41, 0, 0x42, 0, 0x43, 0],
+                FStringEncoding::Utf16,
+            ),
+            (
+                &[0xFD, 0xFF, 0xFF, 0xFF, 0x41, 0, 0x42, 0, 0, 0x43],
+                FStringEncoding::Utf16,
+            ),
+        ] {
+            assert_eq!(
+                parse_fault(&v5_versioned(branch)),
+                MappingsParseFault::EngineBranchMalformed {
+                    kind: FStringFault::MissingNullTerminator { encoding }
+                },
+                "{branch:02x?}"
+            );
+        }
+    }
+
+    /// The branch length is checked against its cap before any branch byte
+    /// is read, so a refused length is refused with nothing after it. The cap
+    /// itself is accepted in both encodings.
+    #[test]
+    fn parse_usmap_v5_branch_length_is_capped_before_it_is_read() {
+        let cap = max_usmap_branch_len();
+        let signed_cap = i32::try_from(cap).unwrap();
+        let too_long = |length| MappingsParseFault::EngineBranchMalformed {
+            kind: FStringFault::LengthExceedsMaximum {
+                length,
+                maximum: cap,
+            },
+        };
+        for (len, expected) in [
+            (signed_cap + 1, too_long(cap + 1)),
+            (-(signed_cap + 1), too_long(cap + 1)),
+            (i32::MAX, too_long(i32::MAX.unsigned_abs())),
+            (
+                i32::MIN,
+                MappingsParseFault::EngineBranchMalformed {
+                    kind: FStringFault::LengthIsI32Min,
+                },
+            ),
+        ] {
+            assert_eq!(
+                parse_fault(&v5_cut_after_branch_length(len)),
+                expected,
+                "{len}"
+            );
+        }
+
+        let filler = usize::try_from(cap - 1).unwrap();
+        let ansi = [&signed_cap.to_le_bytes()[..], &vec![b'A'; filler], &[0]].concat();
+        let utf16 = [
+            &(-signed_cap).to_le_bytes()[..],
+            &[0x41, 0].repeat(filler),
+            &[0, 0],
+        ]
+        .concat();
+        for (label, branch) in [("ANSI", ansi), ("UTF-16", utf16)] {
+            let usmap = Usmap::from_bytes(&v5_versioned(&branch))
+                .unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_matches_uncompressed(&usmap);
+        }
+    }
+
+    #[test]
+    fn max_usmap_branch_len_accessor_returns_expected_value() {
+        assert_eq!(max_usmap_branch_len(), 65_536);
+    }
+
     /// A header cut anywhere is truncated at the start of the field that
-    /// ran out; a cut anywhere in the custom-version array, at the array's
-    /// start. Each layout lists where its header fields start, then the
-    /// payload's.
+    /// ran out; a cut anywhere in the custom-version array or the engine
+    /// version's branch, at the start of its bytes. Each layout lists where
+    /// its header fields start, then the payload's.
     #[test]
     fn every_cut_of_the_header_is_truncated_at_its_field() {
         // has_versioning = 1, two object versions, two custom versions, net_cl
@@ -3748,6 +3994,22 @@ mod tests {
                 "versioned",
                 v1_usmap(&versioning),
                 &[0, 2, 3, 7, 11, 15, 19, 59, 63, 64, 68, 72][..],
+            ),
+            // magic, version, has_versioning = 0, compression, two sizes
+            (
+                "v5 unversioned",
+                build_minimal_v5_usmap_bytes(&0i32.to_le_bytes()),
+                &[0, 2, 3, 7, 8, 12, 16][..],
+            ),
+            // magic, version, has_versioning, the engine version's four
+            // fields, the branch's length and bytes, the five fields after
+            // it, compression, two sizes
+            (
+                "v5 versioned",
+                v5_versioned(&V5_BRANCH_FSTRING),
+                &[
+                    0, 2, 3, 7, 9, 11, 13, 17, 21, 39, 43, 47, 51, 91, 95, 96, 100, 104,
+                ][..],
             ),
         ] {
             assert_matches_uncompressed(&Usmap::from_bytes(&bytes).unwrap());
