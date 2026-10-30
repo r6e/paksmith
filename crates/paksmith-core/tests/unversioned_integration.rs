@@ -21,8 +21,9 @@ mod tests {
     use paksmith_core::testing::uasset::{MinimalPackage, build_minimal_ue4_27_unversioned};
     use paksmith_core::testing::usmap::{
         MINIMAL_UNVERSIONED_PAYLOAD_HEX, build_hero_usmap_bytes, build_hero_usmap_with_enum_speed,
-        build_hero_usmap_with_struct_speed, build_minimal_unversioned_uasset_bytes,
-        build_minimal_usmap_bytes, build_sparse_schema_usmap_bytes,
+        build_hero_usmap_with_leading_gear, build_hero_usmap_with_struct_speed,
+        build_minimal_unversioned_uasset_bytes, build_minimal_usmap_bytes,
+        build_sparse_schema_usmap_bytes,
     };
     use proptest::prelude::*;
 
@@ -181,8 +182,9 @@ mod tests {
     }
 
     /// Asset-level pin for the unversioned `EnumProperty` decode
-    /// path: the wire stream stores a single `u8` ordinal, and the
-    /// decoder resolves it via `Usmap::enums[enum_name]`. Builds a
+    /// path: the wire stream stores the value as the enum's underlying
+    /// type (here `ByteProperty`, one byte), and the decoder resolves it
+    /// via `Usmap::enums[enum_name]`. Builds a
     /// `.usmap` whose `Speed` slot is `EnumProperty(HeroDifficulty)`
     /// with values `["Easy", "Normal", "Hard"]`. The asset payload
     /// encodes ordinal 1 in the Speed slot — should resolve to
@@ -264,6 +266,47 @@ mod tests {
             }
             other => panic!("expected Enum, got {other:?}"),
         }
+    }
+
+    /// An `IntProperty`-backed enum (`Gear: Enum<Int32>`, with no named
+    /// values) ahead of `Health` and `Speed` reads four bytes, so the slots
+    /// behind it decode from the right offset.
+    #[test]
+    fn wide_enum_keeps_the_slots_behind_it_aligned() {
+        let usmap = std::sync::Arc::new(
+            Usmap::from_bytes(&build_hero_usmap_with_leading_gear(&[26, 2, 5, 0, 0, 0]))
+                .expect("Usmap parse"),
+        );
+        let payload = [
+            &[0x00, 0x07][..], // one fragment, last, three values
+            &300i32.to_le_bytes(),
+            &100i32.to_le_bytes(),
+            &600f32.to_le_bytes(),
+        ]
+        .concat();
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27_unversioned("Hero", payload);
+
+        let pkg = Package::read_from(&bytes, None, Some(&usmap), "test/Hero.uasset")
+            .expect("Package::read_from");
+        let props = prop_tree(&pkg);
+        assert_eq!(props.len(), 3, "{props:?}");
+        let PropertyValue::Enum { type_name, value } = &props[0].value else {
+            panic!("expected Enum, got {:?}", props[0].value);
+        };
+        assert_eq!(type_name.as_ref(), "EGear");
+        assert!(
+            matches!(value, EnumValue::Ordinal { ordinal: 300, .. }),
+            "{value:?}"
+        );
+        assert_eq!(value.to_string(), "EGear::300");
+        assert_eq!(
+            (props[1].name(), &props[1].value),
+            ("Health", &PropertyValue::Int(100))
+        );
+        assert_eq!(
+            (props[2].name(), &props[2].value),
+            ("Speed", &PropertyValue::Float(600.0))
+        );
     }
 
     /// Asset-level pin for the depth-1 `UnversionedSchemaMissing`

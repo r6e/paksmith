@@ -40,7 +40,9 @@ use crate::error::{
 use crate::seams::AssetSeam;
 use crate::untrusted::clamp;
 
-use super::super::mappings::{MappedProperty, MappedPropertyType, ResolvedProperty, Usmap};
+use super::super::mappings::{
+    EnumStorage, MappedProperty, MappedPropertyType, ResolvedProperty, Usmap,
+};
 
 // Bit masks from oracle unreal_asset_base::unversioned::header::UnversionedHeaderFragment.
 const SKIP_NUM_MASK: u16 = 0x007f;
@@ -641,23 +643,21 @@ fn read_unversioned_value(
             }
             PropertyValue::Text(text)
         }
-        MT::Enum { enum_name, .. } => {
-            // A single u8 ordinal: the ByteProperty storage nearly every enum
-            // uses. CUE4Parse@77b94fa reads the value as the underlying type
-            // from the mappings (`EnumProperty.cs` L27-L32), so an enum with a
-            // wider underlying type is misread here, and so is every slot
-            // after it.
-            let idx = cur.read_u8().map_err(|_| value_eof())?;
+        MT::Enum {
+            enum_name,
+            underlying,
+        } => {
+            let ordinal = read_enum_ordinal(cur, *underlying).map_err(|_| value_eof())?;
             // A name the `.usmap` has is shared; an ordinal it has no name
             // for keeps the enum's name by refcount rather than formatting a
             // copy of it per decoded value.
             let value = view
                 .enum_values(enum_name, asset_path)?
-                .and_then(|values| values.get(&u64::from(idx)))
+                .and_then(|values| values.get(&ordinal.cast_unsigned()))
                 .map_or_else(
                     || EnumValue::Ordinal {
                         enum_name: Arc::clone(enum_name),
-                        ordinal: i64::from(idx),
+                        ordinal,
                     },
                     |name| EnumValue::Named(Arc::clone(name)),
                 );
@@ -908,6 +908,23 @@ fn read_collection_count(
         })
 }
 
+/// An enum value stored as `storage`, widened to `i64` as CUE4Parse's
+/// `Convert.ToInt64` widens it (signed widths sign-extend, unsigned widths
+/// zero-extend); a `UInt64` above `i64::MAX` keeps its bits, where CUE4Parse
+/// throws. Its bits as a `u64` key the `.usmap` enum table.
+fn read_enum_ordinal(cur: &mut Cursor<&[u8]>, storage: EnumStorage) -> std::io::Result<i64> {
+    Ok(match storage {
+        EnumStorage::Int8 => i64::from(cur.read_i8()?),
+        EnumStorage::Int16 => i64::from(cur.read_i16::<LE>()?),
+        EnumStorage::Int32 => i64::from(cur.read_i32::<LE>()?),
+        EnumStorage::Int64 => cur.read_i64::<LE>()?,
+        EnumStorage::UInt8 => i64::from(cur.read_u8()?),
+        EnumStorage::UInt16 => i64::from(cur.read_u16::<LE>()?),
+        EnumStorage::UInt32 => i64::from(cur.read_u32::<LE>()?),
+        EnumStorage::UInt64 => cur.read_u64::<LE>()?.cast_signed(),
+    })
+}
+
 /// Map a [`MappedPropertyType`] back to its UE wire-format type name
 /// (e.g. `"IntProperty"`, `"FloatProperty"`) for storage in
 /// [`PropertyValue::Array::inner_type`]. Inverse of the byte → type
@@ -1003,7 +1020,7 @@ mod tests {
     use std::collections::HashMap;
     use std::io::Cursor;
 
-    use crate::asset::mappings::{ClassSchema, EnumStorage};
+    use crate::asset::mappings::ClassSchema;
     use crate::asset::property::primitives::{MapEntry, PropertyValue};
     use crate::asset::property::test_utils::{
         assert_derived_budget_exceeded, make_ctx, make_ctx_with_import, with_derived_budget,
@@ -1919,12 +1936,10 @@ mod tests {
         usmap
     }
 
-    /// `Difficulty` as a container's element type.
+    /// `Difficulty`, stored as a `ByteProperty`, as a container's element
+    /// type.
     fn difficulty() -> Arc<MappedPropertyType> {
-        Arc::new(MappedPropertyType::Enum {
-            enum_name: Arc::from("Difficulty"),
-            underlying: EnumStorage::UInt8,
-        })
+        Arc::new(difficulty_as(EnumStorage::UInt8))
     }
 
     /// `wire` read against `usmap` as a property of type `prop_type`, at
@@ -2006,6 +2021,195 @@ mod tests {
             .map(|e| (named(&e.key), named(&e.value)))
             .collect();
         assert_eq!(pairs, [("Easy".to_string(), "Hard".to_string())]);
+    }
+
+    /// `Difficulty` stored as `underlying`.
+    fn difficulty_as(underlying: EnumStorage) -> MappedPropertyType {
+        MappedPropertyType::Enum {
+            enum_name: Arc::from("Difficulty"),
+            underlying,
+        }
+    }
+
+    /// `wire` read as class `C`: `E: e_type` at slot 0, then `N: Int32` at
+    /// slot 1. The `Difficulty` table is [`difficulty_usmap`]'s plus
+    /// `u64::MAX` = `Neg` and `0xFFFF_FFFF` = `U32Max`. Returns the
+    /// properties and the cursor's end position.
+    fn read_e_then_n(e_type: MappedPropertyType, wire: &[u8]) -> (Vec<Property>, u64) {
+        let row = |name: &str, schema_index, prop_type| MappedProperty {
+            name: Arc::from(name),
+            schema_index,
+            array_index: 0,
+            prop_type,
+        };
+        let schema = ClassSchema {
+            name: "C".to_string(),
+            super_type: None,
+            prop_count: 2,
+            properties: vec![row("E", 0, e_type), row("N", 1, MappedPropertyType::Int32)],
+        };
+        let mut enums = difficulty_usmap().enums;
+        enums.get_mut("Difficulty").unwrap().extend([
+            (u64::MAX, Arc::from("Neg")),
+            (0xFFFF_FFFF, Arc::from("U32Max")),
+        ]);
+        let usmap = Usmap::from_parts(HashMap::from([("C".to_string(), schema)]), enums).unwrap();
+        let mut cur = Cursor::new(wire);
+        let props =
+            read_unversioned_properties(&mut cur, "C", &usmap, &make_ctx(&["None"]), "t", 0)
+                .unwrap();
+        (props, cur.position())
+    }
+
+    /// [`read_e_then_n`] with both slots serialized: `E` = `body`, `N` = 42.
+    fn decode_e_then_n(e_type: MappedPropertyType, body: &[u8]) -> (Vec<Property>, u64) {
+        let wire = [&[0x00, 0x05][..], body, &42i32.to_le_bytes()].concat();
+        read_e_then_n(e_type, &wire)
+    }
+
+    /// The end position [`decode_e_then_n`] reaches for `body`: the
+    /// header, `body` and `N`.
+    fn end_after(body: &[u8]) -> u64 {
+        u64::try_from(2 + body.len() + 4).unwrap()
+    }
+
+    /// An `Int32`-backed enum reads four bytes, so the slot behind it reads
+    /// from the right offset.
+    #[test]
+    fn an_int_backed_enum_reads_four_bytes_and_keeps_the_next_slot_aligned() {
+        let (props, pos) = decode_e_then_n(difficulty_as(EnumStorage::Int32), &1i32.to_le_bytes());
+        assert_eq!(
+            props[0].value,
+            PropertyValue::Enum {
+                type_name: Arc::from("Difficulty"),
+                value: EnumValue::from("Hard"),
+            }
+        );
+        assert_eq!(
+            (props[1].name(), &props[1].value),
+            ("N", &PropertyValue::Int(42))
+        );
+        assert_eq!(pos, 10);
+    }
+
+    /// An enum value reads as its underlying integer type, widened to `i64`
+    /// (sign-extended from a signed type, zero-extended from an unsigned
+    /// one), and its bits as a `u64` key the `.usmap` table; a `UInt64`
+    /// above `i64::MAX` keeps its bits as a negative ordinal.
+    #[test]
+    fn enum_values_read_at_their_underlying_width() {
+        use EnumStorage as S;
+        let named = EnumValue::from;
+        let ord = |ordinal| EnumValue::Ordinal {
+            enum_name: Arc::from("Difficulty"),
+            ordinal,
+        };
+        let rows: [(S, Vec<u8>, EnumValue); 19] = [
+            (S::Int8, vec![1], named("Hard")),
+            (S::Int8, vec![0xFF], named("Neg")),
+            (S::Int16, 1i16.to_le_bytes().to_vec(), named("Hard")),
+            (S::Int16, (-1i16).to_le_bytes().to_vec(), named("Neg")),
+            (S::Int32, (-1i32).to_le_bytes().to_vec(), named("Neg")),
+            (S::Int32, 300i32.to_le_bytes().to_vec(), ord(300)),
+            (S::Int32, (-5i32).to_le_bytes().to_vec(), ord(-5)),
+            (S::Int64, 1i64.to_le_bytes().to_vec(), named("Hard")),
+            (S::Int64, (-1i64).to_le_bytes().to_vec(), named("Neg")),
+            (S::Int64, i64::MIN.to_le_bytes().to_vec(), ord(i64::MIN)),
+            (S::UInt8, vec![1], named("Hard")),
+            (S::UInt8, vec![0xFF], ord(255)),
+            (S::UInt16, 1u16.to_le_bytes().to_vec(), named("Hard")),
+            (S::UInt16, 0xFFFFu16.to_le_bytes().to_vec(), ord(65535)),
+            (S::UInt32, 1u32.to_le_bytes().to_vec(), named("Hard")),
+            (
+                S::UInt32,
+                0xFFFF_FFFFu32.to_le_bytes().to_vec(),
+                named("U32Max"),
+            ),
+            (S::UInt64, 1u64.to_le_bytes().to_vec(), named("Hard")),
+            (S::UInt64, u64::MAX.to_le_bytes().to_vec(), named("Neg")),
+            (S::UInt64, (u64::MAX - 1).to_le_bytes().to_vec(), ord(-2)),
+        ];
+        for (underlying, body, expected) in rows {
+            let label = format!("{underlying:?} {body:02x?}");
+            let (props, pos) = decode_e_then_n(difficulty_as(underlying), &body);
+            assert_eq!(props.len(), 2, "{label}");
+            let PropertyValue::Enum { value, .. } = &props[0].value else {
+                panic!("{label}: expected an enum, got {:?}", props[0].value);
+            };
+            assert_eq!(*value, expected, "{label}");
+            assert_eq!(value.name(), expected.name(), "{label}");
+            assert_eq!(value.to_string(), expected.to_string(), "{label}");
+            assert_eq!(props[1].value, PropertyValue::Int(42), "{label}");
+            assert_eq!(pos, end_after(&body), "{label}");
+        }
+    }
+
+    /// A zero-masked enum slot, here an `Int64`-backed one, is skipped before
+    /// any value read: it consumes nothing and the slot behind it decodes.
+    #[test]
+    fn a_zero_masked_wide_enum_reads_nothing() {
+        // One fragment, has_zeros, last, two values; mask bit 0 (E) set.
+        let wire = [&[0x80, 0x05, 0x01][..], &42i32.to_le_bytes()].concat();
+        let (props, pos) = read_e_then_n(difficulty_as(EnumStorage::Int64), &wire);
+        let pairs: Vec<_> = props.iter().map(|p| (p.name(), &p.value)).collect();
+        assert_eq!(pairs, [("N", &PropertyValue::Int(42))]);
+        assert_eq!(pos, 7);
+    }
+
+    /// An enum element of an Array reads its underlying type, as a
+    /// top-level value does: one byte for a `ByteProperty`-backed enum, four
+    /// for an `Int32`-backed one, so the slot behind the array stays
+    /// aligned. CUE4Parse reads each element as an FName (8 bytes).
+    #[test]
+    fn wide_enum_container_elements_read_the_underlying_width() {
+        for (underlying, body) in [
+            (EnumStorage::UInt8, vec![2, 0, 0, 0, 0, 1]),
+            (EnumStorage::Int32, vec![2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
+        ] {
+            let array = MappedPropertyType::Array {
+                inner: Arc::new(difficulty_as(underlying)),
+            };
+            let (props, pos) = decode_e_then_n(array, &body);
+            let PropertyValue::Array { elements, .. } = &props[0].value else {
+                panic!(
+                    "{underlying:?}: expected an array, got {:?}",
+                    props[0].value
+                );
+            };
+            let names: Vec<_> = elements
+                .iter()
+                .map(|element| match element {
+                    PropertyValue::Enum { value, .. } => value.name(),
+                    other => panic!("{underlying:?}: expected an enum, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(names, [Some("Easy"), Some("Hard")], "{underlying:?}");
+            assert_eq!(props[1].value, PropertyValue::Int(42), "{underlying:?}");
+            assert_eq!(pos, end_after(&body), "{underlying:?}");
+        }
+    }
+
+    /// An enum body shorter than its underlying type is a truncated value.
+    #[test]
+    fn a_short_wide_enum_body_is_an_unexpected_eof() {
+        for (underlying, body) in [
+            (EnumStorage::Int32, &[1, 0, 0][..]),
+            (EnumStorage::UInt64, &[0; 7][..]),
+        ] {
+            let read = read_value(difficulty_as(underlying), body, &difficulty_usmap(), 0);
+            assert!(
+                matches!(
+                    read,
+                    Err(PaksmithError::AssetParse {
+                        fault: AssetParseFault::UnexpectedEof {
+                            field: AssetWireField::UnversionedValue
+                        },
+                        ..
+                    })
+                ),
+                "{underlying:?}: {read:?}"
+            );
+        }
     }
 
     /// A container looks its element enum's table up once for all its

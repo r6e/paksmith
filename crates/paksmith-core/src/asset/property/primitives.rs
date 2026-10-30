@@ -76,8 +76,9 @@ pub enum EnumValue {
     Ordinal {
         /// The enum's name, shared with the property's `type_name`.
         enum_name: Arc<str>,
-        /// The value as read, widened to `i64`. Every value is currently read
-        /// as one byte and zero-extended, whatever the enum's underlying type.
+        /// The value as read, widened to `i64`: sign-extended from a signed
+        /// underlying type, zero-extended from an unsigned one; a `UInt64`
+        /// value above `i64::MAX` is negative.
         ordinal: i64,
     },
 }
