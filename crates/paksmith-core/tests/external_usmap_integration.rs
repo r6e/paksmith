@@ -1,7 +1,7 @@
 //! Parse-success integration tests against externally-produced
 //! `.usmap` fixtures (issue #376).
 //!
-//! The fixtures live at `tests/fixtures/external_minimal_v{0,4}.usmap`
+//! The fixtures live at `tests/fixtures/external_minimal_v{0,4,5}.usmap`
 //! and are built by raw byte writes following CUE4Parse spec — see
 //! `crates/paksmith-fixture-gen/src/external_usmap.rs`. The whole point
 //! is that they round-trip the parser's wire-format claims against
@@ -57,11 +57,18 @@ fn external_v0_usmap_parses_hero_schema() {
 
 #[test]
 fn external_v4_usmap_parses_hero_schema_with_explicit_enum_values() {
-    let usmap = load_external_usmap("external_minimal_v4.usmap");
-    let hero = usmap
-        .schemas
-        .get("Hero")
-        .expect("Hero schema present in v4 fixture");
+    assert_minimal_v4_schema(&load_external_usmap("external_minimal_v4.usmap"));
+}
+
+#[test]
+fn external_v5_usmap_parses_hero_schema_with_explicit_enum_values() {
+    assert_minimal_v4_schema(&load_external_usmap("external_minimal_v5.usmap"));
+}
+
+/// The schema the v4 and v5 fixtures share: `Hero { Health, Color: EColor }`,
+/// with `EColor`'s ordinals explicit and sparse.
+fn assert_minimal_v4_schema(usmap: &Usmap) {
+    let hero = usmap.schemas.get("Hero").expect("Hero schema present");
     assert_eq!(hero.properties.len(), 2);
     assert!(
         hero.properties.iter().any(|p| p.name.as_ref() == "Health"),

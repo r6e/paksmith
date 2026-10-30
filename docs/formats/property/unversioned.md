@@ -46,10 +46,11 @@ silently mis-decoding the property stream as tagged bytes.
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | `EUsmapVersion::Initial` (byte 0) | Baseline: `u8` name lengths, `u8` enum value counts, positional enum ordinals. | `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapParser.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
-| `EUsmapVersion::PackageVersioning` (byte 1) | Adds an optional versioning block (object version, custom version array, netCL) before the compression header. | Same[^1] |
+| `EUsmapVersion::PackageVersioning` (byte 1) | Adds an optional versioning block (object versions UE4 and UE5, custom version array, netCL) before the compression header. | Same[^1] |
 | `EUsmapVersion::LongFName` (byte 2) | Widens name-table entry length field from `u8` to `u16` (needed for names > 255 bytes). | Same[^1] |
 | `EUsmapVersion::LargeEnums` (byte 3) | Widens per-enum value count from `u8` to `u16`. | Same[^1] |
 | `EUsmapVersion::ExplicitEnumValues` (byte 4) | Enum entries carry explicit `u64` ordinals instead of positional indices. Supports sparse enums (`A = 0, C = 2`). | Same[^1] |
+| `EUsmapVersion::EngineVersioning` (byte 5) | When `has_versioning` is 1, an [`FEngineVersion`](../primitive/fengine-version.md) (`u16` major, minor, patch; `u32` changelist; `FString` branch) follows it, ahead of the object versions. Nothing else changes: with `has_versioning` 0 the file is laid out as at version 4. | `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapParser.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7`[^3] |
 
 ## Wire layout
 
@@ -213,8 +214,8 @@ always uncompressed:
 | field | size | type | semantics |
 |-------|------|------|-----------|
 | magic | 2 | `u16` LE | Must equal `0x30C4` (on-disk bytes `C4 30`). |
-| version | 1 | `u8` | `EUsmapVersion` discriminant (0–4 at the pinned SHA[^1]; see Versions table). |
-| [versioning block] | variable | — | Present iff `version ≥ 1`. Starts with `has_versioning`, an `FArchive` bool: an `i32` LE that must be 0 or 1. If it is 1: `object_version i32`, `object_version_ue5 i32`, `custom_version_count i32`, `custom_version_count × 20` bytes (GUID + i32), `net_cl u32`. |
+| version | 1 | `u8` | `EUsmapVersion` discriminant, 0–5: 0–4 at the pinned SHA[^1] and 5 at 77b94fa[^3]. See Versions table. |
+| [versioning block] | variable | — | Present iff `version ≥ 1`. Starts with `has_versioning`, an `FArchive` bool: an `i32` LE that must be 0 or 1. If it is 1: for version ≥ 5, an [`FEngineVersion`](../primitive/fengine-version.md) first[^3]: 10 bytes (`u16` major, minor and patch, `u32` changelist), then the branch FString (an `i32` length that counts the terminator, in bytes if positive and UTF-16 code units if negative, then that many units, the last of them zero; a length of 0 is an empty branch with no units after it); then `object_version i32`, `object_version_ue5 i32`, `custom_version_count i32`, `custom_version_count × 20` bytes (GUID + i32), `net_cl u32`. |
 | compression | 1 | `u8` | `0` = None, `1` = Oodle (unsupported), `2` = Brotli, `3` = ZStandard. |
 | compressed_size | 4 | `u32` LE | Byte count of the compressed payload. Capped at `MAX_USMAP_COMPRESSED_SIZE = 64 MiB`. |
 | decompressed_size | 4 | `u32` LE | Expected decompressed byte count. Capped at `MAX_USMAP_DECOMPRESSED_SIZE = 256 MiB`. |
@@ -230,8 +231,9 @@ After decompression, the schema data is parsed as:
 
 Variance has two axes, both documented above. (1) `.usmap`-version
 gates — the EUsmapVersion byte controls name-length widths (u8→u16 at
-v2), enum-count widths (u8→u16 at v3), and enum-ordinal encoding
-(positional vs explicit u64 at v4) per the Versions table and Wire
+v2), enum-count widths (u8→u16 at v3), enum-ordinal encoding
+(positional vs explicit u64 at v4) and, from v5, an engine version
+inside the versioning block, per the Versions table and Wire
 layout §*.usmap file format*. (2) Per-file compression — None /
 Brotli / ZStandard, with Oodle rejected, selected by the compression
 byte in the `.usmap` header. The unversioned property bitstream
@@ -245,11 +247,10 @@ format itself has no version discriminant.
   `value_num` is 7 bits (max 127). Per-fragment a maximum of
   127 + 127 = 254 schema slots are touched.
 - **`.usmap` discriminant** (`EUsmapVersion`): wire-imposed range
-  `0..=4` at the pinned SHA[^1] (5 variants documented); newer
-  CUE4Parse[^3] adds 5 (`EngineVersioning`), which starts the
-  versioning block with an `FEngineVersion` this doc does not
-  describe. Future versions extend this; a reader gates
-  compatibility on the value.
+  `0..=5` (6 variants documented): `0..=4` at the pinned SHA[^1],
+  and 5 (`EngineVersioning`), which adds an `FEngineVersion` after
+  `has_versioning`, at 77b94fa[^3]. Future versions extend this;
+  a reader gates compatibility on the value.
 - **`.usmap` compression byte**: `0..=3` (None / Oodle / Brotli /
   ZStandard). Other values are wire-imposed-invalid.
 
@@ -269,6 +270,7 @@ hardening*.
 | `MAX_USMAP_DECOMPRESSED_SIZE` | 256 MiB | Bounds the output buffer reserved for the declared size. A decoder's own working memory is separate; see the Brotli and ZStandard notes below. |
 | `MAX_USMAP_ENUM_COUNT` | 4096 | Bounds the enum-table `HashMap` heap cost per `.usmap`. |
 | `MAX_USMAP_VALUES_PER_ENUM` | 1024 | Bounds per-enum `HashMap` heap cost. |
+| `MAX_USMAP_BRANCH_LEN` | 65536 code units | Bounds the engine-version branch length a v5 header may claim; refused before the bytes are read. |
 | `MAX_USMAP_HEAP_BYTES` | 512 MiB | Bounds the sum the per-section caps leave open, since one file can fill several sections at once: an estimate of the decompressed buffer and of each table parsed from it, charged before each is allocated, refuses a load that would pass it. |
 | `MAX_INHERITANCE_DEPTH` | 64 | Breaks cyclic `super_type` chains in `.usmap`; a malicious cycle would otherwise loop forever in `get_all_properties`. |
 | `MAX_PROPERTY_DEPTH` | 128 | Shared with the tagged path; prevents stack overflow from adversarial `Struct<Struct<...>>` or `Array<Array<...>>` nesting. |
@@ -347,6 +349,7 @@ tests can read the live value without duplicating the literal.
   - Enum (`26`) values are always read as a `u8` ordinal and the underlying type's tree is discarded. CUE4Parse[^4] reads the value as the underlying type, so for an enum backed by a wider integer type paksmith misreads the value and reads every later property of the export from the wrong offset.
   - `unreal_asset`[^2] has no type byte above FieldPath (`27`) other than `0xFF` and refuses a file with an Optional (`28`) row. Paksmith follows CUE4Parse[^4] and reads the Optional's inner tree.
   - Brotli bytes after the stream's final meta-block but inside `compressed_size` are refused as `MappingsParseFault::BrotliTrailingBytes`. `unreal_asset`'s brotli decode stops at the stream's end and accepts them.
+  - The engine-version branch is refused past 65,536 code units, as `MappingsParseFault::EngineBranchMalformed`; CUE4Parse[^3] has no fixed cap and checks the length only against the bytes left in the file. Paksmith reads past the engine version and keeps none of it; CUE4Parse keeps it as `UsmapParser.EngineVersion`.
 
 ## Paksmith implementation
 
@@ -364,5 +367,5 @@ tests can read the live value without duplicating the literal.
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapParser.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the `.usmap` wire format and `EUsmapVersion` discriminants. `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/Unversioned/FUnversionedHeader.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the fragment-header bitstream.
 [^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/unversioned/header.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle; bit-mask constants cross-referenced against `UnversionedHeaderFragment`. Its `EPropertyType` discriminant table (0-27 and `Unknown = 0xFF`) is `unreal_asset_base/src/unversioned/properties/mod.rs` at the same SHA (L31-L91; `UsmapPropertyData::new` refuses other bytes at L165).
-[^3]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/EUsmapVersion.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L20-L24 — `EngineVersioning` (5) follows `ExplicitEnumValues` and is `Latest`; `UsmapParser.cs` at the same revision rejects only versions above `Latest` (L37-L39) and, from v5, reads an `FEngineVersion` at the head of the versioning block (L46-L49).
+[^3]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/EUsmapVersion.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L20-L24 — `EngineVersioning` (5) follows `ExplicitEnumValues` and is `Latest`; `UsmapParser.cs` at the same revision rejects only versions above `Latest` (L37-L39) and, from v5, reads an `FEngineVersion` after `has_versioning` (L46-L49, the parser's only version-5 gate; the versioning block is L43-L54). At the same revision, `CUE4Parse/UE4/Objects/Core/Misc/FEngineVersionBase.cs` (L35-L38) and `FEngineVersion.cs` (L13) read its fields, and `CUE4Parse/UE4/Readers/FArchive.cs` (`ReadFString`, L521-L579) frames the branch: 0 is empty, a positive length counts bytes and a negative one UTF-16 units, the terminator included, the last unit must be zero, and the length is checked only against the bytes left in the file (L529).
 [^4]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapProperties.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` (`ParsePropertyType`, L36-L67) and `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/EPropertyType.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` (`OptionalProperty` = 28, L33) — the schema type-tree layout. `CUE4Parse/UE4/Assets/Objects/Properties/EnumProperty.cs` (L27-L32) and `CUE4Parse/UE4/Assets/Objects/FPropertyTagData.cs` (L115-L124) at the same revision read an unversioned enum value as the underlying type from the mappings.

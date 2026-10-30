@@ -5322,8 +5322,8 @@ pub enum MappingsParseFault {
         found: u16,
     },
 
-    /// Version byte is not in the supported range (0–4).
-    #[error("unsupported usmap version {found} (paksmith accepts 0–4)")]
+    /// Version byte is not in the supported range (0–5).
+    #[error("unsupported usmap version {found} (paksmith accepts 0–5)")]
     UnsupportedVersion {
         /// The version byte read from the header.
         found: u8,
@@ -5548,6 +5548,15 @@ pub enum MappingsParseFault {
     InvalidVersioningFlag {
         /// The flag's wire value.
         found: i32,
+    },
+
+    /// The engine version's branch, an FString in a version-5+ versioning
+    /// block, is malformed: its length is `i32::MIN` or past the branch-length
+    /// cap (in code units), or its last code unit is not zero.
+    #[error("usmap engine-version branch: {kind}")]
+    EngineBranchMalformed {
+        /// What is wrong with it.
+        kind: FStringFault,
     },
 
     /// A schema declared `prop_count < serial_count` — fewer total
@@ -6830,8 +6839,39 @@ mod tests {
         };
         assert_eq!(
             format!("{err}"),
-            "usmap deserialization failed: unsupported usmap version 9 (paksmith accepts 0–4)"
+            "usmap deserialization failed: unsupported usmap version 9 (paksmith accepts 0–5)"
         );
+    }
+
+    #[test]
+    fn mappings_parse_display_engine_branch_malformed() {
+        for (kind, expected) in [
+            (
+                FStringFault::LengthExceedsMaximum {
+                    length: 65_537,
+                    maximum: 65_536,
+                },
+                "usmap deserialization failed: usmap engine-version branch: \
+                 FString length 65537 exceeds maximum 65536",
+            ),
+            (
+                FStringFault::MissingNullTerminator {
+                    encoding: FStringEncoding::Utf16,
+                },
+                "usmap deserialization failed: usmap engine-version branch: \
+                 UTF-16 FString missing null terminator",
+            ),
+            (
+                FStringFault::LengthIsI32Min,
+                "usmap deserialization failed: usmap engine-version branch: \
+                 FString length i32::MIN overflows",
+            ),
+        ] {
+            let err = PaksmithError::MappingsParse {
+                fault: MappingsParseFault::EngineBranchMalformed { kind },
+            };
+            assert_eq!(err.to_string(), expected);
+        }
     }
 
     #[test]
