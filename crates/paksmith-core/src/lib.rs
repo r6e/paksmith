@@ -197,7 +197,7 @@ mod send_sync_assertions {
     use super::*;
     use crate::asset::bulk_data::{BulkDataResolver, FByteBulkData};
     use crate::asset::mappings::{
-        ClassSchema, MappedProperty, MappedPropertyType, ResolvedProperty,
+        ClassSchema, EnumStorage, MappedProperty, MappedPropertyType, ResolvedProperty,
     };
     use crate::container::pak::footer::PakFooter;
     use crate::container::pak::index::{PakIndex, PakIndexEntry};
@@ -304,6 +304,7 @@ mod send_sync_assertions {
         assert_send_sync::<ClassSchema>();
         assert_send_sync::<MappedProperty>();
         assert_send_sync::<MappedPropertyType>();
+        assert_send_sync::<EnumStorage>();
         assert_send_sync::<ResolvedProperty>();
 
         // Digest / errors

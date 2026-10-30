@@ -375,10 +375,10 @@ pub enum MappedPropertyType {
     Name,
     /// `TextProperty` — localized `FText`.
     Text,
-    /// `EnumProperty` — on the wire, a value of the enum's underlying type;
-    /// paksmith reads it as a `u8` ordinal, the `ByteProperty` storage
-    /// nearly every enum uses. The resolved string comes from
-    /// `Usmap::enums[enum_name]`.
+    /// `EnumProperty` — on the wire, a value of the enum's integer
+    /// underlying type; the resolved name comes from
+    /// `Usmap::enums[enum_name]`. A `.usmap` underlying type that is not an
+    /// integer parses as `Unknown(26)`.
     Enum {
         /// The enum's class name; key into [`Usmap::enums`].
         ///
@@ -391,6 +391,8 @@ pub enum MappedPropertyType {
         /// of clone-only heap per schema — now one refcount bump per
         /// expanded slot. Issue #397 sub-fix A.
         enum_name: Arc<str>,
+        /// The integer type the enum's values are stored as.
+        underlying: EnumStorage,
     },
     /// `StructProperty` — nested struct with its own schema.
     Struct {
@@ -425,11 +427,53 @@ pub enum MappedPropertyType {
         /// The value type, shared the same way.
         value: Arc<MappedPropertyType>,
     },
-    /// Unrecognised or unsupported type byte. Carries the raw byte for
+    /// Unrecognised or unsupported type byte — also 26, an `EnumProperty`
+    /// whose underlying type is not an integer. Carries the raw byte for
     /// diagnostics so downstream readers can emit
     /// `UnversionedTypeNotSupported { type_byte }` rather than silently
     /// misparsing.
     Unknown(u8),
+}
+
+/// The integer type an `EnumProperty` stores its value as: its `.usmap`
+/// underlying type. Any other underlying type parses as
+/// [`MappedPropertyType::Unknown`]`(26)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnumStorage {
+    /// `Int8Property` (usmap type 23).
+    Int8,
+    /// `Int16Property` (usmap type 22).
+    Int16,
+    /// `IntProperty` (usmap type 2).
+    Int32,
+    /// `Int64Property` (usmap type 21).
+    Int64,
+    /// `ByteProperty` (usmap type 0), the storage nearly every enum uses.
+    UInt8,
+    /// `UInt16Property` (usmap type 20).
+    UInt16,
+    /// `UInt32Property` (usmap type 19).
+    UInt32,
+    /// `UInt64Property` (usmap type 18).
+    UInt64,
+}
+
+impl EnumStorage {
+    /// The storage `underlying` names, or `None` when it is not an integer
+    /// type.
+    fn of(underlying: &MappedPropertyType) -> Option<Self> {
+        Some(match underlying {
+            MappedPropertyType::Int8 => Self::Int8,
+            MappedPropertyType::Int16 => Self::Int16,
+            MappedPropertyType::Int32 => Self::Int32,
+            MappedPropertyType::Int64 => Self::Int64,
+            MappedPropertyType::UInt8 => Self::UInt8,
+            MappedPropertyType::UInt16 => Self::UInt16,
+            MappedPropertyType::UInt32 => Self::UInt32,
+            MappedPropertyType::UInt64 => Self::UInt64,
+            _ => return None,
+        })
+    }
 }
 
 /// A single property entry from a `.usmap` schema.
@@ -1509,12 +1553,17 @@ fn read_mapped_type(
             }
         }
         26 => {
-            // EnumProperty — the underlying type's tree (a bare ByteProperty
-            // in practice), then the enum name. The tree is read only to stay
-            // aligned: unversioned enum values decode as a `u8` ordinal.
-            let _ = read_mapped_type(cur, names, depth + 1, ledger)?;
+            // EnumProperty — the underlying type's tree, then the enum name; a
+            // tree that is not an integer type is read whole to stay aligned.
+            let underlying = read_mapped_type(cur, names, depth + 1, ledger)?;
             let enum_name = read_name_arc(cur, names)?;
-            MappedPropertyType::Enum { enum_name }
+            EnumStorage::of(&underlying).map_or(
+                MappedPropertyType::Unknown(type_byte),
+                |underlying| MappedPropertyType::Enum {
+                    enum_name,
+                    underlying,
+                },
+            )
         }
         27 => MappedPropertyType::Unknown(type_byte), // FieldPathProperty
         28 => {
@@ -3054,7 +3103,8 @@ mod tests {
             (parsed.unwrap(), end),
             (
                 MappedPropertyType::Enum {
-                    enum_name: Arc::from("E")
+                    enum_name: Arc::from("E"),
+                    underlying: EnumStorage::UInt8
                 },
                 6
             )
@@ -3115,20 +3165,57 @@ mod tests {
         );
     }
 
-    /// An EnumProperty's underlying type is a whole type tree, read before
-    /// the enum name: an Array or Struct there keeps the rows behind it
-    /// aligned, as the bare Byte that real files carry does.
+    /// An EnumProperty keeps its integer underlying type as the storage of
+    /// its values.
     #[test]
-    fn parse_usmap_enum_property_reads_its_underlying_type_tree() {
-        let expected = MappedPropertyType::Enum {
-            enum_name: Arc::from("EGear"),
-        };
-        for gear in [
-            &[26u8, 0, 5, 0, 0, 0][..],           // Enum<Byte>
-            &[26, 8, 0, 5, 0, 0, 0][..],          // Enum<Array<Byte>>
-            &[26, 9, 0, 0, 0, 0, 5, 0, 0, 0][..], // Enum<Struct Hero>
+    fn parse_usmap_enum_property_keeps_an_integer_underlying_type() {
+        for (tag, underlying) in [
+            (0u8, EnumStorage::UInt8),
+            (23, EnumStorage::Int8),
+            (22, EnumStorage::Int16),
+            (20, EnumStorage::UInt16),
+            (2, EnumStorage::Int32),
+            (19, EnumStorage::UInt32),
+            (21, EnumStorage::Int64),
+            (18, EnumStorage::UInt64),
         ] {
-            assert_eq!(gear_after_aligned_rows(gear), expected, "{gear:?}");
+            assert_eq!(
+                gear_after_aligned_rows(&[26, tag, 5, 0, 0, 0]),
+                MappedPropertyType::Enum {
+                    enum_name: Arc::from("EGear"),
+                    underlying
+                },
+                "{tag}"
+            );
+        }
+    }
+
+    /// An EnumProperty whose underlying type is not an integer parses as
+    /// `Unknown(26)`, its whole type tree read before the enum name so the
+    /// rows behind it stay aligned.
+    #[test]
+    fn parse_usmap_enum_with_a_non_integer_underlying_type_is_unknown() {
+        for gear in [
+            &[26u8, 1, 5, 0, 0, 0][..],               // Enum<Bool>
+            &[26, 3, 5, 0, 0, 0][..],                 // Enum<Float>
+            &[26, 7, 5, 0, 0, 0][..],                 // Enum<Double>
+            &[26, 5, 5, 0, 0, 0][..],                 // Enum<Name>
+            &[26, 10, 5, 0, 0, 0][..],                // Enum<Str>
+            &[26, 4, 5, 0, 0, 0][..],                 // Enum<Object>
+            &[26, 8, 0, 5, 0, 0, 0][..],              // Enum<Array<Byte>>
+            &[26, 25, 0, 5, 0, 0, 0][..],             // Enum<Set<Byte>>
+            &[26, 24, 0, 0, 5, 0, 0, 0][..],          // Enum<Map<Byte, Byte>>
+            &[26, 28, 2, 5, 0, 0, 0][..],             // Enum<Optional<Int>>
+            &[26, 9, 0, 0, 0, 0, 5, 0, 0, 0][..],     // Enum<Struct Hero>
+            &[26, 26, 0, 5, 0, 0, 0, 5, 0, 0, 0][..], // Enum<Enum<Byte>>
+            &[26, 6, 5, 0, 0, 0][..],                 // Enum<Delegate>
+            &[26, 0xFF, 5, 0, 0, 0][..],              // Enum<an unknown type byte>
+        ] {
+            assert_eq!(
+                gear_after_aligned_rows(gear),
+                MappedPropertyType::Unknown(26),
+                "{gear:?}"
+            );
         }
     }
 
@@ -4218,7 +4305,7 @@ mod tests {
         let MappedPropertyType::Struct { struct_name } = &props[0].prop_type else {
             panic!("{:?}", props[0].prop_type);
         };
-        let MappedPropertyType::Enum { enum_name } = &props[1].prop_type else {
+        let MappedPropertyType::Enum { enum_name, .. } = &props[1].prop_type else {
             panic!("{:?}", props[1].prop_type);
         };
         assert!(Arc::ptr_eq(&values[&0], &values[&1]), "enum values");
@@ -4388,7 +4475,8 @@ mod tests {
     }
 
     /// Every node of an Optional's inner tree and of an Enum's underlying
-    /// tree is charged to the type-node budget, though neither tree is kept.
+    /// tree is charged to the type-node budget, though only an integer
+    /// underlying type is kept, as its `EnumStorage`.
     #[test]
     fn optional_and_enum_inners_count_toward_the_type_node_budget() {
         for (row_type, nodes) in [(&[28u8, 8, 2][..], 3u64), (&[26, 0, 2, 0, 0, 0][..], 2)] {

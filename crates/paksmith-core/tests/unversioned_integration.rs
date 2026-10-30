@@ -254,7 +254,7 @@ mod tests {
                     .properties
                     .iter()
                     .find_map(|p| match &p.prop_type {
-                        MappedPropertyType::Enum { enum_name } => Some(enum_name),
+                        MappedPropertyType::Enum { enum_name, .. } => Some(enum_name),
                         _ => None,
                     })
                     .expect("Speed is enum-typed");

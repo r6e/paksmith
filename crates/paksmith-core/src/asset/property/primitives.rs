@@ -76,8 +76,9 @@ pub enum EnumValue {
     Ordinal {
         /// The enum's name, shared with the property's `type_name`.
         enum_name: Arc<str>,
-        /// The raw ordinal from the asset.
-        ordinal: u8,
+        /// The value as read, widened to `i64`. Every value is currently read
+        /// as one byte and zero-extended, whatever the enum's underlying type.
+        ordinal: i64,
     },
 }
 
@@ -739,7 +740,7 @@ mod tests {
     };
     use std::io::Cursor;
 
-    fn ordinal(enum_name: &str, ordinal: u8) -> EnumValue {
+    fn ordinal(enum_name: &str, ordinal: i64) -> EnumValue {
         EnumValue::Ordinal {
             enum_name: Arc::from(enum_name),
             ordinal,
@@ -758,21 +759,48 @@ mod tests {
         assert_eq!(EnumValue::from("EColor::Red").name(), Some("EColor::Red"));
     }
 
-    /// JSON for an unnamed ordinal is the same string its named spelling
-    /// gives, so output does not change with how a value was resolved.
-    #[test]
-    fn an_unnamed_ordinal_serializes_as_its_string() {
+    /// The JSON of `value` as an `EColor` property is that of its named
+    /// spelling `spelled`, and reads back equal to `value`.
+    fn assert_serializes_as(value: &EnumValue, spelled: &str) {
         let enum_value = |value| PropertyValue::Enum {
             type_name: Arc::from("EColor"),
             value,
         };
-        let as_ordinal = serde_json::to_string(&enum_value(ordinal("EColor", 7))).unwrap();
-        let as_name = serde_json::to_string(&enum_value(EnumValue::from("EColor::7"))).unwrap();
+        let as_ordinal = serde_json::to_string(&enum_value(value.clone())).unwrap();
+        let as_name = serde_json::to_string(&enum_value(EnumValue::from(spelled))).unwrap();
         assert_eq!(as_ordinal, as_name);
         assert_eq!(
             serde_json::from_str::<PropertyValue>(&as_ordinal).unwrap(),
-            enum_value(ordinal("EColor", 7))
+            enum_value(value.clone())
         );
+    }
+
+    /// JSON for an unnamed ordinal is the same string its named spelling
+    /// gives, so output does not change with how a value was resolved.
+    #[test]
+    fn an_unnamed_ordinal_serializes_as_its_string() {
+        assert_serializes_as(&ordinal("EColor", 7), "EColor::7");
+    }
+
+    /// An unnamed value that is negative or wider than a byte renders,
+    /// compares and serializes as its signed decimal.
+    #[test]
+    fn a_negative_or_wide_ordinal_renders_and_serializes_signed() {
+        let minus_one = ordinal("EColor", -1);
+        assert_eq!(minus_one.to_string(), "EColor::-1");
+        assert_eq!(ordinal("EColor", 300).to_string(), "EColor::300");
+        assert_eq!(
+            ordinal("E", i64::MIN).to_string(),
+            "E::-9223372036854775808"
+        );
+        assert_eq!(EnumValue::from("EColor::-1"), minus_one);
+        assert_eq!(minus_one, EnumValue::from("EColor::-1"));
+        assert_ne!(EnumValue::from("EColor::1"), minus_one);
+        assert_ne!(EnumValue::from("EColor::-01"), minus_one);
+        assert_serializes_as(&minus_one, "EColor::-1");
+        assert_eq!(EnumValue::from("EColor::300"), ordinal("EColor", 300));
+        assert_serializes_as(&ordinal("EColor", 300), "EColor::300");
+        assert_serializes_as(&ordinal("E", i64::MIN), "E::-9223372036854775808");
     }
 
     #[test]
