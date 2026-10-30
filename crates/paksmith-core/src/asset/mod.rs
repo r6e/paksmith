@@ -142,15 +142,8 @@ pub enum Asset {
     /// packages as of #643.) The audio
     /// `FormatHandler`s (OGG/Opus passthrough, WAV) export it.
     SoundWave(SoundWaveData),
-    /// A `UStaticMesh` export. Phase 3g. As of 3g1 it carries the segment-1
-    /// tagged-property stream (`StaticMaterials`, `LODGroup`, …) plus the leading
-    /// `UStaticMesh.Deserialize` fields through `BodySetup`: the `cooked` flag
-    /// (gates whether the render data is eventually present) and the
-    /// `body_setup` collision reference. Several more `Deserialize` fields
-    /// (`NavCollision`, `LightingGuid`, `Sockets`, …) and then the per-LOD
-    /// geometry (`FStaticMeshRenderData` → vertex / index buffers) sit beyond
-    /// `BodySetup` and are added — with the glTF `FormatHandler` — in later 3g
-    /// milestones.
+    /// A `UStaticMesh` export. Phase 3g. See [`StaticMeshData`];
+    /// `GltfStaticMeshHandler` exports one that carries render data.
     StaticMesh(StaticMeshData),
     /// A `USkeletalMesh` export. Phase 3h. Carries the segment-1 tagged
     /// properties, the `USkeletalMesh.Deserialize` prefix (`ImportedBounds`,
@@ -174,19 +167,19 @@ pub enum Asset {
 ///
 /// # Scope / known limitations
 ///
-/// The render-data parser targets the **UE 4.23–4.27 / UE 5.0–5.3 new-cooked**
+/// The render-data parser targets the **UE 4.23–4.27 / UE 5.0–5.5 new-cooked**
 /// `FStaticMeshRenderData` layout, plus the pre-4.23 legacy
 /// `SerializeBuffersLegacy` LOD layout as a **deliberately UNVERIFIED** path (no
-/// real fixture; synthetic-only — see the `read_lod_legacy` reader docs). UE5.0–5.3
-/// decodes the classic LOD geometry; only the Nanite tail (the virtualized-mesh
-/// detail beyond that LOD) is intentionally surfaced as
-/// [`crate::error::PaksmithError::UnsupportedFeature`] rather than mis-decoded. A
+/// real fixture; synthetic-only — see the `read_lod_legacy` reader docs). UE5.0–5.5
+/// decodes the classic LOD geometry only: the reader stops after `numInlinedLODs`
+/// and leaves the rest of the render data, the `FNaniteResources` blob included,
+/// unread rather than mis-decoded. A
 /// non-inlined (`bInlined == false`) LOD's geometry is resolved via the bulk
 /// resolver (from a companion file, the package, or in-stream), when one is available; an
-/// unresolvable record (no resolver, a missing companion, or LZO / BitWindow
-/// compression) degrades the export to a generic property bag; an allocation
-/// failure while loading the companion or inflating a zlib payload ends the
-/// package read instead. A present per-LOD
+/// unresolvable record (no resolver, a missing companion, a non-zero data-resource
+/// cooked index, or LZO / BitWindow compression) degrades the export to a generic
+/// property bag; an allocation
+/// failure ends the package read instead. A present per-LOD
 /// `FDistanceFieldVolumeData` (`bValid == true`, UE4 path) is validated-skipped,
 /// so a distance-field-bearing mesh still returns its geometry. The
 /// `UStaticMesh.Deserialize` tail *after* the render
@@ -241,9 +234,10 @@ impl StaticMeshData {
 
 /// Cooked `FStaticMeshRenderData` — the per-LOD render geometry plus the
 /// mesh-level bounds and LOD screen sizes. Phase 3g (UE 4.23–4.27 new-cooked
-/// layout, full record; UE 5.0–5.3 is read geometry-only, with default `bounds`
-/// and empty `screen_sizes` — see [`StaticMeshData`] and the `render_data`
-/// module docs for the scope boundary).
+/// and UNVERIFIED pre-4.23 legacy layouts, full record; UE 5.0–5.5 is read
+/// geometry-only, with all-zero `bounds`,
+/// `lods_share_static_lighting` false and empty `screen_sizes` — see
+/// [`StaticMeshData`] and the `render_data` module docs for the scope boundary).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct StaticMeshRenderData {

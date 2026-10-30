@@ -10,9 +10,9 @@
 //! (per-LOD vertex / index buffers).
 //!
 //! Phase 3g parses the whole `UStaticMesh.Deserialize` chain through the
-//! `bCooked`-gated [`render_data`] geometry (UE 4.23–4.27 new-cooked, inlined
-//! LODs; see [`crate::asset::StaticMeshData`] for the scope boundary). The glTF
-//! `FormatHandler` that exports it is a later 3g milestone.
+//! `bCooked`-gated [`render_data`] geometry; [`crate::asset::StaticMeshData`]
+//! documents the version scope. The glTF `FormatHandler` that exports it is
+//! `GltfStaticMeshHandler` (`export/static_mesh.rs`).
 
 // Render-data parser, built bottom-up: the leaf readers (`read` helpers, vertex
 // / index / section buffers) feed the `lod` / `render_data` orchestration, which

@@ -27,9 +27,9 @@
 //! next export by table offset, not cursor position, and decoding
 //! `FStaticMaterial` is a later milestone. See [`StaticMeshData`] for the
 //! render-data scope boundary: pre-4.23 legacy (UNVERIFIED, see
-//! [`super::lod::read_lod_legacy`]) + UE 4.23–4.27 (full) + UE 5.0–5.3
+//! [`super::lod::read_lod_legacy`]) + UE 4.23–4.27 (full) + UE 5.0–5.5
 //! (geometry-only, the classic LOD geometry without the un-decoded Nanite tail).
-//! UE5.4+ degrades to a generic property bag. A non-inlined LOD's geometry
+//! A non-inlined LOD's geometry
 //! is resolved from a companion file, the package, or in-stream (see [`StaticMeshData`]
 //! for when an unresolvable record degrades the export); a distance-field-present
 //! UE4 mesh is parsed (the `FDistanceFieldVolumeData` is validated-skipped)
@@ -237,7 +237,7 @@ mod tests {
         // Full read_from for a UE5.0 cooked UStaticMesh: tagged-property
         // terminator → Deserialize tail → the UE5 render data (classic LOD
         // geometry followed by the un-decoded FNaniteResources blob). Proves the
-        // export pipeline yields typed geometry for UE5.0–5.3 rather than
+        // export pipeline yields typed geometry for a UE5.0 mesh rather than
         // degrading to a property bag, and that the trailing Nanite blob is left
         // untouched.
         let ctx = ue5_release_ctx(REMOVING_TESSELLATION);
