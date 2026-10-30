@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use paksmith_core::asset::mappings::{MappedPropertyType, Usmap};
+use paksmith_core::asset::mappings::{EnumStorage, MappedPropertyType, Usmap};
 
 fn fixture_path(name: &str) -> PathBuf {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -79,10 +79,19 @@ fn assert_minimal_v4_schema(usmap: &Usmap) {
         .iter()
         .find(|p| p.name.as_ref() == "Color")
         .expect("Color property");
-    let MappedPropertyType::Enum { enum_name } = &color.prop_type else {
+    let MappedPropertyType::Enum {
+        enum_name,
+        underlying,
+    } = &color.prop_type
+    else {
         panic!("Color must be EnumProperty, got {:?}", color.prop_type);
     };
     assert_eq!(enum_name.as_ref(), "EColor");
+    assert_eq!(
+        *underlying,
+        EnumStorage::UInt8,
+        "a ByteProperty underlying type"
+    );
 
     // The v4 fixture encodes EColor with sparse ordinals: Red=0, Blue=2.
     // A reader that stores values positionally (the v0-v3 layout) would

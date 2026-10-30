@@ -2722,7 +2722,8 @@ pub enum AssetParseFault {
     /// An unversioned property's schema-declared type byte is one
     /// paksmith doesn't yet decode (the `type_byte` names the specific
     /// one — currently delegates, interfaces, field paths, optionals,
-    /// weak/lazy/asset-object references and type bytes above 28;
+    /// weak/lazy/asset-object references, enums whose `.usmap` underlying
+    /// type is not an integer (type byte 26) and type bytes above 28;
     /// Array / Map / Set / Struct / scalars all decode). The decoder
     /// stops the property walk and returns the partial tree rather than
     /// mis-decoding subsequent properties whose offsets depend on the

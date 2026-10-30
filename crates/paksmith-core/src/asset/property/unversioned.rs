@@ -641,7 +641,7 @@ fn read_unversioned_value(
             }
             PropertyValue::Text(text)
         }
-        MT::Enum { enum_name } => {
+        MT::Enum { enum_name, .. } => {
             // A single u8 ordinal: the ByteProperty storage nearly every enum
             // uses. CUE4Parse@77b94fa reads the value as the underlying type
             // from the mappings (`EnumProperty.cs` L27-L32), so an enum with a
@@ -657,7 +657,7 @@ fn read_unversioned_value(
                 .map_or_else(
                     || EnumValue::Ordinal {
                         enum_name: Arc::clone(enum_name),
-                        ordinal: idx,
+                        ordinal: i64::from(idx),
                     },
                     |name| EnumValue::Named(Arc::clone(name)),
                 );
@@ -1003,7 +1003,7 @@ mod tests {
     use std::collections::HashMap;
     use std::io::Cursor;
 
-    use crate::asset::mappings::ClassSchema;
+    use crate::asset::mappings::{ClassSchema, EnumStorage};
     use crate::asset::property::primitives::{MapEntry, PropertyValue};
     use crate::asset::property::test_utils::{
         assert_derived_budget_exceeded, make_ctx, make_ctx_with_import, with_derived_budget,
@@ -1788,15 +1788,19 @@ mod tests {
         assert!(props.is_empty(), "unknown struct must partial-tree-stop");
     }
 
-    /// An Optional slot from a parsed `.usmap` (`Gear: Optional<Int>` ahead of
-    /// `Health` and `Speed`): left out of the export, the slots behind it
-    /// decode; serialized, the walk stops at it on its own type byte.
+    /// A `Gear` slot the `.usmap` types as `gear_type`, which the decoder
+    /// refuses, ahead of `Health` and `Speed`: left out of the export, the
+    /// slots behind it decode; serialized, the walk stops at it on its own
+    /// type byte before reading its body. `logs_contain` is the calling
+    /// `traced_test`'s.
     #[cfg(feature = "__test_utils")]
-    #[tracing_test::traced_test]
-    #[test]
-    fn unversioned_optional_slot_skips_or_stops_without_desync() {
+    fn assert_a_refused_leading_gear_skips_or_stops(
+        gear_type: &[u8],
+        logs_contain: fn(&str) -> bool,
+    ) {
+        let type_byte = gear_type[0];
         let usmap = Usmap::from_bytes(&crate::testing::usmap::build_hero_usmap_with_leading_gear(
-            &[28, 2],
+            gear_type,
         ))
         .expect("usmap parse");
         let ctx = make_ctx(&["None"]);
@@ -1822,18 +1826,39 @@ mod tests {
         assert!(!logs_contain("unsupported type byte"));
 
         // Gear serialized (value_num 3, last = 0x0700).
-        let stopped = read(&[&[0x00, 0x07, 0x01][..], &tail].concat());
+        let stopped = read(&[&[0x00, 0x07][..], &tail].concat());
         assert!(stopped.is_empty(), "{stopped:?}");
-        assert!(logs_contain("unsupported type byte 28"));
+        assert!(logs_contain(&format!("unsupported type byte {type_byte}")));
 
         let gear = usmap.schemas["Hero"].properties[0].prop_type.clone();
-        assert!(matches!(
-            read_value(gear, &[], &usmap, 0),
-            Err(PaksmithError::AssetParse {
-                fault: AssetParseFault::UnversionedTypeNotSupported { type_byte: 28, .. },
-                ..
-            })
-        ));
+        let refused = read_value(gear, &[], &usmap, 0);
+        assert!(
+            matches!(
+                &refused,
+                Err(PaksmithError::AssetParse {
+                    fault: AssetParseFault::UnversionedTypeNotSupported { type_byte: t, .. },
+                    ..
+                }) if *t == type_byte
+            ),
+            "{refused:?}"
+        );
+    }
+
+    /// An Optional slot from a parsed `.usmap` (`Gear: Optional<Int>`).
+    #[cfg(feature = "__test_utils")]
+    #[tracing_test::traced_test]
+    #[test]
+    fn unversioned_optional_slot_skips_or_stops_without_desync() {
+        assert_a_refused_leading_gear_skips_or_stops(&[28, 2], logs_contain);
+    }
+
+    /// An enum whose `.usmap` underlying type is not an integer (`Gear:
+    /// Enum<Float>`).
+    #[cfg(feature = "__test_utils")]
+    #[tracing_test::traced_test]
+    #[test]
+    fn an_enum_with_a_non_integer_underlying_type_stops_the_walk() {
+        assert_a_refused_leading_gear_skips_or_stops(&[26, 3, 5, 0, 0, 0], logs_contain);
     }
 
     /// Unversioned `MT::Text` with a `StringTableEntry (11)` history
@@ -1898,6 +1923,7 @@ mod tests {
     fn difficulty() -> Arc<MappedPropertyType> {
         Arc::new(MappedPropertyType::Enum {
             enum_name: Arc::from("Difficulty"),
+            underlying: EnumStorage::UInt8,
         })
     }
 
@@ -2115,6 +2141,7 @@ mod tests {
                 array_index: 0,
                 prop_type: MappedPropertyType::Enum {
                     enum_name: Arc::clone(name),
+                    underlying: EnumStorage::UInt8,
                 },
             })
             .collect();
@@ -2187,6 +2214,7 @@ mod tests {
                 "E",
                 MappedPropertyType::Enum {
                     enum_name: Arc::from("Difficulty"),
+                    underlying: EnumStorage::UInt8,
                 },
             )],
         };
