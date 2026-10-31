@@ -5,7 +5,7 @@
 //! §`FStaticMeshLODResources`; oracle `FabianFG/CUE4Parse`
 //! `FStaticMeshLODResources.cs` (`ca637ae`).
 //!
-//! # Scope: the UE 4.23–5.3 new-cooked layout (inlined + non-inlined LODs)
+//! # Scope: the UE 4.23–5.5 new-cooked layout (inlined + non-inlined LODs)
 //!
 //! This reader targets the `StaticMesh.UseNewCookedFormat` (UE 4.23+) layout:
 //! an outer `FStripDataFlags`, the section array, `MaxDeviation`,
@@ -72,12 +72,13 @@ const CDSF_MIN_LOD_DATA: u8 = 2;
 const CDSF_REVERSED_INDEX_BUFFER: u8 = 4;
 const CDSF_RAY_TRACING_RESOURCES: u8 = 8;
 
-/// Read one `FStaticMeshLODResources` (UE 4.23–4.27 new-cooked layout).
+/// Read one `FStaticMeshLODResources` (UE 4.23–5.5 new-cooked layout).
 ///
 /// Wire: outer `FStripDataFlags` → `Sections[]` (`i32` count, capped) →
 /// `MaxDeviation` (`f32`) → `bIsLODCookedOut` + `bInlined` (`u32` bools).
-/// When the LOD carries buffers (`!AVStripped && !bIsLODCookedOut`): if
-/// `bInlined`, `SerializeBuffers` in-stream; otherwise [`read_non_inlined_lod`]
+/// When the LOD carries buffers (`!AVStripped && !bIsLODCookedOut`): a UE 5.5
+/// `bHasRayTracingGeometry` (`u32`, skipped), then if `bInlined`,
+/// `SerializeBuffers` in-stream; otherwise [`read_non_inlined_lod`]
 /// resolves the streamed geometry. Either way the 12-byte
 /// `FStaticMeshBuffersSize` trailer closes the LOD. A cooked-out /
 /// audio-visual-stripped LOD has no buffers and decodes to empty geometry (just
@@ -146,16 +147,17 @@ pub(crate) fn read_lod(
 /// consumes the in-stream availability-info trailer from the main cursor.
 ///
 /// Fails with [`PaksmithError::UnsupportedFeature`] when the context has no
-/// resolver (one built by `AssetContext::new`), and with the resolver's error
-/// when the payload cannot be resolved (for example LZO or BitWindow
-/// compression, a companion that is missing or fails to load, a region outside
-/// its source, or a source this decode has charged past its length).
-/// `read_payloads` degrades either to the generic property bag, never an
+/// resolver (one built by `AssetContext::new`) or a UE5 data-resource entry
+/// has a non-zero cooked index, and with the resolver's error when the payload
+/// cannot be resolved (for example LZO or BitWindow compression, a companion
+/// that is missing or fails to load, a region outside its source, or a source
+/// this decode has charged past its length).
+/// `read_payloads` degrades each to the generic property bag, never an
 /// empty-geometry typed mesh, except an allocation failure, which ends the
 /// package read.
 ///
 /// Wire order (oracle `FStaticMeshLODResources.cs`, `!bInlined` branch, UE4.23–4.27
-/// / UE5.0–5.3 generic path): the `FByteBulkData` header, then — when
+/// / UE5.0–5.5 generic path): the `FByteBulkData` header, then — when
 /// `element_count > 0` — the resolved `SerializeBuffers` blob (decoded from the
 /// resolved bytes, NOT the main cursor), then the availability-info trailer
 /// consumed **unconditionally** from the main cursor (present even when
@@ -951,7 +953,7 @@ pub(crate) mod test_support {
 
     /// A UE5 (`file_version_ue5 = 1004`) [`AssetContext`] stamping
     /// `FUE5ReleaseStreamObjectVersion` at `release` — pass
-    /// `REMOVING_TESSELLATION` (or any value at/above it) for a UE5.0–5.3 cook
+    /// `REMOVING_TESSELLATION` (or any value at/above it) for a UE5 cook
     /// in which the tessellation adjacency buffer has been removed. The name table
     /// carries `"None"` (index 0) so callers that drive the full `UStaticMesh`
     /// read (tagged-property terminator) work.
@@ -1078,7 +1080,7 @@ mod tests {
 
     /// The gate is `FUE5ReleaseStreamObjectVersion < RemovingTessellation`: a cook
     /// stamping a version strictly *above* `RemovingTessellation` (the realistic
-    /// UE5.0–5.3 case) also omits the adjacency buffer. Pins the comparison
+    /// UE5.0–5.5 case) also omits the adjacency buffer. Pins the comparison
     /// direction — a `>`-mutated gate would read a phantom buffer here and desync.
     #[test]
     fn ue5_lod_skips_adjacency_above_removing_tessellation() {

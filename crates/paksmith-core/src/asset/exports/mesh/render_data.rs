@@ -6,14 +6,15 @@
 //! `docs/formats/mesh/static-mesh.md` §`FStaticMeshRenderData`; oracle
 //! `FabianFG/CUE4Parse` `FStaticMeshRenderData.cs` (`ca637ae`).
 //!
-//! # Scope: UE 4.23–4.27 (full tail) + UE 5.0–5.3 (geometry-only)
+//! # Scope: UE 4.23–4.27 (full tail) + UE 5.0–5.5 (geometry-only)
 //!
 //! For UE4.23–4.27 the full record is read: LOD array, `numInlinedLODs`, the
 //! distance-field block, `Bounds`, `bLODsShareStaticLighting`, and the per-LOD
 //! `ScreenSize` array.
 //!
-//! For UE5.0–5.3 the reader stops after `numInlinedLODs` and returns
-//! **geometry-only** (default `Bounds`, empty `ScreenSize`). Per the oracle, an
+//! For UE5.0–5.5 the reader stops after `numInlinedLODs` and returns
+//! **geometry-only** (all-zero `Bounds`, `bLODsShareStaticLighting` false,
+//! empty `ScreenSize`). Per the oracle, an
 //! `FNaniteResources` blob plus the inline-data-representations block follow
 //! `numInlinedLODs` for UE5; neither is decoded, and the post-blob `Bounds` /
 //! `ScreenSize` are therefore unreachable. The classic LOD array (read first) is
@@ -86,12 +87,14 @@ const DISTANCE_FIELD_FIXED_BYTES: u64 = 12 + 25 + 8;
 const DISTANCE_FIELD_STRIP: u8 = 0x01;
 
 /// Read an `FStaticMeshRenderData` — pre-4.23 legacy (UNVERIFIED, see
-/// [`super::lod::read_lod_legacy`]), UE 4.23–4.27 (full record), or UE 5.0–5.3
+/// [`super::lod::read_lod_legacy`]), UE 4.23–4.27 (full record), or UE 5.0–5.5
 /// (geometry-only: the classic LOD array, returning before the un-decoded Nanite
 /// tail; see the module docs).
 ///
 /// # Errors
-/// [`crate::PaksmithError`] from a truncated / corrupt record.
+/// [`crate::PaksmithError`] from a truncated / corrupt record, or from
+/// [`super::lod::read_lod`] / [`super::lod::read_lod_legacy`] for a LOD they
+/// cannot read.
 pub(crate) fn read_render_data(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,

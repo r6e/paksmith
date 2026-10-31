@@ -59,11 +59,10 @@ impl FormatHandler for GltfStaticMeshHandler {
         "glb"
     }
 
-    /// Accepts a `StaticMesh` carrying render data. Uncooked / Nanite / legacy /
-    /// no-render-data meshes are degraded to [`Asset::Generic`] by the parser
-    /// upstream, so they never reach this handler. (Were such a mesh to arrive
-    /// here, `HandlerRegistry::find_handler` would simply return `None` for the
-    /// unsupported `StaticMesh` — it would NOT route to the generic handler.)
+    /// Accepts a `StaticMesh` carrying render data: any cooked mesh the typed
+    /// reader parsed, UE5 and pre-4.23 legacy meshes included. An uncooked mesh
+    /// has `render_data: None`, so `HandlerRegistry::find_handler` returns `None`
+    /// for it rather than routing it to the generic handler.
     fn supports(&self, asset: &Asset) -> bool {
         matches!(asset, Asset::StaticMesh(d) if d.render_data.is_some())
     }

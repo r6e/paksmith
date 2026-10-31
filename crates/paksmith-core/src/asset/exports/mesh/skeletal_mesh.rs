@@ -1356,8 +1356,10 @@ fn read_lod_post_loop_tail(
 /// `LODModels` count, a nested `FSkeletalMaterial` / `FReferenceSkeleton` /
 /// `FStaticLODModel` fault, the bulk resolver's error for an external LOD
 /// payload, or [`crate::PaksmithError::UnsupportedFeature`] for a legacy /
-/// non-cooked / pre-UE4.24 mesh (see *Scope* above) or an external LOD
-/// without a resolver — all of which the package walker degrades to a
+/// non-cooked / pre-UE4.24 mesh (see *Scope* above), a versioned UE 5.5
+/// (object 1013) mesh, a bulk LOD whose UE5 data-resource entry has a
+/// non-zero cooked index, or an external LOD without a resolver — all of
+/// which the package walker degrades to a
 /// generic property bag (see `Package::read_payloads`), except a fault
 /// that ends the package read (`ends_package_read`).
 #[allow(

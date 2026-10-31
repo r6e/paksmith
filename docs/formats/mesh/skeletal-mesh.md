@@ -50,7 +50,7 @@ inlined LODs' `SerializeStreamedData` blobs are parsed (indices, positions,
 normals/tangents/UVs, per-vertex bone influences, vertex colors). The
 full `read_typed` path — `FStripDataFlags` through `BuffersSize`, the
 blob, the post-loop tail, and the cursor-landing sentinel — is
-implemented for cooked UE 4.24+ assets. The non-inlined
+implemented for cooked UE 4.24–5.4 assets. The non-inlined
 (`FByteBulkData`) path decodes geometry from BOTH payload tiers: an
 **in-stream inline** payload is captured and decoded directly; an
 external payload (`.ubulk` / end-of-file tier, the cooked norm) is
@@ -63,8 +63,15 @@ Out of scope: **cloth**, resolved wontfix under #650 — see
 Non-empty `FSkinWeightProfilesData` no longer blocks the parse — the map is
 skipped by the `BuffersSize` seek (override skin weights unused by the glTF
 exporter), not materialized. **The LOD wire structure is fully traversed AND every
-renderable LOD's geometry is decoded (cooked UE 4.24+); pre-4.24 cooked
+renderable LOD's geometry is decoded (cooked UE 4.24–5.4); pre-4.24 cooked
 layouts remain fail-closed `UnsupportedFeature`s, tracked under #650.**
+A versioned UE 5.5 (object 1013) mesh is refused as `UnsupportedFeature`
+(→ `Generic`) before any of its bytes are read. A UE5 bulk record whose data-resource entry has a
+non-zero cooked index is also refused as `UnsupportedFeature` (see
+[Paksmith implementation](#paksmith-implementation)).
+Typed dispatch is versioned-only: a `USkeletalMesh` export
+in an unversioned-properties (`PKG_UnversionedProperties` + `.usmap`)
+package parses to `Asset::Generic`.
 
 ## Versions
 
@@ -311,7 +318,8 @@ re-read them as a fake LOD.
 
 #### Scope and deferrals (PR5c)
 
-PR5c completes the skeletal-mesh **LOD wire traversal** (every cooked UE 4.24+ LOD lands the cursor correctly). Geometry-decode coverage:
+PR5c completes the skeletal-mesh **LOD wire traversal** (every cooked UE 4.24–5.4 LOD it does not refuse lands the cursor
+correctly). Geometry-decode coverage:
 
 - **Inline-payload bulk-LOD geometry** — DECODED. When a non-inlined
   (`bInlined == false`) LOD's `FByteBulkData` carries an **in-stream inline**
@@ -355,8 +363,7 @@ land on the next LOD.
   resolver-less parse (header-only) or an unresolvable payload is an
   `UnsupportedFeature`/typed error (→ `Generic`) — never an empty-geometry
   typed mesh (though `lod.rs` places its guard earlier, before the
-  bulk-header read). An allocation failure while loading or inflating the
-  companion instead ends the package read.
+  bulk-header read). An allocation failure instead ends the package read.
 
 Mixed inline/bulk meshes **parse with full geometry on every renderable
 LOD**; only audiovisual-stripped, `bIsLODCookedOut`, or empty-bulk
@@ -748,21 +755,30 @@ See `docs/security/allocation-caps.md` for the broader policy.
 ## Paksmith implementation
 
 **Parser modules:**
-- `crates/paksmith-core/src/asset/exports/mesh/skeletal_mesh.rs` — `read_typed` (full cooked UE 4.24+ path: LOD loop + inlined-LOD streamed blob + post-loop tail + cursor-landing sentinel), `read_streamed_data` (the 10-item blob orchestration), `read_lod_post_loop_tail` (post-loop tail + sentinel), `read_static_lod_model` (LOD header → `LodHeader`), `read_skel_mesh_section_render` (per-section cooked record).
-- `crates/paksmith-core/src/asset/exports/mesh/skin_weights.rs` — `read_skin_weight_vertex_buffer` (LEGACY + NEW paths), `read_multisize_index_container`.
+- `crates/paksmith-core/src/asset/exports/mesh/skeletal_mesh.rs` — `read_typed` (full cooked UE 4.24–5.4 path: LOD loop + inlined-LOD streamed blob + post-loop tail + cursor-landing sentinel), `read_streamed_data` (the 10-item blob orchestration), `read_lod_post_loop_tail` (post-loop tail + sentinel), `read_static_lod_model` (LOD header → `LodHeader`), `read_skel_mesh_section_render` (per-section cooked record).
+- `crates/paksmith-core/src/asset/exports/mesh/skin_weights.rs` — `read_skin_weight_vertex_buffer` (LEGACY + NEW paths).
+- `crates/paksmith-core/src/asset/exports/mesh/index_buffer.rs` — `read_multisize_index_container`.
+- `crates/paksmith-core/src/asset/exports/mesh/vertex_buffers.rs` — the position, vertex and color readers shared with the static-mesh path.
 
-**Status (Phase 3h + #650 — geometry decode complete for cooked UE 4.24+):**
+**Status (Phase 3h + #650 — geometry decode complete for cooked UE 4.24–5.4):**
 Every renderable LOD's geometry is parsed: indices, positions,
 normals/tangents/UVs, per-vertex bone indices/weights, and vertex colors. Non-inlined (bulk) LODs decode from
 either payload source — in-stream inline payloads are captured directly;
 external `.ubulk` payloads resolve through the bulk resolver (#650) — and
-the `SerializeAvailabilityInfo` mirror is skipped byte-exactly. Cooked
+the `SerializeAvailabilityInfo` mirror is skipped byte-exactly. When a
+package carries a UE5 data-resource table, a bulk record whose entry has a
+non-zero cooked index is refused as `UnsupportedFeature` (→ `Generic`)
+before any payload is captured, inline payloads included.
+A versioned UE 5.5 (object 1013) mesh is refused as `UnsupportedFeature`
+(→ `Generic`) before any of its bytes are read. Cooked
 layouts BEFORE UE 4.24 remain fail-closed `UnsupportedFeature`s: the
 pre-`SplitModelAndRenderData` inline layout (UE 4.14-4.18; 4.13 is refused
 at the summary) and the
 `SerializeRenderItem_Legacy` layout (UE 4.19-4.23) are documented wire
 formats with oracle support, tracked for future implementation under
-issue #650. The LOD loop, the `BuffersSize` seek, the
+issue #650. Typed dispatch is versioned-only: a `USkeletalMesh` export
+in an unversioned-properties (`PKG_UnversionedProperties` + `.usmap`)
+package parses to `Asset::Generic`. The LOD loop, the `BuffersSize` seek, the
 non-inlined bulk path (both payload decodes + availability-info skip), the
 post-loop tail, and the cursor-landing sentinel are all implemented. The bone-map
 LOD-local→global remap is consumed by the glTF exporter (PR6; see the

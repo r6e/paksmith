@@ -53,12 +53,18 @@ already-parsed geometry is still returned. The pre-4.23 legacy
 UNVERIFIED** path (no real pre-4.23 fixture; synthetic-only — reachable
 for object ≤516, ~UE4.20; 4.21/4.22 collapse to object 517 and route to
 the new reader). Below object 516 (UE4 ≤4.18) a LOD's vertex buffer is
-refused as `UnsupportedFeature`. UE5 / Nanite is surfaced as `UnsupportedFeature`; an
-unresolvable non-inlined record (no resolver, or any bulk-resolver error
+refused as `UnsupportedFeature`. For UE 5.0–5.5 the render-data read
+decodes the classic LOD geometry, then stops after `numInlinedLODs`,
+leaving the rest of the record unread, including `FNaniteResources`,
+`Bounds` and `ScreenSize`. An unresolvable non-inlined record (no
+resolver, a UE5 data-resource entry with a non-zero cooked index, or any
+bulk-resolver error
 such as a missing companion or a source the decode has charged past its
 length) degrades the export to a generic property bag, except an
-allocation failure while loading or inflating the companion, which ends
-the package read. The glTF
+allocation failure, which ends the package read. Typed dispatch is
+versioned-only: a `UStaticMesh` export
+in an unversioned-properties (`PKG_UnversionedProperties` + `.usmap`)
+package parses to `Asset::Generic`. The glTF
 `FormatHandler` that exports the geometry ships in
 `export/static_mesh.rs` (`GltfStaticMeshHandler`).
 
@@ -307,7 +313,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 - **Known divergences:** the pre-4.23 legacy (`SerializeBuffersLegacy`)
   LOD layout is decoded as a deliberately UNVERIFIED path (no real
   pre-4.23 fixture; synthetic-only — see the Verification notes above).
-  The reader otherwise matches the oracle.
+  For UE5 the reader reads nothing after `numInlinedLODs`.
 
 ## Paksmith implementation
 
@@ -328,17 +334,24 @@ path) is validated-skipped, so a distance-field-bearing mesh still exports
 its geometry. The pre-4.23 legacy (`SerializeBuffersLegacy`) LOD layout is
 decoded as a **deliberately UNVERIFIED** path (no real pre-4.23 fixture;
 synthetic-only, targets object 516 (~UE4.20); below 516 a LOD's vertex
-buffer is refused as `UnsupportedFeature`). UE5
-/ Nanite is surfaced as `UnsupportedFeature`; an unresolvable non-inlined
-record (no resolver, or any bulk-resolver error such as a missing
+buffer is refused as `UnsupportedFeature`). For UE 5.0–5.5 the render-data
+read decodes the classic LOD geometry, then stops after `numInlinedLODs`,
+leaving the rest of the record unread, including `FNaniteResources`,
+`Bounds` and `ScreenSize`. An unresolvable non-inlined record (no
+resolver, a UE5 data-resource entry with a non-zero cooked index, or any
+bulk-resolver error such as a missing
 companion or a source the decode has charged past its length) degrades the
-export to a generic property bag, except an allocation failure while
-loading or inflating the companion, which ends the package read. Cross-validated against CUE4Parse[^1]
+export to a generic property bag, except an allocation failure, which
+ends the package read. Typed
+dispatch is versioned-only: a `UStaticMesh` export in an
+unversioned-properties (`PKG_UnversionedProperties` + `.usmap`) package
+parses to `Asset::Generic`.
+Cross-validated against CUE4Parse[^1]
 (except the UNVERIFIED legacy path); in-memory fixtures exercise the
 readers (no `.pak` fixture, to avoid the CI fixture-count gate).
 
-**Remaining (later 3g / Phase 9):** the glTF `FormatHandler` that
-exports the parsed geometry, and a 3D viewport (Phase 9). UE5 / Nanite is
+**Remaining:** a 3D viewport (Phase 9). Decoding the UE5
+`FNaniteResources` blob and the render-data fields after it is
 deferred; the pre-4.23 legacy path needs a real fixture for verification.
 
 ## References

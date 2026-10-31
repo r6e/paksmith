@@ -34,15 +34,19 @@ encodings (`FPackedNormal` with the UE 4.20+ `0x80808080` XOR;
 `FPackedRGBA16N` with the UE 4.20+ per-component `0x8000` XOR).
 The per-vertex `FGPUVertHalf` / `FGPUVertFloat` record structure
 (the contents of `FSkeletalMeshVertexBuffer`'s bulk vertex array)
-is identified by name and deferred to Phase 3 implementation work
-alongside the modern separate-buffer path.
+is identified by name and deferred until the
+pre-`SplitModelAndRenderData` reader lands (tracked under #650).
 
-**Paksmith parser status: `partial` (Phase 3g).** The
+**Paksmith parser status: `partial` (Phases 3g, 3h).** The
 `FPositionVertexBuffer`, `FStaticMeshVertexBuffer`, `FColorVertexBuffer`,
 and `FRawStaticIndexBuffer` readers (plus the `FPackedNormal` /
-`FPackedRGBA16N` tangent decoders) are implemented for the UE 4.23–4.27
-static-mesh path under `crates/paksmith-core/src/asset/exports/mesh/`.
-The skeletal-mesh merged/skin buffers remain a later deliverable.
+`FPackedRGBA16N` tangent decoders) are implemented for the static-mesh
+LOD path under `crates/paksmith-core/src/asset/exports/mesh/`;
+`static-mesh.md` gives its version scope. The skeletal-mesh path reuses
+the position, vertex and color readers and adds `FSkinWeightVertexBuffer`
+and `FMultisizeIndexContainer`. The pre-`SplitModelAndRenderData` merged
+`FSkeletalMeshVertexBuffer` is not read: `skeletal-mesh.md` refuses the
+pre-4.24 layouts that carry it.
 
 ## Versions
 
@@ -208,9 +212,9 @@ the oracle by narrowing to f32 after the 8-byte read.
 The per-vertex `FGPUVertHalf` / `FGPUVertFloat` records — the
 contents of the bulk array — are a deferred sub-format; the modern
 separate-buffer path (Position + StaticMesh + SkinWeight) has been
-documented in this doc and `skeletal-mesh.md`, and Phase 3
-implementation work will catalog the per-vertex legacy record
-shape when the pre-`SplitModelAndRenderData` reader lands.
+documented in this doc and `skeletal-mesh.md`; the per-vertex legacy
+record shape is deferred until the pre-`SplitModelAndRenderData` reader
+lands (tracked under #650).
 
 ### `FRawStaticIndexBuffer` / `FMultisizeIndexContainer`
 
@@ -322,8 +326,8 @@ by the GPU.
 ### Implementation hardening (recommended for any parser)
 
 A vertex-format reader (paksmith's static + skeletal vertex/index
-buffers live in `asset/exports/mesh/vertex_buffers.rs` and
-`skin_weights.rs`) MUST:
+buffers live in `asset/exports/mesh/vertex_buffers.rs`, `index_buffer.rs`
+and `skin_weights.rs`) MUST:
 
 - **Verify all `i32` count prefixes are non-negative** before any allocation arithmetic. `NumVertices`, `byteCount`, and count prefixes are all signed `i32` on wire; sign-extension attacks via negative values would either underflow allocation sizing or produce `usize::MAX`-adjacent capacities on cast.
 - **Validate `FPositionVertexBuffer.Stride`, `FColorVertexBuffer.Stride`, and `FStaticMeshVertexBuffer.Strides`** (pre-UE 4.19, when present) as `> 0` before any allocation multiplication. The LWC-detection dispatch on `Stride` values (`12`/`24`) does NOT protect against attacker-supplied negative values, which would fall through to an undefined branch.
@@ -353,23 +357,26 @@ See `docs/security/allocation-caps.md` for the broader policy.
   ```
   A conformant vertex-format parser fed these bytes MUST decode them as the values shown in the Worked examples — a +Z surface normal and a 3-vertex position buffer respectively.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle; see [`static-mesh.md`](static-mesh.md) Verification for details on why no Rust counterpart exists).
-- **Known divergences:** none currently known (the static + skeletal vertex/index buffer readers ship; see [`static-mesh.md`](static-mesh.md) and [`skeletal-mesh.md`](skeletal-mesh.md) for their respective implementation notes).
+- **Known divergences:** the pre-4.23 legacy path these readers serve is UNVERIFIED; see [`static-mesh.md`](static-mesh.md) and [`skeletal-mesh.md`](skeletal-mesh.md) for their respective implementation notes.
 
 ## Paksmith implementation
 
 **Parser module:**
 `crates/paksmith-core/src/asset/exports/mesh/vertex_buffers.rs` +
-`index_buffer.rs` (the static-mesh path; a skeletal-mesh counterpart is
-a later deliverable).
+`index_buffer.rs` (static and skeletal paths) + `skin_weights.rs`
+(skeletal skin weights).
 
-**Status:** `partial` (Phase 3g) — `FPositionVertexBuffer`,
+**Status:** `partial` (Phases 3g, 3h) — `FPositionVertexBuffer`,
 `FStaticMeshVertexBuffer`, `FColorVertexBuffer`, `FRawStaticIndexBuffer`,
 and the `FPackedNormal` / `FPackedRGBA16N` decoders are implemented for
-the UE 4.23–4.27 static-mesh layout and cross-validated against
-CUE4Parse[^1].
+the static-mesh LOD path (version scope in `static-mesh.md`) and
+cross-validated against CUE4Parse[^1], except on the UNVERIFIED pre-4.23
+legacy path. The skeletal-mesh path (Phase 3h) reuses the position, vertex
+and color readers and adds the `FSkinWeightVertexBuffer` and
+`FMultisizeIndexContainer` readers.
 
-**Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (skeletal-mesh buffers
-remain).
+**Phase plan:** `docs/plans/ROADMAP.md` Phase 3; the merged
+`FSkeletalMeshVertexBuffer` is tracked under #650.
 
 ## References
 
