@@ -71,7 +71,7 @@ Offset  Bytes (LE)                                          Field
 +32                                                          (end — 32 bytes total)
 ```
 
-Decoded: `EngineVersion { major: 5, minor: 1, patch: 1, changelist: 12345 (masked), is_licensee: false, branch: "++UE5+Release-5.1" }`.
+Decoded: `EngineVersion { major: 5, minor: 1, patch: 1, changelist: 12345, branch: "++UE5+Release-5.1" }`, with `masked_changelist() = 12345` and `is_licensee_version() = false`.
 Display: `5.1.1-12345+++UE5+Release-5.1`.
 
 ### Worked example — licensee variant
