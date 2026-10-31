@@ -7,9 +7,9 @@
 ## Overview
 
 UE has two property-serialization modes (see
-[`unversioned.md`](unversioned.md) for the other). The default —
-used by editor builds, by every default-cooked archive, and by every
-UE4 game — is **tagged**: each property's body is preceded by an
+[`unversioned.md`](unversioned.md) for the other). A package without
+the `PKG_UnversionedProperties` flag uses the **tagged** one: each
+property's body is preceded by an
 `FPropertyTag` that publishes everything the reader needs to either
 decode the body or skip it intact.
 

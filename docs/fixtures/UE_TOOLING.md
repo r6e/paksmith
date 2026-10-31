@@ -34,7 +34,7 @@ that pins a specific wire-format edge case.
 - [Compression backends](#compression-backends)
 - [Encryption](#encryption)
 - [IoStore (.utoc / .ucas / .uptnl)](#iostore-utoc--ucas--uptnl)
-- [Unversioned properties (UE5)](#unversioned-properties-ue5)
+- [Unversioned properties](#unversioned-properties)
 - [Verification and cross-validation](#verification-and-cross-validation)
 - [Reproducibility](#reproducibility)
 - [Troubleshooting](#troubleshooting)
@@ -582,7 +582,7 @@ known-good reference parser.**
 | 26 | 2d | `bp_softref.uasset` | 4.27 | UE cook | author BP holding `FSoftObjectPath` | `*.uasset`/`.uexp` | needs cook | UE install |
 | 27 | 2e | `texture_with_bulk.uasset` | 4.27 | UE cook | import a small PNG as Texture2D, cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
 | 28 | 2f | `bp_unversioned.uasset` | 5.4+ | UE cook (cooked target — unversioned is the cook-time default) | author Blueprint, cook for any shipped-target platform | `*.uasset`/`.uexp` + paired `.usmap` from a packaged build | needs cook + dumper (paksmith UE5 ≤1013 support landed #643; the fixture itself still needs a cook + `.usmap` dumper) | UE install + dumper |
-| 29 | 2f | `bp_versioned_ue4.uasset` | 4.27 | UE cook | author Blueprint, cook for any UE 4.27 target — UE4 cooks always emit versioned tagged properties | `*.uasset`/`.uexp` (no `.usmap` needed) | needs cook (or use synthetic from `paksmith-fixture-gen` already in tree) | UE install |
+| 29 | 2f | `bp_versioned_ue4.uasset` | 4.27 | UE cook | author Blueprint, cook for any UE 4.27 target, and check that `PKG_UnversionedProperties` (`0x2000`) is clear — UE4 packages can carry it | `*.uasset`/`.uexp` (no `.usmap` needed) | needs cook (or use synthetic from `paksmith-fixture-gen` already in tree) | UE install |
 | 30 | 3 | `tex_dxt1.uasset` | 4.27 | UE cook | author Texture2D forced to DXT1 (BC1), cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
 | 31 | 3 | `tex_bc7.uasset` | 4.27 | UE cook | author Texture2D forced to BC7, cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
 | 32 | 3 | `sm_cube.uasset` | 4.27 | UE cook | author StaticMesh (default cube), cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
@@ -760,8 +760,8 @@ For non-texture bulk data, a SoundWave asset works analogously.
 Rows 28–29. **This is the most fragile area** — the exact project
 setting that toggles unversioned property serialization differs
 across UE versions and was not pinned via the sources reachable in
-this research pass. See [Unversioned properties
-(UE5)](#unversioned-properties-ue5) for what's known and what needs
+this research pass. See [Unversioned properties](#unversioned-properties)
+for what's known and what needs
 verification on a local UE install.
 
 ### Phase 3 — Export format coverage
@@ -1111,7 +1111,7 @@ Per-chunk compression. Default backends: **Zlib**, **LZ4**, **Oodle**
 
 ---
 
-## Unversioned properties (UE5)
+## Unversioned properties
 
 **The single most consequential change between UE4 and UE5 cooked
 assets.** Affects every Phase 2b–2f parser path.
@@ -1119,7 +1119,9 @@ assets.** Affects every Phase 2b–2f parser path.
 ### What it is
 
 UE5 introduced **unversioned property serialization** as the default
-for cooked output. Under unversioned serialization:
+for cooked output. The format predates UE5: UEViewer reads flagged
+packages as unversioned from UE 4.26. Under unversioned
+serialization:
 
 - Each property in an exported object is written **without** its
   `FPropertyTag` header (no `Name`, `Type`, `Size`, `ArrayIndex`).
@@ -1134,8 +1136,9 @@ CUE4Parse, FModel, paksmith, `unreal_asset` all need it.
 
 ### When it's on / off
 
-- **UE4** (≤ 4.27): always **versioned** (tagged properties); the
-  `PKG_UnversionedProperties` flag is never set.
+- **UE4** (≤ 4.27): **versioned** (tagged properties) unless the
+  package sets `PKG_UnversionedProperties`; UEViewer reads a flagged
+  package as unversioned from UE 4.26.
 - **UE5**: cooked output uses **unversioned** by default for every
   shipped-target platform (Windows, Linux, Mac, Android, iOS,
   console targets). Editor-mode (uncooked) packages remain versioned.
@@ -1212,19 +1215,22 @@ project.
 6. Pair the fixture with a `.usmap` dumped from the same project
    (using one of the dumpers listed above) so paksmith can read it.
 
-**Row 29 — Versioned cooked Blueprint (UE 5.4):**
+**Row 29 — Versioned cooked Blueprint (UE 4.27):**
 
 Per the [When it's on / off](#when-its-on--off) discussion, there is
 no project-setting toggle. Two practical approaches for paksmith:
 
 - **Synthetic Phase 2b fixture** (recommended). The
-  `crates/paksmith-fixture-gen` synthetic uasset path emits
-  versioned tagged properties unconditionally — use that for the
-  versioned-path parser test. It's byte-stable and cross-validated.
-- **UE 4.27 cooked Blueprint.** UE4 cooks always emit versioned
-  tagged properties (the `PKG_UnversionedProperties` flag did not
-  exist before UE5). A UE 4.27 cooked Blueprint exercises the same
-  parser fast path as a hypothetical "versioned UE5" package would.
+  `crates/paksmith-fixture-gen` writer
+  `write_minimal_ue4_27_with_properties` emits versioned tagged
+  properties — use that for the versioned-path parser test. It's
+  byte-stable, and its header (not its property stream) is
+  cross-validated against `unreal_asset`.
+- **UE 4.27 cooked Blueprint.** UE4 packages can carry
+  `PKG_UnversionedProperties` too (see [When it's on / off](#when-its-on--off)),
+  so check that the cooked package has the flag clear. A versioned
+  UE 4.27 cooked Blueprint exercises the same parser fast path as a
+  hypothetical "versioned UE5" package would.
 
 This pair (unversioned UE5 + versioned UE4 or synthetic) is enough
 to test Phase 2f's reader: it routes on the `PKG_UnversionedProperties`
