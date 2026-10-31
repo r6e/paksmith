@@ -1,14 +1,16 @@
 # Unversioned property serialization
 
-> UE5 schema-driven property serialization — properties encoded as a
+> Schema-driven property serialization — properties encoded as a
 > compact bitstream of "which fields are present" + raw bodies, with
 > the field schema living in a sibling `.usmap` mapping file.
 
 ## Overview
 
-UE5 cooked shipping builds may opt into **unversioned** property
+Cooked builds may opt into **unversioned** property
 serialization (via the `PKG_UnversionedProperties = 0x2000` package
 flag) instead of the tagged scheme (see [`tagged.md`](tagged.md)).
+UEViewer reads flagged packages as unversioned from UE 4.26, and
+CUE4Parse tests the flag with no engine-version check.[^5]
 In unversioned mode, each export body is a sequence of `u16`
 fragments forming an `FUnversionedHeader` — each fragment encoding
 `(skip_count, value_count, has_zeros, is_last)` — optionally followed
@@ -373,3 +375,4 @@ tests can read the live value without duplicating the literal.
 [^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/unversioned/header.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle; bit-mask constants cross-referenced against `UnversionedHeaderFragment`. Its `EPropertyType` discriminant table (0-27 and `Unknown = 0xFF`) is `unreal_asset_base/src/unversioned/properties/mod.rs` at the same SHA (L31-L91; `UsmapPropertyData::new` refuses other bytes at L165), and `unreal_asset_properties/src/enum_property.rs` at the same SHA reads an enum value as a `u8` only for a `ByteProperty` underlying type and as an `FName` otherwise (L47-L84).
 [^3]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/EUsmapVersion.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L20-L24 — `EngineVersioning` (5) follows `ExplicitEnumValues` and is `Latest`; `UsmapParser.cs` at the same revision rejects only versions above `Latest` (L37-L39) and, from v5, reads an `FEngineVersion` after `has_versioning` (L46-L49, the parser's only version-5 gate; the versioning block is L43-L54). At the same revision, `CUE4Parse/UE4/Objects/Core/Misc/FEngineVersionBase.cs` (L35-L38) and `FEngineVersion.cs` (L13) read its fields, and `CUE4Parse/UE4/Readers/FArchive.cs` (`ReadFString`, L521-L579) frames the branch: 0 is empty, a positive length counts bytes and a negative one UTF-16 units, the terminator included, the last unit must be zero, and the length is checked only against the bytes left in the file (L529).
 [^4]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapProperties.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` (`ParsePropertyType`, L36-L67) and `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/EPropertyType.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` (`OptionalProperty` = 28, L33) — the schema type-tree layout. `CUE4Parse/UE4/Assets/Objects/Properties/EnumProperty.cs` (L19, L27-L32) and `CUE4Parse/UE4/Assets/Objects/FPropertyTagData.cs` (L115-L124) at the same revision read an unversioned enum value that is neither a container element nor an Optional's value as the underlying type from the mappings. `CUE4Parse/Utils/MathUtils.cs` (`IsNumericType`, L9-L28) at the same revision decides which underlying values convert, by .NET `Convert.ToInt64` (Microsoft Learn, `System.Convert.ToInt64`, UInt64, Single and Double overloads: it rounds `Single`/`Double` to the nearest integer, halfway values to the even one, and throws `OverflowException` for a `Single`/`Double` value outside the `Int64` range and for a `UInt64` above `Int64.MaxValue`), and which leave the value at 0 (`EnumProperty.cs` L26); `CUE4Parse/UE4/Assets/Objects/Properties/FPropertyTagType.cs` (`ReadPropertyTagType`, L206) reads nothing for a type name it does not know. `CUE4Parse/MappingsProvider/Usmap/UsmapParser.cs` (L110-L112) and `CUE4Parse/MappingsProvider/TypeMappings.cs` (L6) at the same revision key enum values as `long`; `CUE4Parse/UE4/Assets/Objects/UScriptArray.cs` (L70), `UScriptSet.cs` (L65, L70) and `UScriptMap.cs` (L59, L65) read container elements with `ReadType.ARRAY`/`MAP`, which `EnumProperty.cs` (L39-L42) reads as an `FName`.
+[^5]: `gildor2/UEViewer/Unreal/UnObject.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L901-L912 (property bodies are read unversioned when `Ar.Game >= GAME_UE4(26)` and the flag is set, and tagged otherwise) and L920 (the same gate on the object-GUID check); `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Readers/FAssetArchive.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L39 (`HasUnversionedProperties` tests the flag alone).

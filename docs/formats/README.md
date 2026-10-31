@@ -52,8 +52,8 @@ section "Format inventory" for column semantics.
 | `asset/ubulk.md` | complete | complete | `asset/bulk_data.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `asset/companion-resolution.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `asset/bulk-data.md` | complete | complete | `asset/bulk_data.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `91456be` |
-| `property/tagged.md` | complete | complete | `asset/property/tag.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` | `25d452a` |
-| `property/unversioned.md` | complete | partial | `asset/property/unversioned.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + unreal_asset @ `f4df5d8e75b1e184832384d1865f0b696b90a614` | `714aac9` |
+| `property/tagged.md` | complete | complete | `asset/property/tag.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` | `18769d0` |
+| `property/unversioned.md` | complete | partial | `asset/property/unversioned.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + unreal_asset @ `f4df5d8e75b1e184832384d1865f0b696b90a614` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `18769d0` |
 | `property/primitives.md` | complete | complete | `asset/property/primitives.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `property/containers.md` | complete | complete | `asset/property/containers.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `91456be` |
 | `property/struct.md` | complete | partial | `asset/property/containers.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
