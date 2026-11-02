@@ -122,11 +122,14 @@ the proxy reader directly.
 
 paksmith's Phase 3 implementation should:
 
-1. Read the property segment and surface the parameter defaults,
-   then read what precedes the shader-map gate: the object-GUID tail
-   and, when `FUE5ReleaseStreamObjectVersion >= MaterialInterfaceSavedCachedData`,
+1. Read the property segment, then what precedes the shader-map
+   gate: the object-GUID tail, which CUE4Parse reads only when the
+   export is not flagged `RF_ClassDefaultObject`, and, when
+   `FUE5ReleaseStreamObjectVersion >= MaterialInterfaceSavedCachedData`,
    `UMaterialInterface`'s bool and optional `MaterialCachedExpressionData`
-   struct.
+   struct. Surface the parameter defaults and referenced textures
+   from the properties and from that struct, where CUE4Parse also
+   finds them.
 2. When `Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`, seek to the
    export end instead of reading Segment 2, as CUE4Parse does when it
    skips the decode.
