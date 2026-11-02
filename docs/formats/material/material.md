@@ -110,7 +110,7 @@ oracle fields when implementing.
 
 ### Segment 2: inline shader-map blob (UE 4.25+, conditional)
 
-After the property terminator, when `Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`
+When `Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`
 and the reader has `ReadShaderMaps` enabled, `DeserializeInlineShaderMaps`
 deserializes an inline shader-map blob via `FMaterialResourceProxyReader`.
 
@@ -122,14 +122,14 @@ the proxy reader directly.
 
 paksmith's Phase 3 implementation should:
 
-1. Read the property segment and surface the parameter defaults.
+1. Read the property segment and surface the parameter defaults,
+   then read what precedes the shader-map gate: the object-GUID tail
+   and, when `FUE5ReleaseStreamObjectVersion >= MaterialInterfaceSavedCachedData`,
+   `UMaterialInterface`'s bool and optional `MaterialCachedExpressionData`
+   struct.
 2. When `Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`, seek to the
    export end instead of reading Segment 2, as CUE4Parse does when it
    skips the decode.
-
-A `UMaterial` without `PURGED_FMATERIAL_COMPILE_OUTPUTS` (pre-UE-4.25)
-has no shader-map blob; the export body ends at the property `"None"`
-terminator.
 
 ## Variants
 
@@ -161,7 +161,8 @@ A `UMaterial` reader (paksmith does not yet have one) MUST:
 
 - **Cap parameters per material** at `MAX_COLLECTION_ELEMENTS`
   (see `docs/security/allocation-caps.md`).
-- **Cap shader maps per material** at a project-defined ceiling.
+- **Cap shader maps per material** at a project-defined ceiling when
+  decoding them.
 - **Validate enum-discriminant property values** (`EBlendMode`,
   `EMaterialShadingModel`, `EMaterialDomain`,
   `ETranslucencyLightingMode`) against the documented value sets
