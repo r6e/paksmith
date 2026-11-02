@@ -213,8 +213,9 @@ A `UMaterialInstance` reader (paksmith does not yet have one) MUST:
 - **Skip the cached-data blob** via the property-iterator skip
   mechanism when `bSavedCachedData == true` — paksmith does not
   yet interpret `MaterialInstanceCachedData` contents.
-- **Skip-not-parse the shader maps**: when Segment 3's gate holds,
-  seek to the export end after any `FStaticParameterSet` read.
+- **Skip-not-parse the shader maps**: when Segment 3's gate holds, a
+  reader without a shader-map reader seeks to the export end after
+  any `FStaticParameterSet` read.
 - **Reject `Parent == self`** (self-reference cycle) at parse time
   rather than during chain walk.
 
