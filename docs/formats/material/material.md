@@ -39,12 +39,10 @@ present as generic tagged properties) and the conditional inline
 shader-map blob (gated on
 `PURGED_FMATERIAL_COMPILE_OUTPUTS` + `ReadShaderMaps`). The
 `FMaterialResourceProxyReader` inner-archive mechanism is
-documented along with the paksmith-specific skip-via-`NumBytes`
-strategy. Substrate, Material functions, and shader bytecode
+documented. Substrate, Material functions, and shader bytecode
 itself are explicitly out of scope; the doc tells a parser
 implementer what to extract (parameter defaults, material flags,
-referenced textures) and what to skip (compiled shader bytecode,
-per-platform shader formats).
+referenced textures) and what to skip (compiled shader bytecode).
 
 **Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 
@@ -112,61 +110,29 @@ oracle fields when implementing.
 
 ### Segment 2: inline shader-map blob (UE 4.25+, conditional)
 
-After the property terminator, when `Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`
+When `Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`
 and the reader has `ReadShaderMaps` enabled, `DeserializeInlineShaderMaps`
 deserializes an inline shader-map blob via `FMaterialResourceProxyReader`.
 
-`FMaterialResourceProxyReader` reads its own name map, a locs table
-(`FMaterialResourceLocOnDisk[]`), and a `NumBytes: u32`, then proxies
+`FMaterialResourceProxyReader` reads its own name map and steps over a
+locs table (`FMaterialResourceLocOnDisk[]`) and a 4-byte `NumBytes`, then proxies
 all subsequent inner shader-map reads through the inner archive. The
 oracle does NOT advance past the blob via `NumBytes` — it reads through
 the proxy reader directly.
 
 paksmith's Phase 3 implementation should:
 
-1. Read the property segment and surface the parameter defaults.
-2. When encountering the `PURGED_FMATERIAL_COMPILE_OUTPUTS` version
-   gate, detect the `FMaterialResourceProxyReader` header (name-map
-   + locs + NumBytes). For implementations without a proxy-reader
-   architecture, advance past the shader-map blob using the published
-   `NumBytes` size (bounds-check against remaining archive length
-   first). Note: this skip-via-NumBytes approach is an implementation
-   strategy for paksmith — the oracle uses a proxy-reader and does not
-   perform this skip itself.
-3. NOT attempt to interpret shader bytecode — per-platform shader
-   formats (`SF_VULKAN_SM5`, `SF_METAL_*`, `SF_PCD3D_SM5`, etc.) are
-   outside paksmith's scope.
-
-### Worked example — `FMaterialResourceProxyReader.NumBytes` skip field (4 bytes)
-
-A cooked `UMaterial`'s export body is dominated by the tagged-property
-stream and an optional opaque shader-map blob (when
-`Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`). The interesting
-byte-exact surface for an extraction-focused parser is the
-`NumBytes` field inside the `FMaterialResourceProxyReader`
-header — that field is the cursor-advance value a parser uses to
-skip the opaque shader-map.
-
-For a (placeholder) 0x100-byte shader map, the `NumBytes` field on
-the wire is:
-
-```
-Offset (within proxy-reader header)  Bytes (LE)        Field
------------------------------------  ---------------   --------------------
-+N (after name-map + locs)           00 01 00 00       NumBytes = 0x00000100 = 256 (u32 LE; total proxy-archive byte count)
-+N+4                                 <256 opaque shader-map bytes — paksmith skips via cursor += 256>
-```
-
-The byte position `+N` depends on the variable-length
-`FMaterialResourceProxyReader` name-map and locs table that precede
-`NumBytes` on the wire — a full parser walks those structures (CUE4Parse
-does this through its proxy reader), but the skip strategy only requires
-bounds-checking `NumBytes` against the remaining archive length before
-advancing.
-
-A `UMaterial` without `PURGED_FMATERIAL_COMPILE_OUTPUTS` (pre-UE-4.25)
-has no shader-map blob; the export body ends at the property `"None"`
-terminator.
+1. Read the property segment, then what precedes the shader-map
+   gate: the object-GUID tail, which CUE4Parse reads only when the
+   export is not flagged `RF_ClassDefaultObject`, and, when
+   `FUE5ReleaseStreamObjectVersion >= MaterialInterfaceSavedCachedData`,
+   `UMaterialInterface`'s bool and optional `MaterialCachedExpressionData`
+   struct. Surface the parameter defaults and referenced textures
+   from the properties and from that struct, where CUE4Parse also
+   finds them.
+2. When `Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`, seek to the
+   export end instead of reading Segment 2, as CUE4Parse does when it
+   skips the decode.
 
 ## Variants
 
@@ -182,9 +148,6 @@ stream is the same.
 
 ### Format-defined limits (wire-imposed)
 
-- **`FMaterialResourceProxyReader.NumBytes`**: `u32` LE; total
-  byte count of the proxy-archive shader-map blob. Max representable
-  `u32::MAX = 4 GiB`.
 - **Tagged-property fields** (`TwoSided`, `BlendMode`,
   `ShadingModel`, `OpacityMaskClipValue`, etc.) follow the standard
   tag header / type-extras / value layouts per
@@ -201,15 +164,8 @@ A `UMaterial` reader (paksmith does not yet have one) MUST:
 
 - **Cap parameters per material** at `MAX_COLLECTION_ELEMENTS`
   (see `docs/security/allocation-caps.md`).
-- **Cap shader maps per material** at a project-defined ceiling
-  (cooked builds rarely exceed a few hundred quality / platform
-  combinations).
-- **Bounds-check `FMaterialResourceProxyReader.NumBytes`** against
-  the remaining archive length before advancing the cursor (skip
-  strategy) or before allocating the proxy-archive buffer.
-- **Use `checked_add`** on `current_cursor + NumBytes` to defeat
-  near-`u64::MAX` wraparound when computing the post-skip cursor
-  position.
+- **Cap shader maps per material** at a project-defined ceiling when
+  decoding them.
 - **Validate enum-discriminant property values** (`EBlendMode`,
   `EMaterialShadingModel`, `EMaterialDomain`,
   `ETranslucencyLightingMode`) against the documented value sets
@@ -219,9 +175,8 @@ A `UMaterial` reader (paksmith does not yet have one) MUST:
   don't recognize; reject would over-narrow paksmith's UE-version
   range).
 - **Skip-not-parse compiled shader bytecode**: a parser without a
-  per-platform shader-format reader (paksmith's posture) MUST stop
-  at the shader-map gate point and skip via `NumBytes` rather than
-  attempting to interpret the bytes.
+  shader-map reader MUST stop at the shader-map gate point and seek
+  to the export end rather than attempting to interpret the bytes.
 - **Inherit per-export caps** from
   `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE`.
 
@@ -229,31 +184,10 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** The Worked example above is byte-exact for the
-  4-byte `NumBytes` field of the `FMaterialResourceProxyReader`
-  header; the surrounding name-map and locs structures are
-  variable-size and described symbolically. Real-cooked `UMaterial`
-  fixtures (which would walk the full proxy-reader header) are
-  Phase 3 deliverables.
-- **Hex anchor commands:**
-  ```
-  # Synthesize the 4-byte NumBytes = 256 u32 LE field from the
-  # Worked example:
-  printf '\x00\x01\x00\x00' | xxd
-  ```
-  A paksmith-style extractor parser, after walking the
-  `FMaterialResourceProxyReader` name-map and locs table to reach
-  the `NumBytes` field, fed these 4 bytes MUST advance the cursor
-  by 256 bytes to skip the opaque shader map.
-- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no Rust
-  counterpart for the material family).
-- **Known divergences:**
-  - **Shader bytecode unread.** CUE4Parse can parse the inline
-    shader-map blob (it has per-platform shader-format readers);
-    paksmith deliberately skips the compiled-shader bytes via the
-    published size. Aligns with paksmith's "extract data assets"
-    focus vs CUE4Parse's broader "decompile shader graphs" remit.
-    Both projects agree on the parameter-default extraction.
+- **Fixture:** none committed.
+- **Cross-validation oracle:** CUE4Parse[^1].
+- **Known divergences:** none — no paksmith implementation to
+  diverge.
 
 ## Paksmith implementation
 
