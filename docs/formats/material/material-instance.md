@@ -153,8 +153,7 @@ Following the cached-data blob (when present), if
 `bHasStaticPermutationResource == true` AND
 `Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`, the same
 `FMaterialResourceProxyReader` shader-map mechanism applies as in
-[`material.md`](material.md) §*Segment 2* — use the same
-skip-via-`NumBytes` strategy for paksmith-style extraction. The
+[`material.md`](material.md) §*Segment 2*. The
 common case (`bHasStaticPermutationResource == false`) has no
 shader-map blob; the instance defers to the parent's compiled
 shaders.
@@ -197,9 +196,6 @@ defaults.
   `FStructProperty` entries (`FTextureParameterValue`,
   `FScalarParameterValue`, `FVectorParameterValue`) per the standard
   `ArrayProperty<StructProperty>` shape.
-- **`FMaterialResourceProxyReader.NumBytes`** (in the
-  static-permutation shader-map path): `u32` LE; same constraints
-  as in [`material.md`](material.md) §*Caps & limits*.
 
 ### Implementation hardening (recommended for any parser)
 
@@ -217,9 +213,8 @@ A `UMaterialInstance` reader (paksmith does not yet have one) MUST:
 - **Skip the cached-data blob** via the property-iterator skip
   mechanism when `bSavedCachedData == true` — paksmith does not
   yet interpret `MaterialInstanceCachedData` contents.
-- **Apply the same shader-map skip discipline** as `UMaterial`
-  when `bHasStaticPermutationResource == true`: bounds-check
-  `NumBytes`, `checked_add` on the post-skip cursor, skip-not-parse.
+- **Skip-not-parse the shader maps**: when Segment 3's gate holds,
+  seek to the export end after any `FStaticParameterSet` read.
 - **Reject `Parent == self`** (self-reference cycle) at parse time
   rather than during chain walk.
 
@@ -243,11 +238,9 @@ See `docs/security/allocation-caps.md` for the broader policy.
   UE 5.0+ gate point MUST dispatch into the cached-data blob
   (`bSavedCachedData == 1`) or skip it
   (`bSavedCachedData == 0`).
-- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no Rust
-  counterpart for the material family).
-- **Known divergences:** same as `UMaterial` — paksmith skips the
-  compiled shader bytes in the static-permutation case; see
-  [`material.md`](material.md) Known divergences.
+- **Cross-validation oracle:** CUE4Parse[^1].
+- **Known divergences:** none — no paksmith implementation to
+  diverge.
 
 ## Paksmith implementation
 
@@ -260,4 +253,4 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Material/UMaterialInstance.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — primary oracle for `UMaterialInstance`. `UMaterialInstanceConstant.cs` in the same directory for the concrete subclass (parameter-value arrays). Supporting files: `FMaterialInstanceBasePropertyOverrides.cs`, `FMaterialResourceProxyReader.cs` (shader-map skip), `MaterialResourceTypes.cs` (`FMaterialResource`/`FMaterial`/`FMaterialShaderMap`), and the `Parameters/` subdirectory (`FStaticSwitchParameter.cs`, `FStaticComponentMaskParameter.cs`, `FStaticParameterBase.cs`, etc.).
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Material/UMaterialInstance.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — primary oracle for `UMaterialInstance`. `UMaterialInstanceConstant.cs` in the same directory for the concrete subclass (parameter-value arrays). Supporting files: `FMaterialInstanceBasePropertyOverrides.cs`, `FMaterialResourceProxyReader.cs`, `MaterialResourceTypes.cs` (`FMaterialResource`/`FMaterial`/`FMaterialShaderMap`), and the `Parameters/` subdirectory (`FStaticSwitchParameter.cs`, `FStaticComponentMaskParameter.cs`, `FStaticParameterBase.cs`, etc.).
