@@ -337,7 +337,7 @@ impl ObjectExport {
         // SCRIPT_SERIALIZATION_OFFSET (1010), but ONLY for tagged-property
         // packages (PKG_UnversionedProperties clear). The fields are
         // emitted AFTER the preload-dep tail, per CUE4Parse
-        // (ObjectResource.cs lines 288-292). Below threshold (or for
+        // (`ObjectResource.cs` @77b94fa L323-L327). Below threshold (or for
         // unversioned-property packages at threshold), defaults to None — these
         // bytes are not in the wire stream.
         // Note: the gate uses the SUMMARY's package_flags
@@ -910,7 +910,7 @@ mod tests {
 
     /// UE5 1010 with PKG_UnversionedProperties CLEAR — the two
     /// script-serialization i64s are written AFTER the preload-dep tail
-    /// (per CUE4Parse `ObjectResource.cs` lines 288-292). Round-trip
+    /// (per CUE4Parse `ObjectResource.cs` @77b94fa L323-L327). Round-trip
     /// preserves the offsets.
     #[test]
     fn round_trip_ue5_1010_script_serialization_offsets_present() {

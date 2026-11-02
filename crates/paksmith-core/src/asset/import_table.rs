@@ -77,8 +77,10 @@ impl ObjectImport {
     /// `PKG_FilterEditorOnly` set). Uncooked editor assets at
     /// `file_version_ue4 ≥ VER_UE4_NON_OUTER_PACKAGE_IMPORT` carry an
     /// additional `FName PackageName` field per record (8 wire bytes)
-    /// per CUE4Parse's `FObjectImport` (`ObjectResource.cs`) gate `Ar.Ver >=
-    /// NON_OUTER_PACKAGE_IMPORT && !Ar.IsFilterEditorOnly`. This reader
+    /// per CUE4Parse's `FObjectImport` (`ObjectResource.cs` @77b94fa L400) gate
+    /// `Ar.Game >= GAME_UE5_8 || Ar.Ver >= NON_OUTER_PACKAGE_IMPORT &&
+    /// !Ar.IsFilterEditorOnly`. Its first arm reads the field for every UE 5.8+
+    /// package, cooked or not, and the summary refuses those. This reader
     /// does NOT consume that field and will silently mis-align all
     /// subsequent bytes on uncooked input.
     ///

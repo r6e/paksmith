@@ -202,7 +202,7 @@ pub fn build_hero_usmap_with_enum_speed(enum_name: &str, enum_values: &[&str]) -
         data.extend_from_slice(name.as_bytes());
     }
     // enum_name + values: each gets a name-table entry. Length byte is
-    // the exact byte length per CUE4Parse `ReadStringUnsafe(nameLength)`.
+    // the exact byte length CUE4Parse reads (`UsmapParser.cs` @77b94fa L94).
     let name_len_byte =
         |name: &str| -> u8 { u8::try_from(name.len()).expect("usmap name within u8 length") };
     data.push(name_len_byte(enum_name));

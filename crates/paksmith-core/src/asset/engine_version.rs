@@ -6,7 +6,7 @@
 //! u16  minor
 //! u16  patch
 //! u32  changelist        // Bit 31 set = licensee changelist (CUE4Parse
-//!                        // FEngineVersionBase.cs:30-38)
+//!                        // FEngineVersionBase.cs@380d005 L30, L50-L53)
 //! FStr branch            // e.g. "++UE5+Release-5.1"
 //! ```
 //!
@@ -62,7 +62,7 @@ pub struct EngineVersion {
     /// [`Self::write_to`] is an identity round-trip; consumers should
     /// prefer [`Self::masked_changelist`] for the user-facing
     /// changelist number and [`Self::is_licensee_version`] for the
-    /// flag (mirrors CUE4Parse `FEngineVersionBase.cs:30-38`).
+    /// flag (mirrors CUE4Parse `FEngineVersionBase.cs`@380d005 L30 and L50-L53).
     pub changelist: u32,
     /// Branch name (e.g. `"++UE5+Release-5.1"`).
     pub branch: String,
@@ -72,7 +72,7 @@ impl EngineVersion {
     /// The user-facing changelist number with the licensee-version
     /// high bit masked off (`changelist & 0x7fff_ffff`). Matches
     /// CUE4Parse `FEngineVersionBase.Changelist` (see
-    /// `FEngineVersionBase.cs:30-38`).
+    /// `FEngineVersionBase.cs`@380d005 L30).
     #[must_use]
     pub fn masked_changelist(&self) -> u32 {
         self.changelist & 0x7fff_ffff
@@ -81,7 +81,7 @@ impl EngineVersion {
     /// `true` if the wire-encoded changelist has the licensee-version
     /// high bit set (`changelist & 0x8000_0000 != 0`). Matches
     /// CUE4Parse `FEngineVersionBase.IsLicenseeVersion()` (see
-    /// `FEngineVersionBase.cs:30-38`).
+    /// `FEngineVersionBase.cs`@380d005 L50-L53).
     #[must_use]
     pub fn is_licensee_version(&self) -> bool {
         (self.changelist & 0x8000_0000) != 0
