@@ -55,14 +55,6 @@ is explicitly out of scope.
 
 ## Versions
 
-> Note: UE version numbers in the table are derived from community
-> knowledge (UE release history). The oracle names gating constants
-> (`EUnrealEngineObjectUE4Version.PURGED_FMATERIAL_COMPILE_OUTPUTS`,
-> `FRenderingObjectVersion::MaterialAttributeLayerParameters`,
-> `FUE5MainStreamObjectVersion::MaterialSavedCachedData`, etc.)
-> but not their UE-release version. Phase 3 implementation should
-> anchor against the named constants, not the version numbers.
-
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | UE 4.0+ | `UMaterialInstance` + `UMaterialInstanceConstant` introduced. Parameter-override wire shape stable. | `CUE4Parse/UE4/Assets/Exports/Material/UMaterialInstance.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |

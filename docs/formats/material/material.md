@@ -2,18 +2,14 @@
 
 > Root material asset — defines a shader graph at authoring time and
 > a set of texture / scalar / vector parameter defaults at cook time.
-> The compiled shader bytecode lives in shader cache / DDC, which
-> paksmith does not extract.
 
 ## Overview
 
 `UMaterial` is a UE asset describing a complete shader graph: node
 inputs (`BaseColor`, `Metallic`, `Roughness`, `Normal`, ...) wired
-together into expressions evaluated per-pixel by the GPU. The shader
-graph itself only exists in editor builds; in cooked content the
-graph has been compiled to platform-specific shader bytecode and
-serialized into a separate shader cache (or DDC entry) keyed by the
-platform / quality / feature-level the cooker built for.
+together into expressions evaluated per-pixel by the GPU. In cooked
+content the graph has been compiled to platform-specific shader
+bytecode.
 
 What paksmith CAN extract from a cooked `UMaterial` asset
 (Substrate and Material functions are separate classes, out of scope):
@@ -28,8 +24,6 @@ What paksmith CAN extract from a cooked `UMaterial` asset
 What paksmith CANNOT extract from a cooked `UMaterial`:
 
 - **The shader graph itself** — gone at cook time.
-- **Compiled shader bytecode** — lives in shader cache / DDC, a
-  separate extraction problem.
 - **Material expression nodes** — editor-only, stripped from cooked.
 
 **Document status: complete.** Wire format documented for
@@ -47,13 +41,6 @@ referenced textures) and what to skip (compiled shader bytecode).
 **Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 
 ## Versions
-
-> Note: UE version numbers in the table are derived from community
-> knowledge (UE release history). The oracle (`UMaterial.cs`) names
-> gating constants (`EUnrealEngineObjectUE4Version.PURGED_FMATERIAL_COMPILE_OUTPUTS`,
-> `FUE5MainStreamObjectVersion::MaterialSavedCachedData`, etc.)
-> but not their UE-release version. Phase 3 implementation should
-> anchor against the named constants, not the version numbers.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
@@ -146,9 +133,7 @@ paksmith's Phase 3 implementation should:
 
 The `MaterialDomain` property splits materials into subtypes
 (`Surface`, `DeferredDecal`, `LightFunction`, `Volume`,
-`PostProcess`, `UserInterface`, `Virtual`). Each has slightly
-different cooked shader-map shapes but the outer tagged-property
-stream is the same.
+`PostProcess`, `UserInterface`, `Virtual`).
 
 ## Caps & limits
 
