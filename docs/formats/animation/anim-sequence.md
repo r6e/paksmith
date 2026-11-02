@@ -20,11 +20,11 @@ Compression Library by Nicholas Frechette) also exists; ACL
 detection is supported but decoding requires the upstream ACL
 library or a Rust binding.
 
-**Document status: complete.** Wire format documented in full for
-the two-segment `UAnimSequence` export body: the tagged-property
+**Document status: complete.** Wire format documented for
+the `UAnimSequence` export body: the tagged-property
 stream (with `SkeletonGuid` direct read), and the compressed
 keyframe payload with three version-dispatched paths
-(`SerializeCompressedData` pre-4.23, `SerializeCompressedData2`
+(`SerializeCompressedData`, `SerializeCompressedData2`
 4.23-4.24, `SerializeCompressedData3` 4.25+). Outer-wrapper +
 `FUECompressedAnimData` length-sentinel + `ReadSerializedByteStream`
 + `InitViewsFromBuffer` interaction documented for both modern
@@ -48,8 +48,8 @@ separate UObject classes and explicitly out of scope.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| UE 4.0+ | `UAnimSequence` introduced with the seven legacy `ACF_*` codecs; compressed data serialized inline via `SerializeCompressedData()` (pre-4.23 path). | `CUE4Parse/UE4/Assets/Exports/Animation/UAnimSequence.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| UE 4.12+ | Compressed data moved out of inline serialization into a DDC-backed blob (`FFrameworkObjectVersion::MoveCompressedAnimDataToTheDDC`). | Same[^1] |
+| UE 4.0+ | `UAnimSequence` with the seven legacy `ACF_*` codecs. | `CUE4Parse/UE4/Assets/Exports/Animation/UAnimSequence.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
+| UE 4.12+ | Codec fields move from tagged properties into native serialization behind a `bool` `bSerializeCompressedData` (`FFrameworkObjectVersion::MoveCompressedAnimDataToTheDDC`). | Same[^1] |
 | UE 4.21–4.22 (`GAME_UE4_21`) | `SerializeCompressedData()` gains a `CompressedSegments` array after `CompressedScaleOffsets`; the 4.23 `SerializeCompressedData2()` layout drops it. | Same[^1] |
 | UE 4.22 (`GAME_UE4_22`) | `SerializeCompressedData()` replaces the `RawCurveTracks` struct with a `CompressedCurveNames` array and adds `CompressedNumberOfFrames`, `CurveCodecPath` and `CompressedCurveByteStream`. | Same[^1] |
 | UE 4.23 (`GAME_UE4_23`) | Dispatch switches from `SerializeCompressedData()` to `SerializeCompressedData2()` — outer wrapper + `FUECompressedAnimData.SerializeCompressedData` (length sentinels) + `ReadSerializedByteStream` + `CurveCodecPath` + `CompressedCurveByteStream`. | Same[^1] |
@@ -58,9 +58,9 @@ separate UObject classes and explicitly out of scope.
 
 ## Wire layout
 
-A serialized `UAnimSequence` export body has two segments. The
-property stream owns the metadata; the compressed payload carries
-the keyframe data.
+A serialized `UAnimSequence` export body contains a property stream
+and a compressed-payload segment. The property stream owns the
+metadata; the compressed payload carries the keyframe data.
 
 ### Segment 1: tagged-property stream
 
@@ -73,7 +73,7 @@ Properties come from `UAnimationAsset` (base), `UAnimSequenceBase`
 | `SequenceLength` | `UAnimSequenceBase` | `FloatProperty` | Seconds. |
 | `RateScale` | `UAnimSequenceBase` | `FloatProperty` | Playback rate multiplier; default `1.0`. |
 | `Notifies` | `UAnimSequenceBase` | `ArrayProperty<StructProperty(FAnimNotifyEvent)>` | Time-coded notify events. |
-| `NumFrames` | `UAnimSequence` | `IntProperty` | Total frame count (used before 4.12+; may be absent in newer cooked content). |
+| `NumFrames` | `UAnimSequence` | `IntProperty` | Total frame count. |
 | `BoneCompressionSettings` | `UAnimSequence` | `ObjectProperty` (`UAnimBoneCompressionSettings`) | Bone-track codec settings (a `Codecs` list); from UE 4.25 the compressed data's `BoneCodecDDCHandle` names one of its codecs. |
 | `CurveCompressionSettings` | `UAnimSequence` | `ObjectProperty` (`UAnimCurveCompressionSettings`) | Curve-channel codec settings; from UE 4.22 the compressed data's `CurveCodecPath` is resolved through its `Codec`. |
 | `AdditiveAnimType` | `UAnimSequence` | `ByteProperty` / `EnumProperty` (`EAdditiveAnimationType`) | `AAT_None` / `AAT_LocalSpaceBase` / `AAT_MeshSpaceAdditive`. |
@@ -84,36 +84,32 @@ Properties come from `UAnimationAsset` (base), `UAnimSequenceBase`
 | `RetargetSourceAssetReferencePose` | `UAnimSequence` | `ArrayProperty<StructProperty(FTransform)>` | Override reference pose for retargeting. |
 | `Interpolation` | `UAnimSequence` | `ByteProperty` / `EnumProperty` (`EAnimInterpolationType`) | `Linear` or `Step` interpolation between keys. |
 
-`RawCurveData` is editor-only and stripped from cooked content
-(`// RawCurveData = GetOrDefault<FRawCurveTracks>(nameof(RawCurveData));`
-commented out in the oracle). Properties terminate with the standard
-`"None"` tag. The codec format fields (`KeyEncodingFormat`,
-`*CompressionFormat`, `CompressedTrackOffsets`) are NOT tagged
-properties — they serialize directly in Segment 2.
+Properties terminate with the standard `"None"` tag.
 
 Additionally, `UAnimationAsset::Deserialize` reads a raw `FGuid`
-(`SkeletonGuid`) directly after the tagged-property stream when
+(`SkeletonGuid`) after the tagged-property stream when
 `Ar.Ver >= EUnrealEngineObjectUE4Version.SKELETON_GUID_SERIALIZATION`.
 
 ### Segment 2: compressed keyframe payload
 
-Immediately after the property terminator (and the `SkeletonGuid`
-when present), a strip-flags marker gates editor-only raw data, then
-the compressed payload serializes.
+After the property terminator (and the `SkeletonGuid`
+when present), a strip-flags marker gates editor-only raw data.
 
-The dispatch method is determined by the game version:
+Below `FFrameworkObjectVersion::MoveCompressedAnimDataToTheDDC`, a
+count-prefixed `CompressedByteStream` follows. From that version, a
+`bool` `bSerializeCompressedData` follows; when true, the game version
+picks the method:
 
-- `Ar.Game < GAME_UE4_23` → `SerializeCompressedData()` (legacy/pre-4.23)
+- `Ar.Game < GAME_UE4_23` → `SerializeCompressedData()`
 - `Ar.Game == GAME_UE4_23` or `GAME_UE4_24` → `SerializeCompressedData2()`
 - `Ar.Game >= GAME_UE4_25` → `SerializeCompressedData3()`
 
-#### `SerializeCompressedData` (pre-4.23 legacy path)
+#### `SerializeCompressedData`
 
-The legacy path serializes codec fields and keyframe bytes inline.
+This path serializes codec fields and keyframe bytes inline.
 Phase 3 implementation should oracle-verify each field from
 `UAnimSequence.cs` `SerializeCompressedData()` — the wire-field
-order is version-dependent and this path is less commonly encountered
-in modern cooked content.
+order is version-dependent.
 
 #### `SerializeCompressedData2` (UE 4.23–4.24)
 
@@ -371,8 +367,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
   A conformant `UAnimSequence` parser fed these 24 bytes at the
   matching offset MUST decode them as a 30-frame animation with
   constant-key timing and the documented codec triple.
-- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no Rust
-  counterpart for the animation family).
+- **Cross-validation oracle:** CUE4Parse[^1].
 - **Known divergences:** none — no paksmith implementation to
   diverge.
 
@@ -387,7 +382,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Animation/UAnimSequence.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — primary oracle. Supporting files in the same directory: `AnimSequenceBase.cs`, `UAnimationAsset.cs`, `AnimCompressionTypes.cs` (codec types, `FUECompressedAnimData`, `FCompressedOffsetData`), `AnimationCompressionFormat.cs` (codec enum), `AnimationKeyFormat.cs`, `AnimBoneCompressionCodec.cs`, `AnimBoneCompressionSettings.cs`, `AnimCurveCompressionCodec.cs`, `AnimCurveCompressionSettings.cs`, and the `ACL/` subdirectory for the ACL codec adapters (`AnimBoneCompressionCodec_ACLBase.cs` etc.).
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Animation/UAnimSequence.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — primary oracle (L98-L130: the `MoveCompressedAnimDataToTheDDC` gate, the `bSerializeCompressedData` bool and the dispatch; L209: the comment that these codec fields were properties before UE 4.12). Supporting files in the same directory: `AnimSequenceBase.cs`, `UAnimationAsset.cs`, `AnimCompressionTypes.cs` (codec types, `FUECompressedAnimData`, `FCompressedOffsetData`), `AnimationCompressionFormat.cs` (codec enum), `AnimationKeyFormat.cs`, `AnimBoneCompressionCodec.cs`, `AnimBoneCompressionSettings.cs`, `AnimCurveCompressionCodec.cs`, `AnimCurveCompressionSettings.cs`, and the `ACL/` subdirectory for the ACL codec adapters (`AnimBoneCompressionCodec_ACLBase.cs` etc.).
 
 [^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Versions/FUE5MainStreamObjectVersion.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L21 (`RemovingSourceAnimationData` = 3) and L403-L404 (fallback: below UE 5.0 → `BeforeCustomVersionWasAdded`, 0; UE 5.0 → `TextureDoScaleMipsForAlphaCoverage`, 59).
 
