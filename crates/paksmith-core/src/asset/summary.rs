@@ -165,8 +165,8 @@ pub struct PackageSummary {
     /// present on the wire iff BOTH `PKG_FilterEditorOnly` is clear in
     /// `package_flags` AND `file_version_ue4 >= VER_UE4_ADDED_PACKAGE_OWNER (518)`.
     /// Verified against CUE4Parse's `FPackageFileSummary` reader
-    /// (`CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs` HEAD,
-    /// lines 326-336): the `PersistentGuid` is gated on
+    /// (`CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs` @77b94fa,
+    /// L372-L382): the `PersistentGuid` is gated on
     /// `!PKG_FilterEditorOnly && FileVersionUE >= ADDED_PACKAGE_OWNER`.
     /// Cooked game assets almost always have the flag set, so this
     /// typically resolves to `None`. Writing it unconditionally — as a
@@ -181,7 +181,7 @@ pub struct PackageSummary {
     /// `PersistentGuid`. Always `None` for cooked game assets and for
     /// uncooked assets outside the narrow `[518, 520)` window.
     /// Verified against CUE4Parse's `FPackageFileSummary` reader
-    /// (lines 338-342 of `FPackageFileSummary.cs` HEAD).
+    /// (`FPackageFileSummary.cs` @77b94fa L372-L389).
     pub owner_persistent_guid: Option<FGuid>,
     /// Number of `FGenerationInfo` rows that followed the summary on
     /// disk. The rows themselves are discarded by [`Self::read_from`]
@@ -508,7 +508,7 @@ impl PackageSummary {
         let thumbnail_table_offset = reader.read_i32::<LittleEndian>()?;
 
         // GUIDs. Per CUE4Parse's FPackageFileSummary reader
-        // (FPackageFileSummary.cs HEAD lines 326-343):
+        // (FPackageFileSummary.cs @77b94fa L372-L389):
         //
         //   if (!PackageFlags.HasFlag(PKG_FilterEditorOnly))
         //   {

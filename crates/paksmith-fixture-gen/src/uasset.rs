@@ -1567,7 +1567,7 @@ mod tests {
     // "Invalid string size <random>".
     //
     // paksmith's writer is correct (verified against CUE4Parse
-    // `FPackageFileSummary.cs` HEAD lines 326-343 and the existing
+    // `FPackageFileSummary.cs` @77b94fa L372-L389 and the existing
     // `persistent_guid_and_owner_round_trip_in_addition_window` test in
     // `crates/paksmith-core/src/asset/summary.rs`). The paksmith-side
     // round-trip in `matrix_fixtures_round_trip_through_paksmith` (in

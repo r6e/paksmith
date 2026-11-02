@@ -288,10 +288,11 @@ pub(crate) const VER_UE4_ADDED_PACKAGE_OWNER: i32 = 518;
 /// here at 520). At versions in `[ADDED_PACKAGE_OWNER (518),
 /// NON_OUTER_PACKAGE_IMPORT (520))` with `!PKG_FilterEditorOnly`,
 /// `FPackageFileSummary` emits a second editor-only `FGuid` slot
-/// right after `PersistentGuid`. Also gates editor-only
-/// `FObjectImport.PackageName` per CUE4Parse: at `Ar.Ver >=
-/// VER_UE4_NON_OUTER_PACKAGE_IMPORT && !Ar.IsFilterEditorOnly`,
-/// imports carry an extra `PackageName` FName that paksmith's
+/// right after `PersistentGuid`. Before UE 5.8 this version also gates
+/// the editor-only `FObjectImport.PackageName` (CUE4Parse
+/// `ObjectResource.cs` @77b94fa L400 reads it when `Ar.Game >=
+/// GAME_UE5_8 || Ar.Ver >= NON_OUTER_PACKAGE_IMPORT &&
+/// !Ar.IsFilterEditorOnly`), an extra FName that paksmith's
 /// import reader doesn't consume. Task 9's `PackageSummary` uses
 /// this constant to enforce cooked-only input.
 pub(crate) const VER_UE4_NON_OUTER_PACKAGE_IMPORT: i32 = 520;
