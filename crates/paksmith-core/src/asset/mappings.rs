@@ -924,10 +924,10 @@ impl Usmap {
             MappingsAllocationContext::NameTable,
         )?;
         for _ in 0..name_count {
-            // CUE4Parse `UsmapParser.cs:95`:
+            // CUE4Parse `UsmapParser.cs` @77b94fa L93-L94:
             //   `var nameLength = Ar.Version >= EUsmapVersion.LongFName
             //                     ? Ar.Read<ushort>() : Ar.Read<byte>();`
-            // followed by `Ar.ReadStringUnsafe(nameLength)` which reads
+            // followed by `Encoding.UTF8.GetString(Ar.ReadBytes(nameLength))` which reads
             // exactly `nameLength` bytes (no trailing null, no `-1`).
             let name_length: usize = if version >= USMAP_VERSION_LONG_FNAME {
                 read_or_truncated(&mut cur, |c| c.read_u16::<LE>())? as usize
