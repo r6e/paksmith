@@ -79,7 +79,7 @@ section "Format inventory" for column semantics.
 | `material/material.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `ee88bae` |
 | `material/material-instance.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `ee88bae` |
 | `material/static-parameter-set.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `a10b273` |
-| `material/parameter-values.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
+| `material/parameter-values.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `3ad5234` |
 | `data/data-asset.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
 | `data/data-table.md` | complete | complete | `asset/exports/data_table.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
 | `data/locres.md` | complete | complete | `localization/locres.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `a35c183` |
