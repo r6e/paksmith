@@ -32,12 +32,12 @@ What paksmith CANNOT extract from a cooked `UMaterial`:
   separate extraction problem.
 - **Material expression nodes** — editor-only, stripped from cooked.
 
-**Document status: complete.** Wire format documented in full for
-the two-segment `UMaterial` export body: the tagged-property stream
+**Document status: complete.** Wire format documented for
+the `UMaterial` export body: the tagged-property stream
 (named fields read by CUE4Parse plus the broader set commonly
 present as generic tagged properties) and the conditional inline
 shader-map blob (gated on
-`PURGED_FMATERIAL_COMPILE_OUTPUTS` + `ReadShaderMaps`). The
+`PURGED_FMATERIAL_COMPILE_OUTPUTS`). The
 `FMaterialResourceProxyReader` inner-archive mechanism is
 documented. Substrate, Material functions, and shader bytecode
 itself are explicitly out of scope; the doc tells a parser
@@ -57,14 +57,12 @@ referenced textures) and what to skip (compiled shader bytecode).
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| UE 4.0+ | `UMaterial` introduced. Parameter wire shape stable. | `CUE4Parse/UE4/Assets/Exports/Material/UMaterial.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| UE 4.25+ | `PURGED_FMATERIAL_COMPILE_OUTPUTS`: inline shader-map blob added when `ReadShaderMaps` is enabled. `CachedExpressionData` and referenced-texture extraction added. | Same[^1] |
-| UE 5.0+ | `MaterialSavedCachedData` / `MaterialInterfaceSavedCachedData` version gates for saved expression-data blob. | Same[^1] |
+| UE 5.0+ | `MaterialSavedCachedData` / `MaterialInterfaceSavedCachedData` version gates for saved expression-data blob. | `CUE4Parse/UE4/Assets/Exports/Material/UMaterial.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
 
 ## Wire layout
 
-A serialized `UMaterial` export body has two segments: a
-tagged-property stream and an optional inline shader-map blob.
+A serialized `UMaterial` export body contains a tagged-property
+stream and an optional inline shader-map blob.
 
 ### Segment 1: tagged-property stream
 
@@ -108,11 +106,19 @@ These are plausible tagged properties available through the standard
 property iterator; Phase 3 should verify each against the named
 oracle fields when implementing.
 
-### Segment 2: inline shader-map blob (UE 4.25+, conditional)
+### Segment 2: inline shader-map blob (conditional)
 
-When `Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`
-and the reader has `ReadShaderMaps` enabled, `DeserializeInlineShaderMaps`
-deserializes an inline shader-map blob via `FMaterialResourceProxyReader`.
+Segment 2's version gate is `Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`[^1].
+It follows the reads that step 1 below lists. CUE4Parse decodes it
+only for `GAME_UE4_25`+ with `ReadShaderMaps` set.
+`DeserializeInlineShaderMaps` reads `numLoadedResources: i32` and, if
+it is above 0, the `FMaterialResourceProxyReader` header and
+`numLoadedResources` material-resource records; `UMaterial` then makes
+the deprecated cached-expression-data reads (packages without
+`PKG_FilterEditorOnly`) and, when
+`FRenderingObjectVersion >= NaniteForceMaterialUsage`, reads a
+`bForceNaniteUsage` bool. Without the decode, CUE4Parse seeks to the
+export end.
 
 `FMaterialResourceProxyReader` reads its own name map and steps over a
 locs table (`FMaterialResourceLocOnDisk[]`) and a 4-byte `NumBytes`, then proxies
@@ -200,4 +206,4 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Material/UMaterial.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — primary oracle. Supporting files in the same directory: `UMaterialInterface.cs` (parent class; reads `TextureStreamingData` + `CachedExpressionData`), `UUnrealMaterial.cs` (grandparent), `MaterialResourceTypes.cs` (`FMaterial`, `FMaterialResource : FMaterial`, `FMaterialShaderMap` — all defined in this file), `FMaterialResourceProxyReader.cs` (the inner archive wrapper for shader-map deserialization), `EBlendMode.cs`, `EMaterialShadingModel.cs`.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Material/UMaterial.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — primary oracle (Segment 2: L61-L101). Supporting files in the same directory: `UMaterialInterface.cs` (parent class; reads `TextureStreamingData` + `CachedExpressionData`, L43-L49, and holds `DeserializeInlineShaderMaps`, L171-L195), `UUnrealMaterial.cs` (grandparent), `MaterialResourceTypes.cs` (`FMaterial`, `FMaterialResource : FMaterial`, `FMaterialShaderMap` — all defined in this file), `FMaterialResourceProxyReader.cs` (the inner archive wrapper for shader-map deserialization), `EBlendMode.cs`, `EMaterialShadingModel.cs`. At the same SHA, `CUE4Parse/UE4/Assets/Exports/UObject.cs` L145-L148 reads the object-GUID tail and `CUE4Parse/UE4/Assets/Readers/FAssetArchive.cs` L28 ties `IsFilterEditorOnly` to `PKG_FilterEditorOnly`.

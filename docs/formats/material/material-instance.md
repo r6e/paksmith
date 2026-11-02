@@ -31,8 +31,8 @@ The parameter-override arrays (`TextureParameterValues`,
 `UMaterialInstanceDynamic` instances are runtime-created and don't
 exist in cooked content.
 
-**Document status: complete.** Wire format documented in full for
-the three-segment `UMaterialInstance` /
+**Document status: complete.** Wire format documented for
+the `UMaterialInstance` /
 `UMaterialInstanceConstant` export body: the tagged-property
 stream (parameter overrides + Parent + BasePropertyOverrides +
 StaticParameters), the conditional UE 5.0+ cached-data blob
@@ -67,7 +67,6 @@ is explicitly out of scope.
 |------------------|---------------------|--------|
 | UE 4.0+ | `UMaterialInstance` + `UMaterialInstanceConstant` introduced. Parameter-override wire shape stable. | `CUE4Parse/UE4/Assets/Exports/Material/UMaterialInstance.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
 | UE 4.0+ (pre-`MaterialAttributeLayerParameters`) | `FStaticParameterSet` serialized directly from binary archive when `bHasStaticPermutationResource`; switches to tagged-property path after `MaterialAttributeLayerParameters`. | Same[^1] |
-| UE 4.25+ | When `bHasStaticPermutationResource` is true, inline shader-map blob added (`DeserializeInlineShaderMaps` path — same mechanism as `UMaterial`). | Same[^1] |
 | UE 5.0+ (`MaterialSavedCachedData`) | `bSavedCachedData` bool read before shader maps; if set, a `MaterialInstanceCachedData` struct blob follows. | Same[^1] |
 
 ## Wire layout
@@ -132,14 +131,13 @@ compiled shaders.
 
 ### Worked example — UE 5.0+ `bSavedCachedData` gate (4 bytes)
 
-The wire-significant decision point in a cooked
-`UMaterialInstance` is the UE 5.0+ `bSavedCachedData` boolean read
-immediately after the property `"None"` terminator: when `true`, a
-`MaterialInstanceCachedData` `FStructFallback` blob follows; when
-`false`, the reader skips to the conditional shader-map gate.
+A wire-significant decision point in a cooked
+`UMaterialInstance` is the UE 5.0+ `bSavedCachedData` boolean: when
+`true`, a `MaterialInstanceCachedData` `FStructFallback` blob follows;
+when `false`, the reader skips to the conditional shader-map gate.
 
 ```
-Offset (relative to post-"None")  Bytes (LE)        Field
+Offset (from bSavedCachedData)    Bytes (LE)        Field
 --------------------------------  ---------------   --------------------
 +0                                01 00 00 00       bSavedCachedData = true (u32 bool; UE archive convention)
 +4                                <FStructFallback "MaterialInstanceCachedData" — variable; skippable via property-iterator skip>
