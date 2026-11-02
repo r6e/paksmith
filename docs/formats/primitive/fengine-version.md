@@ -192,6 +192,6 @@ cap and fault are in [`unversioned.md`](../property/unversioned.md).
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Misc/FEngineVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FEngineVersion` class (and its base `FEngineVersionBase` in the same directory) including the wire constructor and `IsLicenseeVersion`.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Misc/FEngineVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` L11-L14 (the wire constructor, which reads the branch) and `FEngineVersionBase.cs` in the same directory at the same revision: L33-L39 (the base constructor, which reads major, minor, patch and changelist), L30 (the masked `Changelist`) and L50-L53 (`IsLicenseeVersion`).
 [^2]: `AstroTechies/unrealmodding/unreal_asset/src/fengineversion.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` L39-L49, which the package summary reader calls.
 [^3]: See [`fstring.md`](fstring.md) for FString wire details.
