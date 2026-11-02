@@ -24,29 +24,23 @@ arrays of parameter overrides:
   (tint colors, modulation vectors).
 
 Each entry pairs a parameter identifier (`FMaterialParameterInfo` —
-the shared 8-or-13-byte `FName + Association + Index` triple, see
+the shared `FName + Association + Index` triple, see
 [`static-parameter-set.md`](static-parameter-set.md)) with a
-type-specific value plus an `ExpressionGuid` that ties back to
-the parent material's expression-graph node.
+type-specific value plus an `ExpressionGUID`.
 
 These structs ALSO carry a legacy `FName ParameterName` field that
-predates `FMaterialParameterInfo` but is still serialized in some
-toolchains. CUE4Parse reads both and picks `ParameterName.IsNone`
-to choose between them when displaying — both are valid name
-sources on the wire, but only one is meaningful per entry.
+predates `FMaterialParameterInfo`. CUE4Parse picks
+`ParameterName.IsNone` to choose between them.
 
 The wire path is the standard tagged-property arrays — `ArrayProperty`
 counted prefix + per-entry `StructProperty(<value-type>)` records
-via the `[StructFallback]` constructor. Each StructFallback in turn
-unwraps to the binary read documented below; CUE4Parse also exposes
-direct binary constructors (`FArchive`-based) for paths that
-bypass the property iterator.
+via the `[StructFallback]` constructor. CUE4Parse also exposes
+direct binary constructors (`FArchive`-based).
 
 **Document status: complete.** Wire format documented in full for
 all three parameter-value structs (direct binary path) and the
 two name-source fallback (`ParameterName` legacy FName vs
-`ParameterInfo.Name`). The tagged-property path is mechanically
-identical via the `[StructFallback]` constructor.
+`ParameterInfo.Name`).
 
 **Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 `UMaterialInstanceConstant` exports surface these arrays as inner
@@ -55,13 +49,8 @@ not yet implemented.
 
 ## Versions
 
-| UE version range | Wire-format change | Source |
-|------------------|---------------------|--------|
-| UE 4.0+ | All three structs introduced with a legacy `FName ParameterName` identifier. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Material/FTextureParameterValue.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| UE 4.24+ (`FRenderingObjectVersion::MaterialAttributeLayerParameters`) | `FMaterialParameterInfo` becomes the primary identifier (replacing the loose `ParameterName`). Wire shape gains an 8-byte `FName + EMaterialParameterAssociation (u8) + Index (i32)` triple = 13 bytes total. The legacy `ParameterName` field remains in the tagged-property surface but is empty in modern cooked content; the binary constructor reads ONLY `ParameterInfo`, not `ParameterName`. | Same[^1] |
-
-The per-value field types (`FPackageIndex`, `f32`, `FLinearColor`)
-have not changed across UE's lifetime.
+CUE4Parse reads the per-value field types (`FPackageIndex`, `f32`,
+`FLinearColor`) with no version gate[^1].
 
 ## Wire layout
 
@@ -111,20 +100,13 @@ Total: 13 + 16 + 16 = **45 bytes**.
 
 ### `FMaterialParameterInfo` width note (shared across all three structs)
 
-Unlike the `FStaticParameterBase`-derived parameter structs (which
-inherit a `FRenderingObjectVersion::MaterialAttributeLayerParameters`
-version gate via `base(Ar)`), the three value-struct binary
-constructors call `new FMaterialParameterInfo(Ar)` directly. That
+Unlike `FStaticParameterBase(FArchive)` (which gates on
+`FRenderingObjectVersion::MaterialAttributeLayerParameters`), the
+three value-struct binary constructors call
+`new FMaterialParameterInfo(Ar)` directly. That
 constructor reads `Name + Association + Index` unconditionally —
 no version gate. The binary path therefore ALWAYS produces a
 13-byte `FMaterialParameterInfo`, regardless of UE version.
-
-Pre-`MaterialAttributeLayerParameters` cooked content used a
-legacy `FName ParameterName` field (per §*Versions* above) that
-serialized through the tagged-property `StructFallback` path, not
-via the binary constructor. A reader using the binary path doesn't
-need a width-vs-version dispatch; a reader using the tagged-property
-path consults the dual-name-source fallback (see below).
 
 ### Legacy `ParameterName` vs `ParameterInfo.Name` (tagged-property path)
 
@@ -138,11 +120,7 @@ Name = !ParameterName.IsNone ? ParameterName.Text : ParameterInfo.Name.Text
 ```
 
 — in other words, the legacy `ParameterName` wins when present;
-otherwise the `ParameterInfo.Name` is used. Modern (post-
-`MaterialAttributeLayerParameters`) cooked content typically writes
-only `ParameterInfo`; the `ParameterName` slot is left as
-`FName::None` (which `IsNone` detects via the empty-FName
-convention per [`../primitive/fname.md`](../primitive/fname.md)).
+otherwise the `ParameterInfo.Name` is used.
 
 The binary-constructor path (`FArchive`-based) reads ONLY
 `ParameterInfo` — there is no `ParameterName` read on that path.
@@ -190,21 +168,6 @@ Per the §*Overview*, both paths exist:
   `ParameterInfo`; the `Name` resolution prefers `ParameterName`
   when not-none.
 
-### Pre- vs post-`MaterialAttributeLayerParameters` (path-dependent)
-
-The 8-vs-13 `FMaterialParameterInfo` width axis documented in
-[`static-parameter-set.md`](static-parameter-set.md) §*Pre- vs
-post-MaterialAttributeLayerParameters* applies to that doc's
-`FStaticParameterBase`-derived sub-structs (which call `base(Ar)`
-and inherit the version gate). It does NOT apply to the binary
-constructors of `FTextureParameterValue` / `FScalarParameterValue` /
-`FVectorParameterValue` — those call `new FMaterialParameterInfo(Ar)`
-directly with no version gate, so the binary path is always
-13 bytes (see §*FMaterialParameterInfo width note* above). Pre-
-`MaterialAttributeLayerParameters` cooked content used a legacy
-`FName ParameterName` field that serialized through the tagged-
-property `StructFallback` path, not via the binary constructor.
-
 ### Per-value type axis
 
 The three structs share their layout shape but differ in the
@@ -229,12 +192,10 @@ width note* above).
   value-struct binary constructors call `new FMaterialParameterInfo(Ar)`
   directly, no version gate — see §*FMaterialParameterInfo width
   note* above). On the tagged-property `StructFallback` path, the
-  width matches whatever the property serializer emitted — pre-refactor
-  cooked content typically writes the legacy `ParameterName` field
-  instead of `ParameterInfo` entirely. See
+  width matches whatever the property serializer emitted. See
   [`static-parameter-set.md`](static-parameter-set.md)
   §*FMaterialParameterInfo* for the broader 8-vs-13 picture (that
-  axis applies to the static-parameter sub-structs, not to these
+  axis applies to `FStaticParameterBase(FArchive)`, not to these
   value structs).
 - **`FPackageIndex` (`FTextureParameterValue.ParameterValue`)**:
   4 bytes `i32`; max representable `i32::MAX`. Negative values
@@ -295,7 +256,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
   overrides are Phase 3 deliverables.
 - **Hex anchor commands:**
   ```
-  # Synthesize the post-refactor 33-byte FScalarParameterValue from
+  # Synthesize the 33-byte FScalarParameterValue from
   # the Worked example (ParameterValue=0.5, zero ExpressionGUID,
   # GlobalParameter association, Index=-1, FName placeholder):
   printf '\x00\x00\x00\x00\x00\x00\x00\x00\x02\xFF\xFF\xFF\xFF\x00\x00\x00\x3F\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' | xxd
@@ -332,4 +293,4 @@ resolving the `FPackageIndex` texture references to their actual
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Material/FTextureParameterValue.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`, `FScalarParameterValue.cs`, and `FVectorParameterValue.cs` in the same directory — primary oracles for the per-struct binary + `StructFallback` constructors. `FMaterialParameterInfo.cs` at the same SHA covers the shared 8-or-13-byte parameter-info prefix.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Material/FTextureParameterValue.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`, `FScalarParameterValue.cs`, and `FVectorParameterValue.cs` in the same directory — primary oracles for the per-struct binary + `StructFallback` constructors. `FMaterialParameterInfo.cs` at the same SHA covers the shared parameter-info prefix.
