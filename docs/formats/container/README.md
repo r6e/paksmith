@@ -9,9 +9,7 @@ Two top-level formats are in scope:
 - **`.pak`** — the legacy archive format. One file. On-disk versions V1
   through V11 cover UE 4.0 through UE 5.6 (UE 5.7 moved to V12).
   Paksmith's primary container today.
-- **IoStore** (`.utoc` + `.ucas` + optional `.uptnl`) — UE4.25+ replacement
-  for `.pak` aimed at faster shipped-game IO. Three coupled files per
-  container.
+- **IoStore** (`.utoc` + `.ucas`) — UE4.25+ replacement for `.pak`.
 
 Encryption, compression, and on-disk integrity are documented separately:
 see `../crypto/README.md` and `../compression/README.md`.

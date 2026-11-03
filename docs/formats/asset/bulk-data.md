@@ -479,9 +479,7 @@ A `FByteBulkDataHeader` reader MUST:
   absent. Paksmith's `CompanionFileKind` enum defines all three
   variants (`Uexp`, `Ubulk`, `Uptnl`), and the resolver routes the
   optional-payload tier accordingly. Silent zero-length substitution
-  masks data-integrity loss
-  (matches [`../container/iostore-uptnl.md`](../container/iostore-uptnl.md)
-  §*Implementation hardening*).
+  masks data-integrity loss.
 - **For the alternate read paths** (UE 5.2+ pre-baked metadata
   tables): when the constructor short-circuits to a 4-byte
   `dataIndex: i32` lookup, MUST validate `0 <= dataIndex <
@@ -535,8 +533,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
      paksmith does.[^4] Paksmith tests `OptionalPayload` only inside the
      separate-file row, so it routes the record by its other bits:
      `0x00000801` reads the package at its fixed-up `OffsetInFile`, and
-     `0x00000800` alone fails with `BulkDataNoTierFlag`. No sample shows
-     the shape.
+     `0x00000800` alone fails with `BulkDataNoTierFlag`.
 
 ## Paksmith implementation
 

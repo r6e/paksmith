@@ -273,9 +273,7 @@ A mip resolver (paksmith resolves per-mip bulk in `texture2d.rs` +
 - **For `BULKDATA_OptionalPayload` mips** routed to `.uptnl`, a
   reader MUST surface a typed `MissingCompanionFile { kind:
   Uptnl }` error if the `.uptnl` sibling is absent — not silent
-  zero-length substitution (matches
-  [`../container/iostore-uptnl.md`](../container/iostore-uptnl.md)
-  §*Implementation hardening*).
+  zero-length substitution.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 

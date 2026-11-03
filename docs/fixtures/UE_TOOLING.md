@@ -33,7 +33,7 @@ that pins a specific wire-format edge case.
 - [Phase recipes](#phase-recipes)
 - [Compression backends](#compression-backends)
 - [Encryption](#encryption)
-- [IoStore (.utoc / .ucas / .uptnl)](#iostore-utoc--ucas--uptnl)
+- [IoStore (.utoc / .ucas)](#iostore-utoc--ucas)
 - [Unversioned properties](#unversioned-properties)
 - [Verification and cross-validation](#verification-and-cross-validation)
 - [Reproducibility](#reproducibility)
@@ -59,7 +59,7 @@ This doc covers fixture generation for:
   (UE 4.27+).
 - AES encryption: per-pak index encryption + per-entry encryption,
   with the `Crypto.json` key file UE 4.20+ uses.
-- IoStore containers (`.utoc` / `.ucas` / `.uptnl`).
+- IoStore containers (`.utoc` / `.ucas`).
 - Versioned and unversioned property serialization (the
   `PKG_UnversionedProperties` package flag).
 - All asset-shape edge cases: containers (arrays/maps/sets), extended
@@ -227,7 +227,7 @@ Four executables produce every UE-cooked fixture paksmith needs.
 **What it does.** Packs cooked-asset files into `.pak` archives.
 With the right flags it can also drive IoStore container creation
 (though most pipelines go through `UnrealEditor -run=IoStore`
-instead — see [IoStore](#iostore-utoc--ucas--uptnl)).
+instead — see [IoStore](#iostore-utoc--ucas)).
 
 **Invocation shapes:**
 
@@ -355,7 +355,7 @@ thread][forum-cook]. Flag semantics:
 - `-run=DumpAssetRegistry` — dumps the asset registry to a file
 - `-run=ResavePackages` — re-saves uasset(s) to refresh format
 - `-run=IoStore` — drives IoStore container creation (see
-  [IoStore section](#iostore-utoc--ucas--uptnl))
+  [IoStore section](#iostore-utoc--ucas))
 - `-run=DerivedDataCache` — populates the DDC
 
 ### RunUAT BuildCookRun (Unreal Automation Tool)
@@ -590,7 +590,7 @@ known-good reference parser.**
 | 34 | 3 | `dt_simple.uasset` | 4.27 | UE cook | author DataTable w/ 1 row, cook | `*.uasset`/`.uexp` | needs cook | UE install |
 | 35 | 5 | `profile_demo_v11.pak` | 4.27 | UnrealPak | `-Create -encryptindex -cryptokeys=demo.json` | `*.pak` | needs cook (paired with Phase 5 demo profile) | UE install |
 | 36 | 6/7 | (reuses Phase 1 + Phase 3 fixtures) | — | — | — | — | — | — |
-| 37 | 8 | `cooked_v11_iostore.{utoc,ucas}` | 4.27–5.6 | `UnrealEditor-Cmd … -run=IoStore` or `RunUAT … -iostore` | see [IoStore](#iostore-utoc--ucas--uptnl) | `*.utoc`/`*.ucas`/`*.uptnl`/`global.utoc`/`global.ucas` | needs cook | UE install |
+| 37 | 8 | `cooked_v11_iostore.{utoc,ucas}` | 4.27–5.6 | `UnrealEditor-Cmd … -run=IoStore` or `RunUAT … -iostore` | see [IoStore](#iostore-utoc--ucas) | `*.utoc`/`*.ucas`/`global.utoc`/`global.ucas` | needs cook | UE install |
 | 38 | 8 | `cooked_ue5_iostore_oodle.{utoc,ucas}` | 5.0+ (any UE5) | `RunUAT … -iostore -compressed` | `*.utoc`/`*.ucas` | needs cook | UE install + Oodle |
 | 39 | 8 | `cooked_ue5_iostore_encrypted.{utoc,ucas}` | 5.0+ (any UE5) | `RunUAT … -iostore -encryptini -signpak=…` | `*.utoc`/`*.ucas` | needs cook | UE install |
 | 40 | 9 | (reuses Phase 3 mesh + texture fixtures) | — | — | viewport reads Phase 3 outputs | — | reuses rows 30–33 | — |
@@ -801,7 +801,7 @@ fixture-format work; see row 36 in the matrix.
 ### Phase 8 — IoStore
 
 Rows 37–39. See the dedicated [IoStore
-section](#iostore-utoc--ucas--uptnl).
+section](#iostore-utoc--ucas).
 
 ### Phase 9 — 3D viewport
 
@@ -982,7 +982,7 @@ hot-update][zs-blog-hotupdate].
 
 ---
 
-## IoStore (.utoc / .ucas / .uptnl)
+## IoStore (.utoc / .ucas)
 
 **Introduced.** UE 4.25 Experimental. UE 4.26 Beta. UE 4.27 GA.
 UE 5.x ships IoStore by default for cooked-game builds.
@@ -994,8 +994,6 @@ UE 5.x ships IoStore by default for cooked-game builds.
   drives all subsequent reads.
 - `<Name>.ucas` — **Content-Addressable Storage.** Holds the actual
   chunk bytes referenced by the TOC. 16-byte aligned.
-- `<Name>.uptnl` — **Optional package payload** (introduced UE 4.27).
-  Holds optional / on-demand bulk data separated from the main `.ucas`.
 
 A cooked build also produces a **global** container pair:
 
@@ -1041,7 +1039,6 @@ Output:
     <Project>-<Platform>.pak       # residual pak (ini files etc.)
     <Project>-<Platform>.utoc
     <Project>-<Platform>.ucas
-    <Project>-<Platform>.uptnl    # if optional payload was cooked
     global.utoc
     global.ucas
 ```
@@ -1355,7 +1352,7 @@ External references:
 10. [How to package your game with commands (old UE4 wiki)](https://nerivec.github.io/old-ue4-wiki/pages/how-to-package-your-game-with-commands.html) — packaging guide.
 11. [Cooking on Linux (old UE4 wiki)](https://nerivec.github.io/old-ue4-wiki/pages/cooking-on-linux.html) — Linux toolchain prereqs.
 12. [Method for repacking UE4 IoStore files (Buckminsterfullerene gist)](https://gist.github.com/Buckminsterfullerene02/0f7233d5dda97c82039ba932c2bc8fb7) — `-run=IoStore` commandlet flags.
-13. [UE 4.25 IoStore deck (EpicGamesJapan, slideshare)](https://www.slideshare.net/slideshow/ue425iostore/239108822) — IoStore introduction; `.utoc`/`.ucas`/`.uptnl` formats.
+13. [UE 4.25 IoStore deck (EpicGamesJapan, slideshare)](https://www.slideshare.net/slideshow/ue425iostore/239108822) — IoStore introduction.
 14. [UE 4.25 Unversioned Property Serialization deck (EpicGamesJapan)](https://www.slideshare.net/EpicGamesJapan/new-loadingsystem-unversionedpropertyserializationv2) — unversioned property serialization design.
 15. [trumank/repak (Rust)](https://github.com/trumank/repak) — pak reader/writer; version support table.
 16. [trumank/retoc (Rust)](https://github.com/trumank/retoc) — IoStore CLI; UE 4.25–5.7, well supported from UE 5.3.

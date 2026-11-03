@@ -1,7 +1,8 @@
 # IoStore `.utoc` (Table of Contents)
 
 > Index file for an IoStore container — the metadata sidecar that maps
-> chunk IDs to byte offsets in the `.ucas` data file.
+> chunk IDs to the compression blocks that hold their bytes in the
+> `.ucas` data file.
 
 ## Overview
 
@@ -14,10 +15,6 @@ prefix):
   metadata, encryption parameters, and compression-block descriptors.
 - **`.ucas`** — Container As-Stream. The bulk data file; chunk payloads
   concatenated.
-
-A third sidecar, `.uptnl` (Optional Container Data), is also part of the
-IoStore trio for patch / optional content distribution. See
-[`iostore-ucas.md`](iostore-ucas.md) and [`iostore-uptnl.md`](iostore-uptnl.md).
 
 **Document status: complete.** Wire format documented in full
 for the TOC header, per-chunk records (`FIoChunkId`,
@@ -137,7 +134,7 @@ fields (the only BE encoding in the entire `.utoc`):
 
 | offset (in record) | size | endian | name | type | semantics |
 |--------------------|------|--------|------|------|-----------|
-| 0 | 5 | **BE** | `Offset` | `u40` | Byte offset into the `.ucas` (or `.uptnl` for `Optional`-flagged chunks). Max `(1<<40)-1` = 1 TiB. |
+| 0 | 5 | **BE** | `Offset` | `u40` | Uncompressed offset: `Offset / CompressionBlockSize` is the chunk's first compression-block index and `Offset % CompressionBlockSize` its start within that block[^1]. Max `(1<<40)-1` ≈ 1 TiB. |
 | 5 | 5 | **BE** | `Length` | `u40` | Uncompressed byte length of the chunk. Max 1 TiB. |
 
 A reader unpacks each field as
@@ -287,7 +284,7 @@ Offset  Bytes (wire)              Field
 
 ### Worked example — `FIoOffsetAndLength` (10 bytes, BE 40-bit pair)
 
-A chunk located at `.ucas` offset `0x0000000400` (= 1024 bytes)
+A chunk at offset `0x0000000400` (= 1024 bytes)
 with uncompressed length `0x0000001000` (= 4096 bytes):
 
 ```
@@ -395,9 +392,6 @@ allocation:
   table (slot 0 = implicit `None`; slots `1..=CompressionMethodNameCount`
   are named methods). A malformed TOC with `index = 255` and a
   table of 4 named methods would otherwise out-of-bounds-access.
-- **Offset + length arithmetic**: all `Offset + Length` (or
-  `Offset + CompressedSize`) sums against the `.ucas` size must use
-  `checked_add` to defeat the near-`u64::MAX` wraparound attack.
 - **`TocChunkPerfectHashSeedsCount`** and
   **`TocChunksWithoutPerfectHashCount`**: cap before allocating the
   `i32[]` arrays.
@@ -459,6 +453,6 @@ for the implementation work.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@ecc4878950336126f125af0747190edf474b2a21` (header + `EIoStoreTocVersion` + `EIoContainerFlags`), `FIoChunkId.cs` (chunk-ID + `EIoChunkType` / `EIoChunkType5`), `FIoOffsetAndLength.cs` (BE 40-bit pair), `FIoStoreTocCompressedBlockEntry.cs` (packed 12-byte entry), `FIoStoreTocResource.cs` (top-level read order + section gating), `FIoStoreTocEntryMeta.cs` (per-chunk metadata variant under TOC v8), all at the same pinned SHA. `IoStoreReader.cs` covers the end-to-end open flow.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@ecc4878950336126f125af0747190edf474b2a21` (header + `EIoStoreTocVersion` + `EIoContainerFlags`), `FIoChunkId.cs` (chunk-ID + `EIoChunkType` / `EIoChunkType5`), `FIoOffsetAndLength.cs` (BE 40-bit pair), `FIoStoreTocCompressedBlockEntry.cs` (packed 12-byte entry), `FIoStoreTocResource.cs` (top-level read order + section gating), `FIoStoreTocEntryMeta.cs` (per-chunk metadata variant under TOC v8), all at the same pinned SHA. `CUE4Parse/UE4/IO/IoStoreReader.cs` covers the end-to-end open flow, and its L231-L235 turn a chunk's `Offset` into a compression-block index and an offset within that block.
 [^2]: `trumank/retoc/retoc/src/version.rs@885a8dae740cb1ce1e41ff2e74f67f9f0c118237` L10-L22 and L25-L40 — `EngineVersion` starts at `UE4_25`, and `toc_version` maps UE 4.25 and 4.26 to `DirectoryIndex` (v2), UE 4.27 to `PartitionSize` (v3) and UE 5.5-5.7 to `ReplaceIoChunkHashWithIoHash` (v8), the newest version it maps. retoc's `README.md` at the same revision (L40) says overrides may be required for some games, usually pre-5.0 ones, where the IoStore version was not well defined.
 [^3]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L8-L24 — `AddedSourceHashes` (9) and `ContainerEncryptionMethod` (10) follow `ReplaceIoChunkHashWithIoHash`, and `LatestPlusOne` is 11. `FIoStoreTocResource.cs` L76-L80 at the same revision gates the container encryption method on v10.
