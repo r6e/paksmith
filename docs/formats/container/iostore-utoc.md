@@ -6,10 +6,8 @@
 
 ## Overview
 
-IoStore is Unreal Engine's replacement for `.pak`, introduced in UE 4.25[^2]
-and the dominant shipped-game container format from UE 5.x onward. A single
-IoStore container comprises two coupled files (always at the same path
-prefix):
+An IoStore container is a `.utoc` and its `.ucas` data, at the same path
+prefix:
 
 - **`.utoc`** — Table of Contents. Holds the chunk-ID index, container
   metadata, encryption parameters, and compression-block descriptors.
@@ -21,12 +19,12 @@ for the TOC header, per-chunk records (`FIoChunkId`,
 `FIoOffsetAndLength`), compression-block table, compression-method
 table, optional perfect-hash arrays, optional signature block, and
 optional directory-index / per-chunk metadata sections. All cross-
-validated against CUE4Parse at the pinned SHA[^1]. The full
-`FIoStoreTocEntryMeta` byte layout (per-chunk SHA-1 hash + flags)
+validated against CUE4Parse[^1][^3]. The full
+`FIoStoreTocEntryMeta` byte layout (per-chunk hash + flags)
 is summarized at the table-row level; the `FIoChunkHash` /
 `FSHAHash` discriminant variance under
 `ReplaceIoChunkHashWithIoHash` (TOC v8) is called out in
-§*Variants*.
+§*Chunk-meta array*.
 
 **Paksmith parser status: `not impl`.** No IoStore parser yet —
 Phase 8 deliverable. This doc serves as the reference for that
@@ -35,11 +33,11 @@ implementation work; it does not depend on the parser existing.
 ## Versions
 
 The TOC header carries an `EIoStoreTocVersion: u8` discriminant.
-Known versions (per `FIoStoreTocHeader.cs`[^1]):
+Known versions (per `FIoStoreTocHeader.cs`[^1][^3]):
 
 | Value | `EIoStoreTocVersion` name | Wire-format change |
 |-------|---------------------------|---------------------|
-| 0 | `Invalid` | Sentinel — never on disk. |
+| 0 | `Invalid` | Sentinel. |
 | 1 | `Initial` | First format (retoc maps no release to it[^2]). Header + chunk-IDs + offset+length + compression-blocks + compression-methods + (optional) signature. |
 | 2 | `DirectoryIndex` | Adds an optional directory-index buffer (when `EIoContainerFlags::Indexed` is set). |
 | 3 | `PartitionSize` | Adds `PartitionCount: u32` and `PartitionSize: u64` to the header. Pre-`PartitionSize` readers MUST default `PartitionCount = 1` and `PartitionSize = u64::MAX`. |
@@ -47,18 +45,14 @@ Known versions (per `FIoStoreTocHeader.cs`[^1]):
 | 5 | `PerfectHashWithOverflow` | Adds a `ChunkIndicesWithoutPerfectHash: i32[TocChunksWithoutPerfectHashCount]` overflow array immediately after the perfect-hash seeds. |
 | 6 | `OnDemandMetaData` | Adds (when `EIoContainerFlags::OnDemand` is set, ONLY at this exact version) two trailing FSHAHash arrays: per-chunk and per-compressed-block on-demand metadata. |
 | 7 | `RemovedOnDemandMetaData` | Removes the v6 on-demand trailers; header schema unchanged otherwise. |
-| 8 | `ReplaceIoChunkHashWithIoHash` | `FIoStoreTocEntryMeta.ChunkHash` switches from `FIoChunkHash` (32 bytes) to `FSHAHash` (20 bytes); a 3-byte pad follows the flags byte to preserve the per-meta record alignment. |
-| 9 | `LatestPlusOne` | Sentinel at the pinned SHA[^1]. Newer CUE4Parse[^3] gives 9 to `AddedSourceHashes` and 10 to `ContainerEncryptionMethod` and moves `LatestPlusOne` to 11; retoc maps no release to either[^2]. |
-
-A reader MUST reject `Version == 0` or `Version >= LatestPlusOne`
-as wire-format-invalid; intermediate values are forward-readable
-because each newer version is a strict superset of the previous.
+| 8 | `ReplaceIoChunkHashWithIoHash` | `FIoStoreTocEntryMeta.ChunkHash` switches from `FIoChunkHash` (32 bytes) to `FSHAHash` (20 bytes), and 3 padding bytes follow the flags byte. |
+| 9 | `AddedSourceHashes` | Newer CUE4Parse[^3] defines it; its TOC reader takes the same branches at 9 as at 8. |
+| 10 | `ContainerEncryptionMethod` | Newer CUE4Parse[^3] defines it and, from this version, takes the encryption method from header byte 81 (below it, `Encrypted` alone selects AES-ECB). With AES-CTR, an array of 12-byte IVs follows the compression-block table, one per compression block and then one for the directory index when `Indexed` is set. The reader rejects a TOC whose `EncryptionIVCount` (read from header offset 104 for `GAME_UE6_0` and later game profiles, 0 otherwise) differs from that count. |
 
 ## Wire layout
 
 A `.utoc` file is a fixed 144-byte header followed by an ordered
-run of variable-length sections; each section's presence and length
-is derived from header fields. All multi-byte integers are
+run of variable-length sections. All multi-byte integers are
 little-endian unless explicitly noted (`FIoOffsetAndLength` uses
 big-endian — see below).
 
@@ -67,7 +61,7 @@ big-endian — see below).
 | offset | size | endian | name | type | semantics |
 |--------|------|--------|------|------|-----------|
 | 0 | 16 | — | `TocMagic` | `[u8; 16]` | MUST equal `2D 3D 3D 2D 2D 3D 3D 2D 2D 3D 3D 2D 2D 3D 3D 2D` (ASCII `-==--==--==--==-`). |
-| 16 | 1 | — | `Version` | `u8` | `EIoStoreTocVersion` discriminant (1-8 valid at the pinned SHA[^1], per §*Versions*). |
+| 16 | 1 | — | `Version` | `u8` | `EIoStoreTocVersion` discriminant (per §*Versions*). |
 | 17 | 1 | — | `_reserved0` | `u8` | Padding; readers ignore. |
 | 18 | 2 | LE | `_reserved1` | `u16` | Padding; readers ignore. |
 | 20 | 4 | LE | `TocHeaderSize` | `u32` | Self-check field. Currently `144`; a reader MUST reject mismatches. |
@@ -80,17 +74,22 @@ big-endian — see below).
 | 48 | 4 | LE | `DirectoryIndexSize` | `u32` | Byte length of the optional directory-index payload (`0` if no index). |
 | 52 | 4 | LE | `PartitionCount` | `u32` | Multi-partition container support (TOC v3+); pre-v3 readers MUST set this to `1`. |
 | 56 | 8 | LE | `ContainerId` | `u64` (`FIoContainerId`) | Stable per-container identifier. |
-| 64 | 16 | LE | `EncryptionKeyGuid` | `[u8; 16]` (`FGuid`) | AES-256 key identifier (zero when not encrypted); 4-`u32`-LE layout per [`../primitive/fguid.md`](../primitive/fguid.md). Key resolution (footer-GUID → `Crypto.json` entry → 32-byte AES key) follows the same conventions documented in [`../crypto/aes-pak.md`](../crypto/aes-pak.md) §*`Crypto.json` (UE 4.20+ key-file format)*. |
-| 80 | 4 | LE | `ContainerFlags` | `u32` (`EIoContainerFlags` bitmask) | Bit 0 `Compressed`, bit 1 `Encrypted`, bit 2 `Signed`, bit 3 `Indexed`, bit 4 `OnDemand`. |
+| 64 | 16 | LE | `EncryptionKeyGuid` | `[u8; 16]` (`FGuid`) | AES-256 key identifier (zero when not encrypted); 4-`u32`-LE layout per [`../primitive/fguid.md`](../primitive/fguid.md). |
+| 80 | 1 | — | `ContainerFlags` | `u8` (`EIoContainerFlags` bitmask)[^1][^2][^3] | Bit 0 `Compressed`, bit 1 `Encrypted`, bit 2 `Signed`, bit 3 `Indexed`, bit 4 `OnDemand`. |
+| 81 | 1 | — | `EncryptionMethod` | `u8` (`EIoEncryptionMethod`) | From TOC v10, newer CUE4Parse[^3] takes this byte as `EIoEncryptionMethod` (`0` `None`, `1` `AES`, `2` `AES_CTR`); only `2` changes how an `Encrypted` container is decrypted (see §*Versions*). |
+| 82 | 2 | LE | `_reserved4` | `u16` | Reserved. |
 | 84 | 4 | LE | `TocChunkPerfectHashSeedsCount` | `u32` | Length of the optional perfect-hash seed array (TOC v4+). |
 | 88 | 8 | LE | `PartitionSize` | `u64` | Bytes per partition (TOC v3+); pre-v3 readers MUST set this to `u64::MAX`. |
 | 96 | 4 | LE | `TocChunksWithoutPerfectHashCount` | `u32` | Length of the optional perfect-hash-overflow array (TOC v5+). |
-| 100 | 4 | LE | `_reserved7` | `u32` | Padding; readers ignore. |
-| 104 | 40 | LE | `_reserved8` | `[u64; 5]` | Padding; readers ignore. |
+| 100 | 4 | LE | `_reserved7` | `u32` | Reserved. Newer CUE4Parse reads it as `TocSourceHashCount` for `GAME_UE6_0` and later game profiles[^3]. |
+| 104 | 40 | LE | `_reserved8` | `[u64; 5]` | Reserved. Newer CUE4Parse reads its first 4 bytes as `EncryptionIVCount: u32` (see §*Versions*) for `GAME_UE6_0` and later game profiles, and zeroes it below TOC v10[^3]. |
 | 144 | — | — | (end of header) | | The TOC body sections follow contiguously. |
 
-After the header, the body sections appear in this fixed order
-(presence gated by version + flags):
+From TOC v10, an AES-CTR container also has an IV array between the
+compression-block table and the compression-method table (see
+§*Versions*).
+
+After the header, the body sections appear in this fixed order:
 
 ### Chunk-ID array (`FIoChunkId[TocEntryCount]`, 12 bytes each)
 
@@ -181,20 +180,19 @@ of `0` maps to "uncompressed".
 
 ### Signature block (optional, when `EIoContainerFlags::Signed` is set)
 
-When the `Signed` flag is set in `ContainerFlags`, an
-RSA-signed manifest follows the compression-method table:
+When the `Signed` flag is set in `ContainerFlags`, a
+signature block follows the compression-method table:
 
 | offset (in section) | size | endian | name | type | semantics |
 |---------------------|------|--------|------|------|-----------|
 | 0 | 4 | LE | `HashSize` | `i32` | Byte length of each signature blob. |
-| 4 | `HashSize` | — | `TocSignature` | `[u8; HashSize]` | RSA signature over the TOC body up to this point. |
-| 4 + HashSize | `HashSize` | — | `BlockSignature` | `[u8; HashSize]` | RSA signature over the per-block hash array. |
+| 4 | `HashSize` | — | `TocSignature` | `[u8; HashSize]` | TOC signature. |
+| 4 + HashSize | `HashSize` | — | `BlockSignature` | `[u8; HashSize]` | Block signature. |
 | 4 + 2×HashSize | 20 × `TocCompressedBlockEntryCount` | — | `ChunkBlockSignature` | `FSHAHash[TocCompressedBlockEntryCount]` | Per-compression-block SHA-1 hash (20 bytes each). |
 
 paksmith readers MAY skip signature verification by advancing the
 cursor `HashSize + HashSize + 20*TocCompressedBlockEntryCount`
-bytes; CUE4Parse takes that path. Production readers SHOULD
-verify both signatures.
+bytes; CUE4Parse takes that path.
 
 ### Directory-index buffer (optional, TOC v2+ + `Indexed` flag + `DirectoryIndexSize > 0`)
 
@@ -211,11 +209,9 @@ that don't need path lookup MAY skip the entire buffer via
 
 ### Chunk-meta array (`FIoStoreTocEntryMeta[TocEntryCount]`, optional)
 
-The per-chunk metadata array is at the very end of the file. CUE4Parse
-only reads it when `EIoStoreTocReadOptions::ReadTocMeta` is set; the
-section is always present in a complete `.utoc` but its presence is
-indicated implicitly (residual bytes after all required sections).
-Each `FIoStoreTocEntryMeta` is:
+CUE4Parse only reads the per-chunk metadata array when
+`EIoStoreTocReadOptions::ReadTocMeta` is set. Each
+`FIoStoreTocEntryMeta` is:
 
 | TOC version | Layout | Total bytes |
 |-------------|--------|-------------|
@@ -256,7 +252,9 @@ Offset  Bytes (LE; multi-byte annotated)                  Field
 +52     01 00 00 00                                       PartitionCount = 1
 +56     EF BE AD DE 00 00 00 00                           ContainerId = 0xDEADBEEF (u64 LE)
 +64     00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  EncryptionKeyGuid = {00000000-0000-0000-0000-000000000000}
-+80     00 00 00 00                                       ContainerFlags = 0 (no flags set)
++80     00                                                ContainerFlags = 0 (no flags set)
++81     00                                                EncryptionMethod = 0
++82     00 00                                             _reserved4
 +84     00 00 00 00                                       TocChunkPerfectHashSeedsCount = 0
 +88     00 00 00 00 00 00 00 00                           PartitionSize = 0 (irrelevant when PartitionCount=1)
 +96     00 00 00 00                                       TocChunksWithoutPerfectHashCount = 0
@@ -314,20 +312,17 @@ Offset  Bytes (wire)              Field
 
 ## Variants
 
-Variation has two orthogonal axes:
-
 ### `EIoStoreTocVersion` (header field)
 
-See §*Versions* for the full enum. Each later version is a strict
-superset; readers gate optional sections on the version
-discriminant.
+See §*Versions* for the enum values; readers gate optional sections
+on the version discriminant.
 
 ### `EIoContainerFlags` (header field, bitmask)
 
 | Bit | Flag | Effect on layout |
 |-----|------|------------------|
-| 0 | `Compressed` | Per-block compression in effect (compression-method indices in the block table may be non-zero). |
-| 1 | `Encrypted` | Per-block AES-256 ECB encryption (key identified by `EncryptionKeyGuid`). |
+| 0 | `Compressed` | Container-compressed bit; each block's `CompressionMethodIndex` selects its codec (`0` = none). |
+| 1 | `Encrypted` | AES-256 encryption (key identified by `EncryptionKeyGuid`): ECB, or CTR from TOC v10 when `EncryptionMethod` is `2`. A CTR counter block is a 12-byte IV followed by a big-endian `u32` AES-block counter that starts at 0[^3]. |
 | 2 | `Signed` | Signature block present after the compression-method table. |
 | 3 | `Indexed` | Directory-index buffer present (requires TOC v2+). |
 | 4 | `OnDemand` | OnDemand metadata trailers present (requires TOC v6 exactly). |
@@ -337,10 +332,7 @@ discriminant.
 ### Format-defined limits (wire-imposed)
 
 - **`TocMagic`**: fixed 16 bytes; any deviation is wire-invalid.
-- **`Version`**: `u8` discriminant; valid range `1..=8` at the pinned
-  SHA[^1] (see §*Versions* table), where `0` and `>= 9` are
-  wire-invalid. Newer revisions define 9 and 10, whose layout this doc
-  does not describe.
+- **`Version`**: `u8` discriminant (see §*Versions* table).
 - **`TocHeaderSize`**: must equal `144` (fixed by the header schema).
 - **`TocCompressedBlockEntrySize`**: must equal `12` (matches the
   packed `FIoStoreTocCompressedBlockEntry` layout).
@@ -357,8 +349,7 @@ discriminant.
   parser policy — see §*Implementation hardening*.)
 - **`CompressionMethodNameLength`**: typically `32`; readers MUST
   use the header field, not hard-code `32`.
-- **`EIoContainerFlags`**: `u32`; bits 0-4 currently allocated.
-  Bits 5-31 SHOULD be zero on conformant writers.
+- **`EIoContainerFlags`**: `u8`[^1][^3]; bits 0-4 currently allocated.
 - **`FIoChunkId`**: 12 bytes packed; `ChunkIndex` is BE on disk.
 
 ### Implementation hardening (recommended for any parser)
@@ -435,7 +426,7 @@ the planned Phase 8 caps will follow.
   — the full layout cited row-by-row in §*Wire layout* above.
   `trumank/repak` has no IoStore coverage; CUE4Parse (C#, with
   wire-faithful byte layouts) is the wire-layout oracle, and retoc[^2]
-  is cited for its release-to-TOC-version mapping.
+  is cited for its release-to-TOC-version mapping and its header read.
 - **Known divergences:** none — no paksmith implementation to
   diverge.
 
@@ -453,6 +444,6 @@ for the implementation work.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@ecc4878950336126f125af0747190edf474b2a21` (header + `EIoStoreTocVersion` + `EIoContainerFlags`), `FIoChunkId.cs` (chunk-ID + `EIoChunkType` / `EIoChunkType5`), `FIoOffsetAndLength.cs` (BE 40-bit pair), `FIoStoreTocCompressedBlockEntry.cs` (packed 12-byte entry), `FIoStoreTocResource.cs` (top-level read order + section gating), `FIoStoreTocEntryMeta.cs` (per-chunk metadata variant under TOC v8), all at the same pinned SHA. `CUE4Parse/UE4/IO/IoStoreReader.cs` covers the end-to-end open flow, and its L231-L235 turn a chunk's `Offset` into a compression-block index and an offset within that block.
-[^2]: `trumank/retoc/retoc/src/version.rs@885a8dae740cb1ce1e41ff2e74f67f9f0c118237` L10-L22 and L25-L40 — `EngineVersion` starts at `UE4_25`, and `toc_version` maps UE 4.25 and 4.26 to `DirectoryIndex` (v2), UE 4.27 to `PartitionSize` (v3) and UE 5.5-5.7 to `ReplaceIoChunkHashWithIoHash` (v8), the newest version it maps. retoc's `README.md` at the same revision (L40) says overrides may be required for some games, usually pre-5.0 ones, where the IoStore version was not well defined.
-[^3]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L8-L24 — `AddedSourceHashes` (9) and `ContainerEncryptionMethod` (10) follow `ReplaceIoChunkHashWithIoHash`, and `LatestPlusOne` is 11. `FIoStoreTocResource.cs` L76-L80 at the same revision gates the container encryption method on v10.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@ecc4878950336126f125af0747190edf474b2a21` (header + `EIoStoreTocVersion` + `EIoContainerFlags`), `FIoChunkId.cs` (chunk-ID + `EIoChunkType` / `EIoChunkType5`), `FIoOffsetAndLength.cs` (BE 40-bit pair), `FIoStoreTocCompressedBlockEntry.cs` (packed 12-byte entry), `FIoStoreTocResource.cs` (top-level read order + section gating), `FIoStoreTocEntryMeta.cs` (per-chunk metadata variant under TOC v8), all at the same pinned SHA. At that revision `FIoStoreTocHeader.cs` L20-L22 put `LatestPlusOne` (9) right after `ReplaceIoChunkHashWithIoHash`, and L26 declares `EIoContainerFlags` as a `uint`, which L82 reads from header bytes 80-83. `CUE4Parse/UE4/IO/IoStoreReader.cs` covers the end-to-end open flow, and its L231-L235 turn a chunk's `Offset` into a compression-block index and an offset within that block.
+[^2]: `trumank/retoc/retoc/src/version.rs@885a8dae740cb1ce1e41ff2e74f67f9f0c118237` L10-L22 and L25-L40 — `EngineVersion` starts at `UE4_25`, and `toc_version` maps UE 4.25 and 4.26 to `DirectoryIndex` (v2), UE 4.27 to `PartitionSize` (v3) and UE 5.5-5.7 to `ReplaceIoChunkHashWithIoHash` (v8), the newest version it maps. retoc's `README.md` at the same revision (L40) says overrides may be required for some games, usually pre-5.0 ones, where the IoStore version was not well defined. `retoc/src/lib.rs` at the same revision reads header byte 80 as `u8` container flags, then `reserved3: u8` and `reserved4: u16` (L225-L227, with the types at L1128 and L1205-L1207).
+[^3]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L8-L24 — `AddedSourceHashes` (9) and `ContainerEncryptionMethod` (10) follow `ReplaceIoChunkHashWithIoHash`, and `LatestPlusOne` is 11. L27 declares `EIoContainerFlags` as a `byte`, and L96-L98 read `ContainerFlags`, then `EncryptionMethod` (one byte) and a `u16`. L102-L113 read offset 100 as `TocSourceHashCount` and offset 104 as `EncryptionIVCount` for `GAME_UE6_0` and later game profiles; for earlier profiles they skip offset 100 and read bytes 104-143 as `CustomGameData`. `FIoStoreTocResource.cs` at the same revision substitutes the encryption method and zeroes the IV count below v10 (L76-L80); it rejects an IV count other than the compression-block count (plus one when `Indexed` is set) under AES-CTR, or other than zero under any other method (L135-L139), then reads the IVs after the compression blocks (L142). Its version gates (L70, L76, L100, L105, L179, L197, L205) take the same branches at 9 as at 8. `CUE4Parse/UE4/IO/FIoStoreEncryptionIV.cs` L7 and L23-L28 give the 12-byte IV and the `EIoEncryptionMethod` values. `CUE4Parse/UE4/IO/IoStoreReader.cs` L513 and L524 test the method for `AES_CTR`; L518-L519 and L530 decrypt the directory index with the last IV and each compression block with its own, and `CUE4Parse/Encryption/Aes/Aes.cs` L15 and L172-L180 build the counter block; L104 and L121 default its starting counter to 0.

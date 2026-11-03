@@ -8,6 +8,5 @@ Encryption schemes UE uses on cooked content.
   missing keys (uniform refusal across all sites — see aes-pak.md for
   per-site details).
 
-IoStore encryption shares the same AES-256 ECB primitive but applies it
-at a different granularity; that will be covered in
-`../container/iostore-utoc.md` when the IoStore doc lands.
+IoStore encryption is documented in `../container/iostore-ucas.md`
+and `../container/iostore-utoc.md`.
