@@ -5,13 +5,14 @@
 
 ## Overview
 
-A UE package on disk is one to three files:
+A UE package on disk is one or more files:
 
 - `.uasset` — header + tables, always present.
 - `.uexp` — export bodies, present for split assets (UE 4.16+ default).
 - `.ubulk` — bulk-data payloads, present when the asset has bulk records.
+- `.uptnl` — optional bulk-data payloads (see [`bulk-data.md`](bulk-data.md)).
 
-The three siblings share a path prefix and differ only in extension.
+The siblings share a path prefix and differ only in extension.
 Resolution comes down to: take the `.uasset` path, swap the extension,
 look up the result in the same container the `.uasset` came from.
 
@@ -153,12 +154,13 @@ The four-state table applies identically.
 
 ### IoStore flow (planned)
 
-Phase 8's IoStore support will require its own resolution flow because
-IoStore packages are referenced by chunk IDs, not virtual paths. The
-TOC publishes a chunk per logical file, with separate `IoChunkType`s
-for `ExportBundleData`, `BulkData`, `OptionalBulkData`, etc.
-Resolution becomes "look up the matching chunk ID via `EIoChunkType`"
-rather than "swap the path extension".
+Each TOC chunk ID carries a chunk type (`EIoChunkType`, or
+`EIoChunkType5` on UE5+), such as `ExportBundleData`, `BulkData` or
+`OptionalBulkData` (see
+[`../container/iostore-utoc.md`](../container/iostore-utoc.md)).
+CUE4Parse gives each file entry in an indexed container's directory
+index a virtual path and, by default, finds a package's `.ubulk` and
+`.uptnl` payloads by swapping the path extension[^2].
 
 ## Caps & limits
 
@@ -208,9 +210,7 @@ rather than "swap the path extension".
 **Status:** `complete` for the in-scope flows (in-memory + pak-archive).
 The loose-filesystem and IoStore flows are explicitly out-of-scope
 for this doc family — loose-filesystem is planned but unscheduled;
-IoStore lives under Phase 8 and its companion-equivalent chunk-type
-dispatch is documented in [`../container/iostore-utoc.md`](../container/iostore-utoc.md)
-+ sibling docs rather than here. The `complete` status reflects
+IoStore lives under Phase 8. The `complete` status reflects
 coverage of the surface this doc claims, consistent with the
 inventory and the doc-level status block.
 
@@ -248,3 +248,4 @@ inventory and the doc-level status block.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Package.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle. CUE4Parse's package loader follows the same `(swap-extension, look-up-in-container)` convention paksmith implements.
+[^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/IoStoreReader.cs@ecc4878950336126f125af0747190edf474b2a21` L474 creates each directory-index file entry under the path that L450-L472 build from the mount point and string-table names. `CUE4Parse/FileProvider/Vfs/FileProviderDictionary.cs` at the same revision: `FindPayloads` (L33) matches `.ubulk` and `.uptnl` payloads by chunk ID only when its `cookedIndexLookup` parameter, `false` by default, is set (L43-L58), and looks them up as `path + ".ubulk"` and `path + ".uptnl"` (L66, L71-L74), where `path` is the package path without its extension (L42).

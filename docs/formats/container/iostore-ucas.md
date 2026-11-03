@@ -1,15 +1,15 @@
 # IoStore `.ucas` (Container As-Stream)
 
-> Bulk-data file for an IoStore container — chunk payloads concatenated,
-> referenced by offset+length pairs in the matching `.utoc`.
+> Bulk-data file for an IoStore container, read through the matching
+> `.utoc`.
 
 ## Overview
 
 `.ucas` ("Container As-Stream") holds the actual data payloads of an
 IoStore container. It is purely a byte stream — no header, no per-chunk
 metadata. All structure lives in the paired `.utoc` file
-([`iostore-utoc.md`](iostore-utoc.md)), which publishes `(chunk_id → offset, length, compression-block-list)`
-mappings into this file.
+([`iostore-utoc.md`](iostore-utoc.md)), which maps each chunk ID to the
+compression blocks that hold its bytes in this file.
 
 Compression and AES-256 ECB encryption are applied at the
 compression-block granularity, the same way `.pak` does it, with parameters
@@ -93,7 +93,7 @@ bytes:
 
 ```
 ChunkOffsetLengths[i] (FIoOffsetAndLength, 10 bytes, BE):
-  Offset = 0    (5-byte BE u40; chunk starts at .ucas byte 0)
+  Offset = 0    (5-byte BE u40; chunk starts at uncompressed byte 0)
   Length = 12   (5-byte BE u40; chunk is 12 bytes uncompressed)
 
 CompressionBlocks[i] (FIoStoreTocCompressedBlockEntry, 12 bytes):
@@ -108,7 +108,7 @@ Reader logic to materialize the payload:
 1. Locate the chunk index `i` for the desired `FIoChunkId` (via
    `.utoc`'s perfect-hash array or linear scan).
 2. Use `ChunkOffsetLengths[i]` to determine the chunk's
-   `Offset = 0` and `Length = 12` in `.ucas`.
+   `Offset = 0` and `Length = 12`.
 3. Walk the compression blocks that cover bytes
    `[Offset, Offset + Length)` (here, just `CompressionBlocks[i]`).
 4. For each block: seek to `block.Offset` in `.ucas`, read
@@ -117,9 +117,7 @@ Reader logic to materialize the payload:
    `block.UncompressedSize` bytes to the chunk's output buffer.
 
 For an `OptionalBulkData`-typed chunk (`EIoChunkType` value 4 on
-UE4, `EIoChunkType5` value 3 on UE5+), the same logic applies but
-the reader sources bytes from `.uptnl` instead of `.ucas` — see
-[`iostore-uptnl.md`](iostore-uptnl.md) §*Chunk-type dispatch*.
+UE4, `EIoChunkType5` value 3 on UE5+), the same logic applies.
 
 ## Variants
 

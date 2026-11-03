@@ -43,15 +43,14 @@ section "Format inventory" for column semantics.
 | Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
 |-----|------------|---------------|----------------|-------------------|---------------|
 | `container/pak.md` | complete | complete | `container/pak/` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `ca02fea` |
-| `container/iostore-utoc.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + retoc @ `885a8dae740cb1ce1e41ff2e74f67f9f0c118237` | `fbb1044` |
-| `container/iostore-ucas.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + retoc @ `885a8dae740cb1ce1e41ff2e74f67f9f0c118237` | `fbb1044` |
-| `container/iostore-uptnl.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
+| `container/iostore-utoc.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + retoc @ `885a8dae740cb1ce1e41ff2e74f67f9f0c118237` | `7066ec9` |
+| `container/iostore-ucas.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + retoc @ `885a8dae740cb1ce1e41ff2e74f67f9f0c118237` | `7066ec9` |
 | `container/iostore-directory-index.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `asset/uasset.md` | complete | complete | `asset/` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `91456be` |
 | `asset/uexp.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `asset/ubulk.md` | complete | complete | `asset/bulk_data.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
-| `asset/companion-resolution.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
-| `asset/bulk-data.md` | complete | complete | `asset/bulk_data.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `91456be` |
+| `asset/companion-resolution.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `7066ec9` |
+| `asset/bulk-data.md` | complete | complete | `asset/bulk_data.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `7066ec9` |
 | `property/tagged.md` | complete | complete | `asset/property/tag.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` | `18769d0` |
 | `property/unversioned.md` | complete | partial | `asset/property/unversioned.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + unreal_asset @ `f4df5d8e75b1e184832384d1865f0b696b90a614` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `18769d0` |
 | `property/primitives.md` | complete | complete | `asset/property/primitives.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
@@ -66,7 +65,7 @@ section "Format inventory" for column semantics.
 | `primitive/fengine-version.md` | complete | complete | `asset/engine_version.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` + unreal_asset @ `f4df5d8e75b1e184832384d1865f0b696b90a614` | `b2cdbc6` |
 | `texture/texture2d.md` | complete | partial | `asset/exports/texture/texture2d.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `a35c183` |
 | `texture/pixel-formats.md` | complete | partial | `asset/exports/texture/pixel_format.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
-| `texture/mips-and-streaming.md` | complete | partial | `asset/exports/texture/texture2d.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` + CUE4Parse @ `1bb6ec4f878baa97f2b5dbf372b18b9970efd8ca` | `a10b273` |
+| `texture/mips-and-streaming.md` | complete | partial | `asset/exports/texture/texture2d.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` + CUE4Parse @ `1bb6ec4f878baa97f2b5dbf372b18b9970efd8ca` | `7066ec9` |
 | `texture/virtual-textures.md` | complete | complete | `asset/exports/texture/virtual_textures.rs` | CUE4Parse @ `b26351df6e4dfe5cf68f1aa83a85353eb8c961fa` | `2960ec2` |
 | `mesh/static-mesh.md` | complete | partial | `asset/exports/mesh/` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `044fb63` |
 | `mesh/skeletal-mesh.md` | complete | partial | `asset/exports/mesh/skeletal_mesh.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `044fb63` |
