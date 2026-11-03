@@ -3373,6 +3373,19 @@ mod tests {
         0x00, 0x02, 0x02, 0x01, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x03, 0x04, 0x00, 0x28, 0x01,
         0x6a, 0xc6, 0xac, 0x04, 0x90, 0x01, 0x3c, 0x01,
     ];
+    /// [`FLUSHED_LEN`] zero bytes as today's brotli encoder writes them at
+    /// quality 11 and the 22-bit window with a flush after the first 1000.
+    /// The flush ends the first meta-block, which is compressed, and writes
+    /// an empty metadata meta-block after it, so the decoder allocates its
+    /// block-type and block-length trees as the first one ends; the last
+    /// meta-block grows its ring buffer. All-zero schema data parses as
+    /// empty tables.
+    const FROZEN_BROTLI_FLUSHED: &[u8] = &[
+        0x8b, 0xf3, 0x01, 0xf8, 0x27, 0x00, 0xa2, 0xb1, 0x40, 0x20, 0xb4, 0x01, 0x71, 0x41, 0x80,
+        0x7f, 0x02, 0x20, 0x0a, 0x0b, 0x00, 0xa4, 0x03,
+    ];
+    /// The output length of [`FROZEN_BROTLI_FLUSHED`].
+    const FLUSHED_LEN: usize = 2048;
 
     #[test]
     fn a_refused_output_buffer_is_an_allocation_fault() {
@@ -3649,10 +3662,14 @@ mod tests {
     /// Every block of brotli decoder memory the allocator refuses is an
     /// allocation fault for that block's size, in the order the decoder
     /// allocates them; past the last block the stream decodes. The compressed
-    /// stream allocates the construction-time context-map table, the
-    /// block-type and block-length trees, the ring buffer, the context modes,
-    /// the literal and distance context maps, then each tree group's htrees
-    /// and codes; the stored stream stops after its ring buffer.
+    /// stream allocates the construction-time context-map table, the context
+    /// modes, the literal and distance context maps, each tree group's htrees
+    /// and codes, then the ring buffer; the stored stream allocates only the
+    /// table and its ring buffer. After the flushed stream's first
+    /// meta-block, which is not the last, the decoder allocates the
+    /// block-type and block-length trees; its last meta-block, after the
+    /// flush's empty metadata one, repeats the per-meta-block blocks and grows
+    /// the ring buffer.
     #[test]
     fn every_brotli_decoder_allocation_the_allocator_refuses_is_an_allocation_fault() {
         let (_, whole) = three_chunk_brotli();
@@ -3661,13 +3678,17 @@ mod tests {
                 "compressed",
                 FROZEN_BROTLI,
                 schema_payload().len(),
-                &[4320, 12960, 12960, 694, 1, 64, 4, 4, 4320, 4, 4320, 4, 4320][..],
+                &[2584, 1, 64, 4, 4, 4320, 4, 4320, 4, 4320, 630][..],
             ),
+            ("stored", whole.as_slice(), THREE_CHUNKS, &[2584, 33334][..]),
             (
-                "stored",
-                whole.as_slice(),
-                THREE_CHUNKS,
-                &[4320, 12960, 12960, 33334][..],
+                "flushed",
+                FROZEN_BROTLI_FLUSHED,
+                FLUSHED_LEN,
+                &[
+                    2584, 1, 64, 4, 4, 4320, 4, 4320, 4, 4320, 1590, 7584, 4752, 1, 64, 4, 4, 4320,
+                    4, 4320, 4, 4320, 2614,
+                ][..],
             ),
         ] {
             let bytes = usmap_with(UsmapCompression::Brotli, stream, declared);
@@ -3722,7 +3743,7 @@ mod tests {
             Err(PaksmithError::MappingsParse {
                 fault: MappingsParseFault::AllocationFailed {
                     context: MappingsAllocationContext::BrotliDecoderBytes,
-                    requested: 4320,
+                    requested: 2584,
                     ..
                 },
             })
