@@ -18,7 +18,10 @@ mod tests {
     use paksmith_core::asset::property::primitives::{EnumValue, PropertyValue};
     use paksmith_core::asset::property::{Property, PropertyBag};
     use paksmith_core::error::AssetParseFault;
-    use paksmith_core::testing::uasset::{MinimalPackage, build_minimal_ue4_27_unversioned};
+    use paksmith_core::testing::uasset::{
+        MinimalPackage, build_minimal_ue4_27_unversioned,
+        build_minimal_ue4_27_unversioned_with_names,
+    };
     use paksmith_core::testing::usmap::{
         MINIMAL_UNVERSIONED_PAYLOAD_HEX, build_hero_usmap_bytes, build_hero_usmap_with_enum_speed,
         build_hero_usmap_with_leading_gear, build_hero_usmap_with_struct_speed,
@@ -299,6 +302,55 @@ mod tests {
             "{value:?}"
         );
         assert_eq!(value.to_string(), "EGear::300");
+        assert_eq!(
+            (props[1].name(), &props[1].value),
+            ("Health", &PropertyValue::Int(100))
+        );
+        assert_eq!(
+            (props[2].name(), &props[2].value),
+            ("Speed", &PropertyValue::Float(600.0))
+        );
+    }
+
+    /// The elements of `Gear: Array<Enum<Byte>>` ahead of `Health` and
+    /// `Speed` are 8-byte FNames naming their values, so the slots behind
+    /// the array decode from the right offset.
+    #[test]
+    fn enum_array_elements_are_fnames_and_keep_the_slots_behind_aligned() {
+        let usmap = std::sync::Arc::new(
+            Usmap::from_bytes(&build_hero_usmap_with_leading_gear(&[8, 26, 0, 5, 0, 0, 0]))
+                .expect("Usmap parse"),
+        );
+        let payload = [
+            &[0x00, 0x07][..], // one fragment, last, three values
+            &2i32.to_le_bytes(),
+            &[5, 0, 0, 0, 0, 0, 0, 0], // FName "EGear::High"
+            &[4, 0, 0, 0, 0, 0, 0, 0], // FName "EGear::Low"
+            &100i32.to_le_bytes(),
+            &600f32.to_le_bytes(),
+        ]
+        .concat();
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27_unversioned_with_names(
+            "Hero",
+            &["EGear::Low", "EGear::High"],
+            payload,
+        );
+
+        let pkg = Package::read_from(&bytes, None, Some(&usmap), "test/Hero.uasset")
+            .expect("Package::read_from");
+        let props = prop_tree(&pkg);
+        assert_eq!(props.len(), 3, "{props:?}");
+        let gear = |name| PropertyValue::Enum {
+            type_name: "EGear".into(),
+            value: EnumValue::from(name),
+        };
+        assert_eq!(
+            props[0].value,
+            PropertyValue::Array {
+                inner_type: "EnumProperty".into(),
+                elements: vec![gear("EGear::High"), gear("EGear::Low")],
+            }
+        );
         assert_eq!(
             (props[1].name(), &props[1].value),
             ("Health", &PropertyValue::Int(100))
