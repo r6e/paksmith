@@ -70,8 +70,8 @@ to a `(partition_index, offset_within_partition)` pair via
 `offset_within_partition = Offset % PartitionSize`.
 
 For `PartitionCount == 1` (pre-TOC-v3 or single-partition
-v3+ containers), the entire `.ucas` is one file and the partition
-arithmetic collapses to identity.
+v3+ containers), the entire `.ucas` is one file, so every block's
+`Offset / PartitionSize` must be 0.
 
 ### Worked example — minimal `.ucas` referenced by a TOC
 
@@ -96,9 +96,9 @@ ChunkOffsetLengths[i] (FIoOffsetAndLength, 10 bytes, BE):
   Offset = 0    (5-byte BE u40; chunk starts at uncompressed byte 0)
   Length = 12   (5-byte BE u40; chunk is 12 bytes uncompressed)
 
-CompressionBlocks[i] (FIoStoreTocCompressedBlockEntry, 12 bytes):
+CompressionBlocks[0] (FIoStoreTocCompressedBlockEntry, 12 bytes):
   Offset = 0                    (5-byte LE u40; block starts at .ucas byte 0)
-  CompressedSize = 12           (3-byte LE u24; on-disk byte count)
+  CompressedSize = 12           (3-byte LE u24; compressed byte count)
   UncompressedSize = 12         (3-byte LE u24; matches CompressedSize when uncompressed)
   CompressionMethodIndex = 0    (u8; 0 = None)
 ```
@@ -110,11 +110,16 @@ Reader logic to materialize the payload:
 2. Use `ChunkOffsetLengths[i]` to determine the chunk's
    `Offset = 0` and `Length = 12`.
 3. Walk the compression blocks that cover bytes
-   `[Offset, Offset + Length)` (here, just `CompressionBlocks[i]`).
-4. For each block: seek to `block.Offset` in `.ucas`, read
-   `block.CompressedSize` bytes, decrypt (if `Encrypted` flag),
-   decompress (if `CompressionMethodIndex != 0`), and emit
-   `block.UncompressedSize` bytes to the chunk's output buffer.
+   `[Offset, Offset + Length)` (here, just `CompressionBlocks[0]`, which
+   holds all 12 bytes).
+4. For each block: read `block.CompressedSize` bytes (rounded up to
+   a multiple of 16 when `Encrypted`) at position
+   `block.Offset % PartitionSize` in `.ucas` partition
+   `block.Offset / PartitionSize` (see §*Partitioned layout*),
+   decrypt (if `Encrypted` flag), decompress the first
+   `block.CompressedSize` bytes (if `CompressionMethodIndex != 0`),
+   and copy the part of the decoded block that falls inside
+   `[Offset, Offset + Length)` to the chunk's output buffer[^1].
 
 For an `OptionalBulkData`-typed chunk (`EIoChunkType` value 4 on
 UE4, `EIoChunkType5` value 3 on UE5+), the same logic applies.
@@ -157,25 +162,23 @@ A `.ucas` reader (paksmith does not yet have one) MUST:
   `CompressionBlockSize` field; a decompressor that produces more
   bytes than declared indicates corruption or a decompression-bomb
   attempt.
-- **Use `checked_add` on `block.Offset + block.CompressedSize`**
-  before any seek-window comparison (defeats near-`u64::MAX`
-  wraparound attacks).
+- **Bound each block's read**: `block.Offset / PartitionSize` must name
+  one of the container's partitions (one `.ucas` when
+  `PartitionCount <= 1`), and the block's position in it
+  (`block.Offset % PartitionSize`) plus its read size
+  (`CompressedSize`, rounded up to a multiple of 16 when `Encrypted`)
+  must lie within that partition's length.
 - **Validate `CompressionMethodIndex < CompressionMethodNameCount + 1`**
   before indexing the method table (rejects out-of-range indices
   surfaced by malformed `.utoc`s).
-- **Reject mis-aligned encrypted regions** (block byte counts not
-  divisible by 16 when `Encrypted` flag is set), per
-  [`../crypto/aes-pak.md`](../crypto/aes-pak.md).
-- **Validate partition arithmetic** (`PartitionCount * PartitionSize`)
-  with `checked_mul` to bound the total addressable byte range; an
-  unbounded multiplication would overflow `u64` for adversarial TOC
-  values. Additionally MUST reject `PartitionSize == 0 AND
-  PartitionCount > 1` at parse time — `partition_index = Offset / PartitionSize`
-  (see §*Partitioned layout* above) would divide-by-zero. The
+- **Reject `PartitionSize == 0`** at parse time for TOC v3 and
+  later, whatever `PartitionCount` is —
+  `partition_index = Offset / PartitionSize`
+  (see §*Partitioned layout* above) would divide by zero. The
   parser-side guard belongs in the `.utoc` reader before any
   `.ucas` access is attempted; see
   [`iostore-utoc.md`](iostore-utoc.md) §*Implementation hardening*
-  for the matching cap.
+  for the matching guard.
 
 See `docs/security/allocation-caps.md` for the broader policy that
 the planned Phase 8 caps will follow.
@@ -195,9 +198,6 @@ the planned Phase 8 caps will follow.
   matching TOC records MUST return the same 12 bytes as the chunk
   payload.
 - **Cross-validation oracle:** CUE4Parse's `IoStoreReader`[^1].
-  The `.ucas` read path is inlined with the `.utoc` chunk lookup;
-  no standalone `.ucas` parser exists in CUE4Parse because the
-  file has no internal structure to parse.
 - **Known divergences:** none — no paksmith implementation to
   diverge.
 
@@ -211,6 +211,6 @@ the planned Phase 8 caps will follow.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/IoStoreReader.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle. The `.ucas` reading happens inline with `.utoc` chunk lookup in this file's `ReadAsync`.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/IoStoreReader.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle. The `.ucas` reading happens inline with `.utoc` chunk lookup in this file's `Read` overloads (L212-L300). L248 rounds every block's `CompressedSize` up to `Aes.ALIGN` (16 in `CUE4Parse/Encryption/Aes/Aes.cs` L9 at the same SHA) whether or not the container is `Encrypted`, and L268 reads that many bytes from partition `block.Offset / PartitionSize` at `block.Offset % PartitionSize` (L256-L257). L287-L288 decompress `CompressedSize` bytes, and L235 with L292-L296 copy the chunk's range out of each block, starting at `Offset % CompressionBlockSize` in the first block.
 [^2]: `trumank/retoc/retoc/src/version.rs@885a8dae740cb1ce1e41ff2e74f67f9f0c118237` L10-L22 — `EngineVersion` starts at `UE4_25`, and `toc_version` (L25-L40) maps UE 4.25 and 4.26 to TOC v2 (`DirectoryIndex`).
 [^3]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/IoStoreReader.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L522-L532 — in an `Encrypted` container whose encryption method is `AES_CTR`, each compression block is decrypted with its own IV. At the same revision, `Objects/FIoStoreTocHeader.cs` L97 reads the method from the header, `Objects/FIoStoreTocResource.cs` L76-L80 set it from the `Encrypted` flag alone below v10 and L135-L142 check and read the IVs, `FIoStoreEncryptionIV.cs` L23-L28 name `AES` (ECB) and `AES_CTR`, and `CUE4Parse/Encryption/Aes/Aes.cs` L100-L180 implement AES-CTR. `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@ecc4878950336126f125af0747190edf474b2a21` L12-L22 make `ReplaceIoChunkHashWithIoHash` (8) the latest version.

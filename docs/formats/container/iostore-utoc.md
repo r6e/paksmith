@@ -156,8 +156,8 @@ Each entry is a packed 12-byte record:
 
 | offset (in entry) | size | endian | name | type | semantics |
 |-------------------|------|--------|------|------|-----------|
-| 0 | 5 | LE | `Offset` | `u40` | Byte offset into the `.ucas` partition where the compressed block starts. Max 1 TiB. |
-| 5 | 3 | LE | `CompressedSize` | `u24` | On-disk byte count of this compression block. Max `(1<<24)-1` = 16 MiB-1. |
+| 0 | 5 | LE | `Offset` | `u40` | Byte offset of the compressed block across the container's `.ucas` partitions: `Offset / PartitionSize` is the partition and `Offset % PartitionSize` the position in it[^4]. Max 1 TiB. |
+| 5 | 3 | LE | `CompressedSize` | `u24` | Compressed byte count of this block: the codec of a compressed block takes exactly this many bytes. In an `Encrypted` container every block is read and decrypted as `CompressedSize` rounded up to a multiple of 16 (see [`iostore-ucas.md`](iostore-ucas.md) §*Worked example*). Max `(1<<24)-1` = 16 MiB-1. |
 | 8 | 3 | LE | `UncompressedSize` | `u24` | Decompressed byte count (always `<= CompressionBlockSize` header field; only the final block of a chunk may be short). |
 | 11 | 1 | — | `CompressionMethodIndex` | `u8` | Index into the compression-method table (`0` = `None`, `1..=CompressionMethodNameCount` = a named method). |
 
@@ -256,7 +256,7 @@ Offset  Bytes (LE; multi-byte annotated)                  Field
 +81     00                                                EncryptionMethod = 0
 +82     00 00                                             _reserved4
 +84     00 00 00 00                                       TocChunkPerfectHashSeedsCount = 0
-+88     00 00 00 00 00 00 00 00                           PartitionSize = 0 (irrelevant when PartitionCount=1)
++88     FF FF FF FF FF FF FF FF                           PartitionSize = 0xFFFFFFFFFFFFFFFF (u64::MAX)
 +96     00 00 00 00                                       TocChunksWithoutPerfectHashCount = 0
 +100    00 00 00 00                                       _reserved7
 +104    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  _reserved8[0..2]
@@ -370,19 +370,23 @@ allocation:
   a 4 GiB allocation for a single name.
 - **`DirectoryIndexSize`**: cap before reading. A `u32::MAX`
   size_on_disk claim would drive a 4 GiB read.
-- **`PartitionSize`**: validate that
-  `PartitionCount * PartitionSize` doesn't overflow `u64` and stays
-  within a project-defined ceiling. Use `checked_mul` before any
-  partition-arithmetic check. Additionally MUST reject
-  `PartitionSize == 0 AND PartitionCount > 1` at parse time — a
-  reader that proceeds would divide-by-zero on
-  `partition_index = block.Offset / PartitionSize`
+- **`PartitionSize`**: MUST reject `PartitionSize == 0` at parse time for TOC v3 and
+  later, whatever `PartitionCount` is: CUE4Parse's chunk `Read`
+  divides every block's `Offset` by `PartitionSize`,
+  single-partition containers included[^4]
   (see [`iostore-ucas.md`](iostore-ucas.md) §*Partitioned layout*).
 - **`CompressionMethodIndex` range**: validate
   `index <= CompressionMethodNameCount` before indexing the method
   table (slot 0 = implicit `None`; slots `1..=CompressionMethodNameCount`
   are named methods). A malformed TOC with `index = 255` and a
   table of 4 named methods would otherwise out-of-bounds-access.
+- **`CompressionBlockSize`**: MUST reject `0` at parse time; a
+  chunk's `Offset` is divided by it (§*Offset+Length array*)[^4].
+- **Compression-block range**: validate that a non-empty chunk's
+  block indices, from `Offset / CompressionBlockSize` through the block
+  holding its last byte, are all below
+  `TocCompressedBlockEntryCount` before indexing the block
+  table[^4].
 - **`TocChunkPerfectHashSeedsCount`** and
   **`TocChunksWithoutPerfectHashCount`**: cap before allocating the
   `i32[]` arrays.
@@ -425,8 +429,9 @@ the planned Phase 8 caps will follow.
   `FIoStoreTocCompressedBlockEntry`, and `FIoStoreTocEntryMeta`[^1]
   — the full layout cited row-by-row in §*Wire layout* above.
   `trumank/repak` has no IoStore coverage; CUE4Parse (C#, with
-  wire-faithful byte layouts) is the wire-layout oracle, and retoc[^2]
-  is cited for its release-to-TOC-version mapping and its header read.
+  wire-faithful byte layouts) is the wire-layout oracle, and retoc[^2][^4]
+  is cited for its release-to-TOC-version mapping, its header read and
+  its block reads.
 - **Known divergences:** none — no paksmith implementation to
   diverge.
 
@@ -447,3 +452,4 @@ for the implementation work.
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@ecc4878950336126f125af0747190edf474b2a21` (header + `EIoStoreTocVersion` + `EIoContainerFlags`), `FIoChunkId.cs` (chunk-ID + `EIoChunkType` / `EIoChunkType5`), `FIoOffsetAndLength.cs` (BE 40-bit pair), `FIoStoreTocCompressedBlockEntry.cs` (packed 12-byte entry), `FIoStoreTocResource.cs` (top-level read order + section gating), `FIoStoreTocEntryMeta.cs` (per-chunk metadata variant under TOC v8), all at the same pinned SHA. At that revision `FIoStoreTocHeader.cs` L20-L22 put `LatestPlusOne` (9) right after `ReplaceIoChunkHashWithIoHash`, and L26 declares `EIoContainerFlags` as a `uint`, which L82 reads from header bytes 80-83. `CUE4Parse/UE4/IO/IoStoreReader.cs` covers the end-to-end open flow, and its L231-L235 turn a chunk's `Offset` into a compression-block index and an offset within that block.
 [^2]: `trumank/retoc/retoc/src/version.rs@885a8dae740cb1ce1e41ff2e74f67f9f0c118237` L10-L22 and L25-L40 — `EngineVersion` starts at `UE4_25`, and `toc_version` maps UE 4.25 and 4.26 to `DirectoryIndex` (v2), UE 4.27 to `PartitionSize` (v3) and UE 5.5-5.7 to `ReplaceIoChunkHashWithIoHash` (v8), the newest version it maps. retoc's `README.md` at the same revision (L40) says overrides may be required for some games, usually pre-5.0 ones, where the IoStore version was not well defined. `retoc/src/lib.rs` at the same revision reads header byte 80 as `u8` container flags, then `reserved3: u8` and `reserved4: u16` (L225-L227, with the types at L1128 and L1205-L1207).
 [^3]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L8-L24 — `AddedSourceHashes` (9) and `ContainerEncryptionMethod` (10) follow `ReplaceIoChunkHashWithIoHash`, and `LatestPlusOne` is 11. L27 declares `EIoContainerFlags` as a `byte`, and L96-L98 read `ContainerFlags`, then `EncryptionMethod` (one byte) and a `u16`. L102-L113 read offset 100 as `TocSourceHashCount` and offset 104 as `EncryptionIVCount` for `GAME_UE6_0` and later game profiles; for earlier profiles they skip offset 100 and read bytes 104-143 as `CustomGameData`. `FIoStoreTocResource.cs` at the same revision substitutes the encryption method and zeroes the IV count below v10 (L76-L80); it rejects an IV count other than the compression-block count (plus one when `Indexed` is set) under AES-CTR, or other than zero under any other method (L135-L139), then reads the IVs after the compression blocks (L142). Its version gates (L70, L76, L100, L105, L179, L197, L205) take the same branches at 9 as at 8. `CUE4Parse/UE4/IO/FIoStoreEncryptionIV.cs` L7 and L23-L28 give the 12-byte IV and the `EIoEncryptionMethod` values. `CUE4Parse/UE4/IO/IoStoreReader.cs` L513 and L524 test the method for `AES_CTR`; L518-L519 and L530 decrypt the directory index with the last IV and each compression block with its own, and `CUE4Parse/Encryption/Aes/Aes.cs` L15 and L172-L180 build the counter block; L104 and L121 default its starting counter to 0.
+[^4]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/IoStoreReader.cs@ecc4878950336126f125af0747190edf474b2a21` L233-L234 derive a chunk's first and last compression-block indices from `Offset`, `Length` and `CompressionBlockSize`, L244-L246 loop over that range, indexing `CompressionBlocks`, and L256-L257 split each block's `Offset` by `PartitionSize` into a partition index and a position within that partition. `CUE4Parse/UE4/IO/Objects/FIoStoreTocResource.cs` L50-L53 at the same SHA substitute `PartitionCount` 1 and `PartitionSize` `ulong.MaxValue` below TOC v3. `trumank/retoc/retoc/src/lib.rs@885a8dae740cb1ce1e41ff2e74f67f9f0c118237` L646-L649 (`read`) index `compression_blocks` with the same range.
