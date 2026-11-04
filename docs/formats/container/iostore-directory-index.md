@@ -22,9 +22,8 @@ reader that doesn't need path lookup MAY skip the entire buffer via
 
 When the parent container is AES-encrypted (`EIoContainerFlags::Encrypted`
 in the `.utoc` header), the entire directory-index buffer is encrypted
-with the container's AES-256-ECB key and MUST be decrypted before
-parsing. The buffer length is always a multiple of 16 bytes (AES block
-size) in encrypted containers.
+with the container's AES-256 key and MUST be decrypted before
+parsing.
 
 The buffer is a flat layout of four sequential sections:
 
@@ -57,9 +56,9 @@ introduced the buffer; no subsequent TOC version (`PartitionSize`,
 `PerfectHashWithOverflow`, `OnDemandMetaData`, `ReplaceIoChunkHashWithIoHash`,
 `RemovedOnDemandMetaData`) has changed the internal directory-index shape.
 
-| UE version range | Wire-format change | Source |
+| TOC version | Wire-format change | Source |
 |------------------|---------------------|--------|
-| UE 4.25+ (`EIoStoreTocVersion::DirectoryIndex (v2)`) | Buffer introduced; layout (mount-point + 3 counted arrays) wire-stable from this point onward. | `CUE4Parse/UE4/IO/IoStoreReader.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
+| `EIoStoreTocVersion::DirectoryIndex (v2)` | Buffer introduced; layout (mount-point + 3 counted arrays) wire-stable from this point onward. | `CUE4Parse/UE4/IO/IoStoreReader.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
 
 ## Wire layout
 
@@ -217,12 +216,11 @@ leading `/` is removed). The file resolves to
 ### Encrypted containers
 
 When `.utoc` `ContainerFlags & EIoContainerFlags::Encrypted` is set,
-the entire directory-index buffer is AES-256-ECB encrypted using the
+the entire directory-index buffer is AES-256 encrypted using the
 container's encryption key (matched via the `EncryptionKeyGuid` field
-from the `.utoc` header — see [`iostore-utoc.md`](iostore-utoc.md) §*Header*). The buffer length on disk is always a multiple of 16
-bytes (AES block alignment); decryption produces a buffer whose first
+from the `.utoc` header — see [`iostore-utoc.md`](iostore-utoc.md) §*Header*). Decryption produces a buffer whose first
 `FString` mount-point length field is a **heuristic, not cryptographic,
-integrity check** — AES-ECB provides no authentication. An incorrect
+integrity check** — the encryption provides no authentication. An incorrect
 key typically yields a corrupted or oversized mount-point length and
 the parse aborts, but a wrong key that happens to decrypt the first
 4 bytes into a small non-negative `i32` (e.g. `0x00000001`) would
@@ -242,10 +240,12 @@ specific 4-byte plaintext, and the same trivially extends to crafting
 a fully parseable buffer. Treating "successful parse" as
 key-validation is therefore unsafe when the key source is untrusted
 (e.g. read from the container's own GUID → key lookup table). In
-adversary-controlled scenarios, key validation requires a separate
-MAC / HMAC over the decrypted buffer (UE's IoStore format does not
-publish one — paksmith MUST treat trust in the key source as a
-prerequisite, not validate the key from the container itself).
+adversary-controlled scenarios, paksmith MUST treat trust in the key
+source as a prerequisite, not validate the key from the container
+itself.
+
+From TOC v10 the `.utoc` can select AES-CTR instead of ECB[^2]; see
+[`iostore-utoc.md`](iostore-utoc.md) §*Versions*.
 
 ### Empty index buffer
 
@@ -256,9 +256,9 @@ attempt to parse a zero-length buffer.
 
 ### Game-specific quirks
 
-CUE4Parse handles one game-specific path remapping:
-`EGame.GAME_NeedForSpeedMobile` strips a `"../../../"` prefix from the
-post-traversal full path before storing. This is a path-level fixup,
+For `EGame.GAME_NeedForSpeedMobile`, CUE4Parse drops everything up to
+and including the first `"../../../"` in the post-traversal full path
+before storing. This is a path-level fixup,
 not a wire-format variant — the buffer content is unchanged.
 
 ## Caps & limits
@@ -272,7 +272,7 @@ not a wire-format variant — the buffer content is unchanged.
 - **`FIoDirectoryIndexEntry`**: fixed 16 bytes (4 × `u32` LE).
 - **`FIoFileIndexEntry`**: fixed 12 bytes (3 × `u32` LE).
 - **Invalid sentinel**: `uint.MaxValue` (`0xFFFFFFFF`) for `Name`, `FirstChildEntry`, `NextSiblingEntry`, `FirstFileEntry`, `NextFileEntry`. The `UserData` field has NO defined invalid sentinel — all 2³² values are valid chunk-table indices (subject to upper-bound validation against `utoc.TocEntryCount`).
-- **AES alignment**: when the parent container is encrypted, `DirectoryIndexSize` MUST be a multiple of 16 bytes (AES-256 block size).
+- **AES alignment**: when the parent container is AES-ECB-encrypted (`Encrypted` set and, from TOC v10, `EncryptionMethod` other than `2`), `DirectoryIndexSize` MUST be a multiple of 16 bytes (AES-256 block size)[^2].
 
 ### Implementation hardening (recommended for any parser)
 
@@ -287,7 +287,7 @@ A directory-index reader (paksmith does not yet have one) MUST:
 - **Detect cycles in the directory and file linked lists.** The `FirstChildEntry → NextSiblingEntry → NextFileEntry` traversal is unbounded recursion otherwise. A directory whose `NextSiblingEntry` points to itself, or a file whose `NextFileEntry` points to an earlier file, would cause infinite recursion / infinite loop on traversal. Reader MUST maintain a visited-set of already-seen entry indices and reject any revisit explicitly — the visited-set is the correctness guarantee, not just a performance heuristic. A naive total-visits cap (`DirectoryEntries.count + FileEntries.count` distinct visits) is NOT a substitute: on a non-cyclic "diamond" graph (two sibling entries pointing at the same child subtree) the count-cap-only implementation would error out on the second descent of the shared subtree, rejecting a valid (non-cyclic) directory structure. The cap MAY be retained as a cheap backstop alongside the visited-set, but a parser implementing only the cap will both (a) reject valid diamond graphs and (b) miss true cycles that happen to fit under the budget.
 - **Detect path-traversal in the StringTable.** The `MountPoint` normalisation strips one fixed `../../..` prefix, but does NOT sanitise the per-entry directory/file names. A `StringTable[i]` value of `"../sibling"` or `"/etc/passwd"` would, after path-concatenation, produce a path that escapes the container's intended mount root. Reader MUST reject any leaf-name that IS `..` exactly, that contains `/` or `\` path-separator characters, or that contains an embedded NUL byte. Substring matches like `"Foo..uasset"` are NOT path-traversal — the reject test is exact-string-equals on the `..` component, not substring containment. **The reject test MUST operate on DECODED codepoints, not raw bytes** — `StringTable` entries are full `FString`s (positive length = UTF-8, negative length = UTF-16 LE per [`../primitive/fstring.md`](../primitive/fstring.md)), so a UTF-16-LE-encoded `/` is `0x2F 0x00` and a raw-byte scan for `0x2F` will miss it unless the parser decodes the FString to codepoints first. On Windows targets, additionally apply Unicode normalisation (NFC) BEFORE the reject test to defeat Unicode lookalike separators (e.g. U+2215 DIVISION SLASH which can collide with `/` after normalisation). (UE's cooker doesn't emit malicious paths, but a hostile container can.)
 - **Reject filesystem-reserved leaf names at the extraction layer**, not at the parse layer. Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, with or without extension) are valid wire-format string-table entries but cannot be written to disk on Windows without becoming device handles. This rejection belongs in the writer/extractor (when materialising entries to a real filesystem), not in the wire-format parser — the parsed virtual-path tree is allowed to contain such names because the in-memory representation is keyed by string, not by filesystem path.
-- **Reject `DirectoryIndexSize % 16 != 0`** when the parent container is encrypted, BEFORE attempting decryption. AES-256-ECB requires 16-byte block alignment; a non-aligned size indicates corruption (or a parser routing a non-encrypted buffer through the encrypted-path code) and the decryption library will throw on the misaligned input. Failing the check explicitly at parse time surfaces a clearer error than the cryptographic library's exception.
+- **Reject `DirectoryIndexSize % 16 != 0`** when the parent container is AES-ECB-encrypted, BEFORE attempting decryption. AES-256-ECB requires 16-byte block alignment; a non-aligned size indicates corruption (or a parser routing a non-encrypted buffer through the encrypted-path code) and the decryption library will throw on the misaligned input. Failing the check explicitly at parse time surfaces a clearer error than the cryptographic library's exception.
 - **Do not rely on "successful parse" as key-validation when the key source is untrusted.** AES-ECB provides no authentication; an adversary controlling both the container AND the key can craft a parseable buffer with any chosen key. See §*Variants — Encrypted containers* for the threat-model scope and the implication: trust in the key source is a prerequisite to parsing, not something the parser can validate from the container itself.
 - **Validate `MountPoint` post-normalisation** stays within a project-defined maximum length (typically the same as `MAX_MOUNTPOINT_TEST_LENGTH = 128` per CUE4Parse's pre-decryption heuristic). A parser that doesn't cap the mount-point length here will cap it implicitly via the file-path concatenation budget downstream, but rejecting early surfaces the error closer to the wire.
 
@@ -295,7 +295,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** The 107-byte Worked example above is byte-exact and self-contained. Real cooked fixtures from any UE 4.25+ `.utoc` with `EIoContainerFlags::Indexed` set exercise the same wire shape; a synthetic single-file fixture is a Phase 8 deliverable.
+- **Fixture:** The 107-byte Worked example above is byte-exact and self-contained. Real cooked fixtures from any `.utoc` that carries this buffer exercise the same wire shape; a synthetic single-file fixture is a Phase 8 deliverable.
 - **Hex anchor command:**
   ```
   # Synthesize the 107-byte minimal directory-index buffer from the Worked example
@@ -319,4 +319,5 @@ is requested)*
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/IoStoreReader.cs@ecc4878950336126f125af0747190edf474b2a21` (`ProcessIndex` method covers the open-flow that reads this buffer end-to-end). `Objects/FIoDirectoryIndexEntry.cs` + `Objects/FIoFileIndexEntry.cs` define the 16-byte and 12-byte fixed-layout records (`[StructLayout(LayoutKind.Sequential)]`). `UE4/VirtualFileSystem/AbstractVfsReader.cs` provides the `ValidateMountPoint` normalisation contract. The `ReadFStringMemoryArray` extension method used for the string table is defined in the upstream `NotOfficer/GenericReader` package that CUE4Parse depends on (counted array of `FString` entries; same wire shape as a hand-rolled `i32 count + FString[count]`).
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/IoStoreReader.cs@ecc4878950336126f125af0747190edf474b2a21` (`ProcessIndex` method covers the open-flow that reads this buffer end-to-end). `Objects/FIoStoreTocResource.cs` L143-L151 at the same SHA gate the buffer on `Version >= DirectoryIndex`, the `Indexed` flag and `DirectoryIndexSize > 0`. `Objects/FIoDirectoryIndexEntry.cs` + `Objects/FIoFileIndexEntry.cs` define the 16-byte and 12-byte fixed-layout records (`[StructLayout(LayoutKind.Sequential)]`). `UE4/VirtualFileSystem/AbstractVfsReader.cs` provides the `ValidateMountPoint` normalisation contract. The `ReadFStringMemoryArray` extension method used for the string table is defined in the upstream `NotOfficer/GenericReader` package that CUE4Parse depends on (counted array of `FString` entries; same wire shape as a hand-rolled `i32 count + FString[count]`).
+[^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/IoStoreReader.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L477 and L511-L520 — in an `Encrypted` container whose encryption method is `AES_CTR`, the directory index is decrypted with the last IV. At the same revision, `Objects/FIoStoreTocHeader.cs` L97 reads the method from the header, `Objects/FIoStoreTocResource.cs` L76-L80 set it from the `Encrypted` flag alone below v10, L135-L142 check and read the IVs and L47 reads `DirectoryIndexSize` bytes for the buffer, `FIoStoreEncryptionIV.cs` L23-L28 name `AES` (ECB) and `AES_CTR`, and `CUE4Parse/Encryption/Aes/Aes.cs` L100-L180 implement AES-CTR, XORing the key stream over the data's own length (L160), while AES-ECB decryption rejects a length that is not a multiple of 16 (L80-L81). `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@ecc4878950336126f125af0747190edf474b2a21` L12-L22 make `ReplaceIoChunkHashWithIoHash` (8) the latest version.

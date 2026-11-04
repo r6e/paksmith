@@ -11,9 +11,9 @@ metadata. All structure lives in the paired `.utoc` file
 ([`iostore-utoc.md`](iostore-utoc.md)), which maps each chunk ID to the
 compression blocks that hold its bytes in this file.
 
-Compression and AES-256 ECB encryption are applied at the
-compression-block granularity, the same way `.pak` does it, with parameters
-(block size, method, key) all carried in the `.utoc`.
+Compression and AES-256 encryption are applied at the
+compression-block granularity, with parameters (block size, method,
+key GUID) all carried in the `.utoc`.
 
 **Document status: complete.** The `.ucas` file is structureless
 by format — a flat byte stream of concatenated chunk payloads with
@@ -50,13 +50,13 @@ readable as a single decompress call against the method named in
 the `.utoc`'s compression-method table.
 
 When the `.utoc`'s `EIoContainerFlags::Encrypted` bit is set, the
-encryption is applied at the compression-block granularity in
-AES-256 ECB mode — same as pak's per-entry encryption (see
-[`../crypto/aes-pak.md`](../crypto/aes-pak.md)). The key is
-identified by the TOC's `EncryptionKeyGuid` field; the bytes on
-disk are `EncryptedBlock = AES-256-ECB(key, padded(CompressedBlock))`,
-where the writer 16-byte-aligns the block to the AES block
-boundary at write time.
+encryption is applied at the compression-block granularity, in
+AES-256 ECB mode (see [`../crypto/aes-pak.md`](../crypto/aes-pak.md))
+unless, from TOC v10, the `.utoc` selects AES-CTR[^3] (see
+[`iostore-utoc.md`](iostore-utoc.md) §*Versions*). The key is
+identified by the TOC's `EncryptionKeyGuid` field; under ECB the
+bytes on disk are `EncryptedBlock = AES-256-ECB(key, CompressedBlock padded to a
+multiple of 16 bytes)`.
 
 ### Partitioned layout (TOC v3+)
 
@@ -124,8 +124,7 @@ UE4, `EIoChunkType5` value 3 on UE5+), the same logic applies.
 None on the `.ucas` wire itself. The two on-disk variants are
 selected by the matching `.utoc`:
 
-- **Per-chunk compression / encryption flags** (encoded in the
-  TOC's `EIoContainerFlags` and per-block
+- **Compression / encryption** (the TOC header and per-block
   `CompressionMethodIndex`).
 - **Partition count** (TOC v3+; affects whether `.ucas` exists as
   one file or multiple).
@@ -214,3 +213,4 @@ the planned Phase 8 caps will follow.
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/IoStoreReader.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle. The `.ucas` reading happens inline with `.utoc` chunk lookup in this file's `ReadAsync`.
 [^2]: `trumank/retoc/retoc/src/version.rs@885a8dae740cb1ce1e41ff2e74f67f9f0c118237` L10-L22 — `EngineVersion` starts at `UE4_25`, and `toc_version` (L25-L40) maps UE 4.25 and 4.26 to TOC v2 (`DirectoryIndex`).
+[^3]: `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/IoStoreReader.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L522-L532 — in an `Encrypted` container whose encryption method is `AES_CTR`, each compression block is decrypted with its own IV. At the same revision, `Objects/FIoStoreTocHeader.cs` L97 reads the method from the header, `Objects/FIoStoreTocResource.cs` L76-L80 set it from the `Encrypted` flag alone below v10 and L135-L142 check and read the IVs, `FIoStoreEncryptionIV.cs` L23-L28 name `AES` (ECB) and `AES_CTR`, and `CUE4Parse/Encryption/Aes/Aes.cs` L100-L180 implement AES-CTR. `FabianFG/CUE4Parse/CUE4Parse/UE4/IO/Objects/FIoStoreTocHeader.cs@ecc4878950336126f125af0747190edf474b2a21` L12-L22 make `ReplaceIoChunkHashWithIoHash` (8) the latest version.
