@@ -220,8 +220,7 @@ detection logic.
 ### Versioned vs unversioned property serialization
 
 - **Versioned** (tagged): export bodies are an `FPropertyTag` sequence.
-  The dedicated tagged-property doc is planned under
-  `docs/formats/property/`.
+  See [`../property/tagged.md`](../property/tagged.md).
 - **Unversioned** (`PKG_UnversionedProperties` flag set): export bodies
   are a schema-driven bitstream. Paksmith requires the caller to supply
   a `.usmap` schema via the `mappings` parameter; without mappings the
@@ -359,8 +358,7 @@ policy.
   helpers.
 
 **Status:** `complete` for the structural header; per-property bodies
-covered in the planned property family docs under
-`docs/formats/property/`.
+covered in the [`../property/`](../property/) family.
 
 **Public surface:**
 - `pub struct Package` — `read_from(uasset, uexp, mappings, asset_path)`,

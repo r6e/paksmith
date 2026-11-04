@@ -188,7 +188,7 @@ cap and fault are in [`unversioned.md`](../property/unversioned.md).
 
 **Test files:** `crates/paksmith-core/src/asset/engine_version.rs` `mod tests`.
 
-**Phase plan:** `docs/plans/phase-2a-uasset-header.md` (Task 5).
+**Phase plan:** `docs/plans/phase-2a-uasset-header.md` (Task 4).
 
 ## References
 
