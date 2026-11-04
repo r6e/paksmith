@@ -346,7 +346,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** The 4-byte `FPackedNormal` and 52-byte `FPositionVertexBuffer` Worked examples above are byte-exact and self-contained. Full mesh fixtures exercising the cooked LOD payload (per `static-mesh.md` and `skeletal-mesh.md`) are Phase 3 deliverables.
+- **Fixture:** The 4-byte `FPackedNormal` and 52-byte `FPositionVertexBuffer` Worked examples above are byte-exact and self-contained.
 - **Hex anchor commands:**
   ```
   # Synthesize the 4-byte FPackedNormal (+Z normal, UE 4.20+ XOR'd):
@@ -357,7 +357,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
   ```
   A conformant vertex-format parser fed these bytes MUST decode them as the values shown in the Worked examples — a +Z surface normal and a 3-vertex position buffer respectively.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle; see [`static-mesh.md`](static-mesh.md) Verification for details on why no Rust counterpart exists).
-- **Known divergences:** the pre-4.23 legacy path these readers serve is UNVERIFIED; see [`static-mesh.md`](static-mesh.md) and [`skeletal-mesh.md`](skeletal-mesh.md) for their respective implementation notes.
+- **Known divergences:** the pre-4.23 legacy path these readers serve is UNVERIFIED; see [`static-mesh.md`](static-mesh.md) and [`skeletal-mesh.md`](skeletal-mesh.md) for their respective implementation notes. A 4.19 static mesh that records no `FRenderingObjectVersion` has its tangents read with the UE 4.20+ XOR, which CUE4Parse does not apply to that mesh at `GAME_UE4_19`.
 
 ## Paksmith implementation
 

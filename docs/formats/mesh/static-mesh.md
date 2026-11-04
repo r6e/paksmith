@@ -28,23 +28,23 @@ The per-LOD vertex layout is governed by the shared
 **Document status: complete.** Wire format documented in full for
 the two segments of the `UStaticMesh` export body: the
 tagged-property stream (common property names + types) and the
-trailing `FStaticMeshRenderData` cooked payload (header fields,
+`FStaticMeshRenderData` cooked payload (header fields,
 per-LOD `FStaticMeshLODResources`, per-section `FStaticMeshSection`).
 Per-buffer wire layouts for the LOD's vertex / index buffers are
 deferred to [`vertex-formats.md`](vertex-formats.md). The
 `FNaniteResources` sub-format (UE 5.0+ virtualized mesh page
 tables) is documented in [`nanite-resources.md`](nanite-resources.md);
-this doc explicitly scopes itself to the classic LOD payload
-(used as Nanite fallback on hardware that lacks support).
+this doc explicitly scopes itself to the classic LOD payload.
 
 **Paksmith parser status: `partial`.** Phase 3g routes the `StaticMesh`
 class to a typed reader (`Asset::StaticMesh`) that parses the
-tagged-property segment, the full `UStaticMesh.Deserialize` chain
+tagged-property segment, the `UStaticMesh.Deserialize` fields
 (`FStripDataFlags`, `bCooked`, `BodySetup`, `NavCollision`,
 `LightingGuid`, `Sockets`), and the `bCooked`-gated
 `FStaticMeshRenderData` geometry — per-LOD vertex / index buffers,
 bounds, and screen sizes — for the UE 4.23–4.27 new-cooked, inlined
-layout. A non-inlined (`bInlined == false`) LOD's geometry is resolved
+layout. The `UStaticMesh.Deserialize` fields after the render data are
+left unread. A non-inlined (`bInlined == false`) LOD's geometry is resolved
 via the bulk resolver, from a companion file, the package, or in-stream, and decoded
 with the same `SerializeBuffers` path as an inlined LOD. A present per-LOD
 `FDistanceFieldVolumeData` (UE4 path) is validated-skipped so the
@@ -77,7 +77,7 @@ package parses to `Asset::Generic`. The glTF
 | UE 4.20 (object version 516) | `ScreenSize[]` entries become `FPerPlatformFloat` (`u32` bool + `f32`); before, each is a plain `f32`. Both references key it on the engine version; 4.19 also writes object 516, and it records `FRenderingObjectVersion` 25 where 4.20 records 26. | CUE4Parse[^6]; UEViewer[^7] |
 | UE 4.23+ | `numInlinedLODs: u8` appended after the LOD array inside `FStaticMeshRenderData`. | Same[^1] |
 | UE 4.25 (object version 518, shared with 4.24) | `FStaticMeshSection` gains `bForceOpaque`, `FRawStaticIndexBuffer` a trailing `bShouldExpandTo32Bit`, and each LOD a ray-tracing geometry bulk array (absent when `CDSF_RayTracingResources` is set). Both references gate `bForceOpaque` on `FRenderingObjectVersion` ≥ 37 (`StaticMeshSectionForceOpaqueField`) and the other two on the engine version; 4.24 records 36 and 4.25 records 43. | CUE4Parse[^4]; UEViewer[^5] |
-| UE 5.0+ | `NaniteResources: FNaniteResources` added inside `FStaticMeshRenderData` after `numInlinedLODs`. Classic LOD payload still present for non-Nanite / fallback. UE 5.5+ also appends a render-data-level `bHasRayTracingProxy: u32` bool gating an `FStaticMeshRayTracingProxy` struct. | Same[^1] |
+| UE 5.0+ | `NaniteResources: FNaniteResources` added inside `FStaticMeshRenderData` after `numInlinedLODs`. Classic LOD payload still present. UE 5.5+ also appends a render-data-level `bHasRayTracingProxy: u32` bool gating an `FStaticMeshRayTracingProxy` struct. | Same[^1] |
 | UE 5.5+ / 5.6+ (per-LOD) | 5.5+ inserts a `bHasRayTracingGeometry` (`u32`) into the LOD record before `SerializeBuffers`; 5.6+ also prepends a `RawDataHeader` (6 × `u32`) before the ray-tracing geometry bulk array. That bulk array itself is the existing `StaticMesh.HasRayTracingGeometry` (UE 4.25+) version-keyed read; the 5.0–5.3 LOD adds no new per-LOD ray-tracing field. | Same[^1] |
 
 Per-version field-by-field enumeration is Phase 3+ work; the
@@ -118,7 +118,7 @@ reads the fields below. `FStaticMeshRenderData` is **not** the next field after
 | `FStripDataFlags` | variable | — | strip-flags struct | Governs which subsections are omitted from cooked output. |
 | `bCooked` | 4 | LE | `u32` (bool) | Expected `1` for cooked content. Guards whether `FStaticMeshRenderData` follows. |
 | `BodySetup` | 4 | LE | `FPackageIndex` | Reference to collision `UBodySetup`. |
-| *(intervening UStaticMesh-level fields)* | — | — | — | `NavCollision` (version-gated `FPackageIndex`), an editor-thumbnail block (gated on `!IsEditorDataStripped`), `LightingGuid` (`FGuid`), `Sockets` (counted `FPackageIndex[]`), `SpeedTreeWind`, and version-gated material re-reads — all between `BodySetup` and `FStaticMeshRenderData`. Exact order / version gating is Phase 3 (3g1-3) work. |
+| *(intervening UStaticMesh-level fields)* | — | — | — | `NavCollision` (version-gated `FPackageIndex`), an editor-data block (gated on `!IsEditorDataStripped`), `LightingGuid` (`FGuid`), and `Sockets` (counted `FPackageIndex[]`) — all between `BodySetup` and `FStaticMeshRenderData`. Version-gated occluder data, `SpeedTreeWind` and material re-reads follow the render data. |
 
 ### `FStaticMeshRenderData` (present when `bCooked == true`)
 
@@ -130,7 +130,7 @@ is at `UStaticMesh.Deserialize` level.[^1]
 |-------|------|--------|------|-----------|
 | `LODs` | variable | — | `FStaticMeshLODResources[]` | Counted-array prefix + per-LOD records. |
 | `numInlinedLODs` (UE 4.23+) | 1 | — | `u8` | Count of LODs whose data is inlined (vs. streamed). |
-| `NaniteResources` (UE 5.0+) | variable | — | `FNaniteResources` | When `NaniteSettings.bEnabled` was true at cook. |
+| `NaniteResources` (UE 5.0+) | variable | — | `FNaniteResources` | Keyed on the engine version, with no `NaniteSettings` check[^9]. |
 | `inlineDataRepresentations` (UE 5.0+) | variable | — | — | `SerializeInlineDataRepresentations()` payload — per-LOD inline representations data (Phase 3 enumeration deferred). |
 | `distance-field block` (UE 4.x+) | variable | — | `FStripDataFlags` + per-LOD `bValid: u32(bool)` + conditional `FDistanceFieldVolumeData` (or `FDistanceFieldVolumeData5` UE 5.0+) | Per-LOD distance field volume data, gated on `Ver >= RENAME_CROUCHMOVESCHARACTERDOWN` + `RENAME_WIDGET_VISIBILITY` strip flags. Skipped when audio-visual data stripped. |
 | `Bounds` | 28 (UE4) / 56 (UE5 LWC) | LE | `FBoxSphereBounds` | Origin (3 × f32/f64) + BoxExtent (3 × f32/f64) + SphereRadius (f32/f64). Under UE5 LWC (`Ver ≥ LARGE_WORLD_COORDINATES`), each component widens to f64 (8 bytes), giving 24+24+8 = 56 bytes. |
@@ -221,13 +221,12 @@ fields (`MaterialIndex` through `bCastShadow`) are always present.
 
 ## Variants
 
-### Nanite-enabled (UE 5+)
+### Nanite resources (UE 5.0+)
 
-When the asset's `NaniteSettings.bEnabled` was true at cook time, an
-`FNaniteResources` blob follows `numInlinedLODs` inside
-`FStaticMeshRenderData`. The blob holds the virtualized-mesh page
-tables; the classic LOD array is still present (used as fallback on
-hardware that doesn't support Nanite).
+In UE 5.0+ an `FNaniteResources` blob follows `numInlinedLODs` inside
+`FStaticMeshRenderData`, keyed on the engine version with no
+`NaniteSettings` check[^9]. The blob holds the virtualized-mesh page
+tables; the classic LOD array is still present.
 
 Paksmith's Phase 3 implementation should make Nanite an opt-in
 follow-up rather than a base requirement — the classic LOD payload
@@ -293,10 +292,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 - **Fixture:** The 40-byte `FStaticMeshSection` Worked example
   above is byte-exact and self-contained for the UE 5.1+
-  per-section record. A full static-mesh fixture
-  (`minimal_static_mesh_v5.uasset` — single-LOD cube with one
-  section, three or four uncompressed vertices, 12-index buffer)
-  is a Phase 3 deliverable.
+  per-section record.
 - **Hex anchor commands:**
   ```
   # Synthesize the 40-byte UE 5.1+ FStaticMeshSection record from
@@ -313,7 +309,14 @@ See `docs/security/allocation-caps.md` for the broader policy.
 - **Known divergences:** the pre-4.23 legacy (`SerializeBuffersLegacy`)
   LOD layout is decoded as a deliberately UNVERIFIED path (no real
   pre-4.23 fixture; synthetic-only — see the Verification notes above).
-  For UE5 the reader reads nothing after `numInlinedLODs`.
+  For UE5 the reader reads nothing after `numInlinedLODs`. UE 4.21 and
+  4.22 share object version 517 with 4.23, so the reader routes their
+  LODs to the new-cooked layout and reads `numInlinedLODs`, where
+  CUE4Parse gates both on `GAME_UE4_23`. The reader applies the
+  distance-field block's class-strip bit (`0x01`) without a version gate;
+  CUE4Parse applies it only from `GAME_UE4_21`. A 4.19 mesh that records
+  no `FRenderingObjectVersion` has its `ScreenSize` entries read as
+  `FPerPlatformFloat`, where CUE4Parse keys them on `GAME_UE4_20`[^6].
 
 ## Paksmith implementation
 
@@ -321,12 +324,15 @@ See `docs/security/allocation-caps.md` for the broader policy.
 `crates/paksmith-core/src/asset/exports/mesh/{static_mesh,render_data,lod,vertex_buffers,index_buffer,section,read}.rs`.
 
 **Status:** `partial` (Phase 3g). `StaticMesh` exports parse the
-tagged-property segment, the full `UStaticMesh.Deserialize` chain, and
-the `bCooked`-gated `FStaticMeshRenderData` geometry into
+tagged-property segment, the `UStaticMesh.Deserialize` fields
+`FStripDataFlags`, `bCooked`, `BodySetup`, `NavCollision`,
+`LightingGuid` and `Sockets`, and the `bCooked`-gated
+`FStaticMeshRenderData` geometry into
 `StaticMeshData` / `StaticMeshRenderData` / `StaticMeshLod` for the UE
 4.23–4.27 new-cooked, inlined layout, with `MAX_LODS_PER_MESH` /
 `MAX_SECTIONS_PER_LOD` / `MAX_VERTICES_PER_LOD` / `MAX_INDICES_PER_LOD`
-caps enforced before allocation. A non-inlined (`bInlined == false`) LOD's
+caps enforced before allocation; the `UStaticMesh.Deserialize` fields after
+the render data are left unread. A non-inlined (`bInlined == false`) LOD's
 geometry is resolved from a companion file, the package, or in-stream (via
 `AssetContext::bulk_resolver`) and decoded with the same `SerializeBuffers`
 path as an inlined LOD. A present per-LOD `FDistanceFieldVolumeData` (UE4
@@ -364,3 +370,4 @@ deferred; the pre-4.23 legacy path needs a real fixture for verification.
 [^6]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/StaticMesh/FStaticMeshRenderData.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L219-L226 (`ScreenSize` as `FPerPlatformFloat` iff `Ar.Game >= GAME_UE4_20`); `CUE4Parse/UE4/Versions/EGame.cs` L354-L355 (4.19 and 4.20 → 516); `CUE4Parse/UE4/Versions/FRenderingObjectVersion.cs` L167-L168 (4.19 → `ShaderPermutationId`, 25; 4.20 → `IncreaseNormalPrecision`, 26).
 [^7]: `gildor2/UEViewer/Unreal/UnrealMesh/UnMesh4.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L2834-L2840 (`bFloatCooked` iff `Ar.Game >= GAME_UE4(20)`); `Unreal/UE4Version.h` L87-L88 (`VER_UE4_19` and `VER_UE4_20` = 516) and L395-L397 (`UE4.19 = 25`, `UE4.20 = 26`, `IncreaseNormalPrecision = 26`).
 [^8]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Versions/VersionContainer.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L86 (`StaticMesh.HasVisibleInRayTracing = Game >= GAME_UE4_26`).
+[^9]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/StaticMesh/FStaticMeshRenderData.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L75-L77 (`FNaniteResources` read iff `Ar.Game >= GAME_UE5_0`).
