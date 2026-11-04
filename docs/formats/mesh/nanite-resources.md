@@ -1,7 +1,7 @@
 # Nanite Resources (`FNaniteResources`)
 
 > Virtualized-geometry payload that follows a `UStaticMesh`'s
-> `numInlinedLODs` when the mesh was cooked with `NaniteSettings.bEnabled`
+> `numInlinedLODs` inside `FStaticMeshRenderData`
 > (UE 5.0+). Carries the streamable-page bulk data, the BVH-hierarchy
 > nodes, and the per-page metadata that the runtime needs to dispatch
 > Nanite's compute-shader rasterization.
@@ -11,18 +11,17 @@
 Nanite is UE 5's virtualized-micropolygon mesh representation: instead
 of a discrete LOD chain, Nanite cooks one extremely-high-poly mesh
 into a hierarchical cluster representation that the renderer streams
-on demand and rasterizes via compute. The on-disk payload follows the
-existing `FStaticMeshRenderData` body inside a cooked `.uasset` /
-`.uexp` (see [`static-mesh.md`](static-mesh.md) §*Nanite-enabled*),
-gated on whether the asset's `NaniteSettings.bEnabled` tagged
-property was true at cook time. The classic LOD payload still ships
-in the same asset as Nanite's fallback mesh.
+on demand and rasterizes via compute. The on-disk payload follows
+`numInlinedLODs` inside the `FStaticMeshRenderData` body of a cooked
+`.uasset` / `.uexp` (see [`static-mesh.md`](static-mesh.md)
+§*Nanite resources*), keyed on the engine version with no
+`NaniteSettings` check[^2]. The classic LOD payload still ships
+in the same asset.
 
 The blob is structured as:
 
 - **Strip-flags header** — `FStripDataFlags` controls whether the
-  remainder is present at all (cooked-without-Nanite-data assets have
-  the audio-visual-data stripped flag set).
+  remainder is present at all.
 - **Resource flags** — `NANITE_RESOURCE_FLAG` u32 indicating
   vertex-color / imposter / DDC-streaming / forced-on opt-ins.
 - **`StreamablePages` bulk data** — `FByteBulkData` holding the
@@ -62,9 +61,9 @@ out of scope for the format-reference layer this doc lives at and
 belong with the GPU-cluster decode pipeline (a Phase 3+ deliverable).
 
 **Paksmith parser status: `not impl`.** Phase 3+ deliverable. Per
-[`static-mesh.md`](static-mesh.md) §*Nanite-enabled*, paksmith's Phase
+[`static-mesh.md`](static-mesh.md) §*Nanite resources*, paksmith's Phase
 3 implementation should make Nanite parsing opt-in — the classic
-fallback LOD chain in the same asset is sufficient for most
+LOD chain in the same asset is sufficient for most
 extraction-oriented use cases.
 
 ## Versions
@@ -81,14 +80,14 @@ extraction-oriented use cases.
 ## Wire layout
 
 Serialized inline after `FStaticMeshRenderData.numInlinedLODs` (per
-[`static-mesh.md`](static-mesh.md) §*Wire layout*) when the
-asset's `NaniteSettings.bEnabled` tagged property was true at cook.
+[`static-mesh.md`](static-mesh.md) §*Wire layout*), keyed on the
+engine version (UE 5.0+) with no `NaniteSettings` check[^2].
 
 ### Strip-flags gate
 
 | order | field | size | endian | type | semantics |
 |-------|-------|------|--------|------|-----------|
-| 1 | `stripFlags` | 2 | LE | `FStripDataFlags` | Strip-flags marker. When `IsAudioVisualDataStripped()` is true (the asset was cooked WITHOUT Nanite data despite the gate firing), the entire remainder is absent — the record ends after the 2 strip-flag bytes. |
+| 1 | `stripFlags` | 2 | LE | `FStripDataFlags` | Strip-flags marker. When `IsAudioVisualDataStripped()` is true, the entire remainder is absent — the record ends after the 2 strip-flag bytes. |
 
 All subsequent fields are present only when `!stripFlags.IsAudioVisualDataStripped()`.
 
@@ -204,16 +203,6 @@ not on the wire — the array is fixed-length 4, NOT counted):
 
 ## Variants
 
-### Strip-flags-stripped builds
-
-When `stripFlags.IsAudioVisualDataStripped()` is true, the entire
-record after the 2 strip-flag bytes is absent on wire. This happens
-when the asset is cooked with `NaniteSettings.bEnabled` (which
-triggers the gate from the parent `FStaticMeshRenderData`) but the
-target platform doesn't support Nanite or the cooker stripped the
-GPU-rasterizer data. The fallback LOD chain in the parent asset is
-the only renderable representation in this case.
-
 ### Pre-LWC UE 5.0 EA
 
 UE 5.0 Early Access (pre-`LARGE_WORLD_COORDINATES`) `FPageStreamingState`
@@ -308,16 +297,16 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/mesh/nanite.rs`, called from
-`asset/exports/mesh/static_mesh.rs` after `numInlinedLODs` when the
-asset's `NaniteSettings.bEnabled` tagged property was true at cook)*
+`asset/exports/mesh/render_data.rs` after `numInlinedLODs`)*
 
 **Status:** `not impl`.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3+ (mesh-format reader).
-Per [`static-mesh.md`](static-mesh.md) §*Nanite-enabled*, Nanite
-parsing is an opt-in feature; the classic fallback LOD chain in the
+Per [`static-mesh.md`](static-mesh.md) §*Nanite resources*, Nanite
+parsing should be an opt-in feature; the classic LOD chain in the
 same asset is sufficient for most extraction-oriented use cases.
 
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Nanite/NaniteResources.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` (top-level `FNaniteResources` constructor with all 6 UE-version dispatches), `FPageStreamingState.cs` (UE 5.3 layout split), `FPackedHierarchyNode.cs` (fixed 4 × `FHierarchyNodeSlice`), `NaniteConstants.cs` (`NANITE_RESOURCE_FLAG`, `NANITE_PAGE_FLAG`, `NANITE_MAX_BVH_NODE_FANOUT`, `NANITE_MAX_UVS`). Deeper sub-records (`FCluster`, `FHierarchyNodeSlice`, `FPageRangeKey`, `FNaniteStreamableData`, `FMatrix3x4` per-element layout) live in the same `Assets/Exports/Nanite/` directory and are deferred to CUE4Parse as canonical source.
+[^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/StaticMesh/FStaticMeshRenderData.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L75-L77 (`FNaniteResources` read iff `Ar.Game >= GAME_UE5_0`).

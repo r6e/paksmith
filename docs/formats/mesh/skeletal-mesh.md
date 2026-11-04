@@ -84,8 +84,8 @@ package parses to `Asset::Generic`.
 | UE 4.25 (`FAnimObjectVersion.IncreaseBoneIndexLimitPerChunk`, per CUE4Parse's fallback[^3]) | `bUse16BitBoneIndex` added: in `FSkelMeshSection`'s non-render-item serialization (cooked render items never carry it) and in `FSkinWeightVertexBuffer` on its `UnlimitedBoneInfluences` metadata path. | Same[^1] |
 | UE 5.0+ (`FUE5ReleaseStreamObjectVersion.AddClothMappingLODBias`, per CUE4Parse's fallback[^3]) | Cloth mappings gain an LOD bias: each section's `ClothMappingDataLODs` becomes an array of arrays, and the cloth buffer carries 4 more bytes per `ClothIndexMapping` entry. | Same[^1]; `FSkeletalMeshVertexClothBuffer.cs`[^3] |
 
-The per-version conditionals are dense; full enumeration is a
-Phase 3 deliverable.
+The per-version conditionals are dense; the table above sketches
+the change shape.
 
 ## Wire layout
 
@@ -143,7 +143,7 @@ and pre-split data.[^1]
 | `Size` | 4 | LE | `i32` | Total vertex data size (bytes). |
 | `NumVertices` | 4 | LE | `i32` | Vertex count. Gated on `!IsAudioVisualDataStripped()`. |
 | `RequiredBones` | variable | — | `short[]` | Bones that must be evaluated for this LOD. |
-| `RawPointIndices` | variable | — | `FIntBulkData` | Present only when editor data is not stripped. CUE4Parse throws `ParserException` for this path; Phase 3 must skip. |
+| `RawPointIndices` | variable | — | `FIntBulkData` | Present only when editor data is not stripped. |
 | `MeshToImportVertexMap` | variable | — | `i32[]` | Present when `Ver ≥ ADD_SKELMESH_MESHTOIMPORTVERTEXMAP`. |
 | `MaxImportVertex` | 4 | LE | `i32` | Present with `MeshToImportVertexMap`. |
 | `NumTexCoords` | 4 | LE | `i32` | Gated on `!IsAudioVisualDataStripped()`. |
@@ -206,8 +206,8 @@ payload to the new-format reader mis-parses it; the strict `ReadBoolean`
 checks on `bIsLODCookedOut` and `bInlined` provide a natural backstop
 (values other than 0/1 are rejected with a typed error in most cases).
 
-**Unversioned packages** carry no in-file
-4.23-vs-4.24 signal; both CUE4Parse and UEViewer ultimately gate
+**Unversioned packages** carry no object version to
+split 4.23 from 4.24; both CUE4Parse and UEViewer ultimately gate
 `UseNewCookedFormat` on an out-of-band engine version; paksmith refuses
 them at the summary. For a versioned package, paksmith degrades
 `FRenderingObjectVersion` present-and-below-threshold to `UnsupportedFeature`;
@@ -243,8 +243,8 @@ a `SkeletalLodCursorDesync` fault and the asset degrades to `Generic`.
 streamed blob carries a version-gated tail (the UE4.27 ray-tracing
 `SkipFixedArray`, plus UE5-only morph / vertex-attribute / half-edge buffers).
 That tail's `HasRayTracingData` gate is controlled by the engine `Game` enum, not
-an in-file version field, and UE4.26 and UE4.27 share `file_version_ue4 = 522`, so
-paksmith cannot distinguish them in-band. Rather than guess the gate, `read_streamed_data`
+an in-file version field, and UE4.26 and UE4.27 share `file_version_ue4 = 522`.
+Rather than guess the gate, `read_streamed_data`
 **stops after the `FSkinWeightProfilesData` count** (the last value it reads) and
 does NOT read the profile map body NOR the version-gated tail; the
 `blob_start + BuffersSize` seek skips both in one jump (`FSkinWeightProfilesData`
@@ -543,7 +543,7 @@ read item 10 (the version-gated tail); the `blob_start + BuffersSize` seek in
 | 7 | `AdjacencyIndexBuffer` — `FMultisizeIndexContainer` | `FUE5ReleaseStreamObjectVersion` absent **or** `< RemovingTessellation(3)`, **and** `!IsClassDataStripped(CDSF_AdjacencyData=1)` | UE4 always lacks `FUE5ReleaseStreamObjectVersion`, so the first half is always true; the class-strip bit from item 1 gates it; read-and-discard |
 | 8 | `ClothVertexBuffer` | `HasClothData()` — any parsed section's `ClothMappingDataLODs` is non-empty | see cloth shape note below; paksmith defers cloth (skips) |
 | 9 | `FSkinWeightProfilesData` | **unconditional** | `i32` count (must be ≥ 0) + `count` map entries (`FName` → `FRuntimeSkinWeightProfileData`); `count == 0` is the cooked norm. paksmith reads only the count (negative → fault) and stops; a non-empty map body is NOT decoded — it sits inside the `BuffersSize` blob, so the `blob_start + BuffersSize` seek skips it along with the tail (item 10+). The profiles are override skin weights the glTF exporter never uses. **The count is the LAST value paksmith reads.** |
-| 10 | ray-tracing geometry tail | `HasRayTracingData` (UE 4.27+): `SkipFixedArray(1)` — `i32` count + `count × 1` byte | **paksmith does NOT read this item** (nor the UE5-only morph / vertex-attribute / half-edge tails that would follow on a UE5 wire). Its `HasRayTracingData` gate is controlled by the engine `Game` enum, and UE4.26 and UE4.27 share `file_version_ue4 = 522`, so paksmith cannot distinguish them in-band — a version gate would mis-fire on 4.26 (which lacks this tail) and mis-read the next LOD's header as a spurious count → desync. Instead `read_streamed_data` stops after item 9 and the `blob_start + BuffersSize` seek in `read_typed` skips the entire tail. This re-syncs correctly for BOTH 4.26 (no tail → no-op seek) and 4.27 (tail present → the seek jumps it) |
+| 10 | ray-tracing geometry tail | `HasRayTracingData` (UE 4.27+): `SkipFixedArray(1)` — `i32` count + `count × 1` byte | **paksmith does NOT read this item** (nor the UE5-only morph / vertex-attribute / half-edge tails that would follow on a UE5 wire). Its `HasRayTracingData` gate is controlled by the engine `Game` enum, and UE4.26 and UE4.27 share `file_version_ue4 = 522`, so an object-version gate would mis-fire on 4.26 (which lacks this tail) and mis-read the next LOD's header as a spurious count → desync. Instead `read_streamed_data` stops after item 9 and the `blob_start + BuffersSize` seek in `read_typed` skips the entire tail. This re-syncs correctly for BOTH 4.26 (no tail → no-op seek) and 4.27 (tail present → the seek jumps it) |
 
 **Cloth buffer shape (item 8, skipped):** inner `FStripDataFlags` (2×`u8`); if
 AV-stripped, done; else `SkipBulkArrayData` (the cloth vertex bulk array); then —
@@ -738,7 +738,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** The 26-byte `FSkinWeightVertexBuffer` new-format-path header Worked example above is byte-exact and self-contained. A full skeletal-mesh fixture (`minimal_skeletal_mesh_v5.uasset` — single-LOD mesh with 3-4 vertices bound to a 2-bone minimal skeleton) is a Phase 3 deliverable.
+- **Fixture:** The 26-byte `FSkinWeightVertexBuffer` new-format-path header Worked example above is byte-exact and self-contained.
 - **Hex anchor commands:**
   ```
   # Synthesize the 26-byte FSkinWeightVertexBuffer new-format header
