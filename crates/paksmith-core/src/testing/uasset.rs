@@ -2273,12 +2273,27 @@ pub fn build_minimal_ue4_27_with_extended_types() -> MinimalPackage {
 /// path entirely.)
 #[must_use]
 pub fn build_minimal_ue4_27_unversioned(class_name: &str, payload: Vec<u8>) -> MinimalPackage {
+    build_minimal_ue4_27_unversioned_with_names(class_name, &[], payload)
+}
+
+/// [`build_minimal_ue4_27_unversioned`] with `extra_names` appended to the
+/// name table after `class_name`, so they sit at indices 4 onward for the
+/// payload's FNames to name.
+#[must_use]
+pub fn build_minimal_ue4_27_unversioned_with_names(
+    class_name: &str,
+    extra_names: &[&str],
+    payload: Vec<u8>,
+) -> MinimalPackage {
     let mut spec = MinimalPackageSpec::default();
     // PKG_UnversionedProperties = 0x0000_2000.
     spec.package_flags |= 0x0000_2000;
     // Append `class_name` to the default 3-entry name table.
     let class_name_idx = u32::try_from(spec.names.names.len()).expect("name table within u32");
     spec.names.names.push(FName::new(class_name));
+    spec.names
+        .names
+        .extend(extra_names.iter().copied().map(FName::new));
     // Schema lookup keys on `imports[0].object_name` (via
     // `resolve_package_index(class_index=Import(0))`). Re-point the
     // default import so the reader looks up `class_name`'s schema.

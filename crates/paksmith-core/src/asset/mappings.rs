@@ -377,8 +377,10 @@ pub enum MappedPropertyType {
     Text,
     /// `EnumProperty` — on the wire, a value of the enum's integer
     /// underlying type; the resolved name comes from
-    /// `Usmap::enums[enum_name]`. A `.usmap` underlying type that is not an
-    /// integer parses as `Unknown(26)`.
+    /// `Usmap::enums[enum_name]`. An enum that is itself an Array, Set or
+    /// Map element, key or value is instead an `FName` naming the value.
+    /// A `.usmap` underlying type that is not an integer parses as
+    /// `Unknown(26)`.
     Enum {
         /// The enum's class name; key into [`Usmap::enums`].
         ///
@@ -391,7 +393,10 @@ pub enum MappedPropertyType {
         /// of clone-only heap per schema — now one refcount bump per
         /// expanded slot. Issue #397 sub-fix A.
         enum_name: Arc<str>,
-        /// The integer type the enum's values are stored as.
+        /// The integer type the enum's values are stored as, except where
+        /// the enum is itself an Array, Set or Map element, key or value (an
+        /// `FName`). An enum field of a struct element is stored as this
+        /// type.
         underlying: EnumStorage,
     },
     /// `StructProperty` — nested struct with its own schema.
@@ -437,7 +442,8 @@ pub enum MappedPropertyType {
 
 /// The integer type an `EnumProperty` stores its value as: its `.usmap`
 /// underlying type. Any other underlying type parses as
-/// [`MappedPropertyType::Unknown`]`(26)`.
+/// [`MappedPropertyType::Unknown`]`(26)`. An enum that is itself an Array,
+/// Set or Map element, key or value is an `FName` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnumStorage {
     /// `Int8Property` (usmap type 23).
@@ -581,7 +587,9 @@ pub struct Usmap {
     /// Enum name -> `(u64 ordinal -> value name)` map. Required for
     /// unversioned `EnumProperty` reads: the asset stores an ordinal (a
     /// byte for the usual `ByteProperty` storage), and the resolved string
-    /// comes from this table.
+    /// comes from this table. An enum that is itself an Array, Set or Map
+    /// element, key or value stores an `FName` naming its value instead and
+    /// does not use the table.
     ///
     /// Keyed by `u64` rather than positional `Vec` index because
     /// `.usmap` versions ≥ `ExplicitEnumValues` (4) store explicit

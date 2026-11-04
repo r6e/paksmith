@@ -276,15 +276,7 @@ pub(crate) fn read_unversioned_properties(
     asset_path: &str,
     depth: usize,
 ) -> crate::Result<Vec<Property>> {
-    if depth > MAX_PROPERTY_DEPTH {
-        return Err(PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::PropertyDepthExceeded {
-                depth,
-                limit: MAX_PROPERTY_DEPTH,
-            },
-        });
-    }
+    check_depth(depth, asset_path)?;
 
     if all_props.is_empty() {
         // At depth 0 the export simply has no schema — emit an empty
@@ -599,15 +591,7 @@ fn read_unversioned_value(
     // this, an adversarial `Array<Array<Array<...>>>` chain could blow
     // the Rust stack — each level here is a regular function call that
     // never hits the schema-walk gate.
-    if depth > MAX_PROPERTY_DEPTH {
-        return Err(PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::PropertyDepthExceeded {
-                depth,
-                limit: MAX_PROPERTY_DEPTH,
-            },
-        });
-    }
+    check_depth(depth, asset_path)?;
     let value_eof = || truncated_at(asset_path, AssetWireField::UnversionedValue);
     Ok(match &prop.prop_type {
         MT::Bool => PropertyValue::Bool(cur.read_u8().map_err(|_| value_eof())? != 0),
@@ -748,7 +732,7 @@ fn read_unversioned_value(
             // `Array<Array<...>>` chains; without the increment the
             // recursion can grow unbounded along the array axis.
             for _ in 0..count {
-                elements.push(read_unversioned_value(
+                elements.push(read_element(
                     cur,
                     &synthetic,
                     view,
@@ -770,8 +754,8 @@ fn read_unversioned_value(
             // Wire (identical tagged/unversioned): i32 num_to_remove +
             // that many removed element bodies + i32 count + count element
             // bodies. Element bodies carry no per-element tag — decode each
-            // via a synthetic `MappedProperty` + `read_unversioned_value`,
-            // like `Array`. #639.
+            // via a synthetic `MappedProperty` + `read_element`, like
+            // `Array`. #639.
             let synthetic = synthetic_element(inner);
             let removed = read_collection_count(
                 cur,
@@ -780,7 +764,7 @@ fn read_unversioned_value(
                 CollectionKind::SetNumToRemove,
             )?;
             for _ in 0..removed {
-                let _ = read_unversioned_value(cur, &synthetic, view, ctx, asset_path, depth + 1)?;
+                let _ = read_element(cur, &synthetic, view, ctx, asset_path, depth + 1)?;
             }
             let count = read_collection_count(
                 cur,
@@ -796,7 +780,7 @@ fn read_unversioned_value(
                 AssetSeam::CollectionElements,
             )?;
             for _ in 0..count {
-                elements.push(read_unversioned_value(
+                elements.push(read_element(
                     cur,
                     &synthetic,
                     view,
@@ -823,7 +807,7 @@ fn read_unversioned_value(
                 CollectionKind::MapNumToRemove,
             )?;
             for _ in 0..removed {
-                let _ = read_unversioned_value(cur, &key_synth, view, ctx, asset_path, depth + 1)?;
+                let _ = read_element(cur, &key_synth, view, ctx, asset_path, depth + 1)?;
             }
             let count = read_collection_count(
                 cur,
@@ -839,10 +823,8 @@ fn read_unversioned_value(
                 AssetSeam::CollectionElements,
             )?;
             for _ in 0..count {
-                let key_val =
-                    read_unversioned_value(cur, &key_synth, view, ctx, asset_path, depth + 1)?;
-                let value_val =
-                    read_unversioned_value(cur, &value_synth, view, ctx, asset_path, depth + 1)?;
+                let key_val = read_element(cur, &key_synth, view, ctx, asset_path, depth + 1)?;
+                let value_val = read_element(cur, &value_synth, view, ctx, asset_path, depth + 1)?;
                 entries.push(MapEntry {
                     key: key_val,
                     value: value_val,
@@ -879,6 +861,43 @@ fn synthetic_element(inner: &MappedPropertyType) -> MappedProperty {
         array_index: 0,
         prop_type: inner.clone(),
     }
+}
+
+/// Read one element, removed element, key or value of an `Array`, `Set` or
+/// `Map`. An enum element is an `FName` naming its value, whatever the
+/// enum's underlying type; every other element reads as a slot of its type
+/// does, an enum field of a struct element included.
+fn read_element(
+    cur: &mut Cursor<&[u8]>,
+    element: &MappedProperty,
+    view: &mut UsmapView<'_>,
+    ctx: &AssetContext,
+    asset_path: &str,
+    depth: usize,
+) -> crate::Result<PropertyValue> {
+    let MappedPropertyType::Enum { enum_name, .. } = &element.prop_type else {
+        return read_unversioned_value(cur, element, view, ctx, asset_path, depth);
+    };
+    check_depth(depth, asset_path)?;
+    let name = read_fname_pair(cur, ctx, asset_path, AssetWireField::EnumElementFName)?;
+    Ok(PropertyValue::Enum {
+        type_name: Arc::clone(enum_name),
+        value: name.into(),
+    })
+}
+
+/// Refuse a read nested deeper than [`MAX_PROPERTY_DEPTH`].
+fn check_depth(depth: usize, asset_path: &str) -> crate::Result<()> {
+    if depth > MAX_PROPERTY_DEPTH {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::PropertyDepthExceeded {
+                depth,
+                limit: MAX_PROPERTY_DEPTH,
+            },
+        });
+    }
+    Ok(())
 }
 
 /// Read an `i32` collection count (element count or removal count) and
@@ -1942,6 +1961,21 @@ mod tests {
         Arc::new(difficulty_as(EnumStorage::UInt8))
     }
 
+    /// The name table [`read_value`] and [`read_e_then_n`] resolve FNames
+    /// against: an enum element's FName names `Difficulty::Easy` as 1 and
+    /// `Difficulty::Hard` as 2.
+    const NAMES: [&str; 3] = ["None", "Difficulty::Easy", "Difficulty::Hard"];
+
+    /// The FName (index, number 0) naming `NAMES[index]`.
+    fn fname(index: u8) -> [u8; 8] {
+        [index, 0, 0, 0, 0, 0, 0, 0]
+    }
+
+    /// A collection count's wire bytes.
+    fn count(n: i32) -> [u8; 4] {
+        n.to_le_bytes()
+    }
+
     /// `wire` read against `usmap` as a property of type `prop_type`, at
     /// `depth`.
     fn read_value(
@@ -1956,7 +1990,7 @@ mod tests {
             array_index: 0,
             prop_type,
         };
-        let ctx = make_ctx(&["None"]);
+        let ctx = make_ctx(&NAMES);
         let view = &mut UsmapView::new(usmap);
         read_unversioned_value(&mut Cursor::new(wire), &prop, view, &ctx, "t", depth)
     }
@@ -1965,62 +1999,6 @@ mod tests {
     /// `prop_type`.
     fn decode_value(prop_type: MappedPropertyType, wire: &[u8], usmap: &Usmap) -> PropertyValue {
         read_value(prop_type, wire, usmap, 0).unwrap()
-    }
-
-    /// Enum elements of an Array, a Set and a Map decode to the `.usmap`'s
-    /// value names.
-    #[test]
-    fn container_enum_elements_decode_to_their_names() {
-        let usmap = difficulty_usmap();
-        let decode = |prop_type, wire: &[u8]| decode_value(prop_type, wire, &usmap);
-        let named = |value: &PropertyValue| match value {
-            PropertyValue::Enum {
-                value: EnumValue::Named(name),
-                ..
-            } => name.to_string(),
-            other => panic!("expected a named enum, got {other:?}"),
-        };
-
-        let array = decode(
-            MappedPropertyType::Array {
-                inner: difficulty(),
-            },
-            &[2, 0, 0, 0, 1, 0],
-        );
-        let PropertyValue::Array { elements, .. } = array else {
-            panic!("expected an array, got {array:?}");
-        };
-        assert_eq!(
-            elements.iter().map(named).collect::<Vec<_>>(),
-            ["Hard", "Easy"]
-        );
-
-        let set = decode(
-            MappedPropertyType::Set {
-                inner: difficulty(),
-            },
-            &[0, 0, 0, 0, 1, 0, 0, 0, 1],
-        );
-        let PropertyValue::Set { elements, .. } = set else {
-            panic!("expected a set, got {set:?}");
-        };
-        assert_eq!(elements.iter().map(named).collect::<Vec<_>>(), ["Hard"]);
-
-        let map = decode(
-            MappedPropertyType::Map {
-                key: difficulty(),
-                value: difficulty(),
-            },
-            &[0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-        );
-        let PropertyValue::Map { entries, .. } = map else {
-            panic!("expected a map, got {map:?}");
-        };
-        let pairs: Vec<_> = entries
-            .iter()
-            .map(|e| (named(&e.key), named(&e.value)))
-            .collect();
-        assert_eq!(pairs, [("Easy".to_string(), "Hard".to_string())]);
     }
 
     /// `Difficulty` stored as `underlying`.
@@ -2033,8 +2011,9 @@ mod tests {
 
     /// `wire` read as class `C`: `E: e_type` at slot 0, then `N: Int32` at
     /// slot 1. The `Difficulty` table is [`difficulty_usmap`]'s plus
-    /// `u64::MAX` = `Neg` and `0xFFFF_FFFF` = `U32Max`. Returns the
-    /// properties and the cursor's end position.
+    /// `u64::MAX` = `Neg` and `0xFFFF_FFFF` = `U32Max`; FNames resolve
+    /// against [`NAMES`]. Returns the properties and the cursor's end
+    /// position.
     fn read_e_then_n(e_type: MappedPropertyType, wire: &[u8]) -> (Vec<Property>, u64) {
         let row = |name: &str, schema_index, prop_type| MappedProperty {
             name: Arc::from(name),
@@ -2056,8 +2035,7 @@ mod tests {
         let usmap = Usmap::from_parts(HashMap::from([("C".to_string(), schema)]), enums).unwrap();
         let mut cur = Cursor::new(wire);
         let props =
-            read_unversioned_properties(&mut cur, "C", &usmap, &make_ctx(&["None"]), "t", 0)
-                .unwrap();
+            read_unversioned_properties(&mut cur, "C", &usmap, &make_ctx(&NAMES), "t", 0).unwrap();
         (props, cur.position())
     }
 
@@ -2156,37 +2134,180 @@ mod tests {
         assert_eq!(pos, 7);
     }
 
-    /// An enum element of an Array reads its underlying type, as a
-    /// top-level value does: one byte for a `ByteProperty`-backed enum, four
-    /// for an `Int32`-backed one, so the slot behind the array stays
-    /// aligned. CUE4Parse reads each element as an FName (8 bytes).
+    /// Every enum element site (an Array's elements, a Set's removed and
+    /// kept elements, a Map's removed keys, keys and values, and a nested
+    /// Array's elements) reads an 8-byte FName whatever the enum's
+    /// underlying type: each element decodes to the name its FName carries,
+    /// and the slot behind the container stays aligned.
     #[test]
-    fn wide_enum_container_elements_read_the_underlying_width() {
-        for (underlying, body) in [
-            (EnumStorage::UInt8, vec![2, 0, 0, 0, 0, 1]),
-            (EnumStorage::Int32, vec![2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one table of element sites, each with its wire and decoded value; splitting it scatters the shared constructors"
+    )]
+    fn enum_elements_read_an_fname_at_every_site_and_width() {
+        use EnumStorage as S;
+        let named = |name| PropertyValue::Enum {
+            type_name: Arc::from("Difficulty"),
+            value: EnumValue::from(name),
+        };
+        let easy = || named("Difficulty::Easy");
+        let hard = || named("Difficulty::Hard");
+        let wire_name = |name: &str| Arc::<str>::from(name);
+        let enum_array = |elements| PropertyValue::Array {
+            inner_type: wire_name("EnumProperty"),
+            elements,
+        };
+        let enum_set = |elements| PropertyValue::Set {
+            inner_type: wire_name("EnumProperty"),
+            elements,
+        };
+        let map = |key_type, value_type, entries| PropertyValue::Map {
+            key_type: wire_name(key_type),
+            value_type: wire_name(value_type),
+            entries,
+        };
+        for underlying in [
+            S::Int8,
+            S::Int16,
+            S::Int32,
+            S::Int64,
+            S::UInt8,
+            S::UInt16,
+            S::UInt32,
+            S::UInt64,
         ] {
-            let array = MappedPropertyType::Array {
-                inner: Arc::new(difficulty_as(underlying)),
-            };
-            let (props, pos) = decode_e_then_n(array, &body);
-            let PropertyValue::Array { elements, .. } = &props[0].value else {
-                panic!(
-                    "{underlying:?}: expected an array, got {:?}",
-                    props[0].value
-                );
-            };
-            let names: Vec<_> = elements
-                .iter()
-                .map(|element| match element {
-                    PropertyValue::Enum { value, .. } => value.name(),
-                    other => panic!("{underlying:?}: expected an enum, got {other:?}"),
-                })
-                .collect();
-            assert_eq!(names, [Some("Easy"), Some("Hard")], "{underlying:?}");
-            assert_eq!(props[1].value, PropertyValue::Int(42), "{underlying:?}");
-            assert_eq!(pos, end_after(&body), "{underlying:?}");
+            let e = || Arc::new(difficulty_as(underlying));
+            let int = || Arc::new(MappedPropertyType::Int32);
+            let sites: [(&str, MappedPropertyType, Vec<u8>, PropertyValue); 7] = [
+                (
+                    "array element",
+                    MappedPropertyType::Array { inner: e() },
+                    [&count(2)[..], &fname(1), &fname(2)].concat(),
+                    enum_array(vec![easy(), hard()]),
+                ),
+                (
+                    "set removed element",
+                    MappedPropertyType::Set { inner: e() },
+                    [&count(1)[..], &fname(2), &count(0)].concat(),
+                    enum_set(vec![]),
+                ),
+                (
+                    "set element",
+                    MappedPropertyType::Set { inner: e() },
+                    [&count(0)[..], &count(1), &fname(1)].concat(),
+                    enum_set(vec![easy()]),
+                ),
+                (
+                    "map removed key",
+                    MappedPropertyType::Map {
+                        key: e(),
+                        value: int(),
+                    },
+                    [&count(1)[..], &fname(1), &count(0)].concat(),
+                    map("EnumProperty", "IntProperty", vec![]),
+                ),
+                (
+                    "map key",
+                    MappedPropertyType::Map {
+                        key: e(),
+                        value: int(),
+                    },
+                    [&count(0)[..], &count(1), &fname(2), &count(7)].concat(),
+                    map(
+                        "EnumProperty",
+                        "IntProperty",
+                        vec![MapEntry {
+                            key: hard(),
+                            value: PropertyValue::Int(7),
+                        }],
+                    ),
+                ),
+                (
+                    "map value",
+                    MappedPropertyType::Map {
+                        key: int(),
+                        value: e(),
+                    },
+                    [&count(0)[..], &count(1), &count(7), &fname(1)].concat(),
+                    map(
+                        "IntProperty",
+                        "EnumProperty",
+                        vec![MapEntry {
+                            key: PropertyValue::Int(7),
+                            value: easy(),
+                        }],
+                    ),
+                ),
+                (
+                    "nested array element",
+                    MappedPropertyType::Array {
+                        inner: Arc::new(MappedPropertyType::Array { inner: e() }),
+                    },
+                    [&count(1)[..], &count(1), &fname(2)].concat(),
+                    PropertyValue::Array {
+                        inner_type: wire_name("ArrayProperty"),
+                        elements: vec![enum_array(vec![hard()])],
+                    },
+                ),
+            ];
+            for (site, container, body, expected) in sites {
+                let label = format!("{underlying:?} {site}");
+                let (props, pos) = decode_e_then_n(container, &body);
+                assert_eq!(props.len(), 2, "{label}");
+                assert_eq!(props[0].value, expected, "{label}");
+                assert_eq!(props[1].value, PropertyValue::Int(42), "{label}");
+                assert_eq!(pos, end_after(&body), "{label}");
+            }
         }
+    }
+
+    /// An enum element's FName faults on [`AssetWireField::EnumElementFName`]:
+    /// a short pair is truncated, and an index past the name table is out
+    /// of bounds.
+    #[test]
+    fn a_bad_enum_element_fname_faults_on_its_field() {
+        let array = || MappedPropertyType::Array {
+            inner: difficulty(),
+        };
+        let one = count(1);
+        let short = read_value(
+            array(),
+            &[&one[..], &[1, 0, 0, 0, 0, 0, 0]].concat(),
+            &difficulty_usmap(),
+            0,
+        );
+        assert!(
+            matches!(
+                short,
+                Err(PaksmithError::AssetParse {
+                    fault: AssetParseFault::UnexpectedEof {
+                        field: AssetWireField::EnumElementFName
+                    },
+                    ..
+                })
+            ),
+            "{short:?}"
+        );
+        let past = read_value(
+            array(),
+            &[&one[..], &fname(3)].concat(),
+            &difficulty_usmap(),
+            0,
+        );
+        assert!(
+            matches!(
+                past,
+                Err(PaksmithError::AssetParse {
+                    fault: AssetParseFault::PackageIndexOob {
+                        field: AssetWireField::EnumElementFName,
+                        index: 3,
+                        table_size: 3,
+                    },
+                    ..
+                })
+            ),
+            "{past:?}"
+        );
     }
 
     /// An enum body shorter than its underlying type is a truncated value.
@@ -2212,62 +2333,65 @@ mod tests {
         }
     }
 
-    /// A container looks its element enum's table up once for all its
-    /// elements (a Set's removed elements and a Map's removed keys included),
-    /// a Map once per allocation of the name its sides carry, nested
-    /// containers once for all their instances, and an empty container not
-    /// at all.
+    /// A container's enum elements look up no enum table: each carries its
+    /// value's name.
     #[cfg(feature = "__test_utils")]
     #[test]
-    fn containers_look_an_enum_table_up_once() {
-        let usmap = difficulty_usmap();
-        let lookups = enum_table_lookups;
-        let shared = difficulty();
-        let array = || MappedPropertyType::Array {
-            inner: difficulty(),
-        };
-        let map = || MappedPropertyType::Map {
+    fn container_enum_elements_look_up_no_enum_table() {
+        let map = MappedPropertyType::Map {
             key: difficulty(),
             value: difficulty(),
         };
-        for (prop_type, wire, expected) in [
-            (array(), &[3, 0, 0, 0, 0, 1, 0][..], 1),
-            (
-                MappedPropertyType::Set {
-                    inner: difficulty(),
-                },
-                &[1, 0, 0, 0, 0, 2, 0, 0, 0, 1, 0][..],
-                1,
-            ),
-            // Two allocations of the name, one per side.
-            (map(), &[1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 1, 0][..], 2),
-            (
-                MappedPropertyType::Map {
-                    key: Arc::clone(&shared),
-                    value: shared,
-                },
-                &[1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 1, 0][..],
-                1,
-            ),
-            (
-                // Two inner arrays share the read's one lookup.
-                MappedPropertyType::Array {
-                    inner: Arc::new(array()),
-                },
-                &[2, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1][..],
-                1,
-            ),
-            (array(), &[0, 0, 0, 0][..], 0),
-            (map(), &[0, 0, 0, 0, 0, 0, 0, 0][..], 0),
-        ] {
-            let before = lookups();
-            let _ = decode_value(prop_type, wire, &usmap);
-            assert_eq!(lookups() - before, expected, "{wire:?}");
-        }
+        let one = &count(1)[..];
+        let wire = [one, &fname(1), one, &fname(2), &fname(1)].concat();
+        let before = enum_table_lookups();
+        let _ = decode_value(map, &wire, &difficulty_usmap());
+        assert_eq!(enum_table_lookups(), before);
+    }
+
+    /// Struct `S` as an element type, and a `.usmap` holding `S`, whose one
+    /// field is `E: Difficulty` stored as a `ByteProperty`, and
+    /// [`difficulty_usmap`]'s table.
+    fn struct_elements() -> (Arc<MappedPropertyType>, Usmap) {
+        let s = ClassSchema {
+            name: "S".to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: Arc::from("E"),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: difficulty_as(EnumStorage::UInt8),
+            }],
+        };
+        let usmap = Usmap::from_parts(
+            HashMap::from([("S".to_string(), s)]),
+            difficulty_usmap().enums,
+        )
+        .unwrap();
+        let s = Arc::new(MappedPropertyType::Struct {
+            struct_name: Arc::from("S"),
+        });
+        (s, usmap)
+    }
+
+    /// One [`struct_elements`] element: one fragment with one enum value, `e`.
+    fn struct_element(e: u8) -> [u8; 3] {
+        [0x00, 0x03, e]
+    }
+
+    /// An Array of three [`struct_elements`] elements: `Easy`, `Hard`, `Easy`.
+    fn struct_array_wire() -> Vec<u8> {
+        [
+            &count(3)[..],
+            &struct_element(0),
+            &struct_element(1),
+            &struct_element(0),
+        ]
+        .concat()
     }
 
     /// The value names `props`' enum values decode to, `None` for an ordinal.
-    #[cfg(feature = "__test_utils")]
     fn enum_names(props: &[Property]) -> Vec<Option<&str>> {
         props
             .iter()
@@ -2279,19 +2403,18 @@ mod tests {
     }
 
     /// The memo reserves an entry on a miss and nothing on a hit: with its
-    /// seam armed to fail the first reservation, an array of one enum fails
-    /// the read; armed to fail the second, the three elements decode.
+    /// seam armed to fail the first reservation, an array of three struct
+    /// elements with one enum field each fails the read; armed to fail the
+    /// second, the three elements decode.
     #[cfg(feature = "__test_utils")]
     #[test]
     fn the_memo_reserves_on_a_miss_and_not_on_a_hit() {
         let site = crate::seams::SeamSite::Asset(AssetSeam::EnumTableMemo);
-        let array = || MappedPropertyType::Array {
-            inner: difficulty(),
-        };
-        let wire = [3, 0, 0, 0, 0, 1, 0];
+        let (s, usmap) = struct_elements();
+        let array = MappedPropertyType::Array { inner: s };
 
         let first = crate::testing::oom::arm_at(site, 0);
-        let err = read_value(array(), &wire, &difficulty_usmap(), 0).unwrap_err();
+        let err = read_value(array.clone(), &struct_array_wire(), &usmap, 0).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -2309,7 +2432,7 @@ mod tests {
         drop(first);
 
         let _second = crate::testing::oom::arm_at(site, 1);
-        assert!(read_value(array(), &wire, &difficulty_usmap(), 0).is_ok());
+        assert!(read_value(array, &struct_array_wire(), &usmap, 0).is_ok());
     }
 
     /// The miss reserves the memo entry for real before the seam is
@@ -2386,72 +2509,78 @@ mod tests {
         );
     }
 
-    /// The enum fields of a container's struct elements share one table
-    /// lookup: each element's recursion reuses the caller's view.
-    #[cfg(feature = "__test_utils")]
+    /// The enum field of a struct element of an Array, a Set or a Map reads
+    /// its underlying type, as a slot does, here one byte. The struct
+    /// elements of each container, a Set's removed element and a Map's
+    /// removed key included, share one enum-table lookup through the
+    /// caller's view.
     #[test]
-    fn struct_elements_share_one_enum_table_lookup() {
-        let row = |name: &str, prop_type| MappedProperty {
-            name: Arc::from(name),
-            schema_index: 0,
-            array_index: 0,
-            prop_type,
-        };
-        let class = ClassSchema {
-            name: "C".to_string(),
-            super_type: None,
-            prop_count: 1,
-            properties: vec![row(
-                "P",
-                MappedPropertyType::Array {
-                    inner: Arc::new(MappedPropertyType::Struct {
-                        struct_name: Arc::from("S"),
-                    }),
-                },
-            )],
-        };
-        let element = ClassSchema {
-            name: "S".to_string(),
-            super_type: None,
-            prop_count: 1,
-            properties: vec![row(
-                "E",
-                MappedPropertyType::Enum {
-                    enum_name: Arc::from("Difficulty"),
-                    underlying: EnumStorage::UInt8,
-                },
-            )],
-        };
-        let schemas = HashMap::from([("C".to_string(), class), ("S".to_string(), element)]);
-        let usmap = Usmap::from_parts(schemas, difficulty_usmap().enums).unwrap();
-
-        let before = enum_table_lookups();
-        // P: three elements, each one fragment with one enum value.
-        let wire = [
-            0x00, 0x03, 3, 0, 0, 0, 0x00, 0x03, 0, 0x00, 0x03, 1, 0x00, 0x03, 0,
-        ];
-        let props = read_unversioned_properties(
-            &mut Cursor::new(&wire[..]),
-            "C",
-            &usmap,
-            &make_ctx(&["None"]),
-            "t",
-            0,
-        )
-        .unwrap();
-
-        assert_eq!(enum_table_lookups() - before, 1);
-        let PropertyValue::Array { elements, .. } = &props[0].value else {
-            panic!("expected an array, got {:?}", props[0].value);
-        };
-        let names: Vec<_> = elements
-            .iter()
-            .map(|element| match element {
+    fn struct_element_enum_fields_read_their_underlying_type() {
+        fn field(value: &PropertyValue) -> Option<&str> {
+            match value {
                 PropertyValue::Struct { properties, .. } => enum_names(properties)[0],
                 other => panic!("expected a struct, got {other:?}"),
-            })
-            .collect();
-        assert_eq!(names, [Some("Easy"), Some("Hard"), Some("Easy")]);
+            }
+        }
+        fn fields(decoded: &PropertyValue) -> Vec<Option<&str>> {
+            match decoded {
+                PropertyValue::Array { elements, .. } | PropertyValue::Set { elements, .. } => {
+                    elements.iter().map(field).collect()
+                }
+                PropertyValue::Map { entries, .. } => entries
+                    .iter()
+                    .flat_map(|e| [field(&e.key), field(&e.value)])
+                    .collect(),
+                other => panic!("expected a container, got {other:?}"),
+            }
+        }
+        let (s, usmap) = struct_elements();
+        let rows = [
+            (
+                MappedPropertyType::Array {
+                    inner: Arc::clone(&s),
+                },
+                struct_array_wire(),
+                vec![Some("Easy"), Some("Hard"), Some("Easy")],
+            ),
+            (
+                MappedPropertyType::Set {
+                    inner: Arc::clone(&s),
+                },
+                [
+                    &count(1)[..],
+                    &struct_element(1),
+                    &count(2),
+                    &struct_element(0),
+                    &struct_element(1),
+                ]
+                .concat(),
+                vec![Some("Easy"), Some("Hard")],
+            ),
+            (
+                MappedPropertyType::Map {
+                    key: Arc::clone(&s),
+                    value: s,
+                },
+                [
+                    &count(1)[..],
+                    &struct_element(0),
+                    &count(1),
+                    &struct_element(1),
+                    &struct_element(0),
+                ]
+                .concat(),
+                vec![Some("Hard"), Some("Easy")],
+            ),
+        ];
+        for (container, wire, expected) in rows {
+            #[cfg(feature = "__test_utils")]
+            let before = enum_table_lookups();
+            let decoded = decode_value(container, &wire, &usmap);
+            #[cfg(feature = "__test_utils")]
+            assert_eq!(enum_table_lookups() - before, 1, "{wire:?}");
+            assert_eq!(fields(&decoded), expected, "{wire:?}");
+        }
     }
 
     /// Struct slots resolve a layout once per name allocation: an array
@@ -2567,12 +2696,13 @@ mod tests {
     }
 
     /// Each recursion in the Array/Set/Map arms
-    /// (`read_unversioned_value(depth + 1)`) and the Struct arm
+    /// (`read_element(.., depth + 1)`) and the Struct arm
     /// (`read_unversioned_properties(.., depth + 1)`) MUST increment
     /// depth, or a nested value escapes `MAX_PROPERTY_DEPTH`
     /// (stack-overflow risk). Called near the
     /// cap so one further level trips it, isolating each `+ 1` (kills the
-    /// `+ 1 -> * 1` mutants on the recursion increments). #639.
+    /// `+ 1 -> * 1` mutants on the recursion increments). #639. A read at
+    /// the cap itself still succeeds.
     #[test]
     #[allow(
         clippy::too_many_lines,
@@ -2681,6 +2811,29 @@ mod tests {
             )),
             "Map entry value must increment depth"
         );
+        // An enum element, which reads no nested value, still checks depth.
+        assert!(
+            too_deep(read_at(
+                MappedPropertyType::Array {
+                    inner: difficulty()
+                },
+                &[&count(1)[..], &fname(1)].concat(), // count=1, element FName
+                cap,
+            )),
+            "Enum element must check depth"
+        );
+        // At the cap itself a read succeeds: an Array at cap - 1 reads its
+        // element, an integer or an enum's FName, at the cap.
+        for (inner, element) in [
+            (int(), &[0u8; 4][..]),
+            (difficulty_as(EnumStorage::UInt8), &fname(1)[..]),
+        ] {
+            let array = MappedPropertyType::Array {
+                inner: Arc::new(inner),
+            };
+            let wire = [&count(1)[..], element].concat();
+            assert!(read_at(array, &wire, cap - 1).is_ok(), "{wire:?}");
+        }
         // A struct's properties read at depth + 1.
         assert!(
             too_deep(read_at(
