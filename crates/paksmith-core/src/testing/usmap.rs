@@ -123,10 +123,9 @@ enum NameLengthWidth {
 /// [`build_hero_usmap_bytes`]'s schema data, its name lengths `width` wide.
 fn hero_schema_data(speed_type_byte: u8, width: NameLengthWidth) -> Vec<u8> {
     let mut data: Vec<u8> = Vec::new();
-    // Name table: ["Hero", "None", "Health", "Speed"]. "None" is UE's
-    // sentinel for "no superclass" (see Usmap parser's super_type
-    // handling); CUE4Parse accepts zero-length names but UE's wire-
-    // format convention uses the literal "None" for the no-super slot.
+    // Name table: ["Hero", "None", "Health", "Speed"]. The parser reads
+    // the name "None" (used here) or the index -1 in the super slot as
+    // no superclass (see Usmap parser's super_type handling).
     data.extend_from_slice(&4u32.to_le_bytes());
     for (len, name) in [
         (4u8, "Hero"),
@@ -187,8 +186,7 @@ pub fn build_hero_usmap_with_enum_speed(enum_name: &str, enum_values: &[&str]) -
     let mut data: Vec<u8> = Vec::new();
     // Name table layout:
     //   0: "Hero", 1: "None", 2: "Health", 3: "Speed", 4: enum_name,
-    //   5..: enum_values (one entry each). "None" is UE's sentinel
-    //   for the no-super slot.
+    //   5..: enum_values (one entry each).
     let total_names = 5 + enum_values.len();
     let total_names_u32 = u32::try_from(total_names).expect("name table within u32");
     data.extend_from_slice(&total_names_u32.to_le_bytes());
@@ -269,8 +267,7 @@ pub fn build_hero_usmap_with_enum_speed(enum_name: &str, enum_values: &[&str]) -
 #[must_use]
 pub fn build_hero_usmap_with_struct_speed(struct_name: &str) -> Vec<u8> {
     let mut data: Vec<u8> = Vec::new();
-    // Name table: ["Hero", "None", "Health", "Speed", struct_name] —
-    // "None" is UE's sentinel for the no-super slot.
+    // Name table: ["Hero", "None", "Health", "Speed", struct_name].
     data.extend_from_slice(&5u32.to_le_bytes());
     for (len, name) in [
         (4u8, "Hero"),
@@ -353,7 +350,6 @@ pub fn build_sparse_schema_usmap_bytes(
     }
 
     // Name table: dedupe `[class_name, "None"]` + property names.
-    // "None" is UE's sentinel for the no-super slot.
     let mut names: Vec<&str> = Vec::with_capacity(2 + properties.len());
     names.push(class_name);
     names.push("None");

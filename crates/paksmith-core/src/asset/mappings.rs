@@ -35,6 +35,10 @@ use crate::seams::MappingsSeam;
 // little-endian `Read<ushort>()` — so on-disk bytes are `C4 30`.
 const USMAP_MAGIC: u16 = 0x30C4;
 
+/// The name index a `.usmap` writer stores for "no name": CUE4Parse's
+/// `InvalidNameIndex` (`UsmapArchiveExtensions.cs@77b94fa` L8, L11-L15).
+const USMAP_NO_NAME_INDEX: i32 = -1;
+
 // `EUsmapVersion` byte values, per CUE4Parse `EUsmapVersion.cs` at
 // 77b94fa26cde08d34e80be2ced29c8f8885ff0a7. Each constant marks the FIRST
 // version that introduces the named wire-format change.
@@ -536,7 +540,10 @@ pub struct MappedProperty {
 pub struct ClassSchema {
     /// The class's name (key in [`Usmap::schemas`]).
     pub name: String,
-    /// Empty string means no super class.
+    /// The super class's name; `None` when the wire stores the no-name
+    /// index `-1` or the name `"None"`. An empty name is kept as
+    /// `Some("")`, which [`Usmap::get_all_properties`] also treats as no
+    /// super class.
     pub super_type: Option<String>,
     /// Wire-declared `PropertyCount` — total number of properties on
     /// this class (serializable + transient/editor-only/deprecated),
@@ -1028,15 +1035,9 @@ impl Usmap {
 
         for _ in 0..schema_count {
             let name = copy_name(&read_name_arc(&mut cur, &names)?, ledger)?;
-            let super_name = read_name_arc(&mut cur, &names)?;
-            // UE's sentinel for "no superclass" is the literal name "None".
-            // Empty strings are preserved as `Some("")` per the wire format —
-            // the inheritance walk's `!parent.is_empty()` guard handles them
-            // identically to `None` for traversal purposes.
-            let super_type = if &*super_name == "None" {
-                None
-            } else {
-                Some(copy_name(&super_name, ledger)?)
+            let super_type = match read_super_name(&mut cur, &names)? {
+                Some(super_name) => Some(copy_name(&super_name, ledger)?),
+                None => None,
             };
 
             // `prop_count` is the wire-declared total property count
@@ -1420,6 +1421,24 @@ pub struct ResolvedProperty {
 /// even though the wire bytes were fully readable).
 fn read_name_arc(cur: &mut Cursor<&[u8]>, names: &[Arc<str>]) -> crate::Result<Arc<str>> {
     let idx = read_or_truncated(cur, |c| c.read_i32::<LE>())?;
+    name_at(names, idx)
+}
+
+/// Read a schema's super-type name. The no-name index
+/// ([`USMAP_NO_NAME_INDEX`]) and the name `"None"` both mean no super
+/// class; any other index goes through [`name_at`], so `-2` or an index
+/// past the table is still [`MappingsParseFault::NameIndexOutOfRange`].
+fn read_super_name(cur: &mut Cursor<&[u8]>, names: &[Arc<str>]) -> crate::Result<Option<Arc<str>>> {
+    let idx = read_or_truncated(cur, |c| c.read_i32::<LE>())?;
+    if idx == USMAP_NO_NAME_INDEX {
+        return Ok(None);
+    }
+    let name = name_at(names, idx)?;
+    Ok((&*name != "None").then_some(name))
+}
+
+/// `names[idx]`, or [`MappingsParseFault::NameIndexOutOfRange`].
+fn name_at(names: &[Arc<str>], idx: i32) -> crate::Result<Arc<str>> {
     #[allow(
         clippy::cast_sign_loss,
         reason = "negative indices wrap to a huge usize that fails the get() bounds check, surfacing as NameIndexOutOfRange"
@@ -2064,7 +2083,7 @@ mod tests {
         let usmap = Usmap::from_bytes(&bytes).unwrap();
         let schema = usmap.schemas.get("Hero").unwrap();
         // Builder uses "None" as the no-super sentinel, which the parser
-        // maps to `super_type: None` (see parse_schema_data).
+        // maps to `super_type: None` (see read_super_name).
         assert_eq!(schema.super_type, None);
         assert_eq!(schema.properties.len(), 2);
         assert_eq!(schema.properties[0].name.as_ref(), "Health");
@@ -2594,7 +2613,8 @@ mod tests {
         // `NameIndexOutOfRange` arm — but the variant payload
         // carries the raw signed `-1`, not the wrapped positive.
         // Pins the i32-carry design decision at the parser level
-        // rather than only at Display.
+        // rather than only at Display, and that -1 is refused at a
+        // name site other than the super-type slot.
         let usmap = build_enum_oob_usmap(-1);
 
         let err = Usmap::from_bytes(&usmap).unwrap_err();
@@ -5063,7 +5083,8 @@ mod tests {
 
     #[test]
     fn get_all_properties_with_inheritance() {
-        // Build a usmap with `Parent(x: Int)` and `Child extends Parent(y: Float)`.
+        // `Parent(x: Int)` and `Child extends Parent(y: Float)`, with
+        // Parent's super the name "None" (index 4).
         //
         // Per CUE4Parse `MappingsSchema.cs::Struct.TryGetValue` each
         // class's `MappedProperty::schema_index` is **per-class**
@@ -5071,62 +5092,86 @@ mod tests {
         // absolute slot indices are child-first concatenated:
         //   - Child's `y` (per-class 0) → absolute 0
         //   - Parent's `x` (per-class 0) → absolute Child.PropertyCount = 1
+        let usmap = Usmap::from_bytes(&parent_child_usmap(4)).unwrap();
+        assert_eq!(usmap.schemas["Parent"].super_type, None);
+        assert_child_first_slots(&usmap);
+    }
+
+    /// `Parent(x: Int)` and `Child extends Parent(y: Float)` over the name
+    /// table `Parent`(0), `x`(1), `Child`(2), `y`(3), `None`(4), `""`(5).
+    /// `parent_super` is Parent's wire super-type name index.
+    fn parent_child_usmap(parent_super: i32) -> Vec<u8> {
+        parent_child_usmap_with(parent_super, 1)
+    }
+
+    /// [`parent_child_usmap`] with `parent_prop` as the name index of
+    /// Parent's property (`x`, index 1, in that fixture).
+    fn parent_child_usmap_with(parent_super: i32, parent_prop: i32) -> Vec<u8> {
         let mut data: Vec<u8> = Vec::new();
-        // Names: "Parent"(0), "None"(1, no-super sentinel), "x"(2),
-        //        "Child"(3), "y"(4)
-        data.extend_from_slice(&5u32.to_le_bytes());
-        for (len, name) in [
-            (6u8, "Parent"),
-            (4u8, "None"),
-            (1u8, "x"),
-            (5u8, "Child"),
-            (1u8, "y"),
-        ] {
-            data.push(len);
-            data.extend_from_slice(name.as_bytes());
-        }
+        push_names(&mut data, &["Parent", "x", "Child", "y", "None", ""]);
         data.extend_from_slice(&0u32.to_le_bytes()); // no enums
         data.extend_from_slice(&2u32.to_le_bytes()); // 2 schemas
-        // Schema Parent: name=0, super=1("None"), prop_count=1, serial=1
-        data.extend_from_slice(&0i32.to_le_bytes());
-        data.extend_from_slice(&1i32.to_le_bytes());
-        data.extend_from_slice(&1u16.to_le_bytes()); // prop_count = own count only
-        data.extend_from_slice(&1u16.to_le_bytes());
-        data.extend_from_slice(&0u16.to_le_bytes()); // per-class schema_index=0
-        data.push(1u8); // array_size
-        data.extend_from_slice(&2i32.to_le_bytes()); // "x"
-        data.push(2u8); // IntProperty
-        // Schema Child: name=3("Child"), super=0("Parent"), prop_count=1, serial=1
-        data.extend_from_slice(&3i32.to_le_bytes());
-        data.extend_from_slice(&0i32.to_le_bytes()); // super = "Parent"
-        data.extend_from_slice(&1u16.to_le_bytes()); // per-class count, NOT child+parent
-        data.extend_from_slice(&1u16.to_le_bytes()); // only 1 new prop serialized
-        data.extend_from_slice(&0u16.to_le_bytes()); // per-class schema_index=0
-        data.push(1u8);
-        data.extend_from_slice(&4i32.to_le_bytes()); // "y"
-        data.push(3u8); // FloatProperty
+        for (name, super_idx, prop, ty) in [(0i32, parent_super, parent_prop, 2u8), (2, 0, 3, 3)] {
+            data.extend_from_slice(&name.to_le_bytes());
+            data.extend_from_slice(&super_idx.to_le_bytes());
+            data.extend_from_slice(&1u16.to_le_bytes()); // prop_count
+            data.extend_from_slice(&1u16.to_le_bytes()); // serial_count
+            data.extend_from_slice(&0u16.to_le_bytes()); // schema_index
+            data.push(1); // array_size
+            data.extend_from_slice(&prop.to_le_bytes());
+            data.push(ty); // IntProperty for x, FloatProperty for y
+        }
+        usmap_with(UsmapCompression::None, &data, data.len())
+    }
 
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "test fixture builds a sub-256-byte schema block; data.len() fits in u32 trivially"
-        )]
-        let data_len = data.len() as u32;
-        // Magic bytes `C4 30` decode as little-endian u16 = 0x30C4.
-        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
-        usmap.extend_from_slice(&data_len.to_le_bytes());
-        usmap.extend_from_slice(&data_len.to_le_bytes());
-        usmap.extend_from_slice(&data);
+    /// The child-first concat over [`parent_child_usmap`]: Child's own slot
+    /// (`y`) first, then Parent's (`x`) offset by Child's `prop_count`.
+    fn assert_child_first_slots(usmap: &Usmap) {
+        let slots = |class: &str| {
+            usmap
+                .get_all_properties(class)
+                .iter()
+                .map(|p| (p.property.name.to_string(), p.absolute_index))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(slots("Child"), [("y".to_owned(), 0), ("x".to_owned(), 1)]);
+        assert_eq!(slots("Parent"), [("x".to_owned(), 0)]);
+    }
 
-        let usmap = Usmap::from_bytes(&usmap).unwrap();
-        let all = usmap.get_all_properties("Child");
-        // Child-first concat: Child's own slots first (`y`), then
-        // Parent's properties offset by Child.PropertyCount (`x` at
-        // absolute 1).
-        assert_eq!(all.len(), 2);
-        assert_eq!(all[0].property.name.as_ref(), "y");
-        assert_eq!(all[0].absolute_index, 0);
-        assert_eq!(all[1].property.name.as_ref(), "x");
-        assert_eq!(all[1].absolute_index, 1);
+    #[test]
+    fn a_super_index_of_minus_one_is_no_super_class() {
+        let usmap = Usmap::from_bytes(&parent_child_usmap(-1)).unwrap();
+        assert_eq!(usmap.schemas["Parent"].super_type, None);
+        assert_eq!(usmap.schemas["Child"].super_type.as_deref(), Some("Parent"));
+        assert_child_first_slots(&usmap);
+    }
+
+    #[test]
+    fn an_empty_super_name_is_kept_as_some_empty() {
+        let usmap = Usmap::from_bytes(&parent_child_usmap(5)).unwrap();
+        assert_eq!(usmap.schemas["Parent"].super_type.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn a_property_name_index_of_minus_one_is_out_of_range() {
+        assert_eq!(
+            parse_fault(&parent_child_usmap_with(4, -1)),
+            crate::error::MappingsParseFault::NameIndexOutOfRange {
+                idx: -1,
+                table_len: 6
+            }
+        );
+    }
+
+    #[test]
+    fn other_negative_and_past_table_super_indices_are_out_of_range() {
+        for idx in [-2, i32::MIN, 6] {
+            assert_eq!(
+                parse_fault(&parent_child_usmap(idx)),
+                crate::error::MappingsParseFault::NameIndexOutOfRange { idx, table_len: 6 },
+                "super index {idx}"
+            );
+        }
     }
 
     #[test]

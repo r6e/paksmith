@@ -95,7 +95,7 @@ pub fn write_external_minimal_v0_usmap(path: &Path) -> io::Result<()> {
     // -- Schema table (u32 count = 1, then one ClassSchema).
     push_u32_le(&mut payload, 1);
     push_i32_le(&mut payload, 0); // name = "Hero" (idx 0)
-    push_i32_le(&mut payload, 1); // super = "None" (idx 1) — UE sentinel for no superclass
+    push_i32_le(&mut payload, 1); // super = "None" (idx 1), read as no superclass
     push_u16_le(&mut payload, 2); // prop_count
     push_u16_le(&mut payload, 2); // serial_count
     // Prop 0: Health IntProperty
