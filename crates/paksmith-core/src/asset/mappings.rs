@@ -5081,6 +5081,24 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    /// The child-first concat over [`parent_child_usmap`]: Child's own slot
+    /// (`y`) first, then Parent's (`x`) offset by Child's `prop_count`. A
+    /// macro, not a fn: a fn's body is a mutant no test can kill.
+    macro_rules! assert_child_first_slots {
+        ($usmap:expr) => {
+            let usmap: &Usmap = $usmap;
+            let slots = |class: &str| {
+                usmap
+                    .get_all_properties(class)
+                    .iter()
+                    .map(|p| (p.property.name.to_string(), p.absolute_index))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(slots("Child"), [("y".to_owned(), 0), ("x".to_owned(), 1)]);
+            assert_eq!(slots("Parent"), [("x".to_owned(), 0)]);
+        };
+    }
+
     #[test]
     fn get_all_properties_with_inheritance() {
         // `Parent(x: Int)` and `Child extends Parent(y: Float)`, with
@@ -5094,7 +5112,7 @@ mod tests {
         //   - Parent's `x` (per-class 0) → absolute Child.PropertyCount = 1
         let usmap = Usmap::from_bytes(&parent_child_usmap(4)).unwrap();
         assert_eq!(usmap.schemas["Parent"].super_type, None);
-        assert_child_first_slots(&usmap);
+        assert_child_first_slots!(&usmap);
     }
 
     /// `Parent(x: Int)` and `Child extends Parent(y: Float)` over the name
@@ -5124,26 +5142,12 @@ mod tests {
         usmap_with(UsmapCompression::None, &data, data.len())
     }
 
-    /// The child-first concat over [`parent_child_usmap`]: Child's own slot
-    /// (`y`) first, then Parent's (`x`) offset by Child's `prop_count`.
-    fn assert_child_first_slots(usmap: &Usmap) {
-        let slots = |class: &str| {
-            usmap
-                .get_all_properties(class)
-                .iter()
-                .map(|p| (p.property.name.to_string(), p.absolute_index))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(slots("Child"), [("y".to_owned(), 0), ("x".to_owned(), 1)]);
-        assert_eq!(slots("Parent"), [("x".to_owned(), 0)]);
-    }
-
     #[test]
     fn a_super_index_of_minus_one_is_no_super_class() {
         let usmap = Usmap::from_bytes(&parent_child_usmap(-1)).unwrap();
         assert_eq!(usmap.schemas["Parent"].super_type, None);
         assert_eq!(usmap.schemas["Child"].super_type.as_deref(), Some("Parent"));
-        assert_child_first_slots(&usmap);
+        assert_child_first_slots!(&usmap);
     }
 
     #[test]
