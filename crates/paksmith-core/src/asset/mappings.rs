@@ -80,7 +80,7 @@ pub const MAX_USMAP_COMPRESSED_SIZE: u32 = 64 * 1024 * 1024;
 // its payload and can spend the whole budget on tables. One load's worst
 // case is that budget, plus what its estimate leaves out (allocator
 // rounding, a Vec's minimum capacity, an Arc's alignment padding and a
-// growing Vec's old buffer, estimated at under 40 MiB on a 64-bit target
+// growing Vec's old buffer, estimated at under 46 MiB on a 64-bit target
 // with an allocator of 16-byte size classes), plus the caller's input:
 // from_path reads up to Usmap::MAX_FILE_SIZE bytes into a buffer whose
 // growth can reserve twice that. There that is about 810 MiB in all. A new
@@ -92,20 +92,19 @@ pub const MAX_USMAP_DECOMPRESSED_SIZE: u32 = 256 * 1024 * 1024;
 /// `B: A`) would loop forever otherwise.
 const MAX_INHERITANCE_DEPTH: usize = 64;
 
-/// Hard cap on `enum_count` to bound the enum-table heap cost. Each value
-/// costs a map entry and a refcount on a shared name, so with the per-enum
-/// value cap a maxed-out table stays near 200 MiB. Realistic UE
-/// mappings carry <1k enums (Fortnite tops out around a few hundred);
-/// 4096 is a wide safety margin.
+/// Hard cap on `enum_count`, checked before the enum table is reserved
+/// from it, so an absurd count is refused as itself rather than by the
+/// heap budget, which bounds the value tables. UAssetAPI's 23 test
+/// mappings at `b4e8a01` hold up to 2,810 enums.
 ///
 /// Exposed via [`max_usmap_enum_count`].
-const MAX_USMAP_ENUM_COUNT: u32 = 4_096;
+const MAX_USMAP_ENUM_COUNT: u32 = 8_192;
 
 /// Hard cap on per-enum `value_count`. `LargeEnums` (v3) widened the
-/// wire field to `u16` (65535 max); no real-world enum has that many
-/// values — even unwieldy Unreal enums top out in the low hundreds.
-/// 1024 leaves room for outliers while bounding the per-enum map to
-/// tens of KiB: each value is a key and a refcount on a shared name.
+/// wire field to `u16` (65535 max). UAssetAPI's 23 test mappings at
+/// `b4e8a01` hold up to 409 values in one enum. 1024 leaves room for
+/// outliers while bounding the per-enum map to tens of KiB: each value
+/// is a key and a refcount on a shared name.
 ///
 /// Exposed via [`max_usmap_values_per_enum`].
 const MAX_USMAP_VALUES_PER_ENUM: u32 = 1_024;
@@ -122,43 +121,35 @@ const MAX_USMAP_VALUES_PER_ENUM: u32 = 1_024;
 /// Exposed via [`max_usmap_expanded_properties_per_schema`].
 const MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA: u32 = 65_536;
 
-/// Hard cap on the wire-claimed `schema_count`. Each schema costs a
-/// `String` key + `ClassSchema` struct (~110 bytes) in
-/// `Usmap::schemas`; without this cap the 256 MiB
-/// `MAX_USMAP_DECOMPRESSED_SIZE` budget alone permitted ~13M
-/// schemas / ~1.4 GiB heap before any per-schema property
-/// allocation fired. Real-world `.usmap` schema tables top out
-/// around 500–2000 entries (Fortnite); 4096 leaves wide headroom
-/// and matches the [`MAX_USMAP_ENUM_COUNT`] rationale.
+/// Hard cap on the wire-claimed `schema_count`, checked before the
+/// schema table is reserved from it, so an absurd count is refused as
+/// itself rather than by the heap budget. UAssetAPI's 23 test mappings
+/// at `b4e8a01` hold up to 15,904 schemas.
 ///
 /// Exposed via [`max_usmap_schema_count`].
-const MAX_USMAP_SCHEMA_COUNT: u32 = 4_096;
+const MAX_USMAP_SCHEMA_COUNT: u32 = 32_768;
 
-/// Hard cap on the wire-claimed `name_count`. Without this cap the
-/// 256 MiB `MAX_USMAP_DECOMPRESSED_SIZE` budget alone permitted a
-/// `name_count` of ~4_294_967_295 (the u32 max) — the subsequent
-/// `try_reserve` would surface as `MappingsAllocationContext::NameTable`
-/// OOM rather than a typed wire-cap rejection. Real-world `.usmap`
-/// name tables top out around 10k entries (very large games);
-/// 131_072 (128k) leaves wide headroom and bounds the pre-allocation
-/// to a single-digit-MiB slot reservation.
+/// Hard cap on the wire-claimed `name_count`, checked before the name
+/// table is reserved from it, so an absurd count is refused as itself
+/// rather than by the heap budget. UAssetAPI's 23 test mappings at
+/// `b4e8a01` hold up to 76,528 names; 262_144 bounds the reservation to
+/// a single-digit-MiB slot table.
 ///
 /// Exposed via [`max_usmap_name_count`].
-const MAX_USMAP_NAME_COUNT: u32 = 131_072;
+const MAX_USMAP_NAME_COUNT: u32 = 262_144;
 
 /// Hard cap on the total entry count in the flattened-property cache
 /// (#370), summed across every class's flattened inheritance chain.
 /// Each class's flat list concatenates its own properties with every
-/// ancestor's properties up to `MAX_INHERITANCE_DEPTH = 64` levels;
-/// without this cap the product of the per-class
-/// (`MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA = 65_536`) and
-/// schema-table (`MAX_USMAP_SCHEMA_COUNT = 4_096`) caps permits a
-/// cache of ~17 G entries (~1 TB heap) against valid per-class wire
-/// fixtures. Real-world `.usmap` files top out around ~30 k cache
-/// entries; 4_194_304 (4 Mi) entries of 56 bytes per `ResolvedProperty`
-/// cap the cache's lists at 224 MiB, charged to `MAX_USMAP_HEAP_BYTES` with
-/// the rest of the load, and leave wide headroom for legitimate `.usmap`
-/// schemas.
+/// ancestor's properties up to `MAX_INHERITANCE_DEPTH = 64` levels, so
+/// the per-class ([`MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA`]) and
+/// schema-table ([`MAX_USMAP_SCHEMA_COUNT`]) caps alone allow a cache
+/// far larger than the heap budget. UAssetAPI's 23 test mappings at
+/// `b4e8a01` reach 281,431 cache entries with a `-1` super index read as
+/// no super class; 4_194_304 (4 Mi) entries of 56 bytes per
+/// `ResolvedProperty` cap the cache's lists at 224 MiB, charged to
+/// `MAX_USMAP_HEAP_BYTES` with the rest of the load, and leave wide
+/// headroom for legitimate `.usmap` schemas.
 ///
 /// Surfaces as [`MappingsParseFault::FlattenedCacheTooLarge`] when
 /// exceeded during `Usmap::from_bytes`'s cache build. Found by
@@ -1157,11 +1148,10 @@ impl Usmap {
         // Fallible: returns `MappingsParseFault::FlattenedCacheTooLarge`
         // if the total entries summed across every class's flat list
         // would exceed `MAX_USMAP_FLATTENED_TOTAL_ENTRIES`;
-        // `build_flattened_cache` documents its allocation faults. Without
-        // the cap the wire's per-class cap × `MAX_INHERITANCE_DEPTH` ×
-        // `MAX_USMAP_SCHEMA_COUNT` permits a ~17 G-entry cache (~1 TB heap)
-        // before any wire input exceeds the 256 MiB
-        // `MAX_USMAP_DECOMPRESSED_SIZE`.
+        // `build_flattened_cache` documents its allocation faults. The
+        // wire's per-class cap × `MAX_INHERITANCE_DEPTH` ×
+        // `MAX_USMAP_SCHEMA_COUNT` alone allows a cache far larger than
+        // the heap budget.
         // Surfaced by security-review on PR #444.
         //
         // Cycle / depth-cap warnings emit here at parse time (once
@@ -2632,9 +2622,7 @@ mod tests {
     #[test]
     fn parse_usmap_name_count_too_large_rejected() {
         // v0 .usmap with `name_count = MAX + 1`. The cap check fires
-        // before the `try_reserve`, so the error surfaces as
-        // `NameCountTooLarge` (wire-cap) instead of an
-        // `AllocationFailed { context: NameTable }` (resource-cap).
+        // before the name table is charged and reserved.
         let cap = max_usmap_name_count();
         let mut data: Vec<u8> = Vec::new();
         data.extend_from_slice(&(cap + 1).to_le_bytes()); // name_count = cap + 1
@@ -2752,6 +2740,56 @@ mod tests {
             }
             other => panic!("expected EnumCountTooLarge, got {other:?}"),
         }
+    }
+
+    /// UAssetAPI's 23 test mappings at `b4e8a01` hold up to 76,528 names,
+    /// 2,810 enums and 15,904 schemas; each cap is the next power of two at
+    /// least twice that.
+    #[test]
+    fn the_table_caps_are_pinned() {
+        assert_eq!(max_usmap_name_count(), 262_144);
+        assert_eq!(max_usmap_enum_count(), 8_192);
+        assert_eq!(max_usmap_schema_count(), 32_768);
+    }
+
+    /// Name, enum and schema tables exactly at their caps parse, each enum
+    /// and schema under its own name: each cap refuses only a count past it.
+    #[test]
+    fn tables_at_their_caps_parse() {
+        let names: Vec<String> = (0..max_usmap_name_count())
+            .map(|i| {
+                if i == 0 {
+                    "None".to_owned()
+                } else {
+                    i.to_string()
+                }
+            })
+            .collect();
+        let name_index = |i: u32| i32::try_from(i).unwrap().to_le_bytes();
+        let mut data = Vec::new();
+        push_names(&mut data, &names);
+        data.extend_from_slice(&max_usmap_enum_count().to_le_bytes());
+        for i in 1..=max_usmap_enum_count() {
+            data.extend_from_slice(&name_index(i));
+            data.push(0); // no values
+        }
+        data.extend_from_slice(&max_usmap_schema_count().to_le_bytes());
+        for i in 1..=max_usmap_schema_count() {
+            data.extend_from_slice(&name_index(i));
+            data.extend_from_slice(&0i32.to_le_bytes()); // super "None"
+            data.extend_from_slice(&0u16.to_le_bytes()); // prop_count
+            data.extend_from_slice(&0u16.to_le_bytes()); // serial_count
+        }
+        let usmap =
+            Usmap::from_bytes(&usmap_with(UsmapCompression::None, &data, data.len())).unwrap();
+        assert_eq!(
+            usmap.enums.len(),
+            usize::try_from(max_usmap_enum_count()).unwrap()
+        );
+        assert_eq!(
+            usmap.schemas.len(),
+            usize::try_from(max_usmap_schema_count()).unwrap()
+        );
     }
 
     #[test]
@@ -4670,16 +4708,27 @@ mod tests {
     /// The table bound covers the capacity std's `HashMap` reserves at every
     /// count up to the caps, read back as buckets under hashbrown's 7/8 load
     /// factor, for each entry type a load charges and for the 4-byte entries
-    /// at its floor.
+    /// at its floor. The walk steps through the counts that reserve one
+    /// capacity: std's reservation grows with the count, so a step's counts
+    /// all reserve its capacity once reserving the capacity itself does,
+    /// which the walk checks. `table_bytes` grows with the count too, so the
+    /// walk checks the bound at each step's smallest count.
     #[test]
     fn table_bytes_bounds_what_std_reserves() {
-        // A macro, not a fn: a fn's body is a mutant no test can kill.
+        // A macro, not a fn: a fn's body is a mutant no test can kill, and a
+        // mutated step in a fn would spin.
         macro_rules! check {
             ($key:ty, $value:ty, $cap:expr) => {
-                for n in 1..=usize::try_from($cap).unwrap() {
+                let cap = usize::try_from($cap).unwrap();
+                let mut n = 1;
+                while n <= cap {
                     let mut table = HashMap::<$key, $value>::new();
                     table.try_reserve(n).unwrap();
                     let capacity = table.capacity();
+                    assert!(capacity >= n, "{n} entries reserved {capacity}");
+                    let mut full = HashMap::<$key, $value>::new();
+                    full.try_reserve(capacity).unwrap();
+                    assert_eq!(full.capacity(), capacity, "{capacity} entries");
                     let buckets = if capacity < 8 {
                         capacity + 1
                     } else {
@@ -4688,6 +4737,7 @@ mod tests {
                     let entry = size_of::<($key, $value)>();
                     let reserved = table_of(u64::try_from(buckets).unwrap(), entry);
                     assert!(table_bytes::<($key, $value)>(n) >= reserved, "{n} entries");
+                    n = capacity + 1;
                 }
             };
         }
@@ -4732,10 +4782,18 @@ mod tests {
         buckets * (entry as u64 + 1) + 16
     }
 
-    /// Each table cap refuses a count past it before that count's map is
+    /// Each table cap refuses a count past it before that count's table is
     /// charged, so the count is reported as itself with no budget to spare.
     #[test]
     fn the_table_caps_refuse_before_the_heap_budget() {
+        assert_eq!(
+            schema_fault(&(MAX_USMAP_NAME_COUNT + 1).to_le_bytes(), 0, heap(0)),
+            MappingsParseFault::NameCountTooLarge {
+                count: MAX_USMAP_NAME_COUNT + 1,
+                limit: MAX_USMAP_NAME_COUNT
+            }
+        );
+
         let mut too_many_enums = 0u32.to_le_bytes().to_vec(); // no names
         too_many_enums.extend_from_slice(&(MAX_USMAP_ENUM_COUNT + 1).to_le_bytes());
         assert_eq!(
