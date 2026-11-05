@@ -144,7 +144,7 @@ no count, no offset. Every possible 16-byte sequence is a valid `FGuid`.
 
 **Test files:** `crates/paksmith-core/src/asset/guid.rs` `mod tests`.
 
-**Phase plan:** `docs/plans/phase-2a-uasset-header.md` (Task 4).
+**Phase plan:** `docs/plans/phase-2a-uasset-header.md` (Task 5).
 
 ## References
 

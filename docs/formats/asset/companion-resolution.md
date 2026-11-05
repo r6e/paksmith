@@ -41,7 +41,7 @@ table, the `derive_companion_path` path-derivation rules (case-insensitive
 resolution flow with `.ubulk` probe-only behavior, and the
 loose-filesystem + IoStore flows declared planned (see §*Variants*).
 
-**Paksmith parser status: `complete`.** Phase 2e (Tasks 1, 4)
+**Paksmith parser status: `complete`.** Phase 2e (Tasks 3, 4)
 deliverable for the in-memory + pak-archive flows; ships as part of
 `paksmith-core/src/asset/package.rs`. The loose-filesystem flow is
 planned but not yet implemented; the IoStore flow is Phase 8 (per
@@ -240,7 +240,7 @@ inventory and the doc-level status block.
 
 **Phase plan:**
 - In-memory flow + four-state detection: `docs/plans/phase-2e-companion-files.md`
-  (Task 1 — Phase 2e PR #316).
+  (Task 3 — Phase 2e PR #316).
 - Pak-archive flow: same plan (Task 4 — Phase 2e PR #317).
 - Loose-filesystem flow: not yet planned.
 - IoStore flow: `docs/plans/ROADMAP.md` Phase 8.

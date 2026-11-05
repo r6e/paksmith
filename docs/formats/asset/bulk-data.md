@@ -538,7 +538,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 ## Paksmith implementation
 
 **Parser module:** `crates/paksmith-core/src/asset/bulk_data.rs`
-ships in Phase 3b Task 3:
+ships in Phase 3b Tasks 2, 3:
 
 - `FByteBulkData::read_from(reader, asset_path) -> Result<Self>`
   parses one wire record, enforcing the full cap chain inline

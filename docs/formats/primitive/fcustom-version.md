@@ -163,7 +163,7 @@ See `docs/security/allocation-caps.md` for the broader allocation-cap policy.
 
 **Test files:** `crates/paksmith-core/src/asset/custom_version.rs` `mod tests`.
 
-**Phase plan:** `docs/plans/phase-2a-uasset-header.md` (Task 7).
+**Phase plan:** `docs/plans/phase-2a-uasset-header.md` (Task 5).
 
 ## References
 

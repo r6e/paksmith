@@ -181,11 +181,10 @@ Wire layout above; the table cells call out the variants inline
 
 - **Fixtures:**
   - `tests/fixtures/minimal_uasset_v5_with_properties.uasset` —
-    exercises Bool/Float/Str/Name/Enum/Object primitive types in
+    exercises Bool/Float/Str primitive types in
     a single export.
   - `tests/fixtures/minimal_uasset_v5_with_extended_types.uasset` —
-    exercises Int8/Int16/UInt16/UInt32/Int64/UInt64/Double/Soft types
-    added in Phase 2d.
+    exercises the Soft and Object types added in Phase 2d.
 - **Hex anchor commands:** `(none yet — see [#347](https://github.com/r6e/paksmith/issues/347))`.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^5].
 - **Known divergences:**
@@ -222,9 +221,8 @@ Wire layout above; the table cells call out the variants inline
   FStringUtf16CodeUnits, … }` (from `StrProperty`).
 
 **Phase plan:**
-- Core primitives: `docs/plans/phase-2b-tagged-properties.md` (Tasks 1–5).
-- Extended types (Int8/16/UInt16/32/Int64/UInt64/Double/Soft):
-  `docs/plans/phase-2d-extended-property-types.md`.
+- Core primitives: `docs/plans/phase-2b-tagged-properties.md` (Task 4).
+- Soft and Object types: `docs/plans/phase-2d-extended-property-types.md`.
 
 ## References
 

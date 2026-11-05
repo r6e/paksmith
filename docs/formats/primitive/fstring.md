@@ -234,7 +234,7 @@ Consumers go through the structured `NameTable`, `CustomVersion`,
 
 **Phase plan:**
 - Pak-side strict reader: covered by Phase 1 hardening (issue #104).
-- Asset-side wrapper: `docs/plans/phase-2a-uasset-header.md` (Task 1).
+- Asset-side wrapper: `docs/plans/phase-2a-uasset-header.md`.
 
 ## References
 
