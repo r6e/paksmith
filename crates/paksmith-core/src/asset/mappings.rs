@@ -5083,7 +5083,8 @@ mod tests {
 
     /// The child-first concat over [`parent_child_usmap`]: Child's own slot
     /// (`y`) first, then Parent's (`x`) offset by Child's `prop_count`. A
-    /// macro, not a fn: a fn's body is a mutant no test can kill.
+    /// macro, not a fn: an assertion-only fn's body is a mutant no test can
+    /// kill.
     macro_rules! assert_child_first_slots {
         ($usmap:expr) => {
             let usmap: &Usmap = $usmap;
@@ -5101,15 +5102,10 @@ mod tests {
 
     #[test]
     fn get_all_properties_with_inheritance() {
-        // `Parent(x: Int)` and `Child extends Parent(y: Float)`, with
-        // Parent's super the name "None" (index 4).
-        //
-        // Per CUE4Parse `MappingsSchema.cs::Struct.TryGetValue` each
-        // class's `MappedProperty::schema_index` is **per-class**
-        // (0-based within the class's own dictionary). The wire
-        // absolute slot indices are child-first concatenated:
-        //   - Child's `y` (per-class 0) → absolute 0
-        //   - Parent's `x` (per-class 0) → absolute Child.PropertyCount = 1
+        // Parent's super is the name "None" (index 4). Per CUE4Parse
+        // `MappingsSchema.cs::Struct.TryGetValue` each class's
+        // `MappedProperty::schema_index` is per-class (0-based within the
+        // class's own dictionary).
         let usmap = Usmap::from_bytes(&parent_child_usmap(4)).unwrap();
         assert_eq!(usmap.schemas["Parent"].super_type, None);
         assert_child_first_slots!(&usmap);
@@ -5154,6 +5150,22 @@ mod tests {
     fn an_empty_super_name_is_kept_as_some_empty() {
         let usmap = Usmap::from_bytes(&parent_child_usmap(5)).unwrap();
         assert_eq!(usmap.schemas["Parent"].super_type.as_deref(), Some(""));
+    }
+
+    /// An empty super name is no super class to the inheritance walk, even
+    /// beside a class named `""`.
+    #[test]
+    fn an_empty_super_name_inherits_nothing() {
+        let schemas = [chain_class("", None), chain_class("A", Some(""))]
+            .into_iter()
+            .collect();
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).unwrap();
+        let slots: Vec<_> = usmap
+            .get_all_properties("A")
+            .iter()
+            .map(|p| (p.property.name.to_string(), p.absolute_index))
+            .collect();
+        assert_eq!(slots, [("A".to_owned(), 0)]);
     }
 
     #[test]
