@@ -225,7 +225,7 @@ always uncompressed:
 After decompression, the schema data is parsed as:
 
 1. **Name table** — `u32` name count, then per entry: name length (`u8` for version < 2, `u16` for version ≥ 2) + that many UTF-8 bytes (no null terminator).
-2. **Enum table** — `u32` enum count (capped at `MAX_USMAP_ENUM_COUNT = 4096`), then per enum: name-table index (`i32`) + value count (`u8` for version < 3, `u16` for version ≥ 3; capped at `MAX_USMAP_VALUES_PER_ENUM = 1024`) + per value: for version ≥ 4 an explicit `u64` ordinal then a name-table index, otherwise just a name-table index (ordinal = positional index).
+2. **Enum table** — `u32` enum count (capped at `MAX_USMAP_ENUM_COUNT = 8192`), then per enum: name-table index (`i32`) + value count (`u8` for version < 3, `u16` for version ≥ 3; capped at `MAX_USMAP_VALUES_PER_ENUM = 1024`) + per value: for version ≥ 4 an explicit `u64` ordinal then a name-table index, otherwise just a name-table index (ordinal = positional index).
 3. **Schema table** — `u32` schema count, then per schema: name index, super-type name index (the sentinel `"None"` means no superclass), `prop_count u16` (total slots including gaps), `serial_count u16` (serializable slot count), then `serial_count` property entries. Each entry: `schema_index u16`, `array_size u8`, name index (`i32`), then a type tree[^4]: the type byte, then for ArrayProperty (8), SetProperty (25) and OptionalProperty (28) one inner tree; for MapProperty (24) a key tree, then a value tree; for StructProperty (9) a struct-name index (`i32`); for EnumProperty (26) the underlying type's tree, then an enum-name index (`i32`); for every other type byte, nothing.
 
 ## Variants
@@ -269,7 +269,7 @@ hardening*.
 | `MAX_FRAGMENTS_PER_HEADER` | 65535 (`u16::MAX`) | Prevents unbounded `Vec` growth from an adversarial `is_last=0` fragment stream. Implementations SHOULD enforce a tighter cap if profiling reveals real assets never exceed a few hundred fragments. |
 | `MAX_USMAP_COMPRESSED_SIZE` | 64 MiB | Bounds the stored payload a header may claim, and with it any buffer a reader sizes from that claim. |
 | `MAX_USMAP_DECOMPRESSED_SIZE` | 256 MiB | Bounds the output buffer reserved for the declared size. A decoder's own working memory is separate; see the Brotli and ZStandard notes below. |
-| `MAX_USMAP_ENUM_COUNT` | 4096 | Bounds the enum-table `HashMap` heap cost per `.usmap`. |
+| `MAX_USMAP_ENUM_COUNT` | 8192 | Bounds the enum-table `HashMap` heap cost per `.usmap`. |
 | `MAX_USMAP_VALUES_PER_ENUM` | 1024 | Bounds per-enum `HashMap` heap cost. |
 | `MAX_USMAP_BRANCH_LEN` | 65536 code units | Bounds the engine-version branch length a v5 header may claim; refused before the bytes are read. |
 | `MAX_USMAP_HEAP_BYTES` | 512 MiB | Bounds the sum the per-section caps leave open, since one file can fill several sections at once: an estimate of the decompressed buffer and of each table parsed from it, charged before each is allocated, refuses a load that would pass it. |
