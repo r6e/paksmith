@@ -5393,8 +5393,7 @@ pub enum MappingsParseFault {
         limit: u32,
     },
 
-    /// Wire-claimed `enum_count` exceeds the structural cap that bounds
-    /// the enum table's heap.
+    /// Wire-claimed `enum_count` exceeds the structural cap.
     #[error("usmap enum_count {count} exceeds cap {limit}")]
     EnumCountTooLarge {
         /// The wire-claimed `enum_count`.
@@ -5403,10 +5402,7 @@ pub enum MappingsParseFault {
         limit: u32,
     },
 
-    /// Per-enum `value_count` exceeds the structural cap. Real-world
-    /// `.usmap` enums max out in the low hundreds of values;
-    /// `LargeEnums` (v3) raised the wire width to `u16` which the
-    /// cap below restores to a defensible bound.
+    /// Per-enum `value_count` exceeds the structural cap.
     #[error("usmap enum value_count {count} exceeds cap {limit}")]
     EnumValueCountTooLarge {
         /// The wire-claimed `value_count`.
@@ -5462,13 +5458,7 @@ pub enum MappingsParseFault {
         limit: u64,
     },
 
-    /// Wire-claimed `schema_count` exceeds the structural cap. Each
-    /// schema costs a `String` key + `ClassSchema` struct (~110 bytes)
-    /// in `Usmap::schemas`; without this cap the `MAX_USMAP_DECOMPRESSED_SIZE`
-    /// (256 MiB) budget alone permitted ~13M schemas / ~1.4 GiB heap
-    /// before any per-schema property allocation fired. Real-world
-    /// `.usmap` schema tables hold ~500–2000 entries (Fortnite); the
-    /// cap leaves wide headroom.
+    /// Wire-claimed `schema_count` exceeds the structural cap.
     #[error("usmap schema_count {count} exceeds cap {limit}")]
     SchemaCountTooLarge {
         /// The wire-claimed `schema_count`.
@@ -5480,14 +5470,12 @@ pub enum MappingsParseFault {
     /// Flattened-property cache (#370) total-entry count exceeds the
     /// structural cap. Each class's flattened list concatenates its
     /// own properties with every ancestor's properties up to
-    /// `MAX_INHERITANCE_DEPTH = 64` levels. Without this cap the
-    /// per-class cap (`MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA = 65_536`)
-    /// permits per-class flat lists up to `depth × per_class` = ~4M
-    /// entries, and the schema-table cap (`MAX_USMAP_SCHEMA_COUNT =
-    /// 4_096`) permits the total cache to grow to ~17 G entries (~1 TB
-    /// heap) even against valid per-class wire fixtures. Real-world
-    /// `.usmap` files top out around ~30 k cache entries. Found by
-    /// security-review on PR #444.
+    /// `MAX_INHERITANCE_DEPTH = 64` levels, so the per-class cap
+    /// (`MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA = 65_536`) allows
+    /// per-class flat lists of up to `depth × per_class` = ~4M entries.
+    /// With the schema-table cap (`MAX_USMAP_SCHEMA_COUNT`), the two caps
+    /// alone allow a total cache far larger than the heap budget. Found
+    /// by security-review on PR #444.
     #[error(
         "usmap flattened-property cache total entries {total} exceeds cap {limit} \
          (sum of every class's inheritance-flattened property list)"
@@ -5519,11 +5507,7 @@ pub enum MappingsParseFault {
         limit: usize,
     },
 
-    /// Wire-claimed `name_count` exceeds the structural cap. Without
-    /// this cap a malicious header could claim `u32::MAX` names and
-    /// force the subsequent `try_reserve` to OOM under the
-    /// `MappingsAllocationContext::NameTable` tag — burying the
-    /// wire-cap rejection inside an allocation-context fault.
+    /// Wire-claimed `name_count` exceeds the structural cap.
     #[error("usmap name_count {count} exceeds cap {limit}")]
     NameCountTooLarge {
         /// The wire-claimed `name_count`.
