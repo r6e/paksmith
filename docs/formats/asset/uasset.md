@@ -75,7 +75,7 @@ across UE versions due to conditional reads; the canonical sequence (UE
 | → varies | variable | — | `custom_versions` | `FCustomVersion[]`[^3] | See [`primitive/fcustom-version.md`](../primitive/fcustom-version.md). |
 | → varies | 4 | LE | `total_header_size` | `i32` | Total byte length of the header region (everything before payloads). Capped at 256 MiB by paksmith. |
 | → varies | variable | — | `folder_name` | `FString`[^4] | Usually `"None"` for cooked content. |
-| → varies | 4 | LE | `package_flags` | `u32` | `EPackageFlags` mask. `PKG_FilterEditorOnly = 0x8000_0000` set for cooked. `PKG_UnversionedProperties = 0x2000` requires the caller to supply a `mappings: Option<&Arc<Usmap>>` schema. |
+| → varies | 4 | LE | `package_flags` | `u32` | `EPackageFlags` mask. `PKG_FilterEditorOnly = 0x8000_0000`. `PKG_UnversionedProperties = 0x2000` requires the caller to supply a `mappings: Option<&Arc<Usmap>>` schema. |
 | → varies | 4 | LE | `name_count` | `i32` | Number of rows in the name table. |
 | → varies | 4 | LE | `name_offset` | `i32` | Byte offset of the name-table region. |
 | (UE5 ≥ 1008) | 4 | LE | `soft_object_paths_count` | `Option<i32>` | UE5 1008+ only. |
@@ -229,9 +229,9 @@ detection logic.
 
 ### Unversioned packages
 
-A package cooked unversioned records no object version:
+An unversioned package records no object version:
 `FileVersionUE4`, `FileVersionUE5` (at `-8` / `-9`) and
-`FileVersionLicenseeUE4` are all 0. Its layout is still the cooking
+`FileVersionLicenseeUE4` are all 0. Its layout is still the writing
 engine's, so a reader must be told which engine that was. CUE4Parse
 substitutes its configured version when all three are 0, before it reads
 the custom versions;[^9] UEViewer detects `FileVersion == 0 &&
@@ -260,7 +260,7 @@ shapes, such as `-6`) or `< -9` are rejected.
 - **`legacy_file_version`**: `i32` LE; wire-format-wise the field is unbounded (any `i32` could appear on disk). UE writers historically emit a small set of negative discriminants; paksmith's acceptance of `{-7, -8, -9}` is a parser-policy decision — see §*Implementation hardening* below.
 - **`file_version_ue4`**: `i32` LE; wire field unbounded. Paksmith's `≥ 504` floor (UE 4.12's object version), with no upper bound, is a parser-policy decision; the Versions table gives the stock floor the legacy check sets.
 - **`file_version_ue5`**: `i32` LE; wire field unbounded. Paksmith's `≤ 1013` ceiling, with no lower bound, is a parser-policy decision (rejecting `≥ 1014` because `METADATA_SERIALIZATION_OFFSET` adds a summary field the reader does not consume, with further summary-shape breaks at 1015/1016).
-- **`package_flags`**: `u32` LE; `EPackageFlags` mask. `PKG_FilterEditorOnly = 0x8000_0000` set for cooked content; `PKG_UnversionedProperties = 0x2000` requires `.usmap` schema.
+- **`package_flags`**: `u32` LE; `EPackageFlags` mask. `PKG_FilterEditorOnly = 0x8000_0000`; `PKG_UnversionedProperties = 0x2000` requires a property schema, such as a `.usmap`.
 - **`ObjectImport` row**: 28 bytes (UE4 baseline) / 32 bytes (UE5 ≥ 1003 with `bImportOptional` bool32).
 - **`ObjectExport` row**: 104 bytes (UE 4.27, `EXPORT_RECORD_SIZE_UE4_27`). UE5 conditionally adds / removes fields (1003 `+generate_public_hash`, 1005 `-package_guid`, 1006 `+is_inherited_instance`, 1010 `+script_serialization_*_offset` when not `PKG_UnversionedProperties`).
 - **`FPackageIndex`**: `i32` LE; `0` = `Null`, `>0` = `Export`, `<0` = `Import`, `i32::MIN` rejected — see [`../primitive/fpackage-index.md`](../primitive/fpackage-index.md).
@@ -334,8 +334,7 @@ policy.
     unversioned properties are decoded against a `.usmap` schema supplied via the
     `mappings: Option<&Arc<Usmap>>` parameter (Phase 2f's loader shipped).
     Parsing without mappings surfaces as
-    `AssetParseFault::UnversionedWithoutMappings`. CUE4Parse and
-    unreal_asset use the same mappings-driven approach.
+    `AssetParseFault::UnversionedWithoutMappings`.
   - **`compressed_chunks_count ≠ 0` rejection.** Paksmith rejects any
     summary that declares legacy compressed chunks. UE writers never
     set this for cooked content; only old uncooked archives would trip

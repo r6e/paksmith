@@ -581,7 +581,7 @@ known-good reference parser.**
 | 25 | 2d | `bp_ftext.uasset` | 4.27 | UE cook | author BP referencing `LOCTEXT` literal | `*.uasset`/`.uexp` | needs cook | UE install |
 | 26 | 2d | `bp_softref.uasset` | 4.27 | UE cook | author BP holding `FSoftObjectPath` | `*.uasset`/`.uexp` | needs cook | UE install |
 | 27 | 2e | `texture_with_bulk.uasset` | 4.27 | UE cook | import a small PNG as Texture2D, cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
-| 28 | 2f | `bp_unversioned.uasset` | 5.4+ | UE cook (cooked target — unversioned is the cook-time default) | author Blueprint, cook for any shipped-target platform | `*.uasset`/`.uexp` + paired `.usmap` from a packaged build | needs cook + dumper (paksmith UE5 ≤1013 support landed #643; the fixture itself still needs a cook + `.usmap` dumper) | UE install + dumper |
+| 28 | 2f | `bp_unversioned.uasset` | 5.4+ | UE cook | author Blueprint, cook, and check that `PKG_UnversionedProperties` (`0x2000`) is set | `*.uasset`/`.uexp` + paired `.usmap` from a packaged build | needs cook + dumper (paksmith UE5 ≤1013 support landed #643; the fixture itself still needs a cook + `.usmap` dumper) | UE install + dumper |
 | 29 | 2f | `bp_versioned_ue4.uasset` | 4.27 | UE cook | author Blueprint, cook for any UE 4.27 target, and check that `PKG_UnversionedProperties` (`0x2000`) is clear — UE4 packages can carry it | `*.uasset`/`.uexp` (no `.usmap` needed) | needs cook (or use synthetic from `paksmith-fixture-gen` already in tree) | UE install |
 | 30 | 3 | `tex_dxt1.uasset` | 4.27 | UE cook | author Texture2D forced to DXT1 (BC1), cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
 | 31 | 3 | `tex_bc7.uasset` | 4.27 | UE cook | author Texture2D forced to BC7, cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
@@ -709,12 +709,12 @@ create `BP_BoolField` (Blueprint subclassing `Actor`), add a single
 **Cook command:**
 
 ```sh
-UnrealEditor-Cmd PaksmithFixtures.uproject \
-    -run=Cook -targetplatform=Windows \
+UE4Editor-Cmd PaksmithFixtures.uproject \
+    -run=Cook -targetplatform=WindowsNoEditor \
     -map=/Game/Blueprints/BP_BoolField -unattended -nullrhi
 ```
 
-Output: `Saved/Cooked/Windows/PaksmithFixtures/Content/Blueprints/BP_BoolField.uasset` and `.uexp`.
+Output: `Saved/Cooked/WindowsNoEditor/PaksmithFixtures/Content/Blueprints/BP_BoolField.uasset` and `.uexp`.
 
 ### Phase 2c — Container properties
 
@@ -748,8 +748,8 @@ Row 27. The simplest companion-file fixture is a Texture2D:
 2. Save the Texture2D asset (default settings).
 3. Cook:
    ```sh
-   UnrealEditor-Cmd PaksmithFixtures.uproject \
-       -run=Cook -targetplatform=Linux -unattended -nullrhi
+   UE4Editor-Cmd PaksmithFixtures.uproject \
+       -run=Cook -targetplatform=LinuxNoEditor -unattended -nullrhi
    ```
 4. Output is three files: `T_Test.uasset`, `T_Test.uexp`, `T_Test.ubulk`.
 
@@ -757,9 +757,8 @@ For non-texture bulk data, a SoundWave asset works analogously.
 
 ### Phase 2f — Unversioned properties
 
-Rows 28–29. **This is the most fragile area** — the exact project
-setting that toggles unversioned property serialization differs
-across UE versions and was not pinned via the sources reachable in
+Rows 28–29. **This is the most fragile area** — what selects unversioned
+property serialization was not pinned via the sources reachable in
 this research pass. See [Unversioned properties](#unversioned-properties)
 for what's known and what needs
 verification on a local UE install.
@@ -1110,63 +1109,36 @@ Per-chunk compression. Default backends: **Zlib**, **LZ4**, **Oodle**
 
 ## Unversioned properties
 
-**The single most consequential change between UE4 and UE5 cooked
-assets.** Affects every Phase 2b–2f parser path.
-
 ### What it is
 
-UE5 introduced **unversioned property serialization** as the default
-for cooked output. The format predates UE5: UEViewer reads flagged
-packages as unversioned from UE 4.26. Under unversioned
+**Unversioned property serialization** predates UE5: UEViewer reads
+flagged packages as unversioned from UE 4.26. Under unversioned
 serialization:
 
 - Each property in an exported object is written **without** its
   `FPropertyTag` header (no `Name`, `Type`, `Size`, `ArrayIndex`).
-- Reading requires an out-of-band **schema** — the `.usmap` mapping
-  file — that says "object class X has fields A, B, C in this order
-  with these types."
+- Reading requires a **schema**, such as a `.usmap` mapping file,
+  that says "object class X has fields A, B, C in this order with
+  these types."
 - The package flag `PKG_UnversionedProperties` (in
   `FPackageFileSummary.package_flags`) marks each package as such.
 
-Without a `.usmap`, **no parser** can read the property bodies.
-CUE4Parse, FModel, paksmith, `unreal_asset` all need it.
+Paksmith refuses a flagged package without a `.usmap`. UEViewer instead
+resolves property indices against class tables built into the tool.
 
 ### When it's on / off
 
 - **UE4** (≤ 4.27): **versioned** (tagged properties) unless the
   package sets `PKG_UnversionedProperties`; UEViewer reads a flagged
   package as unversioned from UE 4.26.
-- **UE5**: cooked output uses **unversioned** by default for every
-  shipped-target platform (Windows, Linux, Mac, Android, iOS,
-  console targets). Editor-mode (uncooked) packages remain versioned.
+- **UE5**: readers route on the same flag; CUE4Parse's UE 5.8.1
+  `Win64` `Shipping` fixtures have both a tagged and an unversioned
+  variant[^cue4parse-ue58-fixtures].
 
-**There is no `bUseUnversionedPropertySerialization` setting on
-`UProjectPackagingSettings`.** The `PKG_UnversionedProperties` flag
-is decided per save by the cooker, driven by the target platform's
-own preferences (cooked-platform targets opt in; the editor target
-opts out) — not by any project-level config.
-
-This means there is no first-class "force versioned cooks" toggle.
-To produce a versioned UE5 cooked package for fixture purposes, the
-options are, in order of invasiveness:
-
-1. **Cook as `Editor` target.** Editor builds run with full
-   `WITH_EDITORONLY_DATA` and serialize versioned tagged properties.
-   This yields uncooked-style output, not a true cooked package —
-   useful for comparing versioned vs unversioned wire format on the
-   same source asset.
-2. **Override `ITargetPlatform::HasEditorOnlyData()`** in a custom
-   platform module to return `true` while leaving cook flags
-   otherwise unchanged. Requires engine modification.
-3. **Hand-flip the `PKG_UnversionedProperties` bit** in a cooked
-   `.uasset`'s `FPackageFileSummary::package_flags` post-cook — but
-   the property data is already in unversioned (header-stripped)
-   layout, so the file becomes unparsable. **Don't do this.**
-
-For Phase 2f fixtures, paksmith generally pairs a cooked package with
-unversioned properties and a `.usmap` mapping file (next section). The "versioned
-UE5" case is mostly useful for sanity-checking the parser fast path,
-not for production usage.
+**Don't hand-flip the `PKG_UnversionedProperties` bit** in a cooked
+`.uasset`'s `FPackageFileSummary::package_flags` to get a versioned
+package: the property data is already in unversioned (header-stripped)
+layout.
 
 ### `.usmap` mapping files
 
@@ -1185,13 +1157,9 @@ Dumper options:
 - [**UE4SS dumper**][ue4ss] — runs in-process via DLL injection
   against a packaged UE 4/5 build; default keybind `Ctrl+Numpad 6`
   dumps `Mappings.usmap` next to the target executable.
-- [**Dumper-7 / UnrealMappingsDumper**][unreal-mappings-dumper] —
-  external dumper, targets UE5.
+- [**UnrealMappingsDumper**][unreal-mappings-dumper] —
+  targets UE5.
 - [**jmap**][jmap] — newer alternative from trumank.
-- Paksmith's eventual Phase 2f implementation will need a `.usmap`
-  parser. Format details: see
-  [the unofficial modding guide][unofficial-mappings] and
-  [The Cutting Room Floor wiki][tcrf-mappings].
 
 `.usmap` files are **not produced by the standard UE cook pipeline**;
 they require a packaged build plus a separate dumper pass. For
@@ -1204,18 +1172,16 @@ project.
 **Row 28 — Unversioned cooked Blueprint (UE 5.4):**
 
 1. Create a UE 5.4 project with the minimal template.
-2. **Verify** the project setting "Use Unversioned Property
-   Serialization" is **on** (this should be the default for UE5).
-3. Author a Blueprint with one bool variable.
-4. Cook: `UnrealEditor-Cmd … -run=Cook -targetplatform=Linux`.
-5. The cooked package will have `PKG_UnversionedProperties` set.
-6. Pair the fixture with a `.usmap` dumped from the same project
+2. Author a Blueprint with one bool variable.
+3. Cook: `UnrealEditor-Cmd … -run=Cook -targetplatform=Linux`.
+4. Check that the cooked package has `PKG_UnversionedProperties`
+   (`0x2000`) set.
+5. Pair the fixture with a `.usmap` dumped from the same project
    (using one of the dumpers listed above) so paksmith can read it.
 
 **Row 29 — Versioned cooked Blueprint (UE 4.27):**
 
-Per the [When it's on / off](#when-its-on--off) discussion, there is
-no project-setting toggle. Two practical approaches for paksmith:
+Two practical approaches for paksmith:
 
 - **Synthetic Phase 2b fixture** (recommended). The
   `crates/paksmith-fixture-gen` writer
@@ -1225,9 +1191,7 @@ no project-setting toggle. Two practical approaches for paksmith:
   cross-validated against `unreal_asset`.
 - **UE 4.27 cooked Blueprint.** UE4 packages can carry
   `PKG_UnversionedProperties` too (see [When it's on / off](#when-its-on--off)),
-  so check that the cooked package has the flag clear. A versioned
-  UE 4.27 cooked Blueprint exercises the same parser fast path as a
-  hypothetical "versioned UE5" package would.
+  so check that the cooked package has the flag clear.
 
 This pair (unversioned UE5 + versioned UE4 or synthetic) is enough
 to test Phase 2f's reader: it routes on the `PKG_UnversionedProperties`
@@ -1353,15 +1317,15 @@ External references:
 11. [Cooking on Linux (old UE4 wiki)](https://nerivec.github.io/old-ue4-wiki/pages/cooking-on-linux.html) — Linux toolchain prereqs.
 12. [Method for repacking UE4 IoStore files (Buckminsterfullerene gist)](https://gist.github.com/Buckminsterfullerene02/0f7233d5dda97c82039ba932c2bc8fb7) — `-run=IoStore` commandlet flags.
 13. [UE 4.25 IoStore deck (EpicGamesJapan, slideshare)](https://www.slideshare.net/slideshow/ue425iostore/239108822) — IoStore introduction.
-14. [UE 4.25 Unversioned Property Serialization deck (EpicGamesJapan)](https://www.slideshare.net/EpicGamesJapan/new-loadingsystem-unversionedpropertyserializationv2) — unversioned property serialization design.
+14. [Unversioned Property Serialization deck (EpicGamesJapan)](https://www.slideshare.net/EpicGamesJapan/new-loadingsystem-unversionedpropertyserializationv2) — unversioned property serialization design.
 15. [trumank/repak (Rust)](https://github.com/trumank/repak) — pak reader/writer; version support table.
 16. [trumank/retoc (Rust)](https://github.com/trumank/retoc) — IoStore CLI; UE 4.25–5.7, well supported from UE 5.3.
 17. [FabianFG/CUE4Parse (C#)](https://github.com/FabianFG/CUE4Parse) — reference parser.
 18. [4sval/FModel discussion: unversioned mappings missing](https://github.com/4sval/FModel/discussions/418) — mapping-file requirements for UE5.
 19. [UE4SS dumpers documentation](https://docs.ue4ss.com/feature-overview/dumpers.html) — `.usmap` generation via UE4SS.
-20. [UnrealMappingsDumper / Dumper-7 (TheNaeem)](https://github.com/TheNaeem/UnrealMappingsDumper) — external `.usmap` dumper for UE5.
+20. [UnrealMappingsDumper (TheNaeem)](https://github.com/TheNaeem/UnrealMappingsDumper) — `.usmap` dumper for UE5.
 21. [Unofficial modding guide: UE4SS and Mappings](https://unofficial-modding-guide.com/posts/ue4ss_and_mappings/) — `.usmap` user-side workflow.
-22. [The Cutting Room Floor: UE5 Mappings](https://tcrf.net/Help:Contents/Finding_Content/Game_Engines/Unreal_Engine_5/Mappings) — `.usmap` file format reference.
+22. [The Cutting Room Floor: UE5 Mappings](https://tcrf.net/Help:Contents/Finding_Content/Game_Engines/Unreal_Engine_5/Mappings) — `.usmap` user-side workflow.
 23. [allcoolthingsatoneplace/UnrealPakTool — sample Crypto.json](https://github.com/allcoolthingsatoneplace/UnrealPakTool) — `Crypto.json` JSON schema reference.
 24. [UE Modding: bUseIoStore cvar wiki (indxzero)](https://indxzero.github.io/ue544cvarwiki/articles/buseiostore/) — `ProjectPackagingSettings.bUseIoStore` semantics.
 25. [Undocumented Use Io Store packaging setting (Epic forums)](https://forums.unrealengine.com/t/undocumented-use-io-store-packaging-setting/144296) — IoStore project-setting discovery thread.
@@ -1402,13 +1366,13 @@ External references:
 [ue4ss]: https://docs.ue4ss.com/feature-overview/dumpers.html
 [unreal-mappings-dumper]: https://github.com/TheNaeem/UnrealMappingsDumper
 [jmap]: https://github.com/trumank/jmap
-[unofficial-mappings]: https://unofficial-modding-guide.com/posts/ue4ss_and_mappings/
-[tcrf-mappings]: https://tcrf.net/Help:Contents/Finding_Content/Game_Engines/Unreal_Engine_5/Mappings
 [unrealpak-tool-crypto]: https://github.com/allcoolthingsatoneplace/UnrealPakTool
 [epic-oodle-blog]: https://www.unrealengine.com/en-US/blog/oodle-now-free-to-use-in-unreal-engine-via-github
 [cbloom-oodle]: http://cbloomrants.blogspot.com/2018/03/oodle-data-compression-integration-for.html
 [epic-oodle-tutorial]: https://dev.epicgames.com/community/learning/tutorials/ry2D/unreal-engine-reducing-package-sizes-with-oodle-compression
 
 [^oodle-licensing]: Per Epic's [Oodle integration blog post][epic-oodle-blog] (2021-04-01), Oodle is "free to use in Unreal Engine" — but the SDK redistribution outside an Epic-licensed pipeline is still governed by RAD/Epic's licensing terms. Treat the shared library as user-supplied.
+
+[^cue4parse-ue58-fixtures]: `FabianFG/CUE4Parse/CUE4Parse.Tests/Fixtures/UE5_8/manifest.json@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` — L3-L11 (engine 5.8.1, `Win64` `Shipping` target), and the `Tagged` and `Unversioned` variants at L73-L76 and L872-L875 (`propertySerialization`, `unversionedProperties`).
 
 [^v11-range]: [repak's compatibility table][repak] maps V11 to UE 4.26–5.3 and calls later releases "likely supported but untested". [CUE4Parse][cue4parse]'s `PakFileReader.cs` (@77b94fa L59) treats pak versions above 11 as unsupported before UE 5.7; commit a06d37d8 moved that cutoff from UE 5.8 to UE 5.7 while V12 (`Utf8PakDirectory`) was its newest version.

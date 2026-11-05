@@ -1,12 +1,11 @@
 # Unversioned property serialization
 
 > Schema-driven property serialization — properties encoded as a
-> compact bitstream of "which fields are present" + raw bodies, with
-> the field schema living in a sibling `.usmap` mapping file.
+> compact bitstream of "which fields are present" + raw bodies.
 
 ## Overview
 
-Cooked builds may opt into **unversioned** property
+A package may use **unversioned** property
 serialization (via the `PKG_UnversionedProperties = 0x2000` package
 flag) instead of the tagged scheme (see [`tagged.md`](tagged.md)).
 UEViewer reads flagged packages as unversioned from UE 4.26, and
@@ -16,8 +15,7 @@ fragments forming an `FUnversionedHeader` — each fragment encoding
 `(skip_count, value_count, has_zeros, is_last)` — optionally followed
 by a zero-mask byte run, then raw per-property bodies in
 schema-declared order. The reader needs the class schema to know each
-body's wire shape; the schema is not embedded in the asset itself but
-in a sibling `.usmap` file produced by an engine commandlet.
+body's wire shape.
 
 The `PKG_UnversionedProperties` flag is package-scoped: either all
 exports in a package use unversioned serialization, or none do. There
