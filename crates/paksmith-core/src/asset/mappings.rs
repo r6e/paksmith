@@ -5139,6 +5139,15 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    /// `class`'s flattened slots as (name, absolute index) pairs.
+    fn flat_slots(usmap: &Usmap, class: &str) -> Vec<(String, u16)> {
+        usmap
+            .get_all_properties(class)
+            .iter()
+            .map(|p| (p.property.name.to_string(), p.absolute_index))
+            .collect()
+    }
+
     /// The child-first concat over [`parent_child_usmap`]: Child's own slot
     /// (`y`) first, then Parent's (`x`) offset by Child's `prop_count`. A
     /// macro, not a fn: an assertion-only fn's body is a mutant no test can
@@ -5146,15 +5155,11 @@ mod tests {
     macro_rules! assert_child_first_slots {
         ($usmap:expr) => {
             let usmap: &Usmap = $usmap;
-            let slots = |class: &str| {
-                usmap
-                    .get_all_properties(class)
-                    .iter()
-                    .map(|p| (p.property.name.to_string(), p.absolute_index))
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(slots("Child"), [("y".to_owned(), 0), ("x".to_owned(), 1)]);
-            assert_eq!(slots("Parent"), [("x".to_owned(), 0)]);
+            assert_eq!(
+                flat_slots(usmap, "Child"),
+                [("y".to_owned(), 0), ("x".to_owned(), 1)]
+            );
+            assert_eq!(flat_slots(usmap, "Parent"), [("x".to_owned(), 0)]);
         };
     }
 
@@ -5218,12 +5223,7 @@ mod tests {
             .into_iter()
             .collect();
         let usmap = Usmap::from_parts(schemas, HashMap::new()).unwrap();
-        let slots: Vec<_> = usmap
-            .get_all_properties("A")
-            .iter()
-            .map(|p| (p.property.name.to_string(), p.absolute_index))
-            .collect();
-        assert_eq!(slots, [("A".to_owned(), 0)]);
+        assert_eq!(flat_slots(&usmap, "A"), [("A".to_owned(), 0)]);
     }
 
     #[test]
