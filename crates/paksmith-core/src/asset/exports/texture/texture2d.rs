@@ -26,9 +26,8 @@
 //! ([`read_platform_data_key`]): the running-platform `pixelFormatName`
 //! (`FName`) + per-entry `skipOffset` (version-gated `i64`/`i32`) that wrap the platform data
 //! (CUE4Parse loops over these for alternate cooked formats and terminates
-//! on a `None` name; paksmith reads only the first/primary entry and stops
-//! at the mips, so the trailing `bIsVirtual` + loop stay deferred to
-//! 3e-VT). It then decodes the whole `FTexturePlatformData`: the UE
+//! on a `None` name; paksmith reads only the first/primary entry, not the
+//! loop). It then decodes the whole `FTexturePlatformData`: the UE
 //! 5.0/5.2 stripped-data prefix, `SizeX`, `SizeY`, `PackedData`,
 //! `PixelFormat` (3e-2a), the
 //! conditional `OptData` (bit 30) / `CPUCopy` (bit 29) sub-records,
@@ -198,8 +197,7 @@ pub(crate) fn read_from_kind(
     // DeserializeCookedPlatformData's leading key: the running-platform
     // `pixelFormatName` (FName) + `skipOffset` (i64/i32) that wrap the
     // FTexturePlatformData. paksmith reads only the first/primary platform
-    // data and stops at the mips, so the trailing `bIsVirtual` + the
-    // `None`-terminated multi-format loop stay deferred (3e-VT).
+    // data, not the `None`-terminated multi-format loop.
     read_platform_data_key(&mut cur, ctx, asset_path)?;
 
     // Segment 2: FTexturePlatformData header (3e-2).

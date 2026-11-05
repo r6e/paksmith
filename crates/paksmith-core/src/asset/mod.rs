@@ -4,18 +4,15 @@
 //!
 //! Parses the structural header of versioned UE 4.14–UE 5.5 `.uasset` files.
 //! Property bodies (`FPropertyTag`-iterated payloads inside export
-//! serialized regions) are carried as opaque bytes via the
-//! [`PropertyBag::Opaque`] variant; tagged-property iteration and the
-//! typed property surface arrive in Phase 2b.
+//! serialized regions) decode through [`property`].
 //!
 //! # Module layout
 //!
-//! [`Package::read_from`] / [`Package::read_from_pak`] are the entry
+//! [`Package::read_from`] / [`Package::read_from_pak`] are entry
 //! points — both return a fully parsed [`Package`] (summary + name /
-//! import / export tables + opaque payload). [`Asset`] wraps the
-//! `Package` as its `Generic` variant; specialized variants
-//! (`Texture`, `StaticMesh`, …) land in Phase 3. [`AssetContext`]
-//! bundles the `Arc`-shared tables for downstream property parsers.
+//! import / export tables + one [`Asset`] payload per export).
+//! [`AssetContext`] bundles the `Arc`-shared tables for downstream
+//! property parsers.
 //!
 //! See `docs/plans/phase-2a-uasset-header.md` for the implementation
 //! plan and `docs/design/SPEC.md` § "Asset Data Model" for the
@@ -77,12 +74,9 @@ pub(crate) use wire::write_bool32;
 
 /// Per-export typed payload for a deserialized UE asset.
 ///
-/// Phase 3 ships only the [`Self::Generic`] variant carrying a
-/// [`property::bag::PropertyBag`] (Tree or Opaque
-/// fallback). Typed variants for known export classes —
-/// `DataTable`, `Texture2D`, `SoundWave`, `StaticMesh`,
-/// `SkeletalMesh` — land in Phase 3 sub-phases 3d-3h on this same
-/// `#[non_exhaustive]` enum.
+/// [`Self::Generic`] carries a [`property::bag::PropertyBag`] (Tree or
+/// Opaque fallback); the typed variants carry the parsed data of the
+/// export classes that have a typed reader.
 ///
 /// `#[non_exhaustive]` so downstream consumers can pattern-match with
 /// `_` and survive future variant additions.
@@ -90,9 +84,7 @@ pub(crate) use wire::write_bool32;
 /// The default `#[derive(Serialize)]` form produces an externally-
 /// tagged JSON object (`{"Generic": {"kind": "...", ...}}`).
 /// Externally-tagged was chosen over `#[serde(untagged)]` precisely
-/// because future variants need a discriminator: locking in the tag
-/// shape now lets 3d-3h add `DataTable` / `Texture2D` / etc. without
-/// breaking consumers who already match on the tag.
+/// because the variants need a discriminator.
 ///
 /// `Package::payloads: Vec<Asset>` carries one entry per export; this
 /// enum is the per-export payload (NOT a per-package wrapper —
@@ -100,12 +92,10 @@ pub(crate) use wire::write_bool32;
 /// placeholder; Phase 3 inverted to per-export semantics).
 ///
 /// **`PartialEq` derive — forward-compat constraint:** every variant's
-/// inner type MUST implement `PartialEq` (PropertyBag already does;
-/// 3d-3h's typed inner types (`DataTableData`, `Texture2DData`, etc.)
-/// must follow. If a future variant carries decoder-state or other
-/// non-`PartialEq` interiors, this derive will need to be removed
-/// and the relevant test assertions (`assert_eq!(asset, ...)`)
-/// rewritten as `matches!` checks.
+/// inner type MUST implement `PartialEq`. If a future variant carries
+/// decoder-state or other non-`PartialEq` interiors, this derive will
+/// need to be removed and the relevant test assertions
+/// (`assert_eq!(asset, ...)`) rewritten as `matches!` checks.
 // `Deserialize` is intentionally NOT derived on `Asset` because the
 // inner property-bag content has a hand-rolled, view-based
 // serialization that loses information (Opaque renders as a byte
@@ -116,20 +106,19 @@ pub(crate) use wire::write_bool32;
 #[non_exhaustive]
 pub enum Asset {
     /// The universal fallback: a single export's parsed property bag.
-    /// Phase 2 produced this for every export; Phase 3 sub-phases
-    /// (3d-3h) add typed variants for known export classes.
     Generic(property::bag::PropertyBag),
     /// A `UDataTable` export: a row-keyed table whose rows share a
-    /// `RowStruct` schema. Phase 3d. The upcoming `data_table::read_from`
-    /// parser fills this in; `CsvHandler` / `JsonHandler` export it.
+    /// `RowStruct` schema. Phase 3d. The `data_table::read_from` parser
+    /// fills this in; `DataTableCsvHandler` / `DataTableJsonHandler`
+    /// export it.
     DataTable(DataTableData),
-    /// A `UTexture2D` export. Phase 3e. Carries the segment-1 tagged
-    /// properties (`SRGB`, `CompressionSettings`, …) plus the **full**
-    /// `FTexturePlatformData` (dimensions, pixel format, slice/cubemap
-    /// bits, `num_mips_in_tail`, `first_mip_to_serialize`, mip count) and
-    /// the per-mip dimension chain ([`Texture2DData::mips`]) as of 3e-3;
-    /// the virtual-texture page-table data is added to [`Texture2DData`]
-    /// in its own later 3e milestone, and `PngHandler` exports it in 3e-8.
+    /// A `UTexture2D`-family export ([`Texture2DData::kind`]). Phase 3e.
+    /// Carries the segment-1 tagged properties (`SRGB`,
+    /// `CompressionSettings`, …) plus the `FTexturePlatformData` fields
+    /// (dimensions, pixel format, slice/cubemap bits, `num_mips_in_tail`,
+    /// `first_mip_to_serialize`, mip count), the per-mip dimension chain
+    /// ([`Texture2DData::mips`]) and, for a virtual texture,
+    /// [`Texture2DData::virtual_texture`]; `PngHandler` exports it.
     Texture2D(Texture2DData),
     /// A `USoundWave` export. Phase 3f. It carries the `USoundBase`
     /// tagged-property segment (audio settings) plus the resolved `cooked` /
@@ -516,10 +505,11 @@ pub struct DataTableData {
     /// Class-level tagged properties (the `RowStruct` `ObjectProperty`,
     /// the strip flags `bStripFromClientBuilds` /
     /// `bStripFromDedicatedServerBuilds`, `bIgnoreExtraFields`,
-    /// `bIgnoreMissingFields`, …). `JsonHandler` round-trips these into
-    /// its output so JSON consumers keep the strip-flag state that
-    /// determined whether the cooker emitted zero rows; `CsvHandler`
-    /// ignores them (CSV has no schema for class-level metadata).
+    /// `bIgnoreMissingFields`, …). `DataTableJsonHandler` round-trips
+    /// these into its output so JSON consumers keep the strip-flag state
+    /// that determined whether the cooker emitted zero rows;
+    /// `DataTableCsvHandler` ignores them (CSV has no schema for
+    /// class-level metadata).
     pub class_properties: property::bag::PropertyBag,
 }
 
@@ -553,8 +543,8 @@ pub struct DataTableRow {
 
 /// Parsed contents of a `USoundWave` export.
 ///
-/// Phase 3f. Produced by `audio::sound_wave::read_from`; consumed (in later
-/// 3f milestones) by the audio `FormatHandler`s. This carries the `USoundBase`
+/// Phase 3f. Produced by `audio::sound_wave::read_from`; consumed by the
+/// audio `FormatHandler`s. This carries the `USoundBase`
 /// tagged-property segment (audio settings: sample rate, channel count,
 /// duration, loop/attenuation metadata) plus the resolved `cooked` /
 /// `streaming` bits from the USoundWave binary header. The header parse also
@@ -574,8 +564,7 @@ pub struct DataTableRow {
 /// The non-streaming non-cooked `RawData` path (a single uncompressed
 /// `FByteBulkData` + the `CompressedDataGuid`) is now parsed too, so every
 /// `(streaming, cooked)` combo is a real read and the retry covers every combo
-/// (matching the oracle). Only the per-codec audio decoders (the
-/// `FormatHandler`s) remain.
+/// (matching the oracle).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SoundWaveData {
@@ -726,12 +715,12 @@ pub enum TextureKind {
 /// Phase 3e. Produced by `texture::texture2d::read_from_kind`; consumed
 /// by the `PngHandler` (3e-8, extended for slice composition in #648).
 ///
-/// **Grows across the 3e milestones.** As of 3e-3 it carries the
-/// segment-1 tagged properties, the full `FTexturePlatformData` header
-/// (`size_x`, `size_y`, `pixel_format`, `num_slices`, `is_cubemap`,
-/// `num_mips_in_tail`, `first_mip_to_serialize`, `mip_count`), and the
-/// per-mip dimension chain ([`mips`](Self::mips)); the virtual-texture
-/// page-table data lands in its own later milestone. The struct is
+/// It carries the segment-1 tagged properties, the
+/// `FTexturePlatformData` header (`size_x`, `size_y`, `pixel_format`,
+/// `num_slices`, `is_cubemap`, `num_mips_in_tail`,
+/// `first_mip_to_serialize`, `mip_count`), the per-mip dimension chain
+/// ([`mips`](Self::mips)), and, for a virtual texture, the
+/// [`virtual_texture`](Self::virtual_texture) blob. The struct is
 /// `#[non_exhaustive]` and constructed only inside this crate, so adding
 /// fields is non-breaking — matching the [`DataTableData`] precedent.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -752,7 +741,7 @@ pub struct Texture2DData {
     /// Top-mip height in pixels (`FTexturePlatformData::SizeY`). Phase 3e-2.
     pub size_y: u32,
     /// `EPixelFormat` variant name (e.g. `"PF_DXT5"`) — drives mip-byte
-    /// interpretation once the per-format decoders land. Phase 3e-2.
+    /// interpretation. Phase 3e-2.
     pub pixel_format: String,
     /// Slice count from `PackedData` (`& 0x3FFF_FFFF`; `1` for a plain
     /// 2D texture). Follows CUE4Parse's `GetNumSlices()` convention of
@@ -762,9 +751,8 @@ pub struct Texture2DData {
     pub is_cubemap: bool,
     /// `FOptTexturePlatformData::NumMipsInTail` — the count of trailing
     /// packed mips — when the optional-data record is present
-    /// (`PackedData` bit 30), else `None`. Feeds 3e-3's mip-tail
-    /// unpacking. The sibling `ExtData` is read-and-discarded (opaque
-    /// platform extension data). Phase 3e-2b.
+    /// (`PackedData` bit 30), else `None`. The sibling `ExtData` is
+    /// read-and-discarded (opaque platform extension data). Phase 3e-2b.
     pub num_mips_in_tail: Option<u32>,
     /// `FirstMipToSerialize` — the top-mip skip-count the cooker applied
     /// for downscaled platforms. Phase 3e-2b.
@@ -779,7 +767,7 @@ pub struct Texture2DData {
     /// i.e. `mips[i]` ↔ the export's bulk record `i` (positional), resolved
     /// lazily through `Package::resolve_bulk_for_export`. When
     /// `bSerializeMipData` is false (a UE 5.3+ texture) the mips carry no
-    /// inline bulk data and the export returns an empty record list. This
+    /// inline bulk data and contribute no bulk records. This
     /// struct holds only the dimensions either way. Phase 3e-3.
     pub mips: Vec<Texture2DMipMap>,
     /// The parsed `FVirtualTextureBuiltData` blob when the texture's trailing
@@ -791,9 +779,8 @@ pub struct Texture2DData {
     /// case. A malformed blob fails the whole read (→ `Generic`), so this is
     /// `Some` iff the texture is virtual — query via [`Self::is_virtual`].
     ///
-    /// Phase 3e-VT-b1 parses the **structural** fields (header, dispatch
-    /// tables, layer formats); the `FVirtualTextureDataChunk[]` tile payloads
-    /// are added in 3e-VT-b2 and flattened to pixels in 3e-VT-c.
+    /// It holds the **structural** fields (header, dispatch tables, layer
+    /// formats, fallback colors) and the `FVirtualTextureDataChunk[]` records.
     ///
     /// `Box`ed because virtual textures are rare and the blob is large
     /// (many dispatch `Vec`s): boxing keeps the common non-virtual

@@ -1,19 +1,14 @@
-//! `FVirtualTextureBuiltData` structural parse (Phase 3e-VT-b1).
+//! `FVirtualTextureBuiltData` parse and flatten (Phase 3e-VT).
 //!
 //! A virtual texture replaces a `UTexture2D`'s standard mip chain with a
 //! sparse/paged tile representation (see `docs/formats/texture/virtual-textures.md`).
 //! When the `UTexture2D` reader sees `bIsVirtual == true` (3e-VT-a), it calls
 //! [`read_from`] to decode the trailing `FVirtualTextureBuiltData` blob.
 //!
-//! **3e-VT-b1 scope: the structural fields only** — the fixed header, both
-//! dispatch paths (the always-serialized legacy arrays + the UE5.0+ trio), the
-//! [`FVirtualTextureTileOffsetData`](TileOffsetData) sub-records, the per-layer
-//! `LayerTypes`, and (UE5.0+) `LayerFallbackColors`. The parse **stops before
-//! the `Chunks` array** — the `FVirtualTextureDataChunk[]` records (which carry
-//! the actual tile bytes via `FByteBulkData`) and their resolver routing are
-//! 3e-VT-b2; the page-table flatten to pixels is 3e-VT-c. paksmith already
-//! stops at the export's `serial_size` boundary, so leaving the chunk bytes
-//! unconsumed is consistent with the non-virtual mip-chain path.
+//! The parse runs through the trailing `Chunks` array: each
+//! `FVirtualTextureDataChunk`'s tile bytes are an `FByteBulkData` appended to
+//! the export's bulk records. [`flatten_virtual_texture`] renders layer 0 to
+//! pixels.
 //!
 //! **Version gating** (verified against CUE4Parse `FVirtualTextureBuiltData`
 //! `@cf74fc32` + the wire-format doc): the `TileDataOffsetPerLayer` array, the
@@ -62,7 +57,7 @@ const MAX_VT_ARRAY_ENTRIES: i32 = 1 << 20;
 /// keeps the nested allocation envelope finite.
 const MAX_VT_TILE_OFFSET_DATA_RECORDS: i32 = 64;
 
-/// Parsed `FVirtualTextureBuiltData` — the structural (non-chunk) fields.
+/// Parsed `FVirtualTextureBuiltData`.
 ///
 /// `#[non_exhaustive]`. `Default` yields an all-empty instance (0 layers, no
 /// dispatch, no chunks) — a degenerate virtual texture, handy for constructing
@@ -191,8 +186,7 @@ const VT_NO_DATA: u32 = u32::MAX;
 /// it (decode + stitch) is 3e-VT-c2.
 ///
 /// `pub(crate)`: an ephemeral lookup result, not a serialized wire struct like
-/// [`VirtualTextureData`]. 3e-VT-c2 may promote it to `pub` (non-breaking) once
-/// the flatten confirms a stable external shape.
+/// [`VirtualTextureData`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TileData {
     /// Index into [`VirtualTextureData::chunks`] (→ the chunk's bulk record via
@@ -335,10 +329,9 @@ impl VirtualTextureData {
     /// resolved `chunk_index` is validated against `chunks.len()`.
     ///
     /// The returned `byte_offset` / `data_length` are **not** bounded against
-    /// the chunk's resolved payload size — they're plain additive `u32`s. The
-    /// 3e-VT-c2 consumer MUST verify `byte_offset + data_length <= payload.len()`
-    /// (checked slicing) before reading, or a crafted offset array yields an
-    /// out-of-payload read.
+    /// the chunk's resolved payload size — they're plain additive `u32`s. A
+    /// consumer MUST bounds-check its read against the payload (checked
+    /// slicing), or a crafted offset array yields an out-of-payload read.
     #[must_use]
     pub(crate) fn tile_data(&self, v_level: usize, v_address: u32, layer: u32) -> Option<TileData> {
         let tile = if self.is_legacy_data() {
@@ -393,7 +386,7 @@ impl VirtualTextureData {
         // `data_length` is paksmith's contract: the layer's byte span
         // (`layer_end - layer_start`). CUE4Parse puts `layer_start` in this slot
         // instead; the span is the natural reading but is UNVERIFIED (no
-        // consumer until 3e-VT-c2 — see the `TileData::data_length` doc). The
+        // consumer — see the `TileData::data_length` doc). The
         // `byte_offset` below matches CUE4Parse exactly and IS exercised.
         let data_length = layer_end.checked_sub(layer_start)?;
         let byte_offset = base_offset

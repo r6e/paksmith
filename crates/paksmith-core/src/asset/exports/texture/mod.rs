@@ -42,7 +42,7 @@
 //!   `bIsVirtual` flag (UE 4.23+) so virtual textures are identified.
 //! - **3e-VT-b1** ([`virtual_textures`]): the structural parse of the
 //!   `FVirtualTextureBuiltData` blob (header, dispatch tables, layer formats)
-//!   when `bIsVirtual == true`, stopping before the chunk payloads (3e-VT-b2).
+//!   when `bIsVirtual == true`.
 
 /// Assertion helpers shared by the decoder test modules in this directory.
 #[cfg(test)]
