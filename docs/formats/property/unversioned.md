@@ -13,8 +13,8 @@ CUE4Parse tests the flag with no engine-version check.[^5]
 In unversioned mode, each export body is a sequence of `u16`
 fragments forming an `FUnversionedHeader` — each fragment encoding
 `(skip_count, value_count, has_zeros, is_last)` — optionally followed
-by a zero-mask byte run, then raw per-property bodies in
-schema-declared order. The reader needs the class schema to know each
+by a zero-mask byte run, then raw per-property bodies in slot order
+(see Per-property bodies). The reader needs the class schema to know each
 body's wire shape.
 
 The `PKG_UnversionedProperties` flag is package-scoped: either all
@@ -109,18 +109,18 @@ hardening*.
 
 ### Per-property bodies
 
-After the header + zero-mask, raw property values follow in
-schema-declared order. The reader iterates the class's schema (from
-the `.usmap`) sorted by `schema_index`, skips slots not marked
-serialised by the header, and reads each present slot as a type-sized
-payload — no name, no type tag, no body-size field.
+After the header + zero-mask, raw property values follow in slot
+order. The reader walks the object's slots in the index space below,
+skips slots not marked serialised by the header, and reads each
+present slot as a type-sized payload — no name, no type tag, no
+body-size field.
 
-A `.usmap` entry's `schema_index` is its slot's index within its own
-class, not the property's position in the file. The header's fragments
-address one index space per object: the class's own `prop_count`
-slots first, then its superclass's slots offset by the class's
-`prop_count`, and so on up the super-type chain[^8]. Slots that
-`prop_count` counts but no entry covers are gaps.
+A `.usmap` entry's `schema_index` is the index of its first slot
+within its own class, not the property's position in the file. The
+header's fragments address one index space per object: the class's
+own `prop_count` slots first, then its superclass's slots offset by
+the class's `prop_count`, and so on up the super-type chain[^8].
+Slots that `prop_count` counts but no entry covers are gaps.
 
 #### Type wire widths
 
