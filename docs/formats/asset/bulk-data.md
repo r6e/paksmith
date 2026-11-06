@@ -292,10 +292,12 @@ deviations are all fail-closed:
 - **Bounded allocation**: the chunk table's byte size is validated
   against the real remaining input before it is walked, the table
   is validated and consumed in place (never copied into an owned
-  buffer), and the output buffer is pre-sized from the compressed
-  input length (never from wire claims), growing only as real bytes
-  are produced — each chunk's read is capped at its claimed size + 1
-  so an over-long stream is detected rather than inflated.
+  buffer), and the output buffer is reserved for the smaller of the
+  compressed input length and `ElementCount` plus one (never more
+  than the bytes present, and at most one byte past the claim the
+  budget charged), growing only as real bytes are produced — each
+  chunk's read is capped at its claimed size plus one so an
+  over-long stream is detected rather than inflated.
 - A zlib record with `SizeOnDisk = 0` decodes to an empty payload,
   without reading any framing, only when `ElementCount` is also 0;
   with a nonzero `ElementCount` it fails as truncated framing.
@@ -478,7 +480,11 @@ A `FByteBulkDataHeader` reader MUST:
   total to `ElementCount`, compute the chunk count, the chunk table's
   byte size (16 bytes per chunk) and the sums of the chunk sizes with
   overflow-checked arithmetic, and check that the table fits in the
-  bytes left in the record before reading it.
+  bytes left in the record before reading it. A valid zlib stream may
+  carry any number of empty stored or fixed-Huffman blocks (RFC 1951
+  §3.2.4, §3.2.6), so a record's compressed size can far exceed its
+  decoded size: size the output buffer from the smaller of the two,
+  not from the input alone.
 - **For `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile`**:
   surface `MissingCompanionFile { kind: Uptnl }` when `.uptnl` is
   absent. Paksmith's `CompanionFileKind` enum defines all three
