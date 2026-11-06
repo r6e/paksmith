@@ -4,9 +4,11 @@
 //! game build that lets a parser decode unversioned-property assets
 //! (post UE 4.25 with `PKG_UnversionedProperties` set), where the wire
 //! stream no longer carries `FPropertyTag` headers. Each schema lists
-//! the class's properties in serialization order; the unversioned
-//! reader walks the schema, advancing the cursor by each property's
-//! type-sized payload.
+//! the class's property entries, each covering `array_size` slots from
+//! its `schema_index`; the unversioned reader walks a class's slots in
+//! index order, its own and then each superclass's (see
+//! [`Usmap::get_all_properties`]), advancing the cursor by each present
+//! slot's type-sized payload.
 //!
 //! See `docs/formats/property/unversioned.md` (`.usmap` file format) for
 //! the wire format.
@@ -499,7 +501,8 @@ pub struct MappedProperty {
     /// permitted ~4 GiB of clone-only heap per schema. Issue #397
     /// sub-fix A.
     pub name: Arc<str>,
-    /// 0-based index within the class's serialisation order.
+    /// The slot's 0-based index within its own class: its entry's wire
+    /// `schema_index` plus [`Self::array_index`].
     pub schema_index: u16,
     /// Per-slot expansion index when the schema declares `array_size > 1`
     /// (a C-style fixed-size array property). Each expanded slot keeps
@@ -536,17 +539,16 @@ pub struct ClassSchema {
     /// `Some("")`, which [`Usmap::get_all_properties`] also treats as no
     /// super class.
     pub super_type: Option<String>,
-    /// Wire-declared `PropertyCount` — total number of properties on
-    /// this class (serializable + transient/editor-only/deprecated),
-    /// **not** the size of [`Self::properties`] (which only carries the
-    /// `serial_count` serializable entries).
+    /// Wire-declared `PropertyCount`: the class's slot count, gaps
+    /// included. Every slot in [`Self::properties`] lies below it, but it
+    /// need not equal their number.
     ///
     /// Required by [`Usmap::get_all_properties`] to compute the
     /// child-first-concat absolute slot indices for inherited classes:
     /// when walking from child → parent, each parent's per-class
     /// `schema_index` is shifted by the sum of preceding classes'
-    /// `prop_count` (per CUE4Parse `MappingsProvider/Usmap/
-    /// MappingsSchema.cs::Struct.TryGetValue`).
+    /// `prop_count` (per CUE4Parse
+    /// `MappingsProvider/MappingsSchema.cs::Struct.TryGetValue`).
     pub prop_count: u16,
     /// Properties defined directly on this class (not inherited), in schema order.
     pub properties: Vec<MappedProperty>,
@@ -1031,29 +1033,11 @@ impl Usmap {
                 None => None,
             };
 
-            // `prop_count` is the wire-declared total property count
-            // for this class (serializable + transient/editor-only/
-            // deprecated). Required by `get_all_properties` to compute
-            // the child-first-concat absolute slot indices for inherited
-            // classes (issue #391).
+            // `prop_count` is the class's slot count, gaps included;
+            // `get_all_properties` offsets a parent's slots by it (issue
+            // #391). `serial_count` is the class's entry count.
             let prop_count = read_or_truncated(&mut cur, |c| c.read_u16::<LE>())?;
             let serial_count = read_or_truncated(&mut cur, |c| c.read_u16::<LE>())?;
-
-            // Pre-row validation (issue #413): the wire-declared
-            // `prop_count` must be at least the row-count `serial_count`
-            // — a class can't have fewer total slots than serializable
-            // rows. An adversarial `.usmap` declaring `prop_count = 0`
-            // with `serial_count > 0` would re-introduce the #391
-            // child/parent inheritance-offset collision by advancing
-            // the offset by 0 past this class. Fast-fail before any
-            // per-row allocation runs.
-            if prop_count < serial_count {
-                return Err(fault(MappingsParseFault::PropCountBelowSerialCount {
-                    schema: name,
-                    prop_count,
-                    serial_count,
-                }));
-            }
 
             // `Vec::with_capacity(serial_count)` would mis-predict the
             // final size (the inner array-expansion loop can push up
@@ -1109,15 +1093,11 @@ impl Usmap {
                 }
             }
 
-            // Post-row validation (issue #413): every per-class
-            // `schema_index` must fit inside `[0, prop_count)`, i.e.,
-            // `prop_count > max(schema_index over declared rows)`.
-            // Violating that would let an adversarial `.usmap`
-            // declare a row at a slot beyond the per-class budget,
-            // breaking the inheritance offset arithmetic in
-            // `get_all_properties` even when `prop_count >=
-            // serial_count` (the pre-row check) holds. Skip the
-            // check on empty schemas; `max()` returns `None`.
+            // Every slot must lie below `prop_count`, or it lands in the
+            // parent's slots in `get_all_properties` (#391, #413). This is
+            // the only check on `prop_count`: an entry with `array_size` 0
+            // emits no slot, so a schema may list more entries than
+            // `prop_count` (#817). An empty schema has no max.
             if let Some(max_schema_index) = properties.iter().map(|p| p.schema_index).max()
                 && prop_count <= max_schema_index
             {
@@ -2445,109 +2425,56 @@ mod tests {
         assert!(!logs_contain("exceeds MAX_INHERITANCE_DEPTH"));
     }
 
+    /// A v0 `.usmap` with names Hero, None and X and one schema, Hero(0) over
+    /// None(1) at `prop_count`, whose entries are IntProperty rows of
+    /// `(schema_index, array_size, name)`.
+    fn hero_usmap(prop_count: u16, rows: &[(u16, u8, i32)]) -> Vec<u8> {
+        let mut data = Vec::new();
+        push_names(&mut data, &["Hero", "None", "X"]);
+        data.extend_from_slice(&0u32.to_le_bytes()); // enums
+        data.extend_from_slice(&1u32.to_le_bytes()); // schemas
+        push_schema(&mut data, 0, 1, prop_count, rows, &[2]);
+        usmap_with(UsmapCompression::None, &data, data.len())
+    }
+
+    /// A slot at or past its class's `prop_count` is refused once the class's
+    /// entries are read, however many entries it lists: it would land in the
+    /// parent's slots in `get_all_properties` (#391, #413).
     #[test]
-    fn parse_usmap_prop_count_below_serial_count_rejected() {
-        // Adversarial .usmap declares `prop_count = 0` while
-        // emitting `serial_count = 1` row. Without validation this
-        // would parse cleanly, then `get_all_properties` would
-        // advance the inheritance offset by `prop_count = 0` past
-        // this class — re-introducing the #391 child/parent
-        // per-class-index collision on any inheriting class.
-        //
-        // Names: "Hero"(0), "None"(1), "Stats"(2)
-        let mut data: Vec<u8> = Vec::new();
-        data.extend_from_slice(&3u32.to_le_bytes());
-        for (len, name) in [(4u8, "Hero"), (4u8, "None"), (5u8, "Stats")] {
-            data.push(len);
-            data.extend_from_slice(name.as_bytes());
-        }
-        data.extend_from_slice(&0u32.to_le_bytes()); // 0 enums
-        data.extend_from_slice(&1u32.to_le_bytes()); // 1 schema
-        // Schema Hero: super=None, prop_count=0 (LIES), serial_count=1
-        data.extend_from_slice(&0i32.to_le_bytes()); // name idx
-        data.extend_from_slice(&1i32.to_le_bytes()); // super idx
-        data.extend_from_slice(&0u16.to_le_bytes()); // prop_count = 0 — bogus
-        data.extend_from_slice(&1u16.to_le_bytes()); // serial_count = 1
-        data.extend_from_slice(&0u16.to_le_bytes()); // schema_index
-        data.push(1u8); // array_size
-        data.extend_from_slice(&2i32.to_le_bytes()); // "Stats"
-        data.push(2u8); // IntProperty
-
-        let data_len = u32::try_from(data.len()).unwrap();
-        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
-        usmap.extend_from_slice(&data_len.to_le_bytes());
-        usmap.extend_from_slice(&data_len.to_le_bytes());
-        usmap.extend_from_slice(&data);
-
-        let err = Usmap::from_bytes(&usmap).unwrap_err();
-        match err {
-            crate::PaksmithError::MappingsParse {
-                fault:
-                    crate::error::MappingsParseFault::PropCountBelowSerialCount {
-                        schema,
-                        prop_count,
-                        serial_count,
-                    },
-            } => {
-                assert_eq!(schema, "Hero");
-                assert_eq!(prop_count, 0);
-                assert_eq!(serial_count, 1);
-            }
-            other => panic!("expected PropCountBelowSerialCount, got {other:?}"),
+    fn parse_usmap_prop_count_below_max_schema_index_rejected() {
+        for (prop_count, rows, max_schema_index) in [
+            (0, &[(0, 1, 2)][..], 0),
+            (1, &[(0, 1, 2), (1, 1, 2)][..], 1),
+            (2, &[(5, 1, 2)][..], 5),
+            (2, &[(5, 1, 2), (0, 1, 2)][..], 5), // the largest slot, not the last
+            (2, &[(3, 1, 2), (5, 1, 2)][..], 5), // the largest slot, not the first past prop_count
+            (1, &[(0, 0, 2), (0, 2, 2)][..], 1),
+        ] {
+            assert_eq!(
+                parse_fault(&hero_usmap(prop_count, rows)),
+                crate::error::MappingsParseFault::PropCountBelowMaxSchemaIndex {
+                    schema: "Hero".to_owned(),
+                    prop_count,
+                    max_schema_index,
+                },
+                "prop_count {prop_count}, rows {rows:?}"
+            );
         }
     }
 
+    /// A fault in a schema's entries is reported before its slots are
+    /// checked against `prop_count`, however many entries it lists.
     #[test]
-    fn parse_usmap_prop_count_below_max_schema_index_rejected() {
-        // Adversarial .usmap declares `prop_count = 2` but emits a
-        // row with `schema_index = 5`. The per-class slot index must
-        // be in `[0, prop_count)`; violating that breaks the
-        // inheritance offset arithmetic in `get_all_properties`. The
-        // post-row validation must fire (the pre-row
-        // `prop_count >= serial_count` check passes: 2 >= 1).
-        //
-        // Names: "Hero"(0), "None"(1), "X"(2)
-        let mut data: Vec<u8> = Vec::new();
-        data.extend_from_slice(&3u32.to_le_bytes());
-        for (len, name) in [(4u8, "Hero"), (4u8, "None"), (1u8, "X")] {
-            data.push(len);
-            data.extend_from_slice(name.as_bytes());
-        }
-        data.extend_from_slice(&0u32.to_le_bytes()); // 0 enums
-        data.extend_from_slice(&1u32.to_le_bytes()); // 1 schema
-        // Schema Hero: super=None, prop_count=2, serial_count=1
-        data.extend_from_slice(&0i32.to_le_bytes());
-        data.extend_from_slice(&1i32.to_le_bytes());
-        data.extend_from_slice(&2u16.to_le_bytes()); // prop_count = 2
-        data.extend_from_slice(&1u16.to_le_bytes()); // serial_count = 1
-        // Row with schema_index = 5 (out of [0, 2) range — lies)
-        data.extend_from_slice(&5u16.to_le_bytes()); // schema_index = 5
-        data.push(1u8); // array_size
-        data.extend_from_slice(&2i32.to_le_bytes()); // "X"
-        data.push(2u8); // IntProperty
-
-        let data_len = u32::try_from(data.len()).unwrap();
-        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
-        usmap.extend_from_slice(&data_len.to_le_bytes());
-        usmap.extend_from_slice(&data_len.to_le_bytes());
-        usmap.extend_from_slice(&data);
-
-        let err = Usmap::from_bytes(&usmap).unwrap_err();
-        match err {
-            crate::PaksmithError::MappingsParse {
-                fault:
-                    crate::error::MappingsParseFault::PropCountBelowMaxSchemaIndex {
-                        schema,
-                        prop_count,
-                        max_schema_index,
-                    },
-            } => {
-                assert_eq!(schema, "Hero");
-                assert_eq!(prop_count, 2);
-                assert_eq!(max_schema_index, 5);
+    fn an_entry_fault_is_reported_before_the_slot_check() {
+        // Slot 0 is at prop_count 0, and the second entry's name index is
+        // past the three-name table.
+        assert_eq!(
+            parse_fault(&hero_usmap(0, &[(0, 1, 2), (0, 1, 99)])),
+            crate::error::MappingsParseFault::NameIndexOutOfRange {
+                idx: 99,
+                table_len: 3
             }
-            other => panic!("expected PropCountBelowMaxSchemaIndex, got {other:?}"),
-        }
+        );
     }
 
     /// Build a minimal v0 `.usmap` with a 2-name table (`"X"`, `"Y"`)
@@ -4320,20 +4247,32 @@ mod tests {
     }
 
     /// A header claiming more stored bytes than the file holds is refused at
-    /// the payload's start.
+    /// the payload's start, even when both sizes agree and the bytes present
+    /// hold the whole schema table: UAssetAPI's F1Manager2023 test mapping at
+    /// `b4e8a01` declares 1,074,319 uncompressed bytes and holds 1,071,839.
     #[test]
     fn parse_usmap_compressed_size_past_the_end_rejected() {
+        const F1_MANAGER_MISSING: usize = 2_480;
         let payload = schema_payload();
         let cap = usize::try_from(MAX_USMAP_COMPRESSED_SIZE).unwrap();
-        for claimed in [payload.len() + 1, cap] {
-            let mut bytes = usmap_with(UsmapCompression::None, &payload, payload.len());
+        let short = payload.len() + F1_MANAGER_MISSING;
+        for (claimed, declared) in [
+            (payload.len() + 1, payload.len()),
+            (cap, payload.len()),
+            (short, short),
+        ] {
+            let mut bytes = usmap_with(UsmapCompression::None, &payload, declared);
             bytes[4..8].copy_from_slice(&u32::try_from(claimed).unwrap().to_le_bytes());
             assert_eq!(
                 parse_fault(&bytes),
                 crate::error::MappingsParseFault::Truncated { offset: HEADER_LEN },
-                "claimed={claimed}"
+                "claimed={claimed} declared={declared}"
             );
         }
+        let whole = [payload.as_slice(), &[0; F1_MANAGER_MISSING]].concat();
+        assert_matches_uncompressed(
+            &Usmap::from_bytes(&usmap_with(UsmapCompression::None, &whole, short)).unwrap(),
+        );
     }
 
     #[test]
@@ -4413,32 +4352,47 @@ mod tests {
         }
     }
 
+    /// One schema, name `class` over super `super_class`, declaring
+    /// `prop_count` slots, with one row of `row_type` per `(schema_index,
+    /// array_size, name)` in `rows`.
+    fn push_schema(
+        data: &mut Vec<u8>,
+        class: i32,
+        super_class: i32,
+        prop_count: u16,
+        rows: &[(u16, u8, i32)],
+        row_type: &[u8],
+    ) {
+        data.extend_from_slice(&class.to_le_bytes());
+        data.extend_from_slice(&super_class.to_le_bytes());
+        data.extend_from_slice(&prop_count.to_le_bytes());
+        data.extend_from_slice(&u16::try_from(rows.len()).unwrap().to_le_bytes());
+        for &(schema_index, array_size, name) in rows {
+            data.extend_from_slice(&schema_index.to_le_bytes());
+            data.push(array_size);
+            data.extend_from_slice(&name.to_le_bytes());
+            data.extend_from_slice(row_type);
+        }
+    }
+
     /// One schema, name 0 over super 1, whose rows are all property 2 of
     /// `row_type`, one row per entry of `array_sizes`.
     fn push_repeated_schema(data: &mut Vec<u8>, array_sizes: &[u8], row_type: &[u8]) {
-        data.extend_from_slice(&0i32.to_le_bytes());
-        data.extend_from_slice(&1i32.to_le_bytes());
-        data.extend_from_slice(&u16::MAX.to_le_bytes()); // prop_count
-        data.extend_from_slice(&u16::try_from(array_sizes.len()).unwrap().to_le_bytes());
-        for &array_size in array_sizes {
-            data.extend_from_slice(&0u16.to_le_bytes());
-            data.push(array_size);
-            data.extend_from_slice(&2i32.to_le_bytes());
-            data.extend_from_slice(row_type);
-        }
+        let rows: Vec<_> = array_sizes.iter().map(|&size| (0, size, 2)).collect();
+        push_schema(data, 0, 1, u16::MAX, &rows, row_type);
     }
 
     /// One schema whose single row, `prop`, expands into `slots` slots of
     /// Map<Array<Int>, Set<Float>>: five type nodes.
     fn push_map_row_schema(data: &mut Vec<u8>, class: i32, super_class: i32, prop: i32, slots: u8) {
-        data.extend_from_slice(&class.to_le_bytes());
-        data.extend_from_slice(&super_class.to_le_bytes());
-        data.extend_from_slice(&u16::from(slots).to_le_bytes()); // prop_count
-        data.extend_from_slice(&1u16.to_le_bytes()); // serial_count
-        data.extend_from_slice(&0u16.to_le_bytes());
-        data.push(slots);
-        data.extend_from_slice(&prop.to_le_bytes());
-        data.extend_from_slice(&[24, 8, 2, 25, 3]);
+        push_schema(
+            data,
+            class,
+            super_class,
+            u16::from(slots),
+            &[(0, slots, prop)],
+            &[24, 8, 2, 25, 3],
+        );
     }
 
     /// The slots a row expands into, and the flattened cache's copies of
@@ -5224,6 +5178,37 @@ mod tests {
             .collect();
         let usmap = Usmap::from_parts(schemas, HashMap::new()).unwrap();
         assert_eq!(flat_slots(&usmap, "A"), [("A".to_owned(), 0)]);
+    }
+
+    /// An entry with `array_size` 0 emits no slot, whatever its index, so a
+    /// schema may list more entries than its `prop_count`; the parent's slots
+    /// still start at the child's `prop_count`.
+    #[test]
+    fn array_size_0_entries_emit_no_slot() {
+        // Child(0) over Parent(1) over None(2); a(3), b(4), c(5), x(6), all
+        // IntProperty. Child's slots 0 and 2 leave a gap below prop_count 3.
+        for (prop_count, rows, want) in [
+            (
+                3,
+                &[(0, 1, 3), (2, 0, 4), (2, 1, 5), (3, 0, 4)][..],
+                &[("a", 0), ("c", 2), ("x", 3)][..],
+            ),
+            (0, &[(0, 0, 3), (7, 0, 4)][..], &[("x", 0)][..]),
+        ] {
+            let mut data = Vec::new();
+            push_names(&mut data, &["Child", "Parent", "None", "a", "b", "c", "x"]);
+            data.extend_from_slice(&0u32.to_le_bytes()); // enums
+            data.extend_from_slice(&2u32.to_le_bytes()); // schemas
+            push_schema(&mut data, 0, 1, prop_count, rows, &[2]);
+            push_schema(&mut data, 1, 2, 1, &[(0, 1, 6)], &[2]);
+            let usmap =
+                Usmap::from_bytes(&usmap_with(UsmapCompression::None, &data, data.len())).unwrap();
+            let want: Vec<_> = want
+                .iter()
+                .map(|&(name, slot)| (name.to_owned(), slot))
+                .collect();
+            assert_eq!(flat_slots(&usmap, "Child"), want, "prop_count {prop_count}");
+        }
     }
 
     #[test]

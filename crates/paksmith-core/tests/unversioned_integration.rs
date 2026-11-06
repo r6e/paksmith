@@ -404,7 +404,7 @@ mod tests {
     /// the gap is #379's whole point.
     #[test]
     fn unversioned_property_at_nonzero_schema_index_decodes_correctly() {
-        // prop_count=4 (Health@3 plus 3 transient/editor-only fillers).
+        // prop_count=4 (Health@3 plus gaps at slots 0-2).
         let usmap_bytes = build_sparse_schema_usmap_bytes(
             "Sparse",
             4,
@@ -433,12 +433,11 @@ mod tests {
     /// Schema with serializable properties at indices `[0, 2, 4]`
     /// (gaps). Tests that the decoder correctly maps each wire value
     /// to its declared `schema_index` slot when consecutive
-    /// serializable indices skip over filler slots.
+    /// serializable indices skip over gap slots.
     #[test]
     fn unversioned_property_with_gap_decodes_correctly() {
-        // prop_count=5 — five class properties total, three
-        // serializable at indices 0, 2, 4 (slots 1 and 3 are
-        // non-serializable filler).
+        // prop_count=5: five slots, three entries at indices 0, 2, 4
+        // (slots 1 and 3 are gaps).
         let usmap_bytes = build_sparse_schema_usmap_bytes(
             "Gapped",
             5,

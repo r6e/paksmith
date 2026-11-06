@@ -13,8 +13,8 @@ CUE4Parse tests the flag with no engine-version check.[^5]
 In unversioned mode, each export body is a sequence of `u16`
 fragments forming an `FUnversionedHeader` — each fragment encoding
 `(skip_count, value_count, has_zeros, is_last)` — optionally followed
-by a zero-mask byte run, then raw per-property bodies in
-schema-declared order. The reader needs the class schema to know each
+by a zero-mask byte run, then raw per-property bodies in slot order
+(see Per-property bodies). The reader needs the class schema to know each
 body's wire shape.
 
 The `PKG_UnversionedProperties` flag is package-scoped: either all
@@ -109,18 +109,18 @@ hardening*.
 
 ### Per-property bodies
 
-After the header + zero-mask, raw property values follow in
-schema-declared order. The reader iterates the class's schema (from
-the `.usmap`) sorted by `schema_index`, skips slots not marked
-serialised by the header, and reads each present slot as a type-sized
-payload — no name, no type tag, no body-size field.
+After the header + zero-mask, raw property values follow in slot
+order. The reader walks the object's slots in the index space below,
+skips slots not marked serialised by the header, and reads each
+present slot as a type-sized payload — no name, no type tag, no
+body-size field.
 
-The `schema_index` in the `.usmap` is the wire-declared absolute slot
-index (not the property's position in the file). The header's
-fragments address these same indices. Using the wire-declared value
-preserves correctness when a schema has gaps (transient, editor-only,
-or deprecated properties that occupy schema slots but are absent from
-`serializablePropertyCount`).
+A `.usmap` entry's `schema_index` is the index of its first slot
+within its own class, not the property's position in the file. The
+header's fragments address one index space per object: the class's
+own `prop_count` slots first, then its superclass's slots offset by
+the class's `prop_count`, and so on up the super-type chain[^8].
+Slots that `prop_count` counts but no entry covers are gaps.
 
 #### Type wire widths
 
@@ -226,7 +226,7 @@ After decompression, the schema data is parsed as:
 
 1. **Name table** — `u32` name count, then per entry: name length (`u8` for version < 2, `u16` for version ≥ 2) + that many UTF-8 bytes (no null terminator).
 2. **Enum table** — `u32` enum count (capped at `MAX_USMAP_ENUM_COUNT = 8192`), then per enum: name-table index (`i32`) + value count (`u8` for version < 3, `u16` for version ≥ 3; capped at `MAX_USMAP_VALUES_PER_ENUM = 1024`) + per value: for version ≥ 4 an explicit `u64` ordinal then a name-table index, otherwise just a name-table index (ordinal = positional index).
-3. **Schema table** — `u32` schema count, then per schema: name index, super-type name index (the index `-1` means no superclass[^7]; paksmith also reads the name `"None"` there as no superclass), `prop_count u16` (total slots including gaps), `serial_count u16` (serializable slot count), then `serial_count` property entries. Each entry: `schema_index u16`, `array_size u8`, name index (`i32`), then a type tree[^4]: the type byte, then for ArrayProperty (8), SetProperty (25) and OptionalProperty (28) one inner tree; for MapProperty (24) a key tree, then a value tree; for StructProperty (9) a struct-name index (`i32`); for EnumProperty (26) the underlying type's tree, then an enum-name index (`i32`); for every other type byte, nothing.
+3. **Schema table** — `u32` schema count, then per schema: name index, super-type name index (the index `-1` means no superclass[^7]; paksmith also reads the name `"None"` there as no superclass), `prop_count u16` (total slots including gaps), `serial_count u16` (entry count), then `serial_count` property entries. Each entry: `schema_index u16`, `array_size u8`, name index (`i32`), then a type tree[^4]: the type byte, then for ArrayProperty (8), SetProperty (25) and OptionalProperty (28) one inner tree; for MapProperty (24) a key tree, then a value tree; for StructProperty (9) a struct-name index (`i32`); for EnumProperty (26) the underlying type's tree, then an enum-name index (`i32`); for every other type byte, nothing. An entry covers `array_size` consecutive slots from its `schema_index`; an entry whose `array_size` is 0 covers none, so `serial_count` can exceed `prop_count`[^8].
 
 ## Variants
 
@@ -286,6 +286,10 @@ Additional implementation hardening notes:
 - **Decompressed size MUST match the header's stated value.** A
   decompressor that returns more or fewer bytes than declared
   indicates corruption or a decompression-bomb attempt; reject.
+- **An uncompressed payload MUST hold all `compressed_size` bytes,**
+  even when its tables end sooner. CUE4Parse and `unreal_asset` read
+  the payload whole and refuse a short one[^9]; paksmith refuses it as
+  `MappingsParseFault::Truncated` at the payload's start.
 - **Brotli: reject the large-window extension.** RFC 7932 caps the
   window at 16 MiB (`WBITS` ≤ 24). The large-window extension is
   signalled by a first byte of `0x11`, whose window code RFC 7932 §9.1
@@ -312,6 +316,11 @@ Additional implementation hardening notes:
   super-type chain `A → B → C → A` would loop indefinitely in
   `get_all_properties` without depth bounding. Paksmith uses
   `MAX_INHERITANCE_DEPTH = 64` as the safety net.
+- **A class's slots MUST lie below its `prop_count`.** A slot at or
+  past it falls in the superclass's range. Check the slots once the
+  entries are read, not the entry count: an `array_size` 0 entry emits
+  no slot, so `serial_count > prop_count` is valid. Paksmith refuses
+  such a slot as `MappingsParseFault::PropCountBelowMaxSchemaIndex`.
 - **Unknown property type bytes MUST stop the property walk.** A
   reader that silently skips an unknown type byte loses cursor
   position because unversioned bodies have no per-property size
@@ -357,6 +366,8 @@ tests can read the live value without duplicating the literal.
   - The engine-version branch is refused past 65,536 code units, as `MappingsParseFault::EngineBranchMalformed`; CUE4Parse[^3] has no fixed cap and checks the length only against the bytes left in the file. Paksmith reads past the engine version and keeps none of it; CUE4Parse keeps it as `UsmapParser.EngineVersion`.
   - A name index of `-1` at a property name, an EnumProperty's enum name, a StructProperty's struct name or an enum value's name is refused as `MappingsParseFault::NameIndexOutOfRange`; CUE4Parse[^7] reads it as no name at those sites (`UsmapProperties.cs` L31, L50, L53 and `UsmapParser.cs` L111, L119 at the same revision). A super-type index below `-1` is refused too; UAssetAPI reads any negative index as no name (`atenfyr/UAssetAPI/UAssetAPI/Unversioned/UsmapBinaryReader.cs@b4e8a012939295a6fd890ddc64e57ea78b709b95` L84-L89; `Unversioned/Usmap.cs` L1231 at the same revision reads the super type with it). `unreal_asset` refuses every negative index, a `-1` super included (`AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/unversioned/usmap_reader.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` L51-L58; `unversioned/mod.rs` L99 at the same revision reads the super type with it).
   - A super-type name of `"None"` or `""` is no superclass to paksmith, even when the schema table holds a schema of that name. CUE4Parse looks the super type up by name in the schema table (`FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/MappingsSchema.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L25-L33; `MappingsProvider/Usmap/UsmapParser.cs` L133-L137 at the same revision fills the table by schema name), so it inherits from such a schema.
+  - An uncompressed payload shorter than `compressed_size` is refused. UAssetAPI reads an uncompressed payload from the file itself (`atenfyr/UAssetAPI/UAssetAPI/Unversioned/Usmap.cs@b4e8a012939295a6fd890ddc64e57ea78b709b95` L1120-L1122) and reads its extensions only if bytes remain (L1350), and its own tests load `TestManyAssets/F1Manager2023/F1Manager2023.usmap` (`UAssetAPI.Tests/AssetUnitTests.cs` L401 at the same revision), which is 2,480 bytes short.
+  - A slot at or past its class's `prop_count` is refused as `MappingsParseFault::PropCountBelowMaxSchemaIndex`. CUE4Parse looks a header index up in the class's own slots before offsetting to the superclass (`FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/MappingsSchema.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L37-L46), so it finds such a slot. UAssetAPI subtracts `prop_count` first and then looks the slot up by its index (`atenfyr/UAssetAPI/UAssetAPI/MainSerializer.cs@b4e8a012939295a6fd890ddc64e57ea78b709b95` L435-L454; `Unversioned/Usmap.cs` L1243-L1249 at the same revision), so it never reaches such a slot. `unreal_asset` also subtracts first, then takes the class's entry at that position in its expanded entries, whatever its `schema_index` (`AstroTechies/unrealmodding/unreal_asset/unreal_asset_properties/src/lib.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` L562-L582; `unreal_asset_base/src/containers/indexed_map/mod.rs` L565-L584, L628-L634 at the same revision).
 
 ## Paksmith implementation
 
@@ -379,3 +390,5 @@ tests can read the live value without duplicating the literal.
 [^5]: `gildor2/UEViewer/Unreal/UnObject.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L901-L912 (property bodies are read unversioned when `Ar.Game >= GAME_UE4(26)` and the flag is set, and tagged otherwise) and L920 (the same gate on the object-GUID check); `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Readers/FAssetArchive.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L39 (`HasUnversionedProperties` tests the flag alone).
 [^6]: `atenfyr/UAssetAPI/UAssetAPI/PropertyTypes/Objects/EnumPropertyData.cs@b4e8a012939295a6fd890ddc64e57ea78b709b95` reads an unversioned enum value as the underlying type only in a `Normal` or `CanBeZero` context (L42; `UAssetAPI/UAPUtils.cs` L270-L273 at the same revision) and as an `FName` otherwise (L127). At the same revision, `ArrayPropertyData.cs` (L168) reads Array elements in the `Array` context, `SetPropertyData.cs` (L57-L65) reads a Set's removed and kept elements through it, and `MapPropertyData.cs` (`MapTypeToClass`, L102; called at L115-L116 and L155) reads a Map's keys, values and removed keys in the `Map` context. Commit `27d4e7a235834a64e4881403d4ab13c873f4f1f5` ("enums in maps/arrays are always FNames") replaced a 7-byte skip after each Array element read as its underlying type, added by `bcb685ae7b3fe4b0efd0be63d1b33f50cfc8698c` with the Lies of P test assets. In the test assets under `UAssetAPI.Tests/TestAssets/` at b4e8a01, the `Array` of a `ByteProperty`-backed enum `ItemHandleInfo._allow_blade_shape_type` (typed in `LiesOfP.usmap`) sits at 0x45E4C of `TestManyAssets/LiesOfP/ItemInfo.uexp` as a count of 5 and five FNames, name-table entries 0x800-0x804 of `ItemInfo.uasset`, each `ELBladeShapeType::E_*`; the first `Map` key of a `ByteProperty`-backed enum is an FName at 0x2A of `TestManyAssets/F1Manager2023/FixedStaff.uexp` (`CharacterLoadout.loadout`, naming `ECharacterPartType::Head`) and at 0xED5 of `TestJson/Atlas_6x4_Semi.uexp` (`MTDashboard.GaugeConfigs`, naming `EMTDashboardGaugeType::RPM`). `UAssetAPI.Tests/AssetUnitTests.cs` (L399, L401, L508) asserts that each of those packages re-serializes to identical bytes (L344, L477). Those bytes show `ByteProperty`-backed Array elements and Map keys only; Set elements, Map values, removed entries and wider underlying types rest on the UAssetAPI reads above and on CUE4Parse's `EnumProperty.cs` at `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` (L19, L39-L42).
 [^7]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapArchiveExtensions.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L8, L11-L15 — `ReadName` returns no name for the index `-1` (`InvalidNameIndex`); `UsmapProperties.cs` L8 at the same revision reads the super type with it.
+[^8]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapProperties.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L13-L21 — each entry fills `ArraySize` slots from its index, and an `ArraySize` of 0 fills none; L10-L11 and L24 keep `prop_count` without comparing it to the entry count. `CUE4Parse/MappingsProvider/MappingsSchema.cs` L37-L46 at the same revision looks a header index up in the class's own slots, then, at or past `prop_count`, in its superclass's at the index less `prop_count`. In `atenfyr/UAssetAPI` at `b4e8a012939295a6fd890ddc64e57ea78b709b95`, `UAssetAPI.Tests/TestAssets/TestJson/Outriders.usmap`'s schema `Weapon` lists 81 entries under `prop_count` 80, and `UAssetAPI.Tests/TestAssets/TestUE5_3/RON/ReadyOrNot.usmap`'s `ReadyOrNotBackend` lists 10 under 9; each has one `array_size` 0 entry.
+[^9]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapParser.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7` L69-L73 — with no compression the two sizes must be equal, and `ReadExactly` reads `compressed_size` bytes. Its archive is an OffiUtils `RandomAccessStream` (`CUE4Parse/UE4/Readers/FArchive.cs` L19 at the same revision; `Directory.Packages.props` at the same revision pins OffiUtils 3.2.0, whose `NotOfficer/Utils/src/OffiUtils/RandomAccessStream.cs@3c6391fac38e2de58eb6bcfa399bba78645bce4f` L6 derives it from `System.IO.Stream`), so .NET's `Stream.ReadExactly` throws on a short read (Microsoft Learn, `System.IO.Stream.ReadExactly`). `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/unversioned/mod.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` L270-L271 reads `compressed_size` bytes with `read_exact`.
