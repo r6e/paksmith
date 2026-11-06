@@ -2425,38 +2425,56 @@ mod tests {
         assert!(!logs_contain("exceeds MAX_INHERITANCE_DEPTH"));
     }
 
+    /// A v0 `.usmap` with names Hero, None and X and one schema, Hero(0) over
+    /// None(1) at `prop_count`, whose entries are IntProperty rows of
+    /// `(schema_index, array_size, name)`.
+    fn hero_usmap(prop_count: u16, rows: &[(u16, u8, i32)]) -> Vec<u8> {
+        let mut data = Vec::new();
+        push_names(&mut data, &["Hero", "None", "X"]);
+        data.extend_from_slice(&0u32.to_le_bytes()); // enums
+        data.extend_from_slice(&1u32.to_le_bytes()); // schemas
+        push_schema(&mut data, 0, 1, prop_count, rows, &[2]);
+        usmap_with(UsmapCompression::None, &data, data.len())
+    }
+
     /// A slot at or past its class's `prop_count` is refused once the class's
     /// entries are read, however many entries it lists: it would land in the
     /// parent's slots in `get_all_properties` (#391, #413).
     #[test]
     fn parse_usmap_prop_count_below_max_schema_index_rejected() {
-        // Hero(0) over None(1); every entry is X(2), an IntProperty.
-        for (prop_count, entries, max_schema_index) in [
-            (0, &[(0, 1)][..], 0),
-            (1, &[(0, 1), (1, 1)][..], 1),
-            (2, &[(5, 1)][..], 5),
-            (2, &[(5, 1), (0, 1)][..], 5), // the largest slot, not the last
-            (1, &[(0, 0), (0, 2)][..], 1),
+        for (prop_count, rows, max_schema_index) in [
+            (0, &[(0, 1, 2)][..], 0),
+            (1, &[(0, 1, 2), (1, 1, 2)][..], 1),
+            (2, &[(5, 1, 2)][..], 5),
+            (2, &[(5, 1, 2), (0, 1, 2)][..], 5), // the largest slot, not the last
+            (2, &[(3, 1, 2), (5, 1, 2)][..], 5), // the largest slot, not the first past prop_count
+            (1, &[(0, 0, 2), (0, 2, 2)][..], 1),
         ] {
-            let rows: Vec<_> = entries
-                .iter()
-                .map(|&(slot, size)| (slot, size, 2))
-                .collect();
-            let mut data = Vec::new();
-            push_names(&mut data, &["Hero", "None", "X"]);
-            data.extend_from_slice(&0u32.to_le_bytes()); // enums
-            data.extend_from_slice(&1u32.to_le_bytes()); // schemas
-            push_schema(&mut data, 0, 1, prop_count, &rows, &[2]);
             assert_eq!(
-                parse_fault(&usmap_with(UsmapCompression::None, &data, data.len())),
+                parse_fault(&hero_usmap(prop_count, rows)),
                 crate::error::MappingsParseFault::PropCountBelowMaxSchemaIndex {
                     schema: "Hero".to_owned(),
                     prop_count,
                     max_schema_index,
                 },
-                "prop_count {prop_count}, entries {entries:?}"
+                "prop_count {prop_count}, rows {rows:?}"
             );
         }
+    }
+
+    /// A fault in a schema's entries is reported before its slots are
+    /// checked against `prop_count`, however many entries it lists.
+    #[test]
+    fn an_entry_fault_is_reported_before_the_slot_check() {
+        // Slot 0 is at prop_count 0, and the second entry's name index is
+        // past the three-name table.
+        assert_eq!(
+            parse_fault(&hero_usmap(0, &[(0, 1, 2), (0, 1, 99)])),
+            crate::error::MappingsParseFault::NameIndexOutOfRange {
+                idx: 99,
+                table_len: 3
+            }
+        );
     }
 
     /// Build a minimal v0 `.usmap` with a 2-name table (`"X"`, `"Y"`)

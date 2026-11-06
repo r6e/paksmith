@@ -1126,10 +1126,12 @@ mod tests {
         // properties are declared at WIRE schema_indices 0 and 2
         // (sparse: no entry covers slot 1, a gap).
         //
-        // Witness for the wire-as-absolute-index convention:
+        // Witness that the wire `schema_index`, not the entry's
+        // position, keys the slot (per class; for a root class like
+        // Hero, the index the header addresses):
         //   CUE4Parse `UsmapProperties.ParseStruct` writes
         //   `properties[propInfo.Index + j] = clone` keyed by the
-        //   wire-declared index; `UObject.DeserializePropertiesUsmap`
+        //   wire-declared index; `UObject.DeserializePropertiesUnversioned`
         //   walks `FIterator(header)` and calls
         //   `propMappings.TryGetValue(slot_idx, ...)` with the
         //   header's emitted slot indices.
