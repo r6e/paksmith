@@ -1,17 +1,15 @@
 # UBulk (`.ubulk`)
 
 > Bulk-data sidecar for UE assets — large payloads (texture mips, audio
-> bodies, animation streams) that the engine streams separately from
-> the main `.uasset` / `.uexp`.
+> bodies) that a package's bulk-data records place in a file separate
+> from the main `.uasset` / `.uexp`.
 
 ## Overview
 
-`.ubulk` holds the bulk-data payloads referenced by a UE asset:
-high-resolution texture mip chains, audio sample buffers, animation
-streaming data, anything large enough that the engine wants to demand-
-load it rather than carrying it inline. The format is structureless —
-a flat byte stream whose interpretation depends entirely on the
-asset's bulk-data records (which live in `.uasset`).
+`.ubulk` holds bulk-data payloads referenced by a UE asset, such as
+high-resolution texture mip chains and audio sample buffers. The
+format is structureless — a flat byte stream whose interpretation
+depends entirely on the asset's bulk-data records.
 
 Multiple bulk-data records inside one `.uasset` carve `.ubulk` into
 per-record byte ranges with `(offset, size, flags)` metadata. The
@@ -31,19 +29,18 @@ the per-record mechanics.
 **Paksmith parser status: `complete`** (Phase 3b PRs #480 / #481 /
 #483 + Task 6). `BulkDataResolver` handles all four storage tiers
 (inline / uexp-resident / streaming `.ubulk` / optional-streaming
-`.uptnl`), gated by the full per-record + per-export + per-package
+`.uptnl`), gated by the per-record + per-export + per-package
 defense chain (see [`bulk-data.md`](bulk-data.md)). The Phase 2e
 "detection-only `tracing::warn!`" surface is gone; the resolver is
 constructed inside `Package::read_from_pak` and runs the `.ubulk` /
 `.uptnl` loader closures only on demand (see
-[Paksmith implementation](#paksmith-implementation)). Per-format export (texture mips / vertex bytes /
-audio chunks) lands in the format-handler sub-phases.
+[Paksmith implementation](#paksmith-implementation)).
 
 ## Versions
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| All UE4 + UE5 | Structureless byte stream; the wire shape is "whatever the `.uasset`'s `FByteBulkData` records say". The shape of the records evolves (compression flags, offset width), not the `.ubulk` itself. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Package.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
+| All UE4 + UE5 | Structureless byte stream; the wire shape is "whatever the `.uasset`'s `FByteBulkData` records say". | `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Package.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
 
 `.ubulk` as a file has no version field; record-shape variance lives
 inside the parent `.uasset`'s bulk-data records.
@@ -52,7 +49,7 @@ inside the parent `.uasset`'s bulk-data records.
 
 | offset | size | endian | name | type | semantics |
 |--------|------|--------|------|------|-----------|
-| 0 | filesize | — | `bulk_records` | byte stream | Concatenation of bulk-data record payloads. Boundaries published by the `.uasset`'s bulk-data records, not by any structure in this file. |
+| 0 | filesize | — | `bulk_records` | byte stream | Bulk-data record payloads. Boundaries published by the `.uasset`'s bulk-data records, not by any structure in this file. |
 
 A bulk-data record's flags may mark its payload compressed: see
 [`bulk-data.md`](bulk-data.md) §*Payload decompression* for the zlib
@@ -106,7 +103,7 @@ Reader logic to materialize the payload:
    LZO and BitWindow flags see [`bulk-data.md`](bulk-data.md)
    §*LZO and BitWindow (fail-closed)*. With no compression flag set,
    hand the 32 raw bytes to the per-asset-class decoder (texture mip,
-   audio sample buffer, anim stream, etc.).
+   audio sample buffer, etc.).
 
 Multiple records inside one `.uasset` carve the `.ubulk` into
 adjacent or overlapping byte ranges; the records carry all the
@@ -115,18 +112,15 @@ structure, the file carries the bytes.
 ## Variants
 
 None on the wire — `.ubulk` is structureless. Variation comes from
-the bulk-data records inside the parent `.uasset`, which paksmith
-will document under `texture/`, `audio/`, etc. as those families
-get sub-phase 3e/3f/3g/3h implementation work.
+the bulk-data records inside the parent `.uasset`.
 
 ## Caps & limits
 
 ### Format-defined limits (wire-imposed)
 
 - **None at the file level.** `.ubulk` is structureless by format:
-  no header, no length field, no terminator. The on-disk byte count
-  is just the union of all per-record byte ranges; any byte not
-  claimed by a record is dead space (format-permitted but unused).
+  no header, no length field, no terminator. Any byte not claimed
+  by a record is dead space (format-permitted but unused).
 - **Per-record bounds** are imposed by the parent `.uasset`'s
   `FByteBulkData` record (the record carries the `offset_in_file`,
   `size_on_disk`, and `element_count` metadata that publishes each
@@ -138,8 +132,8 @@ get sub-phase 3e/3f/3g/3h implementation work.
 ### Implementation hardening (recommended for any parser)
 
 A reader that materializes `.ubulk` payloads (paksmith does as of
-Phase 3b — see [`bulk-data.md`](bulk-data.md) for the full cap
-chain) MUST cap before allocation:
+Phase 3b — see [`bulk-data.md`](bulk-data.md) for its record-level
+caps) MUST cap before allocation:
 
 - **Per-record uncompressed-size cap** (analog to
   `MAX_UNCOMPRESSED_ENTRY_BYTES` in the pak reader). The record's
@@ -155,19 +149,13 @@ chain) MUST cap before allocation:
   `size_on_disk` wraps to a small number under naive arithmetic and
   silently passes an unsigned cap comparison.
 
-See `docs/security/allocation-caps.md` for the broader policy that
-paksmith's Phase 3b cap constants follow.
+See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
 - **Fixture:** The Worked example above is byte-exact and self-
   contained — the file's structurelessness means a 32-byte synthetic
-  hex blob fully specifies the wire shape. A real-cooked
-  `.ubulk` + parent `.uasset` pair (for end-to-end cross-validation
-  of the records-driven decode) is tracked at
-  [#347](https://github.com/r6e/paksmith/issues/347);
-  `tests/fixtures/real_v8b_split.pak` covers `.uasset` + `.uexp` but
-  not `.ubulk`.
+  hex blob fully specifies the wire shape.
 - **Hex anchor commands:**
   ```
   # Synthesize the 32-byte structureless .ubulk from the Worked example:
@@ -176,16 +164,13 @@ paksmith's Phase 3b cap constants follow.
   A conformant reader fed these 32 bytes plus an `FByteBulkData`
   record with `offset=0, size=32, no compression` MUST return the
   same 32 bytes as the bulk payload.
-- **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^2].
-  Both read `.ubulk` payloads driven by `FByteBulkData` records;
-  paksmith's structurelessness claim and the records-on-the-asset-
-  side decode shape are consistent with both. Paksmith's
-  `BulkDataResolver` (Phase 3b) follows the same records-driven
-  decode shape.
-- **Known divergences:** none specific to the `.ubulk` file shape.
-  Record-level decode divergences (e.g. SizeOnDisk widening,
-  reserved-bit handling) are documented in
-  [`bulk-data.md`](bulk-data.md) §Verification.
+- **Cross-validation oracle:** CUE4Parse[^1]. It reads `.ubulk`
+  payloads driven by `FByteBulkData` records; paksmith's
+  structurelessness claim and the records-on-the-asset-side decode
+  shape are consistent with it.
+- **Known divergences:** documented in [`bulk-data.md`](bulk-data.md)
+  §Verification, among them `SizeOnDisk` widening, reserved-bit
+  handling and where a record's read starts inside its `.ubulk`.
 
 ## Paksmith implementation
 
@@ -210,12 +195,11 @@ gone.
 - `Package::resolve_bulk_for_export(export_idx)` — first-call lazy
   resolution + per-call `OnceLock`-cached return. Drives
   `BulkDataResolver::resolve_all` over the records previously
-  registered via `Package::insert_bulk_records` (the 3e/3g/3h
-  typed-reader hook), charging them against a bulk-read ledger of the
-  call's own (see [`bulk-data.md`](bulk-data.md)).
+  registered via `Package::insert_bulk_records` (the typed-reader
+  hook), charging them against a bulk-read ledger of the call's own
+  (see [`bulk-data.md`](bulk-data.md)).
 
-**Error variants:** see [`bulk-data.md`](bulk-data.md) §Caps & limits
-for the full list. `.ubulk`-specific:
+**Error variants** (`.ubulk`-specific):
 - `AssetParseFault::MissingCompanionFile { kind: CompanionFileKind::Ubulk }` —
   fires when a streaming-tier record references `.ubulk` bytes but
   the companion is absent from the pak.
@@ -223,8 +207,9 @@ for the full list. `.ubulk`-specific:
   fires if `.ubulk` exceeds `MAX_UBULK_FILE_SIZE` (16 GiB) at the
   lazy-load boundary.
 
-**Cap constants** (defined in `crates/paksmith-core/src/asset/bulk_data.rs`):
-see [`bulk-data.md`](bulk-data.md) §*Implementation hardening*.
+**Cap constants:** defined in `crates/paksmith-core/src/asset/bulk_data.rs`;
+[`bulk-data.md`](bulk-data.md) §*Implementation hardening* covers the
+record-level ones.
 
 **Phase plan:**
 - Phase 3b — `docs/plans/phase-3b-bulk-data-resolver.md`. Resolver
@@ -234,5 +219,4 @@ see [`bulk-data.md`](bulk-data.md) §*Implementation hardening*.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Package.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle. The `FByteBulkData.Serialize` family covers the in-`.uasset` records that drive `.ubulk` decoding.
-[^2]: `AstroTechies/unrealmodding/unreal_asset/src/asset.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle. Bulk-data reading is supported here; paksmith's Phase 3b `BulkDataResolver` cross-validates against this shape (see [`bulk-data.md`](bulk-data.md) §Verification).
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Package.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle. It attaches the `.ubulk` as a payload archive (L178-L183); `CUE4Parse/UE4/Assets/Objects/TBulkData.cs` (`GetBulkArchive`, L109-L161) and `FByteBulkData.cs` (`ReadBulkDataInto`, L93-L117) at the same commit read each record's bytes from it: the flags pick the archive, and the read takes `SizeOnDisk` bytes from `OffsetInFile`, or from 0 when the archive is exactly `SizeOnDisk` bytes long (`TBulkData.cs` L131, L144).

@@ -114,7 +114,7 @@ below directly), the constructor reads:
 |-------|-------|------|--------|------|-----------|
 | 1 | `BulkDataFlags` | 4 | LE | `u32` (`EBulkDataFlags` bitmask) | Storage tier + compression + size-format selector. Bit allocations per the catalog below. |
 | 2 | `ElementCount` | 4 or 8 | LE | `i32` / `i64` | Number of elements. 8 bytes (`i64`) when `BULKDATA_Size64Bit` (bit 13) is set, otherwise 4 bytes (`i32`). Signed on both widths. For byte bulk data, equals the uncompressed byte count. |
-| 3 | `SizeOnDisk` | 4 or 8 | LE | `u32` / `u64` | Bytes occupied by the on-wire payload (post-compression if applicable). With `BULKDATA_Size64Bit` unset: 4 bytes `u32`. With set: 8 bytes read as `u64`. **Reference deviation:** CUE4Parse's reference implementation reads 8 bytes signed and truncates to the low 32 bits (`(uint) Ar.Read<long>()`), effectively capping `SizeOnDisk` at ~4 GiB. Paksmith reads the full `u64` and relies on `MAX_BULK_DATA_SIZE` (8 GiB) — and `MAX_BULK_DATA_COMPRESSED_SIZE` (512 MiB) for compressed records — to cap pathological values. The paksmith policy is strictly safer than the reference truncation: a wire value like `0x0000_0001_0000_0000` (4 GiB + 0) is interpreted as `4_294_967_296` by paksmith (caught by the 8 GiB cap on a per-record basis, or by the resolver's per-package budget) instead of silently truncated to `0` bytes. Legitimate cooked content has `SizeOnDisk` well under 4 GiB so behavior matches the reference on valid input. |
+| 3 | `SizeOnDisk` | 4 or 8 | LE | `u32` / `u64` | Bytes occupied by the on-wire payload (post-compression if applicable). With `BULKDATA_Size64Bit` unset: 4 bytes `u32`. With set: 8 bytes read as `u64`. **Reference deviation:** CUE4Parse's reference implementation reads 8 bytes signed and truncates to the low 32 bits (`(uint) Ar.Read<long>()`), effectively capping `SizeOnDisk` at ~4 GiB. Paksmith reads the full `u64` and relies on `MAX_BULK_DATA_SIZE` (8 GiB) — and `MAX_BULK_DATA_COMPRESSED_SIZE` (512 MiB) for compressed records — to cap pathological values. The paksmith policy is strictly safer than the reference truncation: a wire value like `0x0000_0001_0000_0000` (4 GiB + 0) is interpreted as `4_294_967_296` by paksmith instead of silently truncated to `0` bytes. Legitimate cooked content has `SizeOnDisk` well under 4 GiB so behavior matches the reference on valid input. |
 | 4 | `OffsetInFile` | 8 or 4 | LE | `i64` / `i32` | Byte offset into the containing file. Width is gated on the `BULKDATA_AT_LARGE_OFFSETS` UE version constant (object version 198, before UE 4.0): 8 bytes (`i64`) for that range and later; 4 bytes (`i32`) on older packages. Paksmith's UE 4.14+ asset floor is past this gate, so paksmith readers always see 8 bytes. **Pre-fixup wire value**: a reader MUST add `Ar.Owner.Summary.BulkDataStartOffset` to the read value UNLESS `BULKDATA_NoOffsetFixUp` (bit 16) is set; an in-stream payload does not use it. |
 | 5 | *(conditional)* | 2 | — | skip | When `BULKDATA_BadDataVersion` (bit 15) is set, `Ar.Position += sizeof(ushort)` (2 bytes). The reader then CLEARS the `BULKDATA_BadDataVersion` bit from `BulkDataFlags` (does not propagate to downstream consumers). |
 | 6 | *(conditional)* | 12–20 | — | skip | When `BULKDATA_DuplicateNonOptionalPayload` (bit 14) is set, three additional fields follow: `DuplicateFlags: EBulkDataFlags` (4 bytes), `DuplicateSizeOnDisk` (4 or 8 bytes gated on `BULKDATA_Size64Bit`), `DuplicateOffset` (4 or 8 bytes gated on `BULKDATA_AT_LARGE_OFFSETS`). Total additional bytes: 12 (neither gate), 16 (one gate), or 20 (both gates). |
@@ -232,11 +232,10 @@ dispatch table.
 ### Payload decompression
 
 When `BULKDATA_SerializeCompressedZLIB` is set, the on-disk payload is
-zlib-compressed. In the engine this routes through
-`FArchive::SerializeCompressed`, which writes the **chunked
-`FCompressedChunkInfo` framing**. Each `FCompressedChunkInfo` is two
-little-endian `i64`s (`CompressedSize`, `UncompressedSize`; the
-pre-UE4 `u32` layout is below paksmith's version floor). The layout:
+zlib-compressed in the **chunked `FCompressedChunkInfo` framing**.
+Each `FCompressedChunkInfo` is two little-endian `i64`s
+(`CompressedSize`, `UncompressedSize`; the pre-UE4 `u32` layout is
+below paksmith's version floor). The layout:
 
 1. **Tag record** — `CompressedSize` carries the magic:
    `PACKAGE_FILE_TAG` (`0x9E2A83C1`, v1) or `ARCHIVE_V2_HEADER_TAG`
@@ -275,21 +274,21 @@ deviations are all fail-closed:
 - **Pre-parse claim cap**: `ElementCount` (the decompressed-size
   claim) is capped at `MAX_BULK_DATA_SIZE` (8 GiB) before any
   framing parse — the per-record transient-output ceiling,
-  independent of the resolver's 16 GiB per-package budget.
+  independent of the resolver's 16 GiB per-package budget
+  (`MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE`), which charges a zlib
+  record its `ElementCount` and any other record its `SizeOnDisk`.
 - **Little-endian only**: the byte-swapped tag forms
   (`PACKAGE_FILE_TAG_SWAPPED`, 64-bit-swapped v1/v2 tags) are
   recognized and rejected, not swap-decoded — consistent with the
   parser-wide LE policy.
 - **Zlib only**: v2 named formats (None/Oodle/Gzip/LZ4) surface
   `UnsupportedBulkCompression`; a v2 inline-FString format name is
-  rejected without parsing the string (no known bulk-data producer).
+  rejected without parsing the string.
 - **Exact totals**: the summary's uncompressed total must equal
-  `ElementCount` exactly (the reference decoder tolerates `<=`; the
-  engine writer always emits `==`, so a mismatch is treated as
-  corruption), chunk-table sums must equal the summary, each chunk
-  must inflate to exactly its claimed size, and the framing must
-  consume the record's `SizeOnDisk` region exactly (no trailing
-  bytes).
+  `ElementCount` exactly (the reference decoder tolerates `<=`),
+  chunk-table sums must equal the summary, each chunk must inflate
+  to exactly its claimed size, and the chunk table's compressed sizes
+  must sum to exactly the rest of the record's `SizeOnDisk` region.
 - **Bounded allocation**: the chunk table's byte size is validated
   against the real remaining input before it is walked, the table
   is validated and consumed in place (never copied into an owned
@@ -297,9 +296,11 @@ deviations are all fail-closed:
   input length (never from wire claims), growing only as real bytes
   are produced — each chunk's read is capped at its claimed size + 1
   so an over-long stream is detected rather than inflated.
-- A **zero-size record** carries no framing at all (the engine
-  early-outs before writing the header); empty input with
-  `ElementCount = 0` decodes to an empty payload.
+- A zlib record with `SizeOnDisk = 0` decodes to an empty payload,
+  without reading any framing, only when `ElementCount` is also 0;
+  with a nonzero `ElementCount` it fails as truncated framing.
+  CUE4Parse gives any record with `SizeOnDisk = 0` an empty payload
+  (`TBulkData.cs` L45-L49).
 
 ### Alternate read paths (UE 5.2+ pre-baked metadata)
 
@@ -391,8 +392,9 @@ record's on-wire shape: 4 bytes total instead of 20.
   `BULKDATA_Size64Bit` is unset; 8 bytes read as `u64` when set
   (paksmith deviates from the CUE4Parse reference truncation —
   see the wire-layout table's `SizeOnDisk` row). Effective bound
-  for paksmith is `MAX_BULK_DATA_SIZE` (8 GiB) per-record and
-  `MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE` (16 GiB) cumulatively.
+  for paksmith is `MAX_BULK_DATA_SIZE` (8 GiB) per record, or
+  `MAX_BULK_DATA_COMPRESSED_SIZE` (512 MiB) when any compression flag
+  is set.
 - **`OffsetInFile`**: `i32` (max `i32::MAX` ≈ 2.1 GiB) or `i64` (max
   `i64::MAX` ≈ 9.2 EiB) gated on `BULKDATA_AT_LARGE_OFFSETS`.
 - **`DuplicateFlags`** (when present): `u32`.
@@ -502,9 +504,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 ## Verification
 
 - **Fixture:** The 20-byte minimal-header Worked example above is
-  byte-exact and self-contained. Real-cooked `FByteBulkData` records
-  appear in every texture / mesh / audio / animation export; Phase 3
-  fixtures will exercise the multi-tier dispatch end-to-end.
+  byte-exact and self-contained.
 - **Hex anchor commands:**
   ```
   # Synthesize the 20-byte minimal FByteBulkDataHeader from the
@@ -523,8 +523,8 @@ See `docs/security/allocation-caps.md` for the broader policy.
      the full `u64` (no upper-bit truncation). CUE4Parse uses
      `(uint) Ar.Read<long>()` to truncate to the low 32 bits.
      Paksmith's policy is strictly safer — attacker-controlled
-     upper bits surface via `MAX_BULK_DATA_SIZE` (8 GiB) instead
-     of silently masking. See the wire-layout `SizeOnDisk` row.
+     upper bits surface instead of silently masking. See the
+     wire-layout `SizeOnDisk` row.
   2. **Reserved-bit hard-reject:** paksmith's `validate()` rejects
      bits 19-27 and 31; the reference warns. See "Paksmith
      deviation" in the `BulkDataFlags` bit catalog and the
@@ -537,6 +537,22 @@ See `docs/security/allocation-caps.md` for the broader policy.
      separate-file row, so it routes the record by its other bits:
      `0x00000801` reads the package at its fixed-up `OffsetInFile`, and
      `0x00000800` alone fails with `BulkDataNoTierFlag`.
+  4. **Companion read position:** CUE4Parse at `cf74fc32` starts a
+     `.ubulk` or `.uptnl` read at position 0 when the companion
+     archive is exactly `SizeOnDisk` bytes long, and at `OffsetInFile`
+     otherwise (`TBulkData.cs` L131, L144). Its file provider hands
+     that archive over already cut to the record's range
+     (`CUE4Parse/FileProvider/AbstractFileProvider.cs` L584-L585 pass
+     the record's header to the companion reader, and
+     `CUE4Parse/UE4/Pak/PakFileReader.cs` L91-L95 read `SizeOnDisk`
+     bytes from `OffsetInFile`). Paksmith loads the whole companion
+     and always starts at the fixed-up `OffsetInFile`. Both read the
+     same bytes for a record inside its companion. Given a whole
+     companion exactly `SizeOnDisk` bytes long, which
+     `CUE4Parse/UE4/Assets/Package.cs`'s archive and byte-array
+     constructors accept (L39-L47, L49-L57), CUE4Parse reads from 0
+     whatever the offset, while paksmith refuses any positive offset
+     with `BulkDataOffsetOob`.
 
 ## Paksmith implementation
 
@@ -564,9 +580,9 @@ audio: 3f) consume the resolved bytes. The chunked zlib framing under
 bulk compression are intentionally **fail-closed** rather than decoded
 — [#559](https://github.com/r6e/paksmith/issues/559) investigated both
 and resolved them so (LZO is a UE3-era codec out of paksmith's UE4.14+
-cooked-asset scope, with no in-scope oracle; BitWindow is a
-deprecated, inert flag with no codec to decode). See
-[LZO and BitWindow](#lzo-and-bitwindow-fail-closed) above.
+cooked-asset scope; BitWindow is a deprecated, inert flag with no
+codec to decode). See [LZO and BitWindow](#lzo-and-bitwindow-fail-closed)
+above.
 
 The resolver loads each `.ubulk` / `.uptnl` companion at most once per
 package; a companion that fails to load reports that failure again on
