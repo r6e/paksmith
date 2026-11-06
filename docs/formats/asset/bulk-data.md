@@ -20,8 +20,8 @@ of the companion sidecar files.
 Concretely, an `FByteBulkData` record on the wire publishes:
 
 1. **`BulkDataFlags: u32`** — bitfield describing the storage tier
-   (inline / uexp / `.ubulk` / `.uptnl`), compression, encryption, and
-   size-format choices.
+   (inline / uexp / `.ubulk` / `.uptnl`), compression, and size-format
+   choices.
 2. **`ElementCount`** — number of elements (bytes for byte bulk data;
    the "uncompressed" element count).
 3. **`SizeOnDisk`** — bytes occupied by the on-wire payload (post-
@@ -466,14 +466,17 @@ A `FByteBulkDataHeader` reader MUST:
   rather than read from a guessed file. A mis-dispatched record reads
   the wrong bytes; the bounds checks above keep the read inside its
   source.
-- **Reject mis-aligned encrypted regions** when the payload tier
-  carries encrypted blocks (per the parent format's encryption
-  conventions; see [`../crypto/aes-pak.md`](../crypto/aes-pak.md)).
 - **For `BULKDATA_SerializeCompressedZLIB` payloads**: bound the
   decompressed output at `MAX_BULK_DATA_SIZE` (paksmith enforces
   this on the `ElementCount` claim before parsing the chunk
   framing); the `ElementCount` field publishes the expected
-  decompressed size (verify the framing totals match).
+  decompressed size (verify the framing totals match). Reject a
+  chunk size of zero or less, and any negative summary or chunk-entry
+  size, before using it. After matching the summary's uncompressed
+  total to `ElementCount`, compute the chunk count, the chunk table's
+  byte size (16 bytes per chunk) and the sums of the chunk sizes with
+  overflow-checked arithmetic, and check that the table fits in the
+  bytes left in the record before reading it.
 - **For `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile`**:
   surface `MissingCompanionFile { kind: Uptnl }` when `.uptnl` is
   absent. Paksmith's `CompanionFileKind` enum defines all three

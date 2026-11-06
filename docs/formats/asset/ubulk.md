@@ -14,19 +14,19 @@ a flat byte stream whose interpretation depends entirely on the
 asset's bulk-data records (which live in `.uasset`).
 
 Multiple bulk-data records inside one `.uasset` carve `.ubulk` into
-per-record byte ranges with `(offset, size, compression-method, flags)`
-metadata. The records carry the structure; the file carries the bytes.
+per-record byte ranges with `(offset, size, flags)` metadata. The
+records carry the structure; the file carries the bytes.
 
 **Document status: complete.** The `.ubulk` file is structureless
 by format — a flat byte stream whose record boundaries are published
 by the parent `.uasset`'s `FByteBulkData` records, not by any
 internal structure in the `.ubulk` file. This doc documents the
 structurelessness, the per-record metadata's role in the parent
-asset, and how compressed / encrypted records interact with the
-`.ubulk` byte ranges. The full wire layout of `FByteBulkData`
-records (with their version-conditional field widths) is documented
-canonically in [`bulk-data.md`](bulk-data.md); this doc cross-
-references there for the per-record mechanics.
+asset, and how compressed records interact with the `.ubulk` byte
+ranges. The full wire layout of `FByteBulkData` records (with their
+version-conditional field widths) is documented canonically in
+[`bulk-data.md`](bulk-data.md); this doc cross-references there for
+the per-record mechanics.
 
 **Paksmith parser status: `complete`** (Phase 3b PRs #480 / #481 /
 #483 + Task 6). `BulkDataResolver` handles all four storage tiers
@@ -54,11 +54,10 @@ inside the parent `.uasset`'s bulk-data records.
 |--------|------|--------|------|------|-----------|
 | 0 | filesize | — | `bulk_records` | byte stream | Concatenation of bulk-data record payloads. Boundaries published by the `.uasset`'s bulk-data records, not by any structure in this file. |
 
-A bulk-data record's payload may itself be compression-block-framed
-(matching `.pak`'s entry compression — see
-[`../compression/pak-block-framing.md`](../compression/pak-block-framing.md))
-or AES-encrypted (see [`../crypto/aes-pak.md`](../crypto/aes-pak.md));
-the per-record flags in `.uasset` drive that decode.
+A bulk-data record's flags may mark its payload compressed: see
+[`bulk-data.md`](bulk-data.md) §*Payload decompression* for the zlib
+framing and §*LZO and BitWindow (fail-closed)* for the other two
+compression flags.
 
 ### Worked example — uncompressed 32-byte bulk record
 
@@ -90,8 +89,7 @@ FByteBulkData record (conceptual; field types deferred to the
                                     | Force_NOT_InlinePayload | NoOffsetFixUp,
                                     a UE 4.26+ cooked word; the separate-file
                                     bit routes it to .ubulk per the tier-dispatch
-                                    table in bulk-data.md; not compressed,
-                                    not encrypted)
+                                    table in bulk-data.md; not compressed)
   element_count     = 32           (one element per byte for raw byte payloads)
   size_on_disk      = 32           (matches uncompressed size when no compression)
   offset_in_file    = 0            (byte offset within .ubulk)
@@ -102,11 +100,13 @@ Reader logic to materialize the payload:
 1. Open the sibling `.ubulk` (located via [`companion-resolution.md`](companion-resolution.md)).
 2. Seek to `offset_in_file = 0`.
 3. Read `size_on_disk = 32` bytes.
-4. If `bulk_data_flags` indicates compression, dispatch to the
-   compression-blocks decoder; if it indicates encryption, dispatch
-   to AES decrypt first; otherwise hand the 32 raw bytes to the
-   per-asset-class decoder (texture mip, audio sample buffer, anim
-   stream, etc.).
+4. If `bulk_data_flags` sets `BULKDATA_SerializeCompressedZLIB`, decode
+   the chunked `FCompressedChunkInfo` framing
+   ([`bulk-data.md`](bulk-data.md) §*Payload decompression*); for the
+   LZO and BitWindow flags see [`bulk-data.md`](bulk-data.md)
+   §*LZO and BitWindow (fail-closed)*. With no compression flag set,
+   hand the 32 raw bytes to the per-asset-class decoder (texture mip,
+   audio sample buffer, anim stream, etc.).
 
 Multiple records inside one `.uasset` carve the `.ubulk` into
 adjacent or overlapping byte ranges; the records carry all the
@@ -153,12 +153,7 @@ chain) MUST cap before allocation:
   `offset_in_file.checked_add(size_on_disk_as_u64)`); an attacker-
   supplied `offset_in_file` near `u64::MAX` plus any nonzero
   `size_on_disk` wraps to a small number under naive arithmetic and
-  silently passes a unsigned cap comparison.
-- **Compression-block-framing caps** apply to compressed records,
-  inherited from
-  [`../compression/pak-block-framing.md`](../compression/pak-block-framing.md).
-- **AES decryption caps** apply to encrypted records, inherited from
-  [`../crypto/aes-pak.md`](../crypto/aes-pak.md).
+  silently passes an unsigned cap comparison.
 
 See `docs/security/allocation-caps.md` for the broader policy that
 paksmith's Phase 3b cap constants follow.
