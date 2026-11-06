@@ -3798,16 +3798,10 @@ mod tests {
     #[test]
     fn resolve_zlib_allocation_failure_rolls_back_budget() {
         let framed = crate::testing::bench::zlib_compress_framed(&[0xAB; 100]);
-        let mut uasset = vec![0u8; 64];
-        uasset.extend_from_slice(&framed);
-        let header_len = uasset.len() as u64;
-        let resolver = BulkDataResolver::new_for_test(uasset, header_len, 0);
-        let record = FByteBulkData::for_test(
-            BulkDataFlags::from(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SERIALIZE_COMPRESSED_ZLIB),
-            100,
-            framed.len() as u64,
-            64,
-        );
+        // A framing no longer than its claim reserves only its own length:
+        // this pins the reservation's compressed-length bound.
+        assert!(framed.len() <= 100);
+        let (resolver, record) = inline_zlib_record(&framed, 100);
         assert_allocation_failure_rolls_back(
             &resolver,
             &record,
@@ -3817,6 +3811,76 @@ mod tests {
                 framed.len(),
             ),
         );
+    }
+
+    /// A resolver whose stitched buffer holds `framed` after a 64-byte
+    /// header, and a zlib record over it claiming `element_count` bytes.
+    #[cfg(feature = "__test_utils")]
+    fn inline_zlib_record(framed: &[u8], element_count: i64) -> (BulkDataResolver, FByteBulkData) {
+        let mut uasset = vec![0u8; 64];
+        uasset.extend_from_slice(framed);
+        let header_len = uasset.len() as u64;
+        let resolver = BulkDataResolver::new_for_test(uasset, header_len, 0);
+        let record = FByteBulkData::for_test(
+            BulkDataFlags::from(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SERIALIZE_COMPRESSED_ZLIB),
+            element_count,
+            framed.len() as u64,
+            64,
+        );
+        (resolver, record)
+    }
+
+    /// A framing longer than its claim reserves the claim plus one, not
+    /// the framing's length.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn resolve_zlib_reservation_is_capped_at_the_claim_plus_one() {
+        // 100 distinct bytes have no repeats to compress.
+        let payload: Vec<u8> = (0..100).collect();
+        let framed = frame_zlib(&payload, 131_072, (TEST_V1_TAG, TEST_CHUNK_128K), None);
+        assert!(framed.len() > payload.len() + 1);
+        let (resolver, record) = inline_zlib_record(&framed, 100);
+        assert_allocation_failure_rolls_back(
+            &resolver,
+            &record,
+            crate::seams::AssetSeam::DecompressedBulkDataBytes,
+            (
+                crate::error::AssetAllocationContext::DecompressedBulkDataBytes,
+                101,
+            ),
+        );
+    }
+
+    /// Deflate lets a valid stream carry any number of empty stored
+    /// blocks, so a long chunk can decode to one byte (#846).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn resolve_zlib_padded_stream_keeps_at_most_its_claim_plus_one() {
+        let mut stream = vec![0x78, 0x01];
+        for _ in 0..200 {
+            // A non-final stored block: BFINAL 0, BTYPE 00, LEN 0, NLEN !0.
+            stream.extend_from_slice(&[0x00, 0x00, 0x00, 0xFF, 0xFF]);
+        }
+        // The final stored block holding b"B", then the Adler-32 of b"B".
+        stream.extend_from_slice(&[0x01, 0x01, 0x00, 0xFE, 0xFF, 0x42, 0x00, 0x43, 0x00, 0x43]);
+        assert_eq!(stream.len(), 1012);
+        let len = i64::try_from(stream.len()).unwrap();
+        let framed = assemble_framing(
+            (TEST_V1_TAG, TEST_CHUNK_128K),
+            None,
+            (len, 1),
+            &[(len, 1)],
+            &stream,
+        );
+        let (resolver, record) = inline_zlib_record(&framed, 1);
+        let bulk = resolver
+            .resolve(&record, "test.uasset")
+            .expect("padded stream decodes");
+        assert_eq!(bulk.bytes, b"B");
+        // `try_reserve_exact` records the requested capacity, so this
+        // bound doesn't depend on the allocator.
+        let capacity = bulk.bytes.capacity();
+        assert!(capacity <= 2, "capacity {capacity}");
     }
 
     /// The budget check runs before the copy: an over-budget record
