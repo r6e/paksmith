@@ -5544,20 +5544,16 @@ pub enum MappingsParseFault {
         kind: FStringFault,
     },
 
-    /// A schema declared `prop_count < serial_count` — fewer total
-    /// per-class slots than serializable rows the same record then
-    /// emits. Wire-faithful `.usmap` files always have
-    /// `prop_count >= serial_count` because `prop_count` counts
-    /// serializable + transient + editor-only + deprecated slots
-    /// and is by construction the larger value. Issue #413 surfaced
-    /// that without this guard, an adversarial input declaring
-    /// `prop_count = 0` re-introduces the inheritance-offset
-    /// collision the #391 fix closed.
+    /// No longer returned. An entry with `array_size` 0 emits no slot, so a
+    /// schema may list more entries than its `prop_count`; a slot at or
+    /// past `prop_count` is [`Self::PropCountBelowMaxSchemaIndex`] (#817).
+    #[deprecated(note = "no longer returned; a slot at or past prop_count is \
+                          PropCountBelowMaxSchemaIndex (#817)")]
     #[error(
         "usmap schema {schema:?} declares prop_count {prop_count} < serial_count {serial_count}"
     )]
     PropCountBelowSerialCount {
-        /// The schema name whose `prop_count` was under-claimed.
+        /// The schema's name.
         schema: String,
         /// The wire-declared `prop_count`.
         prop_count: u16,
@@ -5566,9 +5562,9 @@ pub enum MappingsParseFault {
         serial_count: u16,
     },
 
-    /// A schema's declared `prop_count` is `<=` the largest
-    /// per-class `schema_index` actually emitted by its rows. Every
-    /// per-class slot index must lie in `[0, prop_count)`; a row at
+    /// A schema's declared `prop_count` is `<=` its largest slot: an
+    /// entry's `schema_index` plus the slot's array offset. Every
+    /// per-class slot index must lie in `[0, prop_count)`; a slot at
     /// or above `prop_count` would break the child-first-concat
     /// inheritance offset arithmetic in
     /// [`crate::asset::Usmap::get_all_properties`]. Issue #413.
@@ -5580,8 +5576,8 @@ pub enum MappingsParseFault {
         schema: String,
         /// The wire-declared `prop_count`.
         prop_count: u16,
-        /// The largest per-class `schema_index` actually emitted by
-        /// the schema's property rows.
+        /// The schema's largest slot, an entry's `schema_index` plus the
+        /// slot's array offset.
         max_schema_index: u16,
     },
 
@@ -7131,6 +7127,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated, reason = "pins the retired variant's wire-stable Display")]
     fn mappings_parse_display_prop_count_below_serial_count() {
         let err = PaksmithError::MappingsParse {
             fault: MappingsParseFault::PropCountBelowSerialCount {

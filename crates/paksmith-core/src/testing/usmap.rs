@@ -25,10 +25,10 @@
 //!   schema in the table. Used to drive the depth-1
 //!   `UnversionedSchemaMissing` error path.
 //! - [`build_sparse_schema_usmap_bytes`] — arbitrary class with a
-//!   user-supplied list of `(schema_index, name, type_byte)` triples
-//!   for each serializable property. `prop_count` (total class
-//!   properties including non-serializable) is decoupled from
-//!   `serial_count` (the slice length). Used to exercise non-zero,
+//!   user-supplied list of `(schema_index, name, type_byte)` triples,
+//!   one per entry. `prop_count` (the class's slot count, gaps
+//!   included) is set apart from `serial_count` (the entry count, here
+//!   the slice length). Used to exercise non-zero,
 //!   non-contiguous, and out-of-order `schema_index` values that the
 //!   Hero fixture's hard-coded indices `[0, 1]` cannot reach.
 //! - [`build_hero_usmap_with_leading_gear`] — a `Gear` row of any
@@ -309,14 +309,12 @@ pub fn build_hero_usmap_with_struct_speed(struct_name: &str) -> Vec<u8> {
 /// at user-supplied `schema_index` values. Unlike
 /// [`build_hero_usmap_bytes`] (which hard-codes Health@0 + Speed@1),
 /// this builder accepts a slice of `(schema_index, name, type_byte)`
-/// triples and a separate `prop_count` (the total class-property
-/// count including non-serializable filler).
+/// triples, one per entry, and a separate `prop_count` (the class's
+/// slot count, gaps included).
 ///
-/// Real UE classes routinely have `prop_count > serial_count` because
-/// transient, editor-only, and deprecated properties count toward
-/// `prop_count` but are excluded from the serialized stream. A schema
-/// with three serializable slots at indices `[0, 2, 4]` is the common
-/// shape this builder reproduces.
+/// A slot that no entry covers is a gap. Entries at indices
+/// `[0, 2, 4]` under `prop_count` 5 are the gapped shape this builder
+/// reproduces.
 ///
 /// `properties` may be in any declaration order:
 /// [`crate::asset::mappings::Usmap::get_all_properties`] returns

@@ -1124,8 +1124,7 @@ mod tests {
     fn read_unversioned_properties_uses_wire_schema_index_for_sparse_schema() {
         // Build a Usmap with one class `Hero` whose two serializable
         // properties are declared at WIRE schema_indices 0 and 2
-        // (sparse — slot 1 is absent from the schema, e.g. transient
-        // or editor-only in the originating UE class).
+        // (sparse: no entry covers slot 1, a gap).
         //
         // Witness for the wire-as-absolute-index convention:
         //   CUE4Parse `UsmapProperties.ParseStruct` writes
@@ -1137,8 +1136,8 @@ mod tests {
         let hero = ClassSchema {
             name: "Hero".to_string(),
             super_type: None,
-            // 3 wire-declared total slots: Health@0, transient@1, Color@2.
-            // `serial_count` (the size of `properties`) is 2.
+            // 3 wire-declared slots: Health@0, a gap at 1, Color@2.
+            // `properties` holds 2.
             prop_count: 3,
             properties: vec![
                 MappedProperty {
@@ -1214,8 +1213,8 @@ mod tests {
         let hero = ClassSchema {
             name: "Hero".to_string(),
             super_type: None,
-            // 3 wire-declared total slots (Health@0, transient@1, Color@2);
-            // `serial_count` (the size of `properties`) is 2.
+            // 3 wire-declared slots (Health@0, a gap at 1, Color@2);
+            // `properties` holds 2.
             prop_count: 3,
             properties: vec![
                 MappedProperty {
@@ -2858,7 +2857,7 @@ mod tests {
         // mis-decoded inherited classes whose child and parent slots
         // collided at the same per-class index.
         //
-        // Witness: CUE4Parse `MappingsProvider/Usmap/MappingsSchema.cs`:
+        // Witness: CUE4Parse `MappingsProvider/MappingsSchema.cs`:
         //   if (!Properties.TryGetValue(i, out info)) {
         //     return i >= PropertyCount && Super.Value != null &&
         //       Super.Value.TryGetValue(i - PropertyCount, out info);
@@ -3127,8 +3126,8 @@ mod tests {
 
     #[test]
     fn read_unversioned_properties_handles_sparse_schema_under_single_has_zeros_fragment() {
-        // Bug pinned: a schema with declared slots [0, 2] (slot 1
-        // transient/editor-only/absent) decoded against a single
+        // Bug pinned: a schema with declared slots [0, 2] (slot 1 a
+        // gap) decoded against a single
         // fragment `value_num=3, has_zeros=true` covering all three
         // slots was reading the wrong zero-mask bit when the schema
         // walk skipped slot 1.
@@ -3148,7 +3147,7 @@ mod tests {
         let hero = ClassSchema {
             name: "Hero".to_string(),
             super_type: None,
-            // 3 wire-declared total slots: declared@0, transient@1, declared@2
+            // 3 wire-declared slots: declared@0, a gap at 1, declared@2
             prop_count: 3,
             properties: vec![
                 MappedProperty {
@@ -3172,7 +3171,7 @@ mod tests {
         // Single fragment: skip=0, value_num=3, has_zeros=true, is_last=true
         //   packed = 0 | 0x0080 | 0x0100 | (3u16 << 9) = 0x0780
         // zero_mask: 3 bits → 1 byte, bits [0]=0 (Health non-zero),
-        //   [1]=1 (transient slot zero/skipped), [2]=0 (Speed non-zero)
+        //   [1]=1 (gap slot zero/skipped), [2]=0 (Speed non-zero)
         //   → 0b00000010 = 0x02
         // Followed by Health (slot 0) i32=100, Speed (slot 2) i32=300.
         // Slot 1 is "zero/default" per the zero-mask → no bytes in stream.
