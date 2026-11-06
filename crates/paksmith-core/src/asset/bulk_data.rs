@@ -1775,11 +1775,13 @@ fn read_chunk_info(buf: &[u8], pos: &mut usize) -> Option<(i64, i64)> {
 ///   and consumed in place (never materialized into an owned
 ///   buffer) — a lying summary cannot force any table-proportional
 ///   allocation.
-/// - The output buffer is pre-sized from `compressed.len()`, never
-///   from wire-claimed sizes; growth is driven by actually-produced
-///   bytes, bounded per chunk by `take(chunk_uncompressed + 1)` and
-///   in total by the chunk-table sums equaling `expected_size`
-///   (which the resolver budget-checks before calling).
+/// - The output buffer is reserved for the smaller of
+///   `compressed.len()` and `expected_size + 1`: never more than the
+///   bytes present, and at most one byte past the claim the resolver
+///   budget-checks before calling. Growth past it is driven by
+///   actually-produced bytes, bounded per chunk by
+///   `take(chunk_uncompressed + 1)` and in total by the chunk-table
+///   sums equaling `expected_size`.
 ///
 /// Used by `BulkDataResolver::resolve` and the `__test_utils` bench
 /// accessor (`crate::testing::bench::zlib_decompress`); `pub(crate)`
@@ -2036,18 +2038,24 @@ pub(crate) fn decompress_zlib(
     // 10. Chunk table, second pass: decompress chunk by chunk,
     // appending into one output buffer. Entry values were validated
     // non-negative in the first pass. SECURITY (Phase 3 audit F1):
-    // pre-size from the COMPRESSED input length, NOT the wire-claimed
-    // `expected` — the eager reservation stays proportional to bytes
-    // actually present (bounded by MAX_BULK_DATA_COMPRESSED_SIZE =
-    // 512 MiB upstream), never amplified by a lying count. Each
-    // chunk's read is bounded by `take(chunk_unc + 1)`: the `+ 1`
-    // makes an over-long stream detectable while capping a
-    // decompression bomb at one byte past the table's claim, and the
-    // table sums were pinned to `expected` above.
+    // reserve no more than the bytes actually present (bounded by
+    // MAX_BULK_DATA_COMPRESSED_SIZE = 512 MiB upstream), so a lying
+    // count can never enlarge it. Deflate's empty blocks let an input
+    // of any length decode to one byte, so the reservation is also
+    // capped at the budget-charged `expected` + 1 (#846). Each chunk's
+    // read is bounded by `take(chunk_unc + 1)`: the `+ 1` makes an
+    // over-long stream detectable while capping a decompression bomb
+    // at one byte past the table's claim, and the table sums were
+    // pinned to `expected` above. The reservation's own `+ 1` holds
+    // that byte, so an input longer than the claim never grows the
+    // buffer.
+    let reserve = usize::try_from(expected).map_or(compressed.len(), |claim| {
+        compressed.len().min(claim.saturating_add(1))
+    });
     let mut out: Vec<u8> = Vec::new();
     crate::error::try_reserve_asset(
         &mut out,
-        compressed.len(),
+        reserve,
         asset_path,
         crate::seams::AssetSeam::DecompressedBulkDataBytes,
     )?;
@@ -3983,14 +3991,12 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn decompress_zlib_grows_past_compressed_len_pre_size() {
-        // SECURITY F1 regression: the output is pre-sized from `compressed.len()`,
-        // not the wire `expected`. A highly-compressible payload (256 KiB of zeros
-        // → a few-hundred-byte framed input) decompresses to FAR more than the
-        // pre-size, so the decode loop must grow past the
-        // `compressed.len()` reservation. Pins that the proportional
-        // pre-size still yields the full output (and that a tiny compressed
-        // input does NOT pre-allocate from the claim). 256 KiB at the default
-        // 128 KiB chunk size also exercises the two-chunk path.
+        // SECURITY F1 regression: an input shorter than its claim reserves
+        // only the input's length (resolve_zlib_allocation_failure_rolls_back_budget
+        // pins that). A highly-compressible payload (256 KiB of zeros → a
+        // few-hundred-byte framed input) decompresses to FAR more, so the decode
+        // loop must grow past the reservation to the full output. 256 KiB at
+        // the default 128 KiB chunk size also exercises the two-chunk path.
         let original = vec![0u8; 256 * 1024];
         let framed = frame_zlib(&original, 131_072, (TEST_V1_TAG, TEST_CHUNK_128K), None);
         assert!(

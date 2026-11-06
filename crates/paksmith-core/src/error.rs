@@ -4954,7 +4954,8 @@ pub enum AssetAllocationContext {
     /// `Vec<u8>` for a resolved uncompressed bulk-data record.
     BulkDataBytes,
     /// `Vec<u8>` for a zlib-compressed bulk-data record's output,
-    /// pre-sized from the compressed length.
+    /// reserved for the smaller of the compressed length and
+    /// `ElementCount + 1` (the record's claimed decoded size plus one).
     DecompressedBulkDataBytes,
     /// `HashMap` entry for the per-read memo of resolved enum value
     /// tables.

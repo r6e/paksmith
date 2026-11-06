@@ -348,8 +348,9 @@ fn resolve_bulk_data_bytes_surfaces_allocation_failed_under_oom() {
 }
 
 /// Arm `AssetSeam::DecompressedBulkDataBytes` → a zlib record's output
-/// pre-size surfaces `AllocationFailed{DecompressedBulkDataBytes}` for
-/// the compressed length.
+/// reservation surfaces `AllocationFailed{DecompressedBulkDataBytes}`
+/// for the smaller of the compressed length and `claim + 1` (the
+/// compressed length here).
 #[test]
 fn resolve_decompressed_bulk_data_bytes_surfaces_allocation_failed_under_oom() {
     let payload = [0xAB; 4096];
