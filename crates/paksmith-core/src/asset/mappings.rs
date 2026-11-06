@@ -4320,20 +4320,32 @@ mod tests {
     }
 
     /// A header claiming more stored bytes than the file holds is refused at
-    /// the payload's start.
+    /// the payload's start, even when both sizes agree and the bytes present
+    /// hold the whole schema table: UAssetAPI's F1Manager2023 test mapping at
+    /// `b4e8a01` declares 1,074,319 uncompressed bytes and holds 1,071,839.
     #[test]
     fn parse_usmap_compressed_size_past_the_end_rejected() {
+        const F1_MANAGER_MISSING: usize = 2_480;
         let payload = schema_payload();
         let cap = usize::try_from(MAX_USMAP_COMPRESSED_SIZE).unwrap();
-        for claimed in [payload.len() + 1, cap] {
-            let mut bytes = usmap_with(UsmapCompression::None, &payload, payload.len());
+        let short = payload.len() + F1_MANAGER_MISSING;
+        for (claimed, declared) in [
+            (payload.len() + 1, payload.len()),
+            (cap, payload.len()),
+            (short, short),
+        ] {
+            let mut bytes = usmap_with(UsmapCompression::None, &payload, declared);
             bytes[4..8].copy_from_slice(&u32::try_from(claimed).unwrap().to_le_bytes());
             assert_eq!(
                 parse_fault(&bytes),
                 crate::error::MappingsParseFault::Truncated { offset: HEADER_LEN },
-                "claimed={claimed}"
+                "claimed={claimed} declared={declared}"
             );
         }
+        let whole = [payload.as_slice(), &[0; F1_MANAGER_MISSING]].concat();
+        assert_matches_uncompressed(
+            &Usmap::from_bytes(&usmap_with(UsmapCompression::None, &whole, short)).unwrap(),
+        );
     }
 
     #[test]
