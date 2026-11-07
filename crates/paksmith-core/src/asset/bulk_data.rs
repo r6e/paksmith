@@ -1775,11 +1775,13 @@ fn read_chunk_info(buf: &[u8], pos: &mut usize) -> Option<(i64, i64)> {
 ///   and consumed in place (never materialized into an owned
 ///   buffer) — a lying summary cannot force any table-proportional
 ///   allocation.
-/// - The output buffer is pre-sized from `compressed.len()`, never
-///   from wire-claimed sizes; growth is driven by actually-produced
-///   bytes, bounded per chunk by `take(chunk_uncompressed + 1)` and
-///   in total by the chunk-table sums equaling `expected_size`
-///   (which the resolver budget-checks before calling).
+/// - The output buffer is reserved for the smaller of
+///   `compressed.len()` and `expected_size + 1`: never more than the
+///   bytes present, and at most one byte past the claim the resolver
+///   budget-checks before calling. Growth past it is driven by
+///   actually-produced bytes, bounded per chunk by
+///   `take(chunk_uncompressed + 1)` and in total by the chunk-table
+///   sums equaling `expected_size`.
 ///
 /// Used by `BulkDataResolver::resolve` and the `__test_utils` bench
 /// accessor (`crate::testing::bench::zlib_decompress`); `pub(crate)`
@@ -2036,18 +2038,24 @@ pub(crate) fn decompress_zlib(
     // 10. Chunk table, second pass: decompress chunk by chunk,
     // appending into one output buffer. Entry values were validated
     // non-negative in the first pass. SECURITY (Phase 3 audit F1):
-    // pre-size from the COMPRESSED input length, NOT the wire-claimed
-    // `expected` — the eager reservation stays proportional to bytes
-    // actually present (bounded by MAX_BULK_DATA_COMPRESSED_SIZE =
-    // 512 MiB upstream), never amplified by a lying count. Each
-    // chunk's read is bounded by `take(chunk_unc + 1)`: the `+ 1`
-    // makes an over-long stream detectable while capping a
-    // decompression bomb at one byte past the table's claim, and the
-    // table sums were pinned to `expected` above.
+    // reserve no more than the bytes actually present (bounded by
+    // MAX_BULK_DATA_COMPRESSED_SIZE = 512 MiB upstream), so a lying
+    // count can never enlarge it. Deflate's empty blocks let an input
+    // of any length decode to one byte, so the reservation is also
+    // capped at the budget-charged `expected` + 1 (#846). Each chunk's
+    // read is bounded by `take(chunk_unc + 1)`: the `+ 1` makes an
+    // over-long stream detectable while capping a decompression bomb
+    // at one byte past the table's claim, and the table sums were
+    // pinned to `expected` above. The reservation's own `+ 1` holds
+    // that byte, so an input longer than the claim never grows the
+    // buffer.
+    let reserve = usize::try_from(expected).map_or(compressed.len(), |claim| {
+        compressed.len().min(claim.saturating_add(1))
+    });
     let mut out: Vec<u8> = Vec::new();
     crate::error::try_reserve_asset(
         &mut out,
-        compressed.len(),
+        reserve,
         asset_path,
         crate::seams::AssetSeam::DecompressedBulkDataBytes,
     )?;
@@ -3798,16 +3806,10 @@ mod tests {
     #[test]
     fn resolve_zlib_allocation_failure_rolls_back_budget() {
         let framed = crate::testing::bench::zlib_compress_framed(&[0xAB; 100]);
-        let mut uasset = vec![0u8; 64];
-        uasset.extend_from_slice(&framed);
-        let header_len = uasset.len() as u64;
-        let resolver = BulkDataResolver::new_for_test(uasset, header_len, 0);
-        let record = FByteBulkData::for_test(
-            BulkDataFlags::from(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SERIALIZE_COMPRESSED_ZLIB),
-            100,
-            framed.len() as u64,
-            64,
-        );
+        // A framing no longer than its claim reserves only its own length:
+        // this pins the reservation's compressed-length bound.
+        assert!(framed.len() <= 100);
+        let (resolver, record) = inline_zlib_record(&framed, 100);
         assert_allocation_failure_rolls_back(
             &resolver,
             &record,
@@ -3817,6 +3819,76 @@ mod tests {
                 framed.len(),
             ),
         );
+    }
+
+    /// A resolver whose stitched buffer holds `framed` after a 64-byte
+    /// header, and a zlib record over it claiming `element_count` bytes.
+    #[cfg(feature = "__test_utils")]
+    fn inline_zlib_record(framed: &[u8], element_count: i64) -> (BulkDataResolver, FByteBulkData) {
+        let mut uasset = vec![0u8; 64];
+        uasset.extend_from_slice(framed);
+        let header_len = uasset.len() as u64;
+        let resolver = BulkDataResolver::new_for_test(uasset, header_len, 0);
+        let record = FByteBulkData::for_test(
+            BulkDataFlags::from(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SERIALIZE_COMPRESSED_ZLIB),
+            element_count,
+            framed.len() as u64,
+            64,
+        );
+        (resolver, record)
+    }
+
+    /// A framing longer than its claim reserves the claim plus one, not
+    /// the framing's length.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn resolve_zlib_reservation_is_capped_at_the_claim_plus_one() {
+        // 100 distinct bytes have no repeats to compress.
+        let payload: Vec<u8> = (0..100).collect();
+        let framed = frame_zlib(&payload, 131_072, (TEST_V1_TAG, TEST_CHUNK_128K), None);
+        assert!(framed.len() > payload.len() + 1);
+        let (resolver, record) = inline_zlib_record(&framed, 100);
+        assert_allocation_failure_rolls_back(
+            &resolver,
+            &record,
+            crate::seams::AssetSeam::DecompressedBulkDataBytes,
+            (
+                crate::error::AssetAllocationContext::DecompressedBulkDataBytes,
+                101,
+            ),
+        );
+    }
+
+    /// Deflate lets a valid stream carry any number of empty stored
+    /// blocks, so a long chunk can decode to one byte (#846).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn resolve_zlib_padded_stream_keeps_at_most_its_claim_plus_one() {
+        let mut stream = vec![0x78, 0x01];
+        for _ in 0..200 {
+            // A non-final stored block: BFINAL 0, BTYPE 00, LEN 0, NLEN !0.
+            stream.extend_from_slice(&[0x00, 0x00, 0x00, 0xFF, 0xFF]);
+        }
+        // The final stored block holding b"B", then the Adler-32 of b"B".
+        stream.extend_from_slice(&[0x01, 0x01, 0x00, 0xFE, 0xFF, 0x42, 0x00, 0x43, 0x00, 0x43]);
+        assert_eq!(stream.len(), 1012);
+        let len = i64::try_from(stream.len()).unwrap();
+        let framed = assemble_framing(
+            (TEST_V1_TAG, TEST_CHUNK_128K),
+            None,
+            (len, 1),
+            &[(len, 1)],
+            &stream,
+        );
+        let (resolver, record) = inline_zlib_record(&framed, 1);
+        let bulk = resolver
+            .resolve(&record, "test.uasset")
+            .expect("padded stream decodes");
+        assert_eq!(bulk.bytes, b"B");
+        // `try_reserve_exact` records the requested capacity, so this
+        // bound doesn't depend on the allocator.
+        let capacity = bulk.bytes.capacity();
+        assert!(capacity <= 2, "capacity {capacity}");
     }
 
     /// The budget check runs before the copy: an over-budget record
@@ -3919,14 +3991,12 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn decompress_zlib_grows_past_compressed_len_pre_size() {
-        // SECURITY F1 regression: the output is pre-sized from `compressed.len()`,
-        // not the wire `expected`. A highly-compressible payload (256 KiB of zeros
-        // → a few-hundred-byte framed input) decompresses to FAR more than the
-        // pre-size, so the decode loop must grow past the
-        // `compressed.len()` reservation. Pins that the proportional
-        // pre-size still yields the full output (and that a tiny compressed
-        // input does NOT pre-allocate from the claim). 256 KiB at the default
-        // 128 KiB chunk size also exercises the two-chunk path.
+        // SECURITY F1 regression: an input shorter than its claim reserves
+        // only the input's length (resolve_zlib_allocation_failure_rolls_back_budget
+        // pins that). A highly-compressible payload (256 KiB of zeros → a
+        // few-hundred-byte framed input) decompresses to FAR more, so the decode
+        // loop must grow past the reservation to the full output. 256 KiB at
+        // the default 128 KiB chunk size also exercises the two-chunk path.
         let original = vec![0u8; 256 * 1024];
         let framed = frame_zlib(&original, 131_072, (TEST_V1_TAG, TEST_CHUNK_128K), None);
         assert!(

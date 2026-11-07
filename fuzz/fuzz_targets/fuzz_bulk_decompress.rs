@@ -6,7 +6,8 @@
 //     tag/summary/chunk-table validation (truncation, negative sizes, sum
 //     mismatches, overflow-checked chunk-count math) and the F1 pre-size
 //     discipline (chunk table bounded by real input and consumed in place,
-//     never materialized; output pre-sized from `compressed.len()`).
+//     never materialized; output reserved for the smaller of
+//     `compressed.len()` and `claim + 1`).
 //   - Decompression bombs: a tiny compressed input claiming a huge size must
 //     surface an `Err` (the `MAX_BULK_DATA_SIZE` claim cap, framing-sum
 //     checks, per-chunk `take(chunk_unc + 1)` bounds), never inflate
