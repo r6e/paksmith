@@ -1762,8 +1762,9 @@ fn read_chunk_info(buf: &[u8], pos: &mut usize) -> Option<(i64, i64)> {
 /// doc): byte-swapped (big-endian) tags are rejected rather than
 /// swap-decoded; the summary's uncompressed total must equal
 /// `expected_size` (ElementCount) exactly, not merely fit within it;
-/// the framing must consume the input exactly (no trailing bytes);
-/// v2 named formats other than Zlib surface
+/// the chunk streams must fill the input exactly, and each chunk's zlib
+/// stream must end where its chunk does (no trailing bytes after
+/// either); v2 named formats other than Zlib surface
 /// `UnsupportedBulkCompression`.
 ///
 /// SECURITY invariants (Phase 3 audit F1 discipline):
@@ -2084,6 +2085,18 @@ pub(crate) fn decompress_zlib(
         if produced as u64 != chunk_unc as u64 {
             return Err(fail(format!(
                 "chunk {index} decompressed to {produced} bytes, expected {chunk_unc}"
+            )));
+        }
+        // The stream must end where its chunk does. `total_in` counts the
+        // bytes the inflater consumed. Produced == chunk_unc below the
+        // `take` limit means it reached the stream's end (flate2 1.1.10
+        // errors on a stream cut short), so `total_in` covers the whole
+        // stream, Adler-32 included.
+        let consumed = limited.get_ref().total_in();
+        if consumed < chunk_len as u64 {
+            return Err(fail(format!(
+                "chunk {index}: {} byte(s) after its zlib stream",
+                chunk_len as u64 - consumed
             )));
         }
     }
