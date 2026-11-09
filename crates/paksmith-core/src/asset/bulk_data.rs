@@ -642,7 +642,8 @@ impl FByteBulkData {
     }
 
     /// [`Self::read_from_ctx`], also returning an in-stream payload's bytes
-    /// (`None` when there are none); a short one is an `UnexpectedEof`.
+    /// (`None` when there are none); a short one is an `UnexpectedEof`, and
+    /// a buffer that cannot grow to hold one is `AllocationFailed`.
     /// Used by the skeletal-mesh non-inlined LOD path (#563).
     pub(crate) fn read_from_ctx_capturing_inline(
         cur: &mut std::io::Cursor<&[u8]>,
@@ -830,14 +831,24 @@ impl FByteBulkData {
         capture_inline: bool,
         asset_path: &str,
     ) -> crate::Result<InlinePayload> {
-        use std::io::Read;
         let in_stream = !flags.has_unused() && flags.payload_is_inline();
         if size_on_disk != 0 && in_stream {
             if capture_inline {
                 let mut buf = Vec::new();
-                let read = std::io::Read::take(reader.by_ref(), size_on_disk)
-                    .read_to_end(&mut buf)
-                    .map_err(crate::PaksmithError::Io)?;
+                let read = crate::fallible_read::read_to_end_within(
+                    &mut std::io::Read::take(reader.by_ref(), size_on_disk),
+                    &mut buf,
+                    usize::try_from(size_on_disk).unwrap_or(usize::MAX),
+                    |reserve, n| {
+                        crate::error::check_asset_reserve(
+                            reserve,
+                            n,
+                            asset_path,
+                            crate::seams::AssetSeam::BulkDataBytes,
+                        )
+                    },
+                    crate::PaksmithError::Io,
+                )?;
                 if read as u64 != size_on_disk {
                     return Err(eof_at(
                         asset_path,
@@ -2816,6 +2827,44 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn read_from_ctx_capturing_inline_keeps_its_payload_capacity_at_its_size() {
+        let bytes = inline_record(FLAG_FORCE_INLINE_PAYLOAD, 30_000, &vec![0xAA; 30_000]);
+        let mut cur = std::io::Cursor::new(bytes.as_slice());
+        let (_record, payload) =
+            FByteBulkData::read_from_ctx_capturing_inline(&mut cur, &make_ctx(&[]), "t")
+                .expect("read");
+        let payload = payload.expect("an inline payload is captured");
+        assert_eq!(payload, vec![0xAA; 30_000]);
+        assert_eq!(payload.capacity(), 30_000);
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_from_ctx_capturing_inline_growth_failure_is_allocation_failed() {
+        let bytes = inline_record(FLAG_FORCE_INLINE_PAYLOAD, 30_000, &vec![0xAA; 30_000]);
+        let mut cur = std::io::Cursor::new(bytes.as_slice());
+        // Two 8 KiB reads have reserved 16,384 bytes. The third growth would
+        // double to 32,768, so the 30,000-byte SizeOnDisk caps it.
+        let _guard = crate::testing::oom::arm_at(
+            crate::seams::SeamSite::Asset(crate::seams::AssetSeam::BulkDataBytes),
+            2,
+        );
+        match FByteBulkData::read_from_ctx_capturing_inline(&mut cur, &make_ctx(&[]), "t") {
+            Err(crate::PaksmithError::AssetParse {
+                fault:
+                    crate::error::AssetParseFault::AllocationFailed {
+                        context, requested, ..
+                    },
+                ..
+            }) => assert_eq!(
+                (context, requested),
+                (crate::error::AssetAllocationContext::BulkDataBytes, 13_616)
+            ),
+            other => panic!("expected AllocationFailed, got {other:?}"),
+        }
     }
 
     #[test]

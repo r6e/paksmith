@@ -47,6 +47,7 @@ Core is the load-bearing crate. CLI and GUI are thin presentation-layer frontend
 - `profile/` — game profile management, key store, remote registry, detection, mappings sources (Phase 5, shipped)
 - `error.rs` — `PaksmithError` + typed fault sub-enums with wire-stable `Display` impls
 - `digest.rs` — `Sha1Digest` (byte-equality, NOT constant-time)
+- `fallible_read.rs` — `read_to_end_within`: `read_to_end` whose every growth is a fallible exact reservation, doubling up to a caller's ceiling
 - `hex.rs` — crate-private hex parsing and printing for keys, GUIDs, the registry key and byte signatures
 - `staged_replace.rs` — `StagedReplace`: sibling-temp + rename file replacement
 - `untrusted.rs` — `clamp` and `clamp_path` for untrusted text in log fields and fault messages
