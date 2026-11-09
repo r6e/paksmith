@@ -4971,6 +4971,9 @@ pub enum AssetAllocationContext {
     ClassSchemaMemo,
     /// `Vec<u8>` for an audio passthrough's codec container.
     AudioContainerBytes,
+    /// `Vec<u8>` for a skeletal LOD's new-format skin-weight data
+    /// (`newData`).
+    SkinWeightDataBytes,
 }
 
 impl AssetAllocationContext {
@@ -4986,7 +4989,8 @@ impl AssetAllocationContext {
             | Self::BulkDataBytes
             | Self::DecompressedBulkDataBytes
             | Self::FStringUtf8Bytes
-            | Self::AudioContainerBytes => BoundsUnit::Bytes,
+            | Self::AudioContainerBytes
+            | Self::SkinWeightDataBytes => BoundsUnit::Bytes,
             Self::NameTable
             | Self::ImportTable
             | Self::ExportTable
@@ -5024,6 +5028,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::StructLayoutMemo => "struct layout memo",
             Self::ClassSchemaMemo => "class schema memo",
             Self::AudioContainerBytes => "audio container bytes",
+            Self::SkinWeightDataBytes => "skin weight data bytes",
         };
         f.write_str(s)
     }
@@ -5759,6 +5764,15 @@ pub(crate) fn check_asset_reserve(
             source,
         },
     })
+}
+
+/// [`check_asset_reserve`] at `seam`, as the `reserved` callback of
+/// [`crate::fallible_read::read_to_end_within`].
+pub(crate) fn asset_reserved(
+    asset_path: &str,
+    seam: crate::seams::AssetSeam,
+) -> impl FnMut(Result<(), std::collections::TryReserveError>, usize) -> crate::Result<()> + '_ {
+    move |reserve, count| check_asset_reserve(reserve, count, asset_path, seam)
 }
 
 /// `src` copied into a buffer reserved by [`try_reserve_asset`] at
@@ -8805,6 +8819,10 @@ mod tests {
                 AssetAllocationContext::AudioContainerBytes,
                 "audio container bytes",
             ),
+            (
+                AssetAllocationContext::SkinWeightDataBytes,
+                "skin weight data bytes",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -8973,6 +8991,10 @@ mod tests {
             (AssetAllocationContext::ClassSchemaMemo, BoundsUnit::Items),
             (
                 AssetAllocationContext::AudioContainerBytes,
+                BoundsUnit::Bytes,
+            ),
+            (
+                AssetAllocationContext::SkinWeightDataBytes,
                 BoundsUnit::Bytes,
             ),
         ];

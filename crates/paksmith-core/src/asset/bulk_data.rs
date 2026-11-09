@@ -839,14 +839,10 @@ impl FByteBulkData {
                     &mut std::io::Read::take(reader.by_ref(), size_on_disk),
                     &mut buf,
                     usize::try_from(size_on_disk).unwrap_or(usize::MAX),
-                    |reserve, n| {
-                        crate::error::check_asset_reserve(
-                            reserve,
-                            n,
-                            asset_path,
-                            crate::seams::AssetSeam::BulkDataBytes,
-                        )
-                    },
+                    crate::error::asset_reserved(
+                        asset_path,
+                        crate::seams::AssetSeam::BulkDataBytes,
+                    ),
                     crate::PaksmithError::Io,
                 )?;
                 if read as u64 != size_on_disk {

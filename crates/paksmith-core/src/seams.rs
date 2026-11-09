@@ -221,13 +221,17 @@ pub enum AssetSeam {
     /// copy or the streaming chunks' concatenation.
     /// Surfaces as `AssetAllocationContext::AudioContainerBytes`.
     AudioContainerBytes,
+    /// Each growth of the skin-weight `newData` buffer in
+    /// `asset/exports/mesh/skin_weights.rs`.
+    /// Surfaces as `AssetAllocationContext::SkinWeightDataBytes`.
+    SkinWeightDataBytes,
 }
 
 impl AssetSeam {
     /// Total number of asset-side seam sites. Pinned by the `const _`
     /// guard below and by the exhaustive `match` in
     /// [`SeamSite::slot`].
-    pub const COUNT: usize = 18;
+    pub const COUNT: usize = 19;
 
     /// Map an asset seam to its paired
     /// [`crate::error::AssetAllocationContext`].
@@ -261,12 +265,13 @@ impl AssetSeam {
             Self::StructLayoutMemo => C::StructLayoutMemo,
             Self::ClassSchemaMemo => C::ClassSchemaMemo,
             Self::AudioContainerBytes => C::AudioContainerBytes,
+            Self::SkinWeightDataBytes => C::SkinWeightDataBytes,
         }
     }
 }
 
 // Same compile-time guard pattern as PakSeam above (see precondition).
-const _: [(); AssetSeam::COUNT] = [(); AssetSeam::AudioContainerBytes as usize + 1];
+const _: [(); AssetSeam::COUNT] = [(); AssetSeam::SkinWeightDataBytes as usize + 1];
 
 /// `.usmap` parser OOM seams. The inner enum of [`SeamSite::Mappings`].
 ///
@@ -381,7 +386,10 @@ mod tests {
     /// Every [`SeamSite`] variant names its end-to-end coverage test.
     /// Pak/index/decompression variants are tested in
     /// `paksmith-core-tests/tests/oom_pak.rs`; asset-side variants
-    /// are tested in `paksmith-core-tests/tests/oom_asset.rs`; `.usmap`
+    /// are tested in `paksmith-core-tests/tests/oom_asset.rs`, except
+    /// `SkinWeightDataBytes`, tested in
+    /// `asset/exports/mesh/skin_weights.rs` because `testing` builds no
+    /// wire-level skeletal mesh; `.usmap`
     /// variants are tested in `asset/mappings.rs`, since cargo-mutants
     /// credits only a crate's own tests. The exhaustive `match` is the
     /// load-bearing guard: adding a variant without a match arm fails to
@@ -490,6 +498,9 @@ mod tests {
                 AssetSeam::AudioContainerBytes => {
                     "decode_audio_container_bytes_surfaces_allocation_failed_under_oom"
                 }
+                AssetSeam::SkinWeightDataBytes => {
+                    "skin_weights_new_data_growth_failure_is_allocation_failed"
+                }
             }
         }
         const fn mappings_test_name(site: MappingsSeam) -> &'static str {
@@ -563,6 +574,7 @@ mod tests {
                 AssetSeam::StructLayoutMemo => PakSeam::COUNT + 15,
                 AssetSeam::ClassSchemaMemo => PakSeam::COUNT + 16,
                 AssetSeam::AudioContainerBytes => PakSeam::COUNT + 17,
+                AssetSeam::SkinWeightDataBytes => PakSeam::COUNT + 18,
             }
         }
         const fn expected_mappings_slot(site: MappingsSeam) -> usize {
@@ -613,6 +625,7 @@ mod tests {
             AssetSeam::StructLayoutMemo,
             AssetSeam::ClassSchemaMemo,
             AssetSeam::AudioContainerBytes,
+            AssetSeam::SkinWeightDataBytes,
         ];
         assert_eq!(asset_all.len(), AssetSeam::COUNT);
         for site in asset_all {
