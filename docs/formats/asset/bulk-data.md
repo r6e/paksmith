@@ -287,8 +287,11 @@ deviations are all fail-closed:
 - **Exact totals**: the summary's uncompressed total must equal
   `ElementCount` exactly (the reference decoder tolerates `<=`),
   chunk-table sums must equal the summary, each chunk must inflate
-  to exactly its claimed size, and the chunk table's compressed sizes
-  must sum to exactly the rest of the record's `SizeOnDisk` region.
+  to exactly its claimed size, each chunk's zlib stream must end
+  exactly at its `CompressedSize` (CUE4Parse and UEViewer decode a
+  chunk through one call that reports only its output length[^6]),
+  and the chunk table's compressed sizes must sum to exactly the rest
+  of the record's `SizeOnDisk` region.
 - **Bounded allocation**: the chunk table's byte size is validated
   against the real remaining input before it is walked, the table
   is validated and consumed in place (never copied into an owned
@@ -624,3 +627,5 @@ plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
 [^4]: Separate-file dispatch: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/TBulkData.cs@2b8901c3ee9818558ad33e2496a58d50b82e99db` (`GetBulkArchive` tests `BULKDATA_PayloadInSeperateFile` at L176 before `BULKDATA_PayloadAtEndOfFile` at L215) and `gildor2/UEViewer/Unreal/UnCoreSerialize.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` (L1351 before L1360). CUE4Parse skips a record with no payload at `TBulkData.cs` L53 (UEViewer at L1338), tests for an in-stream one at L62, and reads it at the stream position after the header (L59, L137, L141). In `4.27/T_Worm_A.uexp` the `0x00000048` mip header at 0x14c ends at byte 352, and its `OffsetInFile` is 1173: the 821-byte `.uasset` plus 352. Cooked words: `matyalatte/Matya-Uasset-Samples@a7921caec72aca1d1a9cf28e488d702dceaf6f93`, where `4.18/T_Worm_A.uexp` mip 0 (at 0x100) is `0x00000501` with `OffsetInFile` equal to minus `BulkDataStartOffset`, and `4.27/T_Worm_A.uexp` mip 0 (at 0x104) is `0x00010501` with `OffsetInFile` 0. The writer side is `matyalatte/UE4-DDS-Tools/src/unreal/data_resource.py@10bf27eef8b6d3a8048bf4e226268abe07313879` L71-L82.
 
 [^5]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FByteBulkDataHeader.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L40-L54 (the `dataIndex` short-circuit: read only when the owner's `BulkDataMap` is non-empty, returning on an in-range index and otherwise rewinding 4 bytes); `CUE4Parse/UE4/Assets/IoPackage.cs` L114 (`BulkDataMap` is read only from `DATA_RESOURCES`, apart from one per-game override) and `CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs` L474 (`DataResourceOffset`, behind the same gate, which `CUE4Parse/UE4/Assets/Package.cs` L150-L156 needs before it reads `DataResourceMap`); `CUE4Parse/UE4/Versions/ObjectVersion.cs` L40 (`DATA_RESOURCES`, 1009 counted from `INITIAL_VERSION = 1000` at L13) and `CUE4Parse/UE4/Versions/EGame.cs` L257-L259 (UE 5.1 → 1008; 5.2 and 5.3 → 1009).
+
+[^6]: Per-chunk zlib calls: `FabianFG/CUE4Parse/CUE4Parse/Compression/ZlibHelper.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L70-L71 (Zlib-ng.NET `Uncompress(..., out int decodedSize)`) and `gildor2/UEViewer/Unreal/UnCoreCompression.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L452 (zlib `uncompress(..., &newLen, ...)`).

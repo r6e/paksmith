@@ -1762,8 +1762,9 @@ fn read_chunk_info(buf: &[u8], pos: &mut usize) -> Option<(i64, i64)> {
 /// doc): byte-swapped (big-endian) tags are rejected rather than
 /// swap-decoded; the summary's uncompressed total must equal
 /// `expected_size` (ElementCount) exactly, not merely fit within it;
-/// the framing must consume the input exactly (no trailing bytes);
-/// v2 named formats other than Zlib surface
+/// the chunk streams must fill the input exactly, and each chunk's zlib
+/// stream must end where its chunk does (no trailing bytes after
+/// either); v2 named formats other than Zlib surface
 /// `UnsupportedBulkCompression`.
 ///
 /// SECURITY invariants (Phase 3 audit F1 discipline):
@@ -2084,6 +2085,18 @@ pub(crate) fn decompress_zlib(
         if produced as u64 != chunk_unc as u64 {
             return Err(fail(format!(
                 "chunk {index} decompressed to {produced} bytes, expected {chunk_unc}"
+            )));
+        }
+        // The stream must end where its chunk does. `total_in` counts the
+        // bytes the inflater consumed. Produced == chunk_unc below the
+        // `take` limit means it reached the stream's end (flate2 1.1.10
+        // errors on a stream cut short), so `total_in` covers the whole
+        // stream, Adler-32 included.
+        let consumed = limited.get_ref().total_in();
+        if consumed < chunk_len as u64 {
+            return Err(fail(format!(
+                "chunk {index}: {} byte(s) after its zlib stream",
+                chunk_len as u64 - consumed
             )));
         }
     }
@@ -3859,36 +3872,36 @@ mod tests {
         );
     }
 
-    /// Deflate lets a valid stream carry any number of empty stored
-    /// blocks, so a long chunk can decode to one byte (#846).
+    /// Deflate lets a valid stream carry any number of empty stored or
+    /// fixed-Huffman blocks, so a long chunk can decode to one byte (#846).
     #[cfg(feature = "__test_utils")]
     #[test]
     fn resolve_zlib_padded_stream_keeps_at_most_its_claim_plus_one() {
-        let mut stream = vec![0x78, 0x01];
-        for _ in 0..200 {
-            // A non-final stored block: BFINAL 0, BTYPE 00, LEN 0, NLEN !0.
-            stream.extend_from_slice(&[0x00, 0x00, 0x00, 0xFF, 0xFF]);
+        // Each 5-byte group is one non-final stored block (BFINAL 0,
+        // BTYPE 00, LEN 0, NLEN !0) or four non-final fixed-Huffman
+        // blocks (BFINAL 0, BTYPE 01, then the 7-bit end-of-block code).
+        for padding in [
+            [0x00, 0x00, 0x00, 0xFF, 0xFF],
+            [0x02, 0x08, 0x20, 0x80, 0x00],
+        ] {
+            let mut stream = vec![0x78, 0x01];
+            for _ in 0..200 {
+                stream.extend_from_slice(&padding);
+            }
+            // The final stored block holding b"B", then the Adler-32 of b"B".
+            stream.extend_from_slice(&[0x01, 0x01, 0x00, 0xFE, 0xFF, 0x42, 0x00, 0x43, 0x00, 0x43]);
+            assert_eq!(stream.len(), 1012);
+            let framed = single_chunk_framing(TEST_CHUNK_128K, &stream, 1);
+            let (resolver, record) = inline_zlib_record(&framed, 1);
+            let bulk = resolver
+                .resolve(&record, "test.uasset")
+                .unwrap_or_else(|e| panic!("padding {padding:02X?}: {e}"));
+            assert_eq!(bulk.bytes, b"B", "padding {padding:02X?}");
+            // `try_reserve_exact` records the requested capacity, so this
+            // bound doesn't depend on the allocator.
+            let capacity = bulk.bytes.capacity();
+            assert!(capacity <= 2, "padding {padding:02X?}: capacity {capacity}");
         }
-        // The final stored block holding b"B", then the Adler-32 of b"B".
-        stream.extend_from_slice(&[0x01, 0x01, 0x00, 0xFE, 0xFF, 0x42, 0x00, 0x43, 0x00, 0x43]);
-        assert_eq!(stream.len(), 1012);
-        let len = i64::try_from(stream.len()).unwrap();
-        let framed = assemble_framing(
-            (TEST_V1_TAG, TEST_CHUNK_128K),
-            None,
-            (len, 1),
-            &[(len, 1)],
-            &stream,
-        );
-        let (resolver, record) = inline_zlib_record(&framed, 1);
-        let bulk = resolver
-            .resolve(&record, "test.uasset")
-            .expect("padded stream decodes");
-        assert_eq!(bulk.bytes, b"B");
-        // `try_reserve_exact` records the requested capacity, so this
-        // bound doesn't depend on the allocator.
-        let capacity = bulk.bytes.capacity();
-        assert!(capacity <= 2, "capacity {capacity}");
     }
 
     /// The budget check runs before the copy: an over-budget record
@@ -4121,6 +4134,20 @@ mod tests {
         let total_unc = i64::try_from(payload.len()).unwrap();
         let streams: Vec<u8> = pieces.into_iter().flat_map(|(s, _)| s).collect();
         assemble_framing(tag, format_byte, (total_comp, total_unc), &table, &streams)
+    }
+
+    /// One chunk holding `streams` verbatim, whose table entry and summary
+    /// claim its full length and `unc` uncompressed bytes.
+    #[cfg(feature = "__test_utils")]
+    fn single_chunk_framing(chunk_size: i64, streams: &[u8], unc: i64) -> Vec<u8> {
+        let len = i64::try_from(streams.len()).unwrap();
+        assemble_framing(
+            (TEST_V1_TAG, chunk_size),
+            None,
+            (len, unc),
+            &[(len, unc)],
+            streams,
+        )
     }
 
     /// Expect `BulkDataCompressionDecodeFailed` whose reason contains
@@ -4528,7 +4555,7 @@ mod tests {
         // table entry (compressed 0, uncompressed 10)" — no `chunk 0`.
         // Pinning one arm's text would re-break on a decompressor
         // bump, which is exactly what happened: a zero-length slice is
-        // not a zlib stream at all, and miniz_oxide moved it from
+        // not a zlib stream at all, and flate2 1.1.10 moved it from
         // "inflates to 0 bytes" to an "incomplete deflate stream"
         // error, flipping which arm reports it without changing the
         // typed fault or the fail-closed outcome.
@@ -4560,11 +4587,87 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn chunked_zlib_rejects_trailing_bytes() {
-        // SizeOnDisk delimits the framing exactly; trailing bytes are
-        // a corruption / crafted-input signal.
+        // SizeOnDisk delimits the framing exactly; bytes after the final
+        // chunk stream are a corruption / crafted-input signal.
         let mut framed = frame_zlib(b"0123456789", 4096, (TEST_V1_TAG, 4096), None);
         framed.push(0xAA);
         expect_decode_failed(decompress_zlib(&framed, 10, "test.uasset"), "trailing");
+    }
+
+    /// The first of two chunks holds its zlib stream and then two more
+    /// bytes (#846).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_bytes_after_a_chunk_stream() {
+        let mut streams = zlib_stream(b"01234567");
+        streams.extend_from_slice(&[0xAA, 0xAA]);
+        let first_len = i64::try_from(streams.len()).unwrap();
+        let second = zlib_stream(b"89");
+        let second_len = i64::try_from(second.len()).unwrap();
+        streams.extend_from_slice(&second);
+        let framed = assemble_framing(
+            (TEST_V1_TAG, 8),
+            None,
+            (first_len + second_len, 10),
+            &[(first_len, 8), (second_len, 2)],
+            &streams,
+        );
+        expect_decode_failed(
+            decompress_zlib(&framed, 10, "test.uasset"),
+            "chunk 0: 2 byte(s) after its zlib stream",
+        );
+    }
+
+    /// A chunk that ends inside its zlib stream's Adler-32, after all of
+    /// its output: flate2 1.1.10, the workspace floor, fails the read.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_a_chunk_stream_cut_short() {
+        let mut stream = zlib_stream(b"0123456789");
+        stream.truncate(stream.len() - 2);
+        let framed = single_chunk_framing(4096, &stream, 10);
+        // The read fails before the later checks run, so `chunk 0:` matches
+        // its reason; flate2's own text is left unpinned, as in the
+        // zero-valued-entry test.
+        expect_decode_failed(decompress_zlib(&framed, 10, "test.uasset"), "chunk 0:");
+    }
+
+    /// One chunk holding a stored zlib stream longer than the decoder's
+    /// 32 KiB read-ahead, then `trailing` extra bytes. Returns the payload
+    /// and the framing.
+    #[cfg(feature = "__test_utils")]
+    fn long_stored_chunk_framing(trailing: usize) -> (Vec<u8>, Vec<u8>) {
+        use std::io::Write;
+
+        let payload: Vec<u8> = (0..=250u8).cycle().take(40_000).collect();
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::none());
+        enc.write_all(&payload).expect("in-memory zlib write");
+        let mut streams = enc.finish().expect("in-memory zlib finish");
+        assert!(streams.len() > 32 * 1024);
+        streams.resize(streams.len() + trailing, 0xAA);
+        let unc = i64::try_from(payload.len()).unwrap();
+        let framed = single_chunk_framing(65_536, &streams, unc);
+        (payload, framed)
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_a_byte_after_a_long_chunk_stream() {
+        let (payload, framed) = long_stored_chunk_framing(1);
+        let claim = i64::try_from(payload.len()).unwrap();
+        expect_decode_failed(
+            decompress_zlib(&framed, claim, "test.uasset"),
+            "chunk 0: 1 byte(s) after its zlib stream",
+        );
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_decodes_a_long_chunk_stream_that_fills_its_chunk() {
+        let (payload, framed) = long_stored_chunk_framing(0);
+        let claim = i64::try_from(payload.len()).unwrap();
+        let out = decompress_zlib(&framed, claim, "test.uasset").expect("exact chunk decodes");
+        assert_eq!(out, payload);
     }
 
     #[cfg(feature = "__test_utils")]
@@ -4572,27 +4675,23 @@ mod tests {
     fn chunked_zlib_rejects_chunk_decompressing_to_wrong_length() {
         // A chunk stream that inflates to FEWER bytes than its table
         // entry claims (10 real vs 11 claimed)...
-        let stream = zlib_stream(b"0123456789");
-        let stream_len = i64::try_from(stream.len()).unwrap();
-        let under = assemble_framing(
-            (TEST_V1_TAG, 4096),
-            None,
-            (stream_len, 11),
-            &[(stream_len, 11)],
-            &stream,
+        let under = single_chunk_framing(4096, &zlib_stream(b"0123456789"), 11);
+        expect_decode_failed(
+            decompress_zlib(&under, 11, "test.uasset"),
+            "decompressed to",
         );
-        expect_decode_failed(decompress_zlib(&under, 11, "test.uasset"), "chunk");
         // ...and one that inflates to MORE (11 real vs 10 claimed).
-        let stream = zlib_stream(b"0123456789A");
-        let stream_len = i64::try_from(stream.len()).unwrap();
-        let over = assemble_framing(
-            (TEST_V1_TAG, 4096),
-            None,
-            (stream_len, 10),
-            &[(stream_len, 10)],
-            &stream,
+        let over = single_chunk_framing(4096, &zlib_stream(b"0123456789A"), 10);
+        expect_decode_failed(decompress_zlib(&over, 10, "test.uasset"), "decompressed to");
+        // A short stream followed by a byte fails this check and the
+        // bytes-after-the-stream check; this one runs first and reports.
+        let mut streams = zlib_stream(b"0123456789");
+        streams.push(0xAA);
+        let short_then_byte = single_chunk_framing(4096, &streams, 11);
+        expect_decode_failed(
+            decompress_zlib(&short_then_byte, 11, "test.uasset"),
+            "decompressed to",
         );
-        expect_decode_failed(decompress_zlib(&over, 10, "test.uasset"), "chunk");
     }
 
     #[cfg(feature = "__test_utils")]

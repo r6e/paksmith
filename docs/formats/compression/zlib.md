@@ -195,7 +195,7 @@ file-bounds across both the extract and verify paths).
 **Cap constants:** `MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB` (inherited
 from the pak layer; see [`pak-block-framing.md`](pak-block-framing.md)).
 
-**Dependencies:** `flate2 = "1.1"` (workspace pin). The crate provides
+**Dependencies:** `flate2 = "1.1.10"` (workspace pin). The crate provides
 `ZlibDecoder` over the `miniz_oxide` Rust-native deflate
 implementation by default — no C `zlib` linkage in paksmith's
 default-features build.
