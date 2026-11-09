@@ -86,6 +86,9 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
 - `digest.rs` — `Sha1Digest` newtype with byte-equality semantics; explicitly
   not constant-time (suitable for local file integrity, not network
   attestation).
+- `fallible_read.rs` — crate-private `read_to_end_within`: `read_to_end`
+  for buffers sized by untrusted input, whose every growth is a fallible
+  exact reservation, doubling up to a caller's ceiling.
 - `hex.rs` — crate-private `parse_hex_bytes`, `strip_0x_prefix`, `decode_pair`
   and `to_hex_lower`. Each caller picks its prefix rule, length and error type.
 - `staged_replace.rs` — `StagedReplace`: replaces a file through an

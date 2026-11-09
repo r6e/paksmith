@@ -4951,7 +4951,8 @@ pub enum AssetAllocationContext {
     /// `Vec<FObjectDataResource>` for the UE 5.2+ data-resource
     /// table (#642).
     DataResourceTable,
-    /// `Vec<u8>` for a resolved uncompressed bulk-data record.
+    /// `Vec<u8>` for a resolved uncompressed bulk-data record, or for an
+    /// inline record's payload captured from its export.
     BulkDataBytes,
     /// `Vec<u8>` for a zlib-compressed bulk-data record's output,
     /// reserved for the smaller of the compressed length and
@@ -5737,9 +5738,10 @@ pub(crate) fn try_reserve_asset<T>(
 /// through `seam`'s OOM injection and mapped to
 /// [`AssetParseFault::AllocationFailed`]. Every asset-side seam is
 /// reached through here: through [`try_reserve_asset`] for a `Vec`, or
-/// directly with a reservation made elsewhere (a `HashMap`'s, or the
-/// FString decoder's). `seam` is mandatory and the
-/// [`crate::error::AssetAllocationContext`] comes from
+/// directly with a reservation made elsewhere (a `HashMap`'s, the
+/// FString decoder's, or a growth in
+/// [`crate::fallible_read::read_to_end_within`]). `seam` is mandatory
+/// and the [`crate::error::AssetAllocationContext`] comes from
 /// [`crate::seams::AssetSeam::context`], so one variant sets both the
 /// OOM-injection slot and the wire-stable fault context.
 pub(crate) fn check_asset_reserve(

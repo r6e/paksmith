@@ -190,7 +190,9 @@ pub enum AssetSeam {
     /// `parse_data_resource_table`'s entries-vec reservation (#642).
     /// Surfaces as `AssetAllocationContext::DataResourceTable`.
     DataResourceTable,
-    /// `BulkDataResolver`'s copy of an uncompressed record's bytes.
+    /// `BulkDataResolver`'s copy of an uncompressed record's bytes, and
+    /// each growth of an inline payload's buffer in
+    /// `FByteBulkData::read_from_ctx_capturing_inline`.
     /// Surfaces as `AssetAllocationContext::BulkDataBytes`.
     BulkDataBytes,
     /// `decompress_zlib`'s output pre-size.
