@@ -1105,9 +1105,8 @@ pub(crate) fn counting_loader(
 ///    violations and codec stream errors fire
 ///    `BulkDataCompressionDecodeFailed`; unsupported v2 formats fire
 ///    `UnsupportedBulkCompression`; a decompressed claim over
-///    `MAX_BULK_DATA_SIZE` fires `BulkDataSizeExceeded`; a failure to
-///    grow the output buffer surfaces as `Io` of kind `OutOfMemory`.
-///    A failure to reserve the output buffer, or an uncompressed
+///    `MAX_BULK_DATA_SIZE` fires `BulkDataSizeExceeded`. A failure to
+///    reserve or grow the output buffer, or to reserve an uncompressed
 ///    record's copy, fires `AllocationFailed`.
 ///
 /// # Threading
@@ -1277,10 +1276,9 @@ impl BulkDataResolver {
     /// Per the defense chain documented on the struct: the
     /// `AssetParseFault` bulk-data variant for the invariant the
     /// record violated, `AllocationFailed` when the payload's buffer cannot
-    /// be reserved, `Io` of kind `OutOfMemory` when inflating a zlib
-    /// payload cannot grow its buffer, or the companion loader's error. A
-    /// companion that failed to load reports that failure again instead
-    /// of loading again.
+    /// be reserved or grown, or the companion loader's error. A companion
+    /// that failed to load reports that failure again instead of loading
+    /// again.
     pub fn resolve(&self, record: &FByteBulkData, asset_path: &str) -> crate::Result<BulkData> {
         self.resolve_inner(record, asset_path, None)
     }
@@ -1786,10 +1784,11 @@ fn read_chunk_info(buf: &[u8], pos: &mut usize) -> Option<(i64, i64)> {
 /// - The output buffer is reserved for the smaller of
 ///   `compressed.len()` and `expected_size + 1`: never more than the
 ///   bytes present, and at most one byte past the claim the resolver
-///   budget-checks before calling. Growth past it is driven by
-///   actually-produced bytes, bounded per chunk by
-///   `take(chunk_uncompressed + 1)` and in total by the chunk-table
-///   sums equaling `expected_size`.
+///   budget-checks before calling. Growth past it happens only for
+///   actually-produced bytes, through fallible reservations never past
+///   `expected_size + 1`; reads are bounded per chunk by
+///   `take(chunk_uncompressed + 1)` and in total by the chunk-table sums
+///   equaling `expected_size`.
 ///
 /// Used by `BulkDataResolver::resolve` and the `__test_utils` bench
 /// accessor (`crate::testing::bench::zlib_decompress`); `pub(crate)`
@@ -2056,14 +2055,13 @@ pub(crate) fn decompress_zlib(
     // at one byte past the table's claim, and the table sums were
     // pinned to `expected` above. The reservation's own `+ 1` holds
     // that byte, so an input longer than the claim never grows the
-    // buffer.
-    let reserve = usize::try_from(expected).map_or(compressed.len(), |claim| {
-        compressed.len().min(claim.saturating_add(1))
-    });
+    // buffer. A shorter one grows only as bytes arrive, to at most
+    // `expected` + 1.
+    let ceiling = usize::try_from(expected).map_or(usize::MAX, |claim| claim.saturating_add(1));
     let mut out: Vec<u8> = Vec::new();
     crate::error::try_reserve_asset(
         &mut out,
-        reserve,
+        compressed.len().min(ceiling),
         asset_path,
         crate::seams::AssetSeam::DecompressedBulkDataBytes,
     )?;
@@ -2081,13 +2079,18 @@ pub(crate) fn decompress_zlib(
         // and `pos` advances by each stream's length in turn.
         let stream = &compressed[pos..pos + chunk_len];
         pos += chunk_len;
-        let before = out.len();
         #[allow(clippy::cast_sign_loss, reason = "validated >= 0 above")]
         let mut limited = ZlibDecoder::new(stream).take(chunk_unc as u64 + 1);
-        let _ = limited.read_to_end(&mut out).map_err(|e| {
-            crate::asset::keep_out_of_memory(e, |e| fail(format!("chunk {index}: {e}")))
-        })?;
-        let produced = out.len() - before;
+        let produced = crate::fallible_read::read_to_end_within(
+            &mut limited,
+            &mut out,
+            ceiling,
+            crate::error::asset_reserved(
+                asset_path,
+                crate::seams::AssetSeam::DecompressedBulkDataBytes,
+            ),
+            |e| fail(format!("chunk {index}: {e}")),
+        )?;
         #[allow(clippy::cast_sign_loss, reason = "validated >= 0 above")]
         if produced as u64 != chunk_unc as u64 {
             return Err(fail(format!(
@@ -3817,19 +3820,21 @@ mod tests {
             .expect("rollback restored the headroom the follow-up needs");
     }
 
-    /// Resolve `record` with `seam` armed and the budget pre-seeded so
-    /// the record's 100-byte claim fits but a leaked claim plus an 8-byte
-    /// follow-up would not. Expects `AllocationFailed` with `expected`'s
-    /// context and requested size, then the follow-up to fit.
+    /// Resolve `record` with `seam` armed past its first `skip`
+    /// reservations and the budget pre-seeded so the record's 100-byte
+    /// claim fits but a leaked claim plus an 8-byte follow-up would not.
+    /// Expects `AllocationFailed` with `expected`'s context and requested
+    /// size, then the follow-up to fit.
     #[cfg(feature = "__test_utils")]
     fn assert_allocation_failure_rolls_back(
         resolver: &BulkDataResolver,
         record: &FByteBulkData,
         seam: crate::seams::AssetSeam,
+        skip: u64,
         expected: (crate::error::AssetAllocationContext, usize),
     ) {
         resolver.set_bytes_resolved_for_test(MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE - 105);
-        let guard = crate::testing::oom::arm_at(crate::seams::SeamSite::Asset(seam), 0);
+        let guard = crate::testing::oom::arm_at(crate::seams::SeamSite::Asset(seam), skip);
         match resolver.resolve(record, "test.uasset") {
             Err(crate::PaksmithError::AssetParse {
                 fault:
@@ -3856,6 +3861,7 @@ mod tests {
             &resolver,
             &record,
             crate::seams::AssetSeam::BulkDataBytes,
+            0,
             (crate::error::AssetAllocationContext::BulkDataBytes, 100),
         );
     }
@@ -3872,9 +3878,31 @@ mod tests {
             &resolver,
             &record,
             crate::seams::AssetSeam::DecompressedBulkDataBytes,
+            0,
             (
                 crate::error::AssetAllocationContext::DecompressedBulkDataBytes,
                 framed.len(),
+            ),
+        );
+    }
+
+    /// Inflating past the reservation grows through the same seam: the
+    /// framing reserves its own length, and the first growth doubles it
+    /// but stops at the claim plus one.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn resolve_zlib_growth_failure_rolls_back_budget() {
+        let framed = crate::testing::bench::zlib_compress_framed(&[0xAB; 100]);
+        assert!((51..100).contains(&framed.len()), "{}", framed.len());
+        let (resolver, record) = inline_zlib_record(&framed, 100);
+        assert_allocation_failure_rolls_back(
+            &resolver,
+            &record,
+            crate::seams::AssetSeam::DecompressedBulkDataBytes,
+            1,
+            (
+                crate::error::AssetAllocationContext::DecompressedBulkDataBytes,
+                101,
             ),
         );
     }
@@ -3910,6 +3938,7 @@ mod tests {
             &resolver,
             &record,
             crate::seams::AssetSeam::DecompressedBulkDataBytes,
+            0,
             (
                 crate::error::AssetAllocationContext::DecompressedBulkDataBytes,
                 101,
@@ -4051,11 +4080,11 @@ mod tests {
     fn decompress_zlib_grows_past_compressed_len_pre_size() {
         // SECURITY F1 regression: an input shorter than its claim reserves
         // only the input's length (resolve_zlib_allocation_failure_rolls_back_budget
-        // pins that). A highly-compressible payload (256 KiB of zeros → a
+        // pins that). A highly-compressible payload (200,000 zeros → a
         // few-hundred-byte framed input) decompresses to FAR more, so the decode
-        // loop must grow past the reservation to the full output. 256 KiB at
-        // the default 128 KiB chunk size also exercises the two-chunk path.
-        let original = vec![0u8; 256 * 1024];
+        // loop must grow past the reservation to the full output. 200,000 bytes
+        // at the default 128 KiB chunk size also exercises the two-chunk path.
+        let original = vec![0u8; 200_000];
         let framed = frame_zlib(&original, 131_072, (TEST_V1_TAG, TEST_CHUNK_128K), None);
         assert!(
             framed.len() < original.len() / 100,
@@ -4068,6 +4097,9 @@ mod tests {
         )
         .expect("decompress grows past the compressed-len pre-size");
         assert_eq!(out, original);
+        // Chunk 1's growth would double the buffer past the claim, so the
+        // record's claim plus one caps it.
+        assert_eq!(out.capacity(), original.len() + 1);
     }
 
     #[cfg(feature = "__test_utils")]

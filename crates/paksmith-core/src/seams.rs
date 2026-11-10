@@ -195,7 +195,8 @@ pub enum AssetSeam {
     /// `FByteBulkData::read_from_ctx_capturing_inline`.
     /// Surfaces as `AssetAllocationContext::BulkDataBytes`.
     BulkDataBytes,
-    /// `decompress_zlib`'s output pre-size.
+    /// `decompress_zlib`'s output pre-size (the first check) and each
+    /// growth past it while inflating.
     /// Surfaces as `AssetAllocationContext::DecompressedBulkDataBytes`.
     DecompressedBulkDataBytes,
     /// `UsmapView`'s enum value-table memo, a `HashMap` grown by one
