@@ -2136,7 +2136,10 @@ mod tests {
     use super::*;
     use crate::asset::property::test_utils::make_ctx;
     #[cfg(feature = "__test_utils")]
-    use crate::testing::bench::zlib_stream;
+    use crate::testing::bench::{
+        EMPTY_STORED_BLOCK, FOUR_EMPTY_FIXED_BLOCKS, zlib_compress_framed_with as frame_zlib,
+        zlib_framing, zlib_padded_stream, zlib_stream,
+    };
 
     /// Build an `AssetContext` carrying a data-resource table (#642).
     fn ctx_with_resources(
@@ -3969,19 +3972,8 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn resolve_zlib_padded_stream_keeps_at_most_its_claim_plus_one() {
-        // Each 5-byte group is one non-final stored block (BFINAL 0,
-        // BTYPE 00, LEN 0, NLEN !0) or four non-final fixed-Huffman
-        // blocks (BFINAL 0, BTYPE 01, then the 7-bit end-of-block code).
-        for padding in [
-            [0x00, 0x00, 0x00, 0xFF, 0xFF],
-            [0x02, 0x08, 0x20, 0x80, 0x00],
-        ] {
-            let mut stream = vec![0x78, 0x01];
-            for _ in 0..200 {
-                stream.extend_from_slice(&padding);
-            }
-            // The final stored block holding b"B", then the Adler-32 of b"B".
-            stream.extend_from_slice(&[0x01, 0x01, 0x00, 0xFE, 0xFF, 0x42, 0x00, 0x43, 0x00, 0x43]);
+        for padding in [EMPTY_STORED_BLOCK, FOUR_EMPTY_FIXED_BLOCKS] {
+            let stream = zlib_padded_stream(padding, 200);
             assert_eq!(stream.len(), 1012);
             let framed = single_chunk_framing(TEST_CHUNK_128K, &stream, 1);
             let (resolver, record) = inline_zlib_record(&framed, 1);
@@ -4182,61 +4174,12 @@ mod tests {
         out
     }
 
-    /// Assemble a framing from explicit parts. Malformed-input tests
-    /// pass deliberately inconsistent values; `frame_zlib` passes
-    /// consistent ones.
-    #[cfg(feature = "__test_utils")]
-    fn assemble_framing(
-        tag: (i64, i64),
-        format_byte: Option<u8>,
-        summary: (i64, i64),
-        table: &[(i64, i64)],
-        streams: &[u8],
-    ) -> Vec<u8> {
-        let mut out = chunk_info(tag.0, tag.1);
-        if let Some(b) = format_byte {
-            out.push(b);
-        }
-        out.extend_from_slice(&chunk_info(summary.0, summary.1));
-        for &(c, u) in table {
-            out.extend_from_slice(&chunk_info(c, u));
-        }
-        out.extend_from_slice(streams);
-        out
-    }
-
-    /// Valid engine framing: split `payload` at `split` bytes,
-    /// zlib-compress each piece, derive the summary + chunk table
-    /// from the real sizes. `tag` is written verbatim so the
-    /// chunk-size-quirk test can claim a different chunk size than
-    /// the split actually used.
-    #[cfg(feature = "__test_utils")]
-    fn frame_zlib(
-        payload: &[u8],
-        split: usize,
-        tag: (i64, i64),
-        format_byte: Option<u8>,
-    ) -> Vec<u8> {
-        let pieces: Vec<(Vec<u8>, usize)> = payload
-            .chunks(split.max(1))
-            .map(|c| (zlib_stream(c), c.len()))
-            .collect();
-        let table: Vec<(i64, i64)> = pieces
-            .iter()
-            .map(|(s, u)| (i64::try_from(s.len()).unwrap(), i64::try_from(*u).unwrap()))
-            .collect();
-        let total_comp: i64 = table.iter().map(|&(c, _)| c).sum();
-        let total_unc = i64::try_from(payload.len()).unwrap();
-        let streams: Vec<u8> = pieces.into_iter().flat_map(|(s, _)| s).collect();
-        assemble_framing(tag, format_byte, (total_comp, total_unc), &table, &streams)
-    }
-
     /// One chunk holding `streams` verbatim, whose table entry and summary
     /// claim its full length and `unc` uncompressed bytes.
     #[cfg(feature = "__test_utils")]
     fn single_chunk_framing(chunk_size: i64, streams: &[u8], unc: i64) -> Vec<u8> {
         let len = i64::try_from(streams.len()).unwrap();
-        assemble_framing(
+        zlib_framing(
             (TEST_V1_TAG, chunk_size),
             None,
             (len, unc),
@@ -4460,7 +4403,7 @@ mod tests {
     fn chunked_zlib_rejects_negative_summary_fields() {
         let stream = zlib_stream(b"0123456789");
         let stream_len = i64::try_from(stream.len()).unwrap();
-        let neg_comp = assemble_framing(
+        let neg_comp = zlib_framing(
             (TEST_V1_TAG, 4096),
             None,
             (-1, 10),
@@ -4468,7 +4411,7 @@ mod tests {
             &stream,
         );
         expect_decode_failed(decompress_zlib(&neg_comp, 10, "test.uasset"), "negative");
-        let neg_unc = assemble_framing(
+        let neg_unc = zlib_framing(
             (TEST_V1_TAG, 4096),
             None,
             (stream_len, -1),
@@ -4502,7 +4445,7 @@ mod tests {
         // allocation (F1 discipline at the framing layer).
         let stream = zlib_stream(&[0u8; 1]);
         let stream_len = i64::try_from(stream.len()).unwrap();
-        let framed = assemble_framing(
+        let framed = zlib_framing(
             (TEST_V1_TAG, 1),
             None,
             (stream_len, 1_000_000),
@@ -4535,7 +4478,7 @@ mod tests {
         // MAX_BULK_DATA_SIZE cap before any framing math runs...
         let stream = zlib_stream(&[0u8; 16]);
         let stream_len = i64::try_from(stream.len()).unwrap();
-        let framed = assemble_framing(
+        let framed = zlib_framing(
             (TEST_V1_TAG, 2),
             None,
             (stream_len, i64::MAX),
@@ -4560,7 +4503,7 @@ mod tests {
         // allocation proportional to the count.
         #[allow(clippy::cast_possible_wrap, reason = "8 GiB fits i64 positively")]
         let at_cap = MAX_BULK_DATA_SIZE as i64;
-        let framed = assemble_framing(
+        let framed = zlib_framing(
             (TEST_V1_TAG, 2),
             None,
             (stream_len, at_cap),
@@ -4578,7 +4521,7 @@ mod tests {
         // direction.
         let stream = zlib_stream(b"0123456789");
         let stream_len = i64::try_from(stream.len()).unwrap();
-        let bad_comp_sum = assemble_framing(
+        let bad_comp_sum = zlib_framing(
             (TEST_V1_TAG, 4096),
             None,
             (stream_len + 1, 10),
@@ -4586,7 +4529,7 @@ mod tests {
             &stream,
         );
         expect_decode_failed(decompress_zlib(&bad_comp_sum, 10, "test.uasset"), "sum");
-        let bad_unc_sum = assemble_framing(
+        let bad_unc_sum = zlib_framing(
             (TEST_V1_TAG, 4096),
             None,
             (stream_len, 10),
@@ -4601,7 +4544,7 @@ mod tests {
     fn chunked_zlib_rejects_negative_chunk_table_entry() {
         let stream = zlib_stream(b"0123456789");
         let stream_len = i64::try_from(stream.len()).unwrap();
-        let neg_comp = assemble_framing(
+        let neg_comp = zlib_framing(
             (TEST_V1_TAG, 4096),
             None,
             (stream_len, 10),
@@ -4609,7 +4552,7 @@ mod tests {
             &stream,
         );
         expect_decode_failed(decompress_zlib(&neg_comp, 10, "test.uasset"), "negative");
-        let neg_unc = assemble_framing(
+        let neg_unc = zlib_framing(
             (TEST_V1_TAG, 4096),
             None,
             (stream_len, 10),
@@ -4654,7 +4597,7 @@ mod tests {
         // "inflates to 0 bytes" to an "incomplete deflate stream"
         // error, flipping which arm reports it without changing the
         // typed fault or the fail-closed outcome.
-        let zero_comp = assemble_framing((TEST_V1_TAG, 4096), None, (0, 10), &[(0, 10)], &[]);
+        let zero_comp = zlib_framing((TEST_V1_TAG, 4096), None, (0, 10), &[(0, 10)], &[]);
         expect_decode_failed(decompress_zlib(&zero_comp, 10, "test.uasset"), "chunk 0");
         // (b) A (len, 0) entry alongside a real chunk is ACCEPTED:
         // its stream inflates to exactly the claimed 0 bytes and the
@@ -4667,7 +4610,7 @@ mod tests {
         let full_len = i64::try_from(full_stream.len()).unwrap();
         let mut streams = empty_stream.clone();
         streams.extend_from_slice(&full_stream);
-        let zero_unc = assemble_framing(
+        let zero_unc = zlib_framing(
             (TEST_V1_TAG, 8),
             None,
             (empty_len + full_len, 10),
@@ -4710,8 +4653,7 @@ mod tests {
                 streams.extend_from_slice(&stream);
             }
             let total_comp = table.iter().map(|&(c, _)| c).sum();
-            let framed =
-                assemble_framing((TEST_V1_TAG, 8), None, (total_comp, 10), &table, &streams);
+            let framed = zlib_framing((TEST_V1_TAG, 8), None, (total_comp, 10), &table, &streams);
             expect_decode_failed(
                 decompress_zlib(&framed, 10, "test.uasset"),
                 &format!("chunk {padded}: 2 byte(s) after its zlib stream"),
@@ -4812,7 +4754,7 @@ mod tests {
         let mut stream = vec![0x78, 0x01, 0x00, 0x0B, 0x00, 0xF4, 0xFF];
         stream.extend_from_slice(b"0123456789A");
         for _ in 0..6_600 {
-            stream.extend_from_slice(&[0x00, 0x00, 0x00, 0xFF, 0xFF]);
+            stream.extend_from_slice(&EMPTY_STORED_BLOCK);
         }
         stream.push(0x06);
         let framed = single_chunk_framing(TEST_CHUNK_128K, &stream, 10);
@@ -4826,7 +4768,7 @@ mod tests {
         // Garbage bytes where a zlib stream should be → the codec's
         // stream error surfaces through the decode-failed fault.
         let garbage = [0xFFu8; 16];
-        let framed = assemble_framing((TEST_V1_TAG, 4096), None, (16, 10), &[(16, 10)], &garbage);
+        let framed = zlib_framing((TEST_V1_TAG, 4096), None, (16, 10), &[(16, 10)], &garbage);
         let result = decompress_zlib(&framed, 10, "test.uasset");
         match result {
             Err(crate::PaksmithError::AssetParse {
@@ -4871,7 +4813,7 @@ mod tests {
             ([(0, 0), (len, unc)], "chunk 0:"),
             ([(len, unc), (0, 0)], "chunk 1:"),
         ] {
-            let framed = assemble_framing(
+            let framed = zlib_framing(
                 (TEST_V1_TAG, TEST_CHUNK_128K),
                 None,
                 (len, unc),
@@ -4902,7 +4844,7 @@ mod tests {
         let mut streams = zlib_stream(&first);
         let first_len = i64::try_from(streams.len()).unwrap();
         streams.extend_from_slice(&second);
-        let framed = assemble_framing(
+        let framed = zlib_framing(
             (TEST_V1_TAG, TEST_CHUNK_128K),
             None,
             (first_len + 11, 131_075),
