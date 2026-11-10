@@ -93,29 +93,68 @@ pub fn zlib_decompress(compressed: &[u8], expected_size: i64) -> crate::Result<V
 pub fn zlib_compress_framed(payload: &[u8]) -> Vec<u8> {
     const CHUNK: usize = 131_072; // LOADING_COMPRESSION_CHUNK_SIZE
 
-    let pieces: Vec<(Vec<u8>, usize)> = payload
-        .chunks(CHUNK)
-        .map(|c| (zlib_stream(c), c.len()))
-        .collect();
-    let as_i64 = |n: usize| i64::try_from(n).expect("bench payload fits i64");
-    let info = |c: i64, u: i64, out: &mut Vec<u8>| {
-        out.extend_from_slice(&c.to_le_bytes());
-        out.extend_from_slice(&u.to_le_bytes());
-    };
-    let total_comp: usize = pieces.iter().map(|(s, _)| s.len()).sum();
-    let mut out = Vec::new();
-    info(
+    let chunk_size = i64::try_from(CHUNK).expect("128 KiB fits i64");
+    let tag = (
         i64::from(crate::asset::version::PACKAGE_FILE_TAG),
-        as_i64(CHUNK),
-        &mut out,
+        chunk_size,
     );
-    info(as_i64(total_comp), as_i64(payload.len()), &mut out);
-    for (stream, unc) in &pieces {
-        info(as_i64(stream.len()), as_i64(*unc), &mut out);
+    zlib_compress_framed_with(payload, CHUNK, tag, None)
+}
+
+/// Compress `payload` into the chunked framing at `split` bytes per chunk,
+/// writing the tag record `tag` and the v2 compression-format byte
+/// `format_byte` verbatim and deriving the summary and chunk table from
+/// the real sizes. A `tag` chunk size other than `split` lets a test
+/// claim a chunking other than the one used.
+///
+/// # Panics
+/// Panics if `payload` exceeds `i64::MAX` bytes (impossible for a
+/// bench/test input).
+#[must_use]
+pub fn zlib_compress_framed_with(
+    payload: &[u8],
+    split: usize,
+    tag: (i64, i64),
+    format_byte: Option<u8>,
+) -> Vec<u8> {
+    let as_i64 = |n: usize| i64::try_from(n).expect("bench payload fits i64");
+    let mut table = Vec::new();
+    let mut streams = Vec::new();
+    for chunk in payload.chunks(split.max(1)) {
+        let stream = zlib_stream(chunk);
+        table.push((as_i64(stream.len()), as_i64(chunk.len())));
+        streams.extend_from_slice(&stream);
     }
-    for (stream, _) in &pieces {
-        out.extend_from_slice(stream);
+    let summary = (as_i64(streams.len()), as_i64(payload.len()));
+    zlib_framing(tag, format_byte, summary, &table, &streams)
+}
+
+/// The engine's chunked `FCompressedChunkInfo` framing from its parts,
+/// each written verbatim: the tag record (tag, chunk size), the v2
+/// compression-format byte, the summary record (compressed,
+/// uncompressed), the chunk table and the chunk streams. Nothing is
+/// checked, so tests can pass inconsistent values.
+#[must_use]
+pub fn zlib_framing(
+    tag: (i64, i64),
+    format_byte: Option<u8>,
+    summary: (i64, i64),
+    table: &[(i64, i64)],
+    streams: &[u8],
+) -> Vec<u8> {
+    fn push_info(out: &mut Vec<u8>, (compressed, uncompressed): (i64, i64)) {
+        out.extend_from_slice(&compressed.to_le_bytes());
+        out.extend_from_slice(&uncompressed.to_le_bytes());
     }
+
+    let mut out = Vec::new();
+    push_info(&mut out, tag);
+    out.extend(format_byte);
+    push_info(&mut out, summary);
+    for &entry in table {
+        push_info(&mut out, entry);
+    }
+    out.extend_from_slice(streams);
     out
 }
 
@@ -133,6 +172,26 @@ pub fn zlib_stream(payload: &[u8]) -> Vec<u8> {
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
     enc.write_all(payload).expect("in-memory zlib write");
     enc.finish().expect("in-memory zlib finish")
+}
+
+/// One empty non-final stored block (BFINAL 0, BTYPE 00, LEN 0, NLEN !0),
+/// a padding group for [`zlib_padded_stream`].
+pub const EMPTY_STORED_BLOCK: [u8; 5] = [0x00, 0x00, 0x00, 0xFF, 0xFF];
+
+/// Four empty non-final fixed-Huffman blocks (each BFINAL 0, BTYPE 01, then
+/// the 7-bit end-of-block code), 40 bits ending byte-aligned: a padding
+/// group for [`zlib_padded_stream`].
+pub const FOUR_EMPTY_FIXED_BLOCKS: [u8; 5] = [0x02, 0x08, 0x20, 0x80, 0x00];
+
+/// A zlib stream that decodes to b"B" after `groups` copies of `padding`,
+/// [`EMPTY_STORED_BLOCK`] or [`FOUR_EMPTY_FIXED_BLOCKS`]: a zlib header,
+/// the padding, then a final stored block holding b"B" and its Adler-32.
+#[must_use]
+pub fn zlib_padded_stream(padding: [u8; 5], groups: usize) -> Vec<u8> {
+    let mut stream = vec![0x78, 0x01];
+    stream.extend_from_slice(&padding.repeat(groups));
+    stream.extend_from_slice(&[0x01, 0x01, 0x00, 0xFE, 0xFF, 0x42, 0x00, 0x43, 0x00, 0x43]);
+    stream
 }
 
 /// The exact encoded byte length `decode_mip` requires for `format_name` at
