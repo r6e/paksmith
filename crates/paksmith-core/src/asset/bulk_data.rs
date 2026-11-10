@@ -4221,10 +4221,12 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn chunked_zlib_round_trips_multi_chunk() {
-        // 10_000 bytes at a 4096 chunk size → 3 chunks, short last.
-        let payload: Vec<u8> = (0..10_000u32).map(|i| (i % 249) as u8).collect();
-        let framed = frame_zlib(&payload, 4096, (TEST_V1_TAG, 4096), None);
-        let out = decompress_zlib(&framed, 10_000, "test.uasset").expect("multi chunk");
+        // 300_000 bytes at 64 KiB chunks → 5 chunks, short last. 64 KiB
+        // is not the 128 KiB default, so the tag record's chunk size sets
+        // the count.
+        let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 249) as u8).collect();
+        let framed = frame_zlib(&payload, 65_536, (TEST_V1_TAG, 65_536), None);
+        let out = decompress_zlib(&framed, 300_000, "test.uasset").expect("multi chunk");
         assert_eq!(out, payload);
     }
 
@@ -4245,10 +4247,12 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn chunked_zlib_v2_header_zlib_format_round_trips() {
-        // v2 header: ARCHIVE_V2_HEADER_TAG + inline format byte 3 (Zlib).
-        let payload: Vec<u8> = (0..5000u32).map(|i| (i % 243) as u8).collect();
-        let framed = frame_zlib(&payload, 4096, (TEST_V2_TAG, 4096), Some(3));
-        let out = decompress_zlib(&framed, 5000, "test.uasset").expect("v2 zlib");
+        // v2 header: ARCHIVE_V2_HEADER_TAG + inline format byte 3 (Zlib),
+        // 136_072 bytes in three 64 KiB chunks, so the v2 tag record's
+        // chunk size sets the count.
+        let payload: Vec<u8> = (0..136_072u32).map(|i| (i % 243) as u8).collect();
+        let framed = frame_zlib(&payload, 65_536, (TEST_V2_TAG, 65_536), Some(3));
+        let out = decompress_zlib(&framed, 136_072, "test.uasset").expect("v2 zlib");
         assert_eq!(out, payload);
     }
 
@@ -4438,22 +4442,23 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn chunked_zlib_rejects_truncated_chunk_table() {
-        // Summary claims 1_000_000 uncompressed bytes at chunk size 1
-        // → 1M table entries (16 MiB of table), but the input holds
-        // one. Must fail on the input-length bound BEFORE allocating
-        // table space — a lying header cannot force a large
-        // allocation (F1 discipline at the framing layer).
+        // Summary claims 1_000_000_000 uncompressed bytes at 128 KiB
+        // chunks → 7,630 table entries (about 119 KiB of table), but the
+        // input holds one. Must fail on the input-length bound before the
+        // table is read. The table is read in place and never allocated,
+        // so a lying header cannot force an allocation sized by it (F1
+        // discipline at the framing layer).
         let stream = zlib_stream(&[0u8; 1]);
         let stream_len = i64::try_from(stream.len()).unwrap();
         let framed = zlib_framing(
-            (TEST_V1_TAG, 1),
+            (TEST_V1_TAG, TEST_CHUNK_128K),
             None,
-            (stream_len, 1_000_000),
+            (stream_len, 1_000_000_000),
             &[(stream_len, 1)],
             &stream,
         );
         expect_decode_failed(
-            decompress_zlib(&framed, 1_000_000, "test.uasset"),
+            decompress_zlib(&framed, 1_000_000_000, "test.uasset"),
             "truncated",
         );
         // Near-boundary variant: the input ends 8 bytes INTO the
@@ -4496,15 +4501,14 @@ mod tests {
             ),
             "over-cap claim dies at the claim cap, got {result:?}"
         );
-        // ...while the largest in-cap claim (exactly 8 GiB at chunk
-        // size 2 → a ~4-billion-entry chunk table) exercises the
-        // framing math itself: the ceil computation must not
-        // overflow, and the table bound must reject before any
-        // allocation proportional to the count.
+        // ...while the largest in-cap claim (exactly 8 GiB at 128 KiB
+        // chunks → a 65,536-entry chunk table) exercises the framing
+        // math itself: the ceil computation must not overflow, and the
+        // table bound must reject a count the bytes present cannot hold.
         #[allow(clippy::cast_possible_wrap, reason = "8 GiB fits i64 positively")]
         let at_cap = MAX_BULK_DATA_SIZE as i64;
         let framed = zlib_framing(
-            (TEST_V1_TAG, 2),
+            (TEST_V1_TAG, TEST_CHUNK_128K),
             None,
             (stream_len, at_cap),
             &[(stream_len, 16)],
@@ -4601,23 +4605,23 @@ mod tests {
         expect_decode_failed(decompress_zlib(&zero_comp, 10, "test.uasset"), "chunk 0");
         // (b) A (len, 0) entry alongside a real chunk is ACCEPTED:
         // its stream inflates to exactly the claimed 0 bytes and the
-        // remaining chunk carries the payload. chunk size 8 over a
-        // 10-byte total → count 2, sums consistent.
-        let payload = b"0123456789";
+        // remaining chunk carries the payload. 128 KiB chunks over a
+        // 131_082-byte total → count 2, sums consistent.
+        let payload: Vec<u8> = (0..131_082u32).map(|i| (i % 251) as u8).collect();
         let empty_stream = zlib_stream(&[]);
-        let full_stream = zlib_stream(payload);
+        let full_stream = zlib_stream(&payload);
         let empty_len = i64::try_from(empty_stream.len()).unwrap();
         let full_len = i64::try_from(full_stream.len()).unwrap();
         let mut streams = empty_stream.clone();
         streams.extend_from_slice(&full_stream);
         let zero_unc = zlib_framing(
-            (TEST_V1_TAG, 8),
+            (TEST_V1_TAG, TEST_CHUNK_128K),
             None,
-            (empty_len + full_len, 10),
-            &[(empty_len, 0), (full_len, 10)],
+            (empty_len + full_len, 131_082),
+            &[(empty_len, 0), (full_len, 131_082)],
             &streams,
         );
-        let out = decompress_zlib(&zero_unc, 10, "test.uasset")
+        let out = decompress_zlib(&zero_unc, 131_082, "test.uasset")
             .expect("zero-uncompressed chunk entry is not negative");
         assert_eq!(out, payload);
     }
@@ -4638,10 +4642,11 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn chunked_zlib_rejects_bytes_after_a_chunk_stream() {
+        let first: Vec<u8> = (0..131_072u32).map(|i| (i % 239) as u8).collect();
         for padded in 0..2 {
             let mut table = Vec::new();
             let mut streams = Vec::new();
-            for (index, part) in [&b"01234567"[..], b"89"].into_iter().enumerate() {
+            for (index, part) in [&first[..], b"89"].into_iter().enumerate() {
                 let mut stream = zlib_stream(part);
                 if index == padded {
                     stream.extend_from_slice(&[0xAA, 0xAA]);
@@ -4653,9 +4658,15 @@ mod tests {
                 streams.extend_from_slice(&stream);
             }
             let total_comp = table.iter().map(|&(c, _)| c).sum();
-            let framed = zlib_framing((TEST_V1_TAG, 8), None, (total_comp, 10), &table, &streams);
+            let framed = zlib_framing(
+                (TEST_V1_TAG, TEST_CHUNK_128K),
+                None,
+                (total_comp, 131_074),
+                &table,
+                &streams,
+            );
             expect_decode_failed(
-                decompress_zlib(&framed, 10, "test.uasset"),
+                decompress_zlib(&framed, 131_074, "test.uasset"),
                 &format!("chunk {padded}: 2 byte(s) after its zlib stream"),
             );
         }
