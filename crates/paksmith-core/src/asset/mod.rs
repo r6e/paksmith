@@ -1291,6 +1291,11 @@ mod ends_package_read_tests {
                 resolved: 2,
                 cap: 1,
             }),
+            asset_parse(AssetParseFault::BulkDataChunkSizeTooSmall {
+                chunk_size: 1,
+                chunk_count: 2,
+                minimum: 32_768,
+            }),
             PaksmithError::MappingsParse {
                 fault: MappingsParseFault::AllocationFailed {
                     context: MappingsAllocationContext::NameTable,

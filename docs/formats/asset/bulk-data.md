@@ -301,6 +301,22 @@ deviations are all fail-closed:
   budget charged), growing only as real bytes are produced — each
   chunk's read is capped at its claimed size plus one so an
   over-long stream is detected rather than inflated.
+- **Chunk-size floor**: a record of more than one chunk needs a chunk
+  size of at least 32 KiB (`MIN_BULK_DATA_CHUNK_SIZE`), taken after
+  the sentinel maps to 128 KiB, or it fails with
+  `BulkDataChunkSizeTooSmall` before its chunk table is read. The floor
+  does not apply to a record of at most one chunk. Under the 8 GiB
+  claim cap, a record that passes holds at most 262,144 chunks, each
+  after the first a reset of the decoder. That bounds one record, not
+  the rate of chunks per input byte, and not a package decode: the
+  resolver gives back the budget claim of a record that fails to
+  decode, so the per-source bulk-read ledger bounds a package decode.
+  No chunk-size bound touches empty fixed-Huffman blocks inside one
+  chunk's stream. 32 KiB is a quarter of
+  `LOADING_COMPRESSION_CHUNK_SIZE` and was the chunk size before
+  `EUnrealEngineObjectUE3Version::CHANGED_COMPRESSION_CHUNK_SIZE_TO_128`
+  (369, a UE3 object version). CUE4Parse only asserts that the chunk
+  size is positive.[^7]
 - A zlib record with `SizeOnDisk = 0` decodes to an empty payload,
   without reading any framing, only when `ElementCount` is also 0;
   with a nonzero `ElementCount` it fails as truncated framing.
@@ -483,7 +499,12 @@ A `FByteBulkDataHeader` reader MUST:
   total to `ElementCount`, compute the chunk count, the chunk table's
   byte size (16 bytes per chunk) and the sums of the chunk sizes with
   overflow-checked arithmetic, and check that the table fits in the
-  bytes left in the record before reading it. A valid zlib stream may
+  bytes left in the record before reading it. Bound the chunk count as
+  well; paksmith rejects a record of more than one chunk whose chunk
+  size is under 32 KiB. Each chunk is its own zlib stream, and one can
+  cost as little as a 16-byte table entry plus an 8-byte empty stream,
+  so a small chunk size lets a 512 MiB record hold about 22 million
+  chunks. A valid zlib stream may
   carry any number of empty stored or fixed-Huffman blocks (RFC 1951
   §3.2.4, §3.2.6), so a record's compressed size can far exceed its
   decoded size: size the output buffer from the smaller of the two,
@@ -629,3 +650,5 @@ plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
 [^5]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FByteBulkDataHeader.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L40-L54 (the `dataIndex` short-circuit: read only when the owner's `BulkDataMap` is non-empty, returning on an in-range index and otherwise rewinding 4 bytes); `CUE4Parse/UE4/Assets/IoPackage.cs` L114 (`BulkDataMap` is read only from `DATA_RESOURCES`, apart from one per-game override) and `CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs` L474 (`DataResourceOffset`, behind the same gate, which `CUE4Parse/UE4/Assets/Package.cs` L150-L156 needs before it reads `DataResourceMap`); `CUE4Parse/UE4/Versions/ObjectVersion.cs` L40 (`DATA_RESOURCES`, 1009 counted from `INITIAL_VERSION = 1000` at L13) and `CUE4Parse/UE4/Versions/EGame.cs` L257-L259 (UE 5.1 → 1008; 5.2 and 5.3 → 1009).
 
 [^6]: Per-chunk zlib calls: `FabianFG/CUE4Parse/CUE4Parse/Compression/ZlibHelper.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L70-L71 (Zlib-ng.NET `Uncompress(..., out int decodedSize)`) and `gildor2/UEViewer/Unreal/UnCoreCompression.cpp@a0bfb468d42be831b126632fd8a0ae6b3614f981` L452 (zlib `uncompress(..., &newLen, ...)`).
+
+[^7]: Chunk size: `FabianFG/CUE4Parse/CUE4Parse/UE4/Readers/FArchive.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` L614-L620 (`SerializeCompressedNew` takes the chunk size from the tag record, maps the `PACKAGE_FILE_TAG` sentinel to `LOADING_COMPRESSION_CHUNK_SIZE` and asserts only that it is positive) and L630 (chunk count); `CUE4Parse/Compression/Compression.cs` L17 (`LOADING_COMPRESSION_CHUNK_SIZE = 131072`); `CUE4Parse/UE4/Versions/ObjectVersion.cs` L1307-L1308 (`CHANGED_COMPRESSION_CHUNK_SIZE_TO_128 = 369`, "Changed LOADING_COMPRESSION_CHUNK_SIZE from 32K to 128K", in `EUnrealEngineObjectUE3Version`, which opens at L932).

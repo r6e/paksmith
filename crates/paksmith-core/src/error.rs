@@ -2477,7 +2477,7 @@ pub(crate) fn check_region_bounds(
 /// (issue #94) so tests can use `assert_eq!` alongside `matches!`.
 ///
 /// **Display format** is wire-stable — every variant has a dedicated
-/// `error_display_asset_parse_*` unit test that pins the exact string.
+/// `asset_parse_display_*` unit test that pins the exact string.
 /// Names read from the archive or its `.usmap` mappings render clamped
 /// to 64 chars plus an ellipsis; the fields keep the full value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3061,7 +3061,8 @@ pub enum AssetParseFault {
     /// `reason` names the specific violation. Distinguished from
     /// `BulkDataDecompressLengthMismatch` (which fires when the
     /// framing summary's total disagrees with `ElementCount`,
-    /// before any decoding).
+    /// before any decoding) and `BulkDataChunkSizeTooSmall` (a record
+    /// of more than one chunk under the chunk-size floor).
     BulkDataCompressionDecodeFailed {
         /// Compression method that failed ("zlib", "Oodle", etc.).
         /// `&'static str` for the same forward-compat reason as
@@ -3071,6 +3072,20 @@ pub enum AssetParseFault {
         /// because `flate2`'s `io::Error::to_string()` returns an
         /// owned value; we don't carry a `&'static` constant.
         reason: String,
+    },
+    /// A `BULKDATA_SerializeCompressedZLIB` record of more than one chunk
+    /// names a chunk size under `MIN_BULK_DATA_CHUNK_SIZE` (32 KiB;
+    /// defined in `crate::asset::bulk_data`), caught before its chunk
+    /// table is read (#846). The floor does not apply to a record of at
+    /// most one chunk; a chunk size of zero or less surfaces
+    /// `BulkDataCompressionDecodeFailed` instead.
+    BulkDataChunkSizeTooSmall {
+        /// The tag record's chunk size.
+        chunk_size: i64,
+        /// Chunks the summary's uncompressed total needs at that size.
+        chunk_count: usize,
+        /// The compile-time floor (32 KiB).
+        minimum: i64,
     },
     /// `.ubulk` or `.uptnl` companion file exceeds
     /// `MAX_UBULK_FILE_SIZE` (16 GiB; defined in
@@ -3719,6 +3734,15 @@ impl fmt::Display for AssetParseFault {
             Self::BulkDataCompressionDecodeFailed { method, reason } => {
                 write!(f, "bulk-data {method} decode failed: {reason}")
             }
+            Self::BulkDataChunkSizeTooSmall {
+                chunk_size,
+                chunk_count,
+                minimum,
+            } => write!(
+                f,
+                "zlib bulk-data framing claims {chunk_count} chunks at chunk size {chunk_size}; \
+                 a record of more than one chunk needs a chunk size of at least {minimum}"
+            ),
             Self::BulkDataCompanionTooLarge { kind, size, cap } => {
                 write!(f, ".{kind} companion file size {size} exceeds cap {cap}")
             }
@@ -9735,6 +9759,40 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `Game/Texture.uasset`: \
              bulk-data zlib decode failed: invalid stored block lengths"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_chunk_size_too_small() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataChunkSizeTooSmall {
+                chunk_size: 4096,
+                chunk_count: 3,
+                minimum: 32_768,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             zlib bulk-data framing claims 3 chunks at chunk size 4096; \
+             a record of more than one chunk needs a chunk size of at least 32768"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_data_resource_index_oob() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::DataResourceIndexOob {
+                index: 7,
+                entry_count: 3,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             bulk-data resource index 7 is out of range for the 3-entry FObjectDataResource table"
         );
     }
 

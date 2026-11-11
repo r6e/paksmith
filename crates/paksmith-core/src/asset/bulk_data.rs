@@ -78,6 +78,13 @@ pub(crate) const MAX_BULK_DATA_RECORDS_PER_EXPORT: usize = 256;
 /// (see plan Design Decision #14).
 pub(crate) const MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE: u64 = 16 * 1024 * 1024 * 1024;
 
+/// Smallest chunk size a zlib bulk record of more than one chunk may
+/// name, which bounds how many chunks, and so decoder resets, one
+/// record holds (#846): 32 KiB, a quarter of
+/// `LOADING_COMPRESSION_CHUNK_SIZE` and the chunk size before UE3
+/// object version 369.
+const MIN_BULK_DATA_CHUNK_SIZE: i64 = 32_768;
+
 /// v2 chunked-framing header tag: `PACKAGE_FILE_TAG` in the low 32
 /// bits, `0x22222222` in the high 32. Written as a literal because
 /// any derivation from [`crate::asset::version::PACKAGE_FILE_TAG`]
@@ -138,6 +145,13 @@ pub fn max_bulk_data_records_per_export() -> usize {
 #[must_use]
 pub fn max_total_bulk_data_bytes_per_package() -> u64 {
     MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE
+}
+
+/// Test-only accessor for `MIN_BULK_DATA_CHUNK_SIZE` (32 KiB).
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn min_bulk_data_chunk_size() -> i64 {
+    MIN_BULK_DATA_CHUNK_SIZE
 }
 
 /// Identifies where a resolved `FByteBulkData` record's bytes live.
@@ -1101,8 +1115,10 @@ pub(crate) fn counting_loader(
 /// 6. Compression decode: chunked `FCompressedChunkInfo` framing +
 ///    zlib via flate2 (see `decompress_zlib`); the framing summary's
 ///    uncompressed total is verified against `ElementCount`
-///    (mismatch fires `BulkDataDecompressLengthMismatch`); framing
-///    violations and codec stream errors fire
+///    (mismatch fires `BulkDataDecompressLengthMismatch`); a record of
+///    more than one chunk whose chunk size is under
+///    `MIN_BULK_DATA_CHUNK_SIZE` fires `BulkDataChunkSizeTooSmall`;
+///    framing violations and codec stream errors fire
 ///    `BulkDataCompressionDecodeFailed`; unsupported v2 formats fire
 ///    `UnsupportedBulkCompression`; a decompressed claim over
 ///    `MAX_BULK_DATA_SIZE` fires `BulkDataSizeExceeded`. A failure to
@@ -1767,7 +1783,9 @@ fn read_chunk_info(buf: &[u8], pos: &mut usize) -> Option<(i64, i64)> {
 /// doc): byte-swapped (big-endian) tags are rejected rather than
 /// swap-decoded; the summary's uncompressed total must equal
 /// `expected_size` (ElementCount) exactly, not merely fit within it;
-/// the chunk streams must fill the input exactly, and each chunk's zlib
+/// a record of more than one chunk needs a chunk size of at least
+/// `MIN_BULK_DATA_CHUNK_SIZE`, where CUE4Parse only asserts a positive
+/// one; the chunk streams must fill the input exactly, and each chunk's zlib
 /// stream must end where its chunk does (no trailing bytes after
 /// either); v2 named formats other than Zlib surface
 /// `UnsupportedBulkCompression`.
@@ -1789,6 +1807,10 @@ fn read_chunk_info(buf: &[u8], pos: &mut usize) -> Option<(i64, i64)> {
 ///   `expected_size + 1`; reads are bounded per chunk by
 ///   `take(chunk_uncompressed + 1)` and in total by the chunk-table sums
 ///   equaling `expected_size`.
+/// - The chunk-size floor caps a multi-chunk record that passes at
+///   262,144 chunks under `MAX_BULK_DATA_SIZE`: one decoder build, then
+///   a reset per later chunk. What it does not bound is in
+///   `docs/formats/asset/bulk-data.md`.
 ///
 /// Used by `BulkDataResolver::resolve` and the `__test_utils` bench
 /// accessor (`crate::testing::bench::zlib_decompress`); `pub(crate)`
@@ -1968,6 +1990,18 @@ pub(crate) fn decompress_zlib(
             "chunk count {chunk_count} exceeds the address space"
         ))
     })?;
+
+    // 6b. Chunk-size floor for records of more than one chunk (#846).
+    if chunk_count > 1 && chunk_size < MIN_BULK_DATA_CHUNK_SIZE {
+        return Err(crate::PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: crate::error::AssetParseFault::BulkDataChunkSizeTooSmall {
+                chunk_size,
+                chunk_count,
+                minimum: MIN_BULK_DATA_CHUNK_SIZE,
+            },
+        });
+    }
 
     // 7. SECURITY: the chunk table must physically fit in the
     // remaining input BEFORE it is walked — a lying summary cannot
@@ -2404,7 +2438,7 @@ mod tests {
         assert_eq!(CHUNK_INFO_WIRE_SIZE, 16, "two LE i64s");
     }
 
-    /// Pins the five cap values directly. Kills cargo-mutants
+    /// Pins the cap values directly. Kills cargo-mutants
     /// arithmetic mutations on the constant definitions (e.g.
     /// `8 * 1024 * 1024 * 1024` → `8 + 1024 + 1024 + 1024`
     /// would produce 4120, not 8 GiB; this assertion catches the
@@ -2423,6 +2457,7 @@ mod tests {
             MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE, 17_179_869_184,
             "16 GiB"
         );
+        assert_eq!(MIN_BULK_DATA_CHUNK_SIZE, 32_768, "32 KiB");
     }
 
     /// Pins each `__test_utils`-gated accessor to return its
@@ -2450,6 +2485,7 @@ mod tests {
             max_total_bulk_data_bytes_per_package(),
             MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE
         );
+        assert_eq!(min_bulk_data_chunk_size(), MIN_BULK_DATA_CHUNK_SIZE);
     }
 
     // BulkDataFlags accessor + validate tests. Each test isolates
@@ -4379,6 +4415,83 @@ mod tests {
             let framed = frame_zlib(payload, 4096, (TEST_V1_TAG, chunk_size), None);
             expect_decode_failed(decompress_zlib(&framed, 10, "test.uasset"), "chunk size");
         }
+    }
+
+    /// The fault of a `decompress_zlib` that failed with `AssetParse`;
+    /// panics with the actual result otherwise.
+    #[cfg(feature = "__test_utils")]
+    #[track_caller]
+    fn asset_fault(result: crate::Result<Vec<u8>>) -> crate::error::AssetParseFault {
+        match result {
+            Err(crate::PaksmithError::AssetParse { fault, .. }) => fault,
+            other => panic!("expected an AssetParse fault, got {other:?}"),
+        }
+    }
+
+    /// A record of more than one chunk at exactly 32 KiB decodes (#846).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_accepts_multi_chunk_records_at_the_chunk_size_floor() {
+        // 32_769 bytes at 32 KiB chunks: 2 chunks, at the floor exactly.
+        let payload: Vec<u8> = (0..32_769u32).map(|i| (i % 251) as u8).collect();
+        let framed = frame_zlib(&payload, 32_768, (TEST_V1_TAG, 32_768), None);
+        let out = decompress_zlib(&framed, 32_769, "test.uasset").expect("at the floor");
+        assert_eq!(out, payload);
+    }
+
+    /// A record of more than one chunk under 32 KiB fails after its
+    /// summary is checked and before its chunk table is read (#846).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_rejects_multi_chunk_records_under_the_chunk_size_floor() {
+        use crate::error::AssetParseFault::{
+            BulkDataChunkSizeTooSmall, BulkDataDecompressLengthMismatch,
+        };
+
+        let too_small = |chunk_size, chunk_count| BulkDataChunkSizeTooSmall {
+            chunk_size,
+            chunk_count,
+            minimum: 32_768,
+        };
+        // 32_768 bytes at 32_767-byte chunks: 2 chunks, a byte under the floor.
+        let payload: Vec<u8> = (0..32_768u32).map(|i| (i % 251) as u8).collect();
+        let framed = frame_zlib(&payload, 32_767, (TEST_V1_TAG, 32_767), None);
+        let fault = asset_fault(decompress_zlib(&framed, 32_768, "test.uasset"));
+        assert_eq!(fault, too_small(32_767, 2));
+        // A claim the summary disagrees with still reports that first.
+        let fault = asset_fault(decompress_zlib(&framed, 32_767, "test.uasset"));
+        let mismatch = BulkDataDecompressLengthMismatch {
+            expected: 32_767,
+            actual: 32_768,
+        };
+        assert_eq!(fault, mismatch);
+        // 1_000_000 one-byte chunks need a table the input lacks: the floor
+        // reports before the table bound does.
+        let stream = zlib_stream(&[0u8; 1]);
+        let stream_len = i64::try_from(stream.len()).unwrap();
+        let framed = zlib_framing(
+            (TEST_V1_TAG, 1),
+            None,
+            (stream_len, 1_000_000),
+            &[(stream_len, 1)],
+            &stream,
+        );
+        let fault = asset_fault(decompress_zlib(&framed, 1_000_000, "test.uasset"));
+        assert_eq!(fault, too_small(1, 1_000_000));
+    }
+
+    /// The floor does not apply to a record of one chunk (#846).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_accepts_one_chunk_under_the_chunk_size_floor() {
+        // A byte less than the rejected record above fits in one chunk.
+        let payload: Vec<u8> = (0..32_767u32).map(|i| (i % 251) as u8).collect();
+        let framed = frame_zlib(&payload, 32_767, (TEST_V1_TAG, 32_767), None);
+        let out = decompress_zlib(&framed, 32_767, "test.uasset").expect("one chunk");
+        assert_eq!(out, payload);
+        let framed = frame_zlib(b"B", 1, (TEST_V1_TAG, 1), None);
+        let out = decompress_zlib(&framed, 1, "test.uasset").expect("chunk size 1");
+        assert_eq!(out, b"B");
     }
 
     #[cfg(feature = "__test_utils")]
