@@ -188,11 +188,15 @@ pub const FOUR_EMPTY_FIXED_BLOCKS: [u8; 5] = [0x02, 0x08, 0x20, 0x80, 0x00];
 /// the padding, then a final stored block holding b"B" and its Adler-32.
 #[must_use]
 pub fn zlib_padded_stream(padding: [u8; 5], groups: usize) -> Vec<u8> {
-    let mut stream = vec![0x78, 0x01];
-    stream.extend_from_slice(&padding.repeat(groups));
-    stream.extend_from_slice(&[0x01, 0x01, 0x00, 0xFE, 0xFF, 0x42, 0x00, 0x43, 0x00, 0x43]);
-    stream
+    let (header, stored_b) = STORED_STREAM_B.split_at(2);
+    [header, &padding.repeat(groups), stored_b].concat()
 }
+
+/// A zlib stream holding b"B" in one final stored block: the stream
+/// [`zlib_padded_stream`] builds with no padding.
+pub const STORED_STREAM_B: [u8; 12] = [
+    0x78, 0x01, 0x01, 0x01, 0x00, 0xFE, 0xFF, 0x42, 0x00, 0x43, 0x00, 0x43,
+];
 
 /// The exact encoded byte length `decode_mip` requires for `format_name` at
 /// `width`×`height` — the value a fuzz/bench harness must size its `encoded`
