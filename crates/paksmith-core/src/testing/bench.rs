@@ -198,6 +198,36 @@ pub const STORED_STREAM_B: [u8; 12] = [
     0x78, 0x01, 0x01, 0x01, 0x00, 0xFE, 0xFF, 0x42, 0x00, 0x43, 0x00, 0x43,
 ];
 
+/// A shared-history probe: 131,072 bytes cycling through 1..=251, then an
+/// 11-byte zlib stream whose one match copies the 3 bytes 32 KiB before
+/// its start, with the Adler-32 of the probe's bytes there. A decoder
+/// that kept the first stream's window accepts the second stream; a
+/// fresh one does not.
+#[must_use]
+pub fn shared_history_probe() -> (Vec<u8>, [u8; 11]) {
+    let first = (1..=251u8).cycle().take(131_072).collect();
+    // Zlib header, a final fixed-Huffman block holding one match of
+    // length 3 at distance 32,768, then the Adler-32 trailer.
+    let second = [
+        0x78, 0x01, 0x03, 0xDE, 0xFF, 0x0F, 0x00, 0x03, 0xDF, 0x01, 0xF0,
+    ];
+    (first, second)
+}
+
+/// A zlib stream that yields b"0123456789A" from a non-final stored block,
+/// then holds `empty_blocks` empty non-final stored blocks, then a block of
+/// the reserved type 3 at byte `18 + 5 * empty_blocks`. A decoder that
+/// buffers 32 KiB of input at a time (flate2's `read::ZlibDecoder`) returns
+/// the 11 bytes before it reaches a bad block past its first 32 KiB.
+#[must_use]
+pub fn zlib_stream_corrupt_after(empty_blocks: usize) -> Vec<u8> {
+    let mut stream = vec![0x78, 0x01, 0x00, 0x0B, 0x00, 0xF4, 0xFF];
+    stream.extend_from_slice(b"0123456789A");
+    stream.extend_from_slice(&EMPTY_STORED_BLOCK.repeat(empty_blocks));
+    stream.push(0x06);
+    stream
+}
+
 /// The exact encoded byte length `decode_mip` requires for `format_name` at
 /// `width`×`height` — the value a fuzz/bench harness must size its `encoded`
 /// buffer to so `decode_mip` reaches the decoder instead of bouncing off its
@@ -427,6 +457,23 @@ pub fn large_data_table(rows: usize, cols: usize) -> Asset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The probe's second stream ends with the Adler-32 of the 3 bytes it
+    /// copies from 32 KiB back, so it decodes only against the first
+    /// stream's window.
+    #[test]
+    fn shared_history_probe_checksums_the_bytes_it_reaches_back_to() {
+        let (first, second) = shared_history_probe();
+        let leaked = zlib_stream(&first[first.len() - 32_768..][..3]);
+        assert_eq!(second[7..], leaked[leaked.len() - 4..]);
+    }
+
+    /// The reserved-type block is the stream's last byte, at `18 + 5 * n`.
+    #[test]
+    fn zlib_stream_corrupt_after_ends_with_its_bad_block() {
+        let stream = zlib_stream_corrupt_after(2);
+        assert_eq!((stream.len(), stream[28]), (29, 0x06));
+    }
 
     #[test]
     fn decode_texture_mip_returns_rgba_for_a_bc1_block() {
