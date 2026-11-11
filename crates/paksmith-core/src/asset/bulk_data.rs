@@ -2171,8 +2171,9 @@ mod tests {
     use crate::asset::property::test_utils::make_ctx;
     #[cfg(feature = "__test_utils")]
     use crate::testing::bench::{
-        EMPTY_STORED_BLOCK, FOUR_EMPTY_FIXED_BLOCKS, zlib_compress_framed_with as frame_zlib,
-        zlib_framing, zlib_padded_stream, zlib_stream,
+        EMPTY_STORED_BLOCK, FOUR_EMPTY_FIXED_BLOCKS, shared_history_probe,
+        zlib_compress_framed_with as frame_zlib, zlib_framing, zlib_padded_stream, zlib_stream,
+        zlib_stream_corrupt_after,
     };
 
     /// Build an `AssetContext` carrying a data-resource table (#642).
@@ -4870,18 +4871,7 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn chunked_zlib_reports_corruption_past_a_chunks_claim() {
-        // Zlib header, a non-final stored block of 11 bytes, empty non-final
-        // stored blocks running past the stream's first 32 KiB, then a block
-        // of the reserved type 3. A decoder that buffers 32 KiB of input at a
-        // time (flate2's `read::ZlibDecoder`) returns the excess byte before
-        // it reaches the bad block.
-        let mut stream = vec![0x78, 0x01, 0x00, 0x0B, 0x00, 0xF4, 0xFF];
-        stream.extend_from_slice(b"0123456789A");
-        for _ in 0..6_600 {
-            stream.extend_from_slice(&EMPTY_STORED_BLOCK);
-        }
-        stream.push(0x06);
-        let framed = single_chunk_framing(TEST_CHUNK_128K, &stream, 10);
+        let framed = single_chunk_framing(TEST_CHUNK_128K, &zlib_stream_corrupt_after(6_600), 10);
         // The colon excludes the length mismatch, "chunk 0 decompressed to".
         expect_decode_failed(decompress_zlib(&framed, 10, "test.uasset"), "chunk 0:");
     }
@@ -4948,23 +4938,14 @@ mod tests {
         }
     }
 
-    /// Chunks share no history (#846). Chunk 1's one match copies the 3
-    /// bytes 32 KiB before its start, and its Adler-32 is that of chunk
-    /// 0's bytes there, so only a decoder that kept chunk 0's window
-    /// accepts it. Inflaters that refuse the distance fail it, and so
-    /// does miniz, which reads zeros from its cleared window and then
-    /// fails the checksum.
+    /// Chunks share no history (#846): chunk 1 is `shared_history_probe`'s
+    /// second stream. Inflaters that refuse its distance fail it, and so
+    /// does miniz, which reads zeros from its cleared window and then fails
+    /// the checksum.
     #[cfg(feature = "__test_utils")]
     #[test]
     fn chunked_zlib_chunk_streams_share_no_history() {
-        let first: Vec<u8> = (0..131_072u32).map(|i| (i % 251) as u8 + 1).collect();
-        // Zlib header, a final fixed-Huffman block holding one match of
-        // length 3 at distance 32,768, then the Adler-32 trailer.
-        let second = [
-            0x78, 0x01, 0x03, 0xDE, 0xFF, 0x0F, 0x00, 0x03, 0xDF, 0x01, 0xF0,
-        ];
-        let leaked = zlib_stream(&first[first.len() - 32_768..][..3]);
-        assert_eq!(second[7..], leaked[leaked.len() - 4..]);
+        let (first, second) = shared_history_probe();
         let mut streams = zlib_stream(&first);
         let first_len = i64::try_from(streams.len()).unwrap();
         streams.extend_from_slice(&second);
