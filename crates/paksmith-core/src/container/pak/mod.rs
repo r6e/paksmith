@@ -2546,6 +2546,12 @@ fn check_cumulative_size(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// zlib decoders [`stream_zlib_to`] has built on this thread.
+    static ZLIB_DECODERS_BUILT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Stream the zlib-decompressed payload of `entry` from `file` to
 /// `writer`. Returns the number of decompressed bytes written.
 ///
@@ -2554,9 +2560,10 @@ fn check_cumulative_size(
 /// plus a decompressed-output buffer sized to that block's output.
 /// Both buffers are hoisted outside the per-block loop and reuse
 /// capacity across blocks (#373); the full `uncompressed_size`
-/// never lives in memory at once. A K-block entry pays 2
-/// allocations on the first block, then runs allocator-free for
-/// every subsequent block whose `len()` is `<=` the running peak.
+/// never lives in memory at once. The entry's one zlib decoder is
+/// built on block 0 and reset in place for each later block (#848),
+/// so after block 0 a block allocates only when its input or output
+/// is larger than any before it.
 #[allow(clippy::too_many_lines)] // bounded by per-block error-reporting + zlib-stream branches
 fn stream_zlib_to<R: Read + Seek>(
     file: &mut R,
@@ -2605,6 +2612,9 @@ fn stream_zlib_to<R: Read + Seek>(
     // of whether the allocator was actually consulted.
     let mut compressed: Vec<u8> = Vec::new();
     let mut block_out: Vec<u8> = Vec::new();
+    // Built on block 0's input, which it then owns: later blocks are read
+    // into that same Vec, inside the decoder's cursor.
+    let mut decoder: Option<ZlibDecoder<Cursor<Vec<u8>>>> = None;
 
     // Track the previous block's end so `validate_block_bounds` can
     // enforce monotonic file-order (issue #129) across loop iters.
@@ -2621,15 +2631,11 @@ fn stream_zlib_to<R: Read + Seek>(
             path,
         )?;
 
-        read_compressed_block(
-            file,
-            &mut compressed,
-            block.len(),
-            abs_start,
-            i,
-            "zlib",
-            path,
-        )?;
+        let input = match decoder.as_mut() {
+            Some(reused) => reused.get_mut().get_mut(),
+            None => &mut compressed,
+        };
+        read_compressed_block(file, input, block.len(), abs_start, i, "zlib", path)?;
 
         // Bound the decoder to the remaining output budget plus one byte.
         // The +1 lets us detect "decompressed more than we expected" without
@@ -2638,7 +2644,19 @@ fn stream_zlib_to<R: Read + Seek>(
         // the post-loop length check rejects.
         let remaining = uncompressed_size.saturating_sub(bytes_written);
         let budget = remaining.saturating_add(1);
-        let mut limited = ZlibDecoder::new(&compressed[..]).take(budget);
+        // Resetting the entry's decoder for each later block clears its
+        // window and buffered input, so no block sees another's bytes; the
+        // new cursor starts at the block's first byte.
+        if let Some(reused) = decoder.as_mut() {
+            let input = std::mem::take(reused.get_mut()).into_inner();
+            let _ = reused.reset(Cursor::new(input));
+        }
+        let decoder = decoder.get_or_insert_with(|| {
+            #[cfg(test)]
+            ZLIB_DECODERS_BUILT.with(|built| built.update(|n| n + 1));
+            ZlibDecoder::new(Cursor::new(std::mem::take(&mut compressed)))
+        });
+        let mut limited = decoder.take(budget);
         // Per-block decompressed buffer. We can't `write_all` directly
         // into the output writer because we need the full block's
         // decompressed length for the bomb check and the per-block
@@ -4795,6 +4813,52 @@ mod tests {
             }
             other => panic!("expected a decompression fault, got {other:?}"),
         }
+    }
+
+    /// The zlib decoders `f` builds on this thread.
+    #[cfg(feature = "__test_utils")]
+    fn zlib_decoders_built(f: impl FnOnce()) -> u64 {
+        let before = ZLIB_DECODERS_BUILT.with(std::cell::Cell::get);
+        f();
+        ZLIB_DECODERS_BUILT.with(std::cell::Cell::get) - before
+    }
+
+    /// An entry with blocks builds one decoder, however many it has (#848).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_zlib_entry_builds_one_decoder() {
+        use crate::testing::bench::zlib_stream;
+
+        let streams: Vec<Vec<u8>> = b"abcdefghij".chunks(4).map(zlib_stream).collect();
+        let built = zlib_decoders_built(|| {
+            assert_eq!(read_zlib_entry(&streams, 10, 4).unwrap(), b"abcdefghij");
+        });
+        assert_eq!(built, 1);
+    }
+
+    /// No decoder is built before a block has been read: not for an entry
+    /// without blocks, nor when block 0's input can't be reserved.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_zlib_entry_builds_no_decoder_before_a_block_is_read() {
+        use crate::seams::{PakSeam, SeamSite};
+        use crate::testing::bench::zlib_stream;
+        use crate::testing::oom::arm_at;
+
+        let built = zlib_decoders_built(|| assert_eq!(read_zlib_entry(&[], 0, 4).unwrap(), b""));
+        assert_eq!(built, 0);
+        let built = zlib_decoders_built(|| {
+            let _guard = arm_at(SeamSite::Pak(PakSeam::CompressedReserve), 0);
+            let fault = zlib_entry_fault(&[zlib_stream(b"abcd")], 4, 4, 0);
+            assert!(
+                matches!(
+                    fault,
+                    DecompressionFault::CompressedBlockReserveFailed { block_index: 0, .. }
+                ),
+                "{fault:?}"
+            );
+        });
+        assert_eq!(built, 0);
     }
 
     /// A block's stream that is cut short, empty or fails its Adler-32 fails
