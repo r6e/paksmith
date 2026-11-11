@@ -2155,7 +2155,7 @@ fn read_encrypted_index<R: Read + Seek>(
 /// Returns the number of bytes written (equals `uncompressed_size`).
 ///
 /// When `key` is `Some`, the entry is AES-256-ECB encrypted: the on-disk
-/// payload is 16-byte aligned (padded with trailing zeros by UE's pak writer).
+/// payload is 16-byte aligned.
 /// The full aligned block is read into a `Zeroizing` buffer, decrypted in
 /// place, trimmed to the real `uncompressed_size`, and then written. This
 /// sacrifices the streaming property for encrypted entries — peak allocation
