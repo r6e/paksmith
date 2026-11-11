@@ -64,10 +64,12 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 # 1.1.10: a read that runs out of input inside a deflate stream fails
 # with "incomplete deflate stream" (rust-lang/flate2-rs#556). Bulk-data
 # zlib decoding relies on it to know a decoded chunk reached its stream's
-# end; chunked_zlib_rejects_a_chunk_stream_cut_short pins it. 1.1.10's
-# `bufread::ZlibDecoder::reset` also resets the inflater in place (1.1.9's
-# built a new one), so that decoding can share one decoder across a
-# record's chunks without allocating per chunk.
+# end; chunked_zlib_rejects_a_chunk_stream_cut_short pins it, and
+# read_zlib_entry_stream_errors_name_their_block pins it for pak blocks.
+# In 1.1.10, `bufread::ZlibDecoder::reset` and `read::ZlibDecoder::reset`
+# both reset the inflater in place through `reset_decoder_data` (1.1.9's
+# built a new one), so a bulk record's chunks and a pak entry's blocks
+# can each share one decoder without allocating per chunk or block.
 flate2 = "1.1.10"
 # Raw-block LZ4 for pak entries (#636) — the same block form repak
 # writes and CUE4Parse decodes. `frame` (and its deps) excluded: UE
