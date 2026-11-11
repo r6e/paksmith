@@ -1,6 +1,6 @@
 //! Pak container benchmarks (issue #245).
 //!
-//! Six targets covering the open + read + verify hot paths:
+//! Seven targets covering the open + read + verify hot paths:
 //!
 //! - `pak_open_tiny` — the 818-byte canonical `real_v8b_uasset.pak`
 //!   committed under `tests/fixtures/`. Measures the per-open
@@ -20,6 +20,8 @@
 //!   sustained streaming-decompress throughput.
 //! - `pak_verify_full` — `PakReader::verify()` over a 100-entry pak
 //!   (SHA1 over every entry payload + the FDI + the PHI).
+//! - `pak_read_entry_zlib_block_flood` — one zlib entry of 16,384
+//!   one-byte blocks. Measures the per-block cost of the zlib path.
 //!
 //! Lint allow rationale: `unused_results` is suppressed because
 //! `Criterion::bench_function` / `Throughput` setters return
@@ -36,10 +38,12 @@
 use std::hint::black_box;
 use std::io::Cursor;
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use paksmith_bench::{NullWriter, lazy_fixture, tiny_pak_path};
+use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
+use paksmith_bench::{NullWriter, bench_fixture_path, lazy_fixture, tiny_pak_path};
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
+use paksmith_core::testing::bench::STORED_STREAM_B;
+use paksmith_core::testing::wire::{ZLIB_SYNTH_PATH, build_v8b_zlib_pak};
 use repak::{Compression, PakBuilder, Version};
 
 /// Build a multi-entry v8b pak via repak's writer. Mirrors the
@@ -250,6 +254,48 @@ fn pak_verify_full(c: &mut Criterion) {
     group.finish();
 }
 
+/// Blocks in each block-flood entry, as many as `bulk.rs`'s chunk floods.
+const FLOOD_BLOCKS: usize = 16_384;
+
+/// A zlib stream holding b"B" in one final fixed-Huffman block.
+const FIXED_STREAM_B: [u8; 9] = [0x78, 0x9c, 0x73, 0x02, 0x00, 0x00, 0x43, 0x00, 0x43];
+
+/// Bench: read one zlib entry of `FLOOD_BLOCKS` blocks at a compression
+/// block size of 1, each block a stream decoding to b"B", so the time is
+/// per-block work. `fixed` blocks hold b"B" in a fixed-Huffman block, whose
+/// tables miniz builds for every block; `stored` blocks hold it in a stored
+/// block, which needs none. `fixed_file` reads the `fixed` entry from a file,
+/// so each block's seek and read reach the file.
+fn pak_read_entry_zlib_block_flood(c: &mut Criterion) {
+    let n = u64::try_from(FLOOD_BLOCKS).expect("fits u64");
+    let pak = |block: &[u8]| build_v8b_zlib_pak(&vec![block.to_vec(); FLOOD_BLOCKS], n, 1);
+    let fixed = pak(&FIXED_STREAM_B);
+    // Written on every run, so the file always holds the archive `fixed` reads.
+    let fixed_path = bench_fixture_path("pak_zlib_block_flood_fixed.pak");
+    std::fs::create_dir_all(fixed_path.parent().expect("has a parent")).expect("create dir");
+    std::fs::write(&fixed_path, &fixed).expect("write block flood fixture");
+    let readers = [
+        ("fixed", PakReader::from_bytes(fixed).expect("from_bytes")),
+        (
+            "stored",
+            PakReader::from_bytes(pak(&STORED_STREAM_B)).expect("from_bytes"),
+        ),
+        ("fixed_file", PakReader::open(&fixed_path).expect("open")),
+    ];
+
+    let mut group = c.benchmark_group("pak_read_entry_zlib_block_flood");
+    // Flat: every sample runs the same number of these slow iterations.
+    group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(20);
+    group.throughput(Throughput::Elements(n));
+    for (name, reader) in &readers {
+        let read = || reader.read_entry_to(black_box(ZLIB_SYNTH_PATH), &mut NullWriter);
+        assert_eq!(read().expect("block flood decodes"), n, "{name}");
+        group.bench_function(*name, |b| b.iter(|| black_box(read())));
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     pak_open_tiny,
@@ -257,6 +303,7 @@ criterion_group!(
     pak_read_entry_uncompressed_small,
     pak_read_entry_zlib_small,
     pak_read_entry_zlib_large,
-    pak_verify_full
+    pak_verify_full,
+    pak_read_entry_zlib_block_flood
 );
 criterion_main!(benches);
