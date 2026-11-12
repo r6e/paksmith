@@ -183,11 +183,23 @@ pub const EMPTY_STORED_BLOCK: [u8; 5] = [0x00, 0x00, 0x00, 0xFF, 0xFF];
 /// group for [`zlib_padded_stream`].
 pub const FOUR_EMPTY_FIXED_BLOCKS: [u8; 5] = [0x02, 0x08, 0x20, 0x80, 0x00];
 
+/// Four empty non-final dynamic-Huffman blocks, 90 bits each, ending
+/// byte-aligned: a padding group for [`zlib_padded_stream`]. Each block's
+/// literal/length code holds only end-of-block and its distance code only
+/// distance code 0, each 1 bit long. RFC 1951 §3.2.7 describes that
+/// one-code form only for distances; zlib, miniz and zlib-rs accept it for
+/// both.
+pub const FOUR_EMPTY_DYNAMIC_BLOCKS: [u8; 45] = [
+    0x04, 0xC0, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00, 0x90, 0xFF, 0x6B, 0x10, 0x00, 0x07, 0x02, 0x00,
+    0x00, 0x00, 0x00, 0x40, 0xFE, 0xAF, 0x41, 0x00, 0x1C, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF9,
+    0xBF, 0x06, 0x01, 0x70, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE4, 0xFF, 0x1A,
+];
+
 /// A zlib stream that decodes to b"B" after `groups` copies of `padding`,
-/// [`EMPTY_STORED_BLOCK`] or [`FOUR_EMPTY_FIXED_BLOCKS`]: a zlib header,
-/// the padding, then a final stored block holding b"B" and its Adler-32.
+/// a byte-aligned run of empty non-final blocks: a zlib header, the
+/// padding, then a final stored block holding b"B" and its Adler-32.
 #[must_use]
-pub fn zlib_padded_stream(padding: [u8; 5], groups: usize) -> Vec<u8> {
+pub fn zlib_padded_stream(padding: &[u8], groups: usize) -> Vec<u8> {
     let (header, stored_b) = STORED_STREAM_B.split_at(2);
     [header, &padding.repeat(groups), stored_b].concat()
 }
@@ -466,6 +478,16 @@ mod tests {
         let (first, second) = shared_history_probe();
         let leaked = zlib_stream(&first[first.len() - 32_768..][..3]);
         assert_eq!(second[7..], leaked[leaked.len() - 4..]);
+    }
+
+    /// Each of the group's four 90-bit blocks opens with BFINAL 0, BTYPE 10.
+    #[test]
+    fn four_empty_dynamic_blocks_open_four_dynamic_blocks() {
+        let bit = |i: usize| (FOUR_EMPTY_DYNAMIC_BLOCKS[i / 8] >> (i % 8)) & 1;
+        for start in [0, 90, 180, 270] {
+            let header = bit(start) | (bit(start + 1) << 1) | (bit(start + 2) << 2);
+            assert_eq!(header, 0b100, "block at bit {start}");
+        }
     }
 
     /// The reserved-type block is the stream's last byte, at `18 + 5 * n`.

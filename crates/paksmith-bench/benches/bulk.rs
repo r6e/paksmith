@@ -122,7 +122,7 @@ const PADDING_GROUPS: usize = 26_000;
 /// One chunk claiming 1 byte, whose stream decodes to b"B" after
 /// `4 * PADDING_GROUPS` empty fixed-Huffman blocks.
 fn bulk_decompress_zlib_empty_fixed_blocks(c: &mut Criterion) {
-    let stream = zlib_padded_stream(FOUR_EMPTY_FIXED_BLOCKS, PADDING_GROUPS);
+    let stream = zlib_padded_stream(&FOUR_EMPTY_FIXED_BLOCKS, PADDING_GROUPS);
     let len = i64::try_from(stream.len()).expect("fits i64");
     let framed = framing(&[(len, 1)], &stream, 1);
     assert_eq!(zlib_decompress(&framed, 1).expect("padded stream"), b"B");
