@@ -118,14 +118,14 @@ UE writers may produce streams at any zlib compression level (1 = fastest, 9 = b
 
 ### Dictionary
 
-UE's writer doesn't use the optional preset-dictionary feature (RFC 1950 FDICT bit). Paksmith would refuse to decode an FDICT-bit-set stream because `flate2::ZlibDecoder` requires a caller-provided dictionary in that case — but no UE writer has been observed to emit one.
+UE's writer doesn't use the optional preset-dictionary feature (RFC 1950 FDICT bit), and the pak format has no field that supplies a dictionary. When the containing format doesn't use preset dictionaries, a compliant decompressor must reject any stream with FDICT set (RFC 1950 §2.3).
 
 ## Caps & limits
 
 ### Format-defined limits (wire-imposed)
 
 - **`CMF`**: `u8`; UE cooked content uses `0x78` (deflate + 32 KiB sliding window).
-- **`FLG`**: `u8`; FDICT bit is always `0` in UE content (paksmith would refuse to decode an FDICT-set stream because `flate2::ZlibDecoder` requires a caller-provided dictionary).
+- **`FLG`**: `u8`; FDICT bit is always `0` in UE content, and a decompressor must reject a stream that sets it (see [Dictionary](#dictionary)).
 - **`ADLER32`**: fixed 4 bytes, big-endian per RFC 1950.
 - **Per-block compressed-stream length**: bounded by the parent `CompressionBlock`'s `end - start` (see [`pak-block-framing.md`](pak-block-framing.md) §*Caps & limits*).
 - **Deflate blocks per stream**: RFC 1951 sets no limit. An empty block produces no output, so `compression_block_size` and `uncompressed_size` don't bound the block count: only the stream's compressed length does, at most one block per 10 bits (see [Deflate blocks](#deflate-blocks)).
@@ -231,7 +231,9 @@ from the pak layer; see [`pak-block-framing.md`](pak-block-framing.md)).
 **Dependencies:** `flate2 = "1.1.10"` (workspace pin). The crate provides
 `ZlibDecoder` over the `miniz_oxide` Rust-native deflate
 implementation by default — no C `zlib` linkage in paksmith's
-default-features build.
+default-features build. On that backend a header with FDICT set fails
+as `ZlibStreamError` ("corrupt deflate stream"), which
+`read_zlib_entry_decodes_with_miniz` pins.
 
 **Phase plan:** `docs/plans/phase-1-foundation.md`.
 
