@@ -1,6 +1,6 @@
 //! Pak container benchmarks (issue #245).
 //!
-//! Seven targets covering the open + read + verify hot paths:
+//! Targets covering the open + read + verify hot paths:
 //!
 //! - `pak_open_tiny` — the 818-byte canonical `real_v8b_uasset.pak`
 //!   committed under `tests/fixtures/`. Measures the per-open
@@ -14,14 +14,16 @@
 //!   uncompressed entry. Measures the no-decompress code path
 //!   (read into a pre-reserved `Vec`, SHA1 verify off the read).
 //! - `pak_read_entry_zlib_small` — same shape but zlib-compressed
-//!   payload. Quantifies the flate2-miniz decompressor's
-//!   contribution before any future swap to `zlib-rs`.
+//!   payload. Quantifies the zlib decompressor's contribution.
 //! - `pak_read_entry_zlib_large` — single 100 MiB zlib entry. Tests
 //!   sustained streaming-decompress throughput.
 //! - `pak_verify_full` — `PakReader::verify()` over a 100-entry pak
 //!   (SHA1 over every entry payload + the FDI + the PHI).
 //! - `pak_read_entry_zlib_block_flood` — one zlib entry of 16,384
 //!   one-byte blocks. Measures the per-block cost of the zlib path.
+//! - `pak_read_entry_zlib_empty_blocks` — one zlib entry of one block
+//!   whose stream holds empty fixed- or dynamic-Huffman blocks before
+//!   its one byte. Measures the per-block cost inside one stream.
 //!
 //! Lint allow rationale: `unused_results` is suppressed because
 //! `Criterion::bench_function` / `Throughput` setters return
@@ -39,10 +41,14 @@ use std::hint::black_box;
 use std::io::Cursor;
 
 use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
-use paksmith_bench::{NullWriter, bench_fixture_path, lazy_fixture, tiny_pak_path};
+use paksmith_bench::{
+    NullWriter, PADDED_BLOCKS, PADDING_GROUPS, bench_fixture_path, lazy_fixture, tiny_pak_path,
+};
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
-use paksmith_core::testing::bench::STORED_STREAM_B;
+use paksmith_core::testing::bench::{
+    FOUR_EMPTY_DYNAMIC_BLOCKS, FOUR_EMPTY_FIXED_BLOCKS, STORED_STREAM_B, zlib_padded_stream,
+};
 use paksmith_core::testing::wire::{ZLIB_SYNTH_PATH, build_v8b_zlib_pak};
 use repak::{Compression, PakBuilder, Version};
 
@@ -282,16 +288,44 @@ fn pak_read_entry_zlib_block_flood(c: &mut Criterion) {
         ),
         ("fixed_file", PakReader::open(&fixed_path).expect("open")),
     ];
+    time_zlib_entry_reads(c, "pak_read_entry_zlib_block_flood", n, n, &readers);
+}
 
-    let mut group = c.benchmark_group("pak_read_entry_zlib_block_flood");
+/// Bench: read one zlib entry of one block whose stream decodes to b"B"
+/// after `PADDING_GROUPS` copies of `FOUR_EMPTY_FIXED_BLOCKS` (`fixed`) or
+/// `FOUR_EMPTY_DYNAMIC_BLOCKS` (`dynamic`), so the time is the per-block
+/// work of empty blocks inside one stream.
+fn pak_read_entry_zlib_empty_blocks(c: &mut Criterion) {
+    let readers = [
+        ("fixed", &FOUR_EMPTY_FIXED_BLOCKS[..]),
+        ("dynamic", &FOUR_EMPTY_DYNAMIC_BLOCKS[..]),
+    ]
+    .map(|(name, padding)| {
+        let pak = build_v8b_zlib_pak(&[zlib_padded_stream(padding, PADDING_GROUPS)], 1, 1);
+        (name, PakReader::from_bytes(pak).expect("from_bytes"))
+    });
+    let blocks = u64::try_from(PADDED_BLOCKS).expect("fits u64");
+    time_zlib_entry_reads(c, "pak_read_entry_zlib_empty_blocks", blocks, 1, &readers);
+}
+
+/// Times reading the `ZLIB_SYNTH_PATH` entry from each of `readers`, after
+/// checking that it writes `written` bytes, reporting `elements` per read.
+fn time_zlib_entry_reads(
+    c: &mut Criterion,
+    name: &str,
+    elements: u64,
+    written: u64,
+    readers: &[(&str, PakReader)],
+) {
+    let mut group = c.benchmark_group(name);
     // Flat: every sample runs the same number of these slow iterations.
     group.sampling_mode(SamplingMode::Flat);
     group.sample_size(20);
-    group.throughput(Throughput::Elements(n));
-    for (name, reader) in &readers {
+    group.throughput(Throughput::Elements(elements));
+    for (label, reader) in readers {
         let read = || reader.read_entry_to(black_box(ZLIB_SYNTH_PATH), &mut NullWriter);
-        assert_eq!(read().expect("block flood decodes"), n, "{name}");
-        group.bench_function(*name, |b| b.iter(|| black_box(read())));
+        assert_eq!(read().expect("entry decodes"), written, "{label}");
+        group.bench_function(*label, |b| b.iter(|| black_box(read())));
     }
     group.finish();
 }
@@ -304,6 +338,7 @@ criterion_group!(
     pak_read_entry_zlib_small,
     pak_read_entry_zlib_large,
     pak_verify_full,
-    pak_read_entry_zlib_block_flood
+    pak_read_entry_zlib_block_flood,
+    pak_read_entry_zlib_empty_blocks
 );
 criterion_main!(benches);

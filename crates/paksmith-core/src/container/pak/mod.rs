@@ -4981,6 +4981,22 @@ mod tests {
         assert_eq!(out, b"abcdef");
     }
 
+    /// Pins flate2's miniz backend for an entry's blocks; see
+    /// `PRESET_DICTIONARY_HEADER` (#846).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_zlib_entry_decodes_with_miniz() {
+        use crate::testing::bench::PRESET_DICTIONARY_HEADER;
+
+        let fault = zlib_entry_fault(&[PRESET_DICTIONARY_HEADER.to_vec()], 1, 1, 0);
+        let expected = DecompressionFault::ZlibStreamError {
+            block_index: 0,
+            kind: std::io::ErrorKind::InvalidInput,
+            message: "corrupt deflate stream".to_owned(),
+        };
+        assert_eq!(fault, expected);
+    }
+
     /// The documented AES-256 key for the vendored encrypted fixtures
     /// (`crates/paksmith-fixture-gen/src/encryption.rs::FIXTURE_AES_KEY`).
     /// Hardcoded here because `paksmith-core` must NOT depend on

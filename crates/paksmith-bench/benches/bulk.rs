@@ -6,20 +6,21 @@
 //! 64 × 128 KiB chunks) via the `__test_utils` `zlib_decompress` accessor,
 //! reporting throughput over the decompressed bytes.
 //!
-//! Three crafted shapes from #846 time the decoder's cost on untrusted
-//! records, reporting throughput per chunk or per block: a flood of empty
-//! chunks whose streams each hold one fixed-Huffman block, ending in a
-//! corrupt chunk; the same flood with stored blocks; and one chunk of empty
-//! fixed-Huffman blocks.
+//! Crafted shapes from #846 time the decoder's cost on untrusted records,
+//! reporting throughput per chunk or per block: a flood of empty chunks
+//! whose streams each hold one fixed-Huffman block, ending in a corrupt
+//! chunk; the same flood with stored blocks; and one chunk of empty
+//! fixed-Huffman blocks, or of empty dynamic-Huffman blocks.
 
 #![allow(unused_results, missing_docs)]
 
 use std::hint::black_box;
 
 use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
+use paksmith_bench::{PADDED_BLOCKS, PADDING_GROUPS};
 use paksmith_core::testing::bench::{
-    FOUR_EMPTY_FIXED_BLOCKS, zlib_compress_framed, zlib_decompress, zlib_framing,
-    zlib_padded_stream, zlib_stream,
+    FOUR_EMPTY_DYNAMIC_BLOCKS, FOUR_EMPTY_FIXED_BLOCKS, zlib_compress_framed, zlib_decompress,
+    zlib_framing, zlib_padded_stream, zlib_stream,
 };
 
 const UNCOMPRESSED: usize = 8 * 1024 * 1024;
@@ -116,22 +117,29 @@ fn bulk_decompress_zlib_stored_chunk_flood(c: &mut Criterion) {
     flood_group(c, "bulk_decompress_zlib_stored_chunk_flood", &empty);
 }
 
-/// Groups of four empty non-final fixed-Huffman blocks in the one chunk.
-const PADDING_GROUPS: usize = 26_000;
-
 /// One chunk claiming 1 byte, whose stream decodes to b"B" after
-/// `4 * PADDING_GROUPS` empty fixed-Huffman blocks.
-fn bulk_decompress_zlib_empty_fixed_blocks(c: &mut Criterion) {
-    let stream = zlib_padded_stream(FOUR_EMPTY_FIXED_BLOCKS, PADDING_GROUPS);
+/// `PADDING_GROUPS` copies of `padding`, four empty blocks each.
+fn padded_chunk_group(c: &mut Criterion, name: &str, padding: &[u8]) {
+    let stream = zlib_padded_stream(padding, PADDING_GROUPS);
     let len = i64::try_from(stream.len()).expect("fits i64");
     let framed = framing(&[(len, 1)], &stream, 1);
     assert_eq!(zlib_decompress(&framed, 1).expect("padded stream"), b"B");
-    time_decode(
+    time_decode(c, name, PADDED_BLOCKS, &framed, 1);
+}
+
+fn bulk_decompress_zlib_empty_fixed_blocks(c: &mut Criterion) {
+    padded_chunk_group(
         c,
         "bulk_decompress_zlib_empty_fixed_blocks",
-        4 * PADDING_GROUPS,
-        &framed,
-        1,
+        &FOUR_EMPTY_FIXED_BLOCKS,
+    );
+}
+
+fn bulk_decompress_zlib_empty_dynamic_blocks(c: &mut Criterion) {
+    padded_chunk_group(
+        c,
+        "bulk_decompress_zlib_empty_dynamic_blocks",
+        &FOUR_EMPTY_DYNAMIC_BLOCKS,
     );
 }
 
@@ -140,6 +148,7 @@ criterion_group!(
     bulk_decompress_zlib_8mib,
     bulk_decompress_zlib_chunk_flood,
     bulk_decompress_zlib_stored_chunk_flood,
-    bulk_decompress_zlib_empty_fixed_blocks
+    bulk_decompress_zlib_empty_fixed_blocks,
+    bulk_decompress_zlib_empty_dynamic_blocks
 );
 criterion_main!(benches);

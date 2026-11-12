@@ -2171,9 +2171,9 @@ mod tests {
     use crate::asset::property::test_utils::make_ctx;
     #[cfg(feature = "__test_utils")]
     use crate::testing::bench::{
-        EMPTY_STORED_BLOCK, FOUR_EMPTY_FIXED_BLOCKS, shared_history_probe,
-        zlib_compress_framed_with as frame_zlib, zlib_framing, zlib_padded_stream, zlib_stream,
-        zlib_stream_corrupt_after,
+        EMPTY_STORED_BLOCK, FOUR_EMPTY_DYNAMIC_BLOCKS, FOUR_EMPTY_FIXED_BLOCKS,
+        PRESET_DICTIONARY_HEADER, shared_history_probe, zlib_compress_framed_with as frame_zlib,
+        zlib_framing, zlib_padded_stream, zlib_stream, zlib_stream_corrupt_after,
     };
 
     /// Build an `AssetContext` carrying a data-resource table (#642).
@@ -4004,14 +4004,19 @@ mod tests {
         );
     }
 
-    /// Deflate lets a valid stream carry any number of empty stored or
-    /// fixed-Huffman blocks, so a long chunk can decode to one byte (#846).
+    /// Deflate lets a valid stream carry any number of empty stored,
+    /// fixed-Huffman or dynamic-Huffman blocks, so a long chunk can decode
+    /// to one byte (#846).
     #[cfg(feature = "__test_utils")]
     #[test]
     fn resolve_zlib_padded_stream_keeps_at_most_its_claim_plus_one() {
-        for padding in [EMPTY_STORED_BLOCK, FOUR_EMPTY_FIXED_BLOCKS] {
-            let stream = zlib_padded_stream(padding, 200);
-            assert_eq!(stream.len(), 1012);
+        for (padding, groups, len) in [
+            (&EMPTY_STORED_BLOCK[..], 200, 1012),
+            (&FOUR_EMPTY_FIXED_BLOCKS[..], 200, 1012),
+            (&FOUR_EMPTY_DYNAMIC_BLOCKS[..], 22, 1002),
+        ] {
+            let stream = zlib_padded_stream(padding, groups);
+            assert_eq!(stream.len(), len);
             let framed = single_chunk_framing(TEST_CHUNK_128K, &stream, 1);
             let (resolver, record) = inline_zlib_record(&framed, 1);
             let bulk = resolver
@@ -4891,6 +4896,18 @@ mod tests {
             }) => {}
             other => panic!("expected BulkDataCompressionDecodeFailed, got {other:?}"),
         }
+    }
+
+    /// Pins flate2's miniz backend for a record's chunks; see
+    /// `PRESET_DICTIONARY_HEADER` (#846).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_decodes_with_miniz() {
+        let framed = single_chunk_framing(4096, &PRESET_DICTIONARY_HEADER, 1);
+        expect_decode_failed(
+            decompress_zlib(&framed, 1, "test.uasset"),
+            "chunk 0: corrupt deflate stream",
+        );
     }
 
     /// The zlib decoders `decompress_zlib` builds for `framed` on this
