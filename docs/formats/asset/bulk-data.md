@@ -311,7 +311,7 @@ deviations are all fail-closed:
   the rate of chunks per input byte, and not a package decode: the
   resolver gives back the budget claim of a record that fails to
   decode, so the per-source bulk-read ledger bounds a package decode.
-  No chunk-size bound touches empty fixed-Huffman blocks inside one
+  No chunk-size bound touches the empty deflate blocks inside one
   chunk's stream. 32 KiB is a quarter of
   `LOADING_COMPRESSION_CHUNK_SIZE` and was the chunk size before
   `EUnrealEngineObjectUE3Version::CHANGED_COMPRESSION_CHUNK_SIZE_TO_128`
@@ -422,6 +422,10 @@ record's on-wire shape: 4 bytes total instead of 20.
 - **`DuplicateSizeOnDisk`** and **`DuplicateOffset`** (when present):
   same widths as their non-duplicate counterparts.
 - **`BadDataVersion` skip region** (when bit 15 set): fixed 2 bytes.
+- **Chunked zlib framing** (`BULKDATA_SerializeCompressedZLIB`): only
+  each chunk's `CompressedSize`, and so the record's `SizeOnDisk`,
+  bounds how many deflate blocks a chunk's stream holds, at most one
+  per 10 bits (see [`zlib.md`](../compression/zlib.md#deflate-blocks)).
 
 ### Implementation hardening (recommended for any parser)
 
@@ -505,10 +509,14 @@ A `FByteBulkDataHeader` reader MUST:
   cost as little as a 16-byte table entry plus an 8-byte empty stream,
   so a small chunk size lets a 512 MiB record hold about 22 million
   chunks. A valid zlib stream may
-  carry any number of empty stored or fixed-Huffman blocks (RFC 1951
-  §3.2.4, §3.2.6), so a record's compressed size can far exceed its
-  decoded size: size the output buffer from the smaller of the two,
-  not from the input alone.
+  carry any number of empty stored, fixed-Huffman or dynamic-Huffman
+  blocks (RFC 1951 §3.2.4, §3.2.6, §3.2.7; see
+  [`zlib.md`](../compression/zlib.md#deflate-blocks)), so a record's
+  compressed size can far exceed its decoded size: size the output
+  buffer from the smaller of the two, not from the input alone. Empty
+  blocks add decode work without output, so the compressed-record
+  `SizeOnDisk` cap above, not `ElementCount`, bounds a record's decode
+  work.
 - **For `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile`**:
   surface `MissingCompanionFile { kind: Uptnl }` when `.uptnl` is
   absent. Paksmith's `CompanionFileKind` enum defines all three
