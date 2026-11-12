@@ -234,6 +234,8 @@ implementation by default — no C `zlib` linkage in paksmith's
 default-features build. On that backend a header with FDICT set fails
 as `ZlibStreamError` ("corrupt deflate stream"), which
 `read_zlib_entry_decodes_with_miniz` pins.
+[`docs/PERFORMANCE.md`](../../PERFORMANCE.md) §*Empty zlib blocks*
+measures this backend's cost for empty blocks.
 
 **Phase plan:** `docs/plans/phase-1-foundation.md`.
 

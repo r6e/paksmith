@@ -1,10 +1,11 @@
 # Paksmith performance baseline
 
-Snapshot of paksmith-core's hot paths measured immediately before the
-Phase 2b property-iteration rewrite. Captured per issue #245 so a
-regression introduced by the typed-property work is detectable
-against a real-numbers reference rather than against operator
-intuition.
+Snapshots of paksmith-core's hot paths. The `phase-2a-done` baseline
+was measured immediately before the Phase 2b property-iteration
+rewrite, per issue #245, so a regression introduced by the
+typed-property work is detectable against a real-numbers reference
+rather than against operator intuition. Later sections time targeted
+inputs.
 
 ## How to read this
 
@@ -24,9 +25,8 @@ For comparison across runs:
 
 ```bash
 # Run the baseline-aware compare
-# IMPORTANT: only valid on macOS/ARM64 (the platform the committed
-# baseline was captured on). Cross-platform diffs (e.g. running this
-# on Linux/x86 against the committed ARM64 baseline) show 200-400%
+# IMPORTANT: the numbers in this file are macOS/ARM64. Comparing
+# another platform's run against them (e.g. Linux/x86) shows 200-400%
 # variance from hardware alone — that's noise, not regression signal.
 cargo bench -p paksmith-bench -- --baseline phase-2a-done
 
@@ -34,10 +34,13 @@ cargo bench -p paksmith-bench -- --baseline phase-2a-done
 cargo bench -p paksmith-bench -- --save-baseline phase-2b-done
 ```
 
-Raw `estimates.json` from each bench's `phase-2a-done` baseline is
-committed under `crates/paksmith-bench/baselines/phase-2a-done-arm64/`
-so the numbers are reproducible from a fresh checkout without re-
-running the suite.
+The `estimates.json` from each bench's `phase-2a-done` baseline is
+committed under `crates/paksmith-bench/baselines/phase-2a-done-arm64/`,
+and later baselines sit beside it, so the numbers are reproducible
+from a fresh checkout without re-running the suite. They hold
+criterion's summary estimates, not the raw samples (`sample.json`) a
+`--baseline` compare loads, so a compare needs a run saved locally
+with `--save-baseline`.
 
 **Cache invalidation**: bench fixtures are cached to
 `target/bench-fixtures/` (gitignored). The cache keys solely on the
@@ -57,7 +60,7 @@ rm -rf target/bench-fixtures/
 | CPU      | Apple M2 Pro                       |
 | OS       | macOS 26.1 (Darwin 25.1)           |
 | Rust     | 1.95.0 (stable, 2026-04-14)        |
-| Profile  | `bench` (release + debuginfo)      |
+| Profile  | `bench` (cargo default)            |
 | Captured | 2026-05-17                         |
 
 A second baseline on Linux/x86 (the audit's recommended companion
@@ -140,6 +143,61 @@ the property's name string for display. The current cost — ~47 ns
 per lookup — sets the budget for what Phase 2b can spend on this
 path before parsing perceptibly slows.
 
+## Empty zlib blocks (macOS / ARM64)
+
+Issue #846's empty-block benches, saved as the `empty-zlib-blocks`
+baseline (`crates/paksmith-bench/baselines/empty-zlib-blocks-arm64/`).
+To compare a later run against a local `empty-zlib-blocks` run (the
+filter skips the other benches' timing, not their fixture setup):
+
+```bash
+cargo bench -p paksmith-bench --bench bulk --bench pak -- zlib_empty_ --baseline empty-zlib-blocks
+```
+
+### Machine
+
+| Field    | Value                              |
+| -------- | ---------------------------------- |
+| CPU      | Apple M2 Pro                       |
+| OS       | macOS 26.1 (Darwin 25.1)           |
+| Rust     | 1.100.0 (stable, 2026-11-09)       |
+| Profile  | `bench` (cargo default)            |
+| Captured | 2026-11-12                         |
+
+### Empty-block padding
+
+| Bench                                       | Input          | Median ns/iter | Throughput   |
+| ------------------------------------------- | -------------- | -------------- | ------------ |
+| `bulk_decompress_zlib_empty_fixed_blocks`   | 104,000 blocks |    180,926,906 | 575 Kelem/s  |
+| `bulk_decompress_zlib_empty_dynamic_blocks` | 104,000 blocks |    154,980,229 | 671 Kelem/s  |
+| `pak_read_entry_zlib_empty_blocks/fixed`    | 104,000 blocks |    177,357,812 | 586 Kelem/s  |
+| `pak_read_entry_zlib_empty_blocks/dynamic`  | 104,000 blocks |    154,553,344 | 673 Kelem/s  |
+
+Each iteration decodes one zlib stream of 104,000 empty non-final
+blocks (`PADDED_BLOCKS`) and a final stored block holding one byte,
+as a bulk-data chunk or as a pak compression block. The fixed-block
+stream is 130,012 bytes and the dynamic one 1,170,012. On both paths
+an empty fixed-Huffman block (10 bits) costs about 1.7 µs and an
+empty dynamic-Huffman block (90 bits) about 1.5 µs: `miniz_oxide`
+0.9.1, flate2's default backend, builds the fixed tables again for
+every fixed block and builds each dynamic block's tables from its
+header. That is about 1.4 µs per input byte for fixed blocks and
+0.13 µs for dynamic ones, so a 512 MiB bulk record of padding
+(`MAX_BULK_DATA_COMPRESSED_SIZE`) takes about 12 min (fixed) or 71 s
+(dynamic), extrapolated, not measured. A bulk record's bytes are
+themselves a pak entry's decoded output, and padding compresses well
+under the pak's zlib (about 675:1 for empty fixed blocks), so far
+fewer archive bytes can stand behind a 512 MiB record. A pak block's
+stream costs the same per input byte, and only the archive's size
+bounds the block of an unencrypted entry stored in the inline form
+(v5-v9, and v10+ non-encoded; see
+[`pak-block-framing.md`](formats/compression/pak-block-framing.md)).
+
+The dynamic benches use `FOUR_EMPTY_DYNAMIC_BLOCKS`'s one-code form
+(see its doc comment); the form in
+[`zlib.md`](formats/compression/zlib.md#deflate-blocks) whose
+literal/length code is complete was not timed.
+
 ## CI policy
 
 `paksmith-bench` is **not** run per-PR. Criterion needs quiet
@@ -156,10 +214,20 @@ log; baselines are not auto-committed from CI.
 
 - **Linux/x86 baseline**: capture on a quiet Linux x86 box, commit
   alongside the ARM64 baselines. The audit's recommended companion.
-- **`flate2/zlib-rs` backend swap**: replace the default
-  `miniz_oxide` zlib backend with `zlib-rs` (issue #245 Commit F).
-  Expected speedup on the `pak_read_entry_zlib_*` benches. Filed as
-  a separate PR after this baseline lands.
+- **Empty zlib blocks**: issue #846 keeps flate2's default
+  `miniz_oxide` backend instead of the `zlib-rs` swap planned in
+  issue #245 Commit F: on the M2 Pro on 2026-11-11 a scratch harness
+  measured `zlib-rs` 0.6.7 6-10% slower than `miniz_oxide` 0.9.1 on a
+  normal 8 MiB decode of the same input, and it adds `unsafe` code to
+  an untrusted-input decoder. A
+  fixed-table change is proposed in
+  [a comment on Frommi/miniz_oxide#198](https://github.com/Frommi/miniz_oxide/issues/198#issuecomment-6832564883);
+  a local prototype of it cut empty fixed blocks to about 10-20 ns
+  each and left dynamic blocks unchanged. This repo's Dependabot
+  config doesn't update indirect dependencies, so adopt a 0.9 release
+  by hand with `cargo update -p miniz_oxide@0.9 --precise <version>`,
+  again with `--manifest-path fuzz/Cargo.toml`, then rerun the
+  empty-block benches above.
 - **`pak_open_large` re-scaling**: bump back to 10k entries / 1GB
   if the 1000-entry shape doesn't reveal interesting open-time
   scaling. The bench harness handles it via the existing
