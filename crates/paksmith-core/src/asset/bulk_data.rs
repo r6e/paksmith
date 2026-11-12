@@ -2172,8 +2172,8 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     use crate::testing::bench::{
         EMPTY_STORED_BLOCK, FOUR_EMPTY_DYNAMIC_BLOCKS, FOUR_EMPTY_FIXED_BLOCKS,
-        shared_history_probe, zlib_compress_framed_with as frame_zlib, zlib_framing,
-        zlib_padded_stream, zlib_stream, zlib_stream_corrupt_after,
+        PRESET_DICTIONARY_HEADER, shared_history_probe, zlib_compress_framed_with as frame_zlib,
+        zlib_framing, zlib_padded_stream, zlib_stream, zlib_stream_corrupt_after,
     };
 
     /// Build an `AssetContext` carrying a data-resource table (#642).
@@ -4896,6 +4896,18 @@ mod tests {
             }) => {}
             other => panic!("expected BulkDataCompressionDecodeFailed, got {other:?}"),
         }
+    }
+
+    /// Pins flate2's miniz backend for a record's chunks; see
+    /// `PRESET_DICTIONARY_HEADER` (#846).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn chunked_zlib_decodes_with_miniz() {
+        let framed = single_chunk_framing(4096, &PRESET_DICTIONARY_HEADER, 1);
+        expect_decode_failed(
+            decompress_zlib(&framed, 1, "test.uasset"),
+            "chunk 0: corrupt deflate stream",
+        );
     }
 
     /// The zlib decoders `decompress_zlib` builds for `framed` on this

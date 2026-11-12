@@ -210,6 +210,14 @@ pub const STORED_STREAM_B: [u8; 12] = [
     0x78, 0x01, 0x01, 0x01, 0x00, 0xFE, 0xFF, 0x42, 0x00, 0x43, 0x00, 0x43,
 ];
 
+/// A zlib header that asks for a preset dictionary (FDICT) and ends there.
+/// flate2 fails it as a corrupt stream on its miniz backend, which rejects
+/// the header, and as an incomplete one on zlib-rs, which waits for the
+/// dictionary's id; with the id, zlib-rs would ask for the dictionary,
+/// which flate2 also fails as corrupt. A crate in the build that enables
+/// another flate2 backend switches paksmith's decoders with it.
+pub const PRESET_DICTIONARY_HEADER: [u8; 2] = [0x78, 0xBB];
+
 /// A shared-history probe: 131,072 bytes cycling through 1..=251, then an
 /// 11-byte zlib stream whose one match copies the 3 bytes 32 KiB before
 /// its start, with the Adler-32 of the probe's bytes there. A decoder
@@ -488,6 +496,16 @@ mod tests {
             let header = bit(start) | (bit(start + 1) << 1) | (bit(start + 2) << 2);
             assert_eq!(header, 0b100, "block at bit {start}");
         }
+    }
+
+    /// A valid RFC 1950 §2.2 header apart from FDICT (CM 8, CINFO 7, FCHECK
+    /// valid), so only FDICT separates the backends: miniz rejects it, while
+    /// zlib-rs reads on for the dictionary's id.
+    #[test]
+    fn preset_dictionary_header_is_valid_apart_from_fdict() {
+        let [cmf, flg] = PRESET_DICTIONARY_HEADER;
+        assert_eq!((cmf & 0x0F, cmf >> 4, flg & 0x20), (8, 7, 0x20));
+        assert_eq!(((u16::from(cmf) << 8) | u16::from(flg)) % 31, 0);
     }
 
     /// The reserved-type block is the stream's last byte, at `18 + 5 * n`.
