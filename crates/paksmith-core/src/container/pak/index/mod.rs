@@ -1069,6 +1069,114 @@ mod tests {
         );
     }
 
+    /// A flat index of uncompressed entries named and sized by `entries`,
+    /// parsed.
+    fn flat_index(entries: &[(&str, u64)]) -> PakIndex {
+        let data = build_index_bytes("../../../", |buf| {
+            for &(name, size) in entries {
+                write_uncompressed_entry(buf, name, 0, size);
+            }
+            u32::try_from(entries.len()).unwrap()
+        });
+        let len = data.len() as u64;
+        PakIndex::read_from(
+            &mut Cursor::new(data),
+            PakVersion::DeleteRecords,
+            0,
+            len,
+            len,
+            &[],
+        )
+        .unwrap()
+    }
+
+    /// Each entry's name and size, in order.
+    fn names_and_sizes(index: &PakIndex) -> Vec<(&str, u64)> {
+        let entries = index.entries().iter();
+        entries
+            .map(|e| (e.filename(), e.header().uncompressed_size()))
+            .collect()
+    }
+
+    /// A repeated name keeps its last entry, at the last entry's position:
+    /// `[a, b, a]` reads as `[b, a]`, and `find` returns the same entries.
+    #[test]
+    fn dedup_keeps_each_survivor_at_its_last_position() {
+        let index = flat_index(&[("a", 10), ("b", 20), ("a", 30)]);
+        assert_eq!(names_and_sizes(&index), [("b", 20), ("a", 30)]);
+        for entry in index.entries() {
+            assert!(std::ptr::eq(index.find(entry.filename()).unwrap(), entry));
+        }
+    }
+
+    /// The index logs one line, a warn, which samples the shadowed names
+    /// nearest the end, latest first, up to five: seven names written twice
+    /// drop seven entries and sample `n6` to `n2`, and the survivors are the
+    /// second copies.
+    #[tracing_test::traced_test]
+    #[test]
+    fn dedup_warn_samples_the_last_shadowed_names_first() {
+        use crate::untrusted::test_support::{lines_carrying, lines_counted};
+
+        let names = ["n0", "n1", "n2", "n3", "n4", "n5", "n6"];
+        let first = names.map(|name| (name, 1));
+        let second = names.map(|name| (name, 2));
+        let index = flat_index(&[first, second].concat());
+        assert_eq!(names_and_sizes(&index), second);
+        logs_assert(lines_counted("", 1));
+        logs_assert(lines_carrying("duplicate filename(s)", "WARN"));
+        assert!(logs_contain("dup_count=7"));
+        assert!(logs_contain("first 5 shown"));
+        assert!(logs_contain(r#"samples=["n6", "n5", "n4", "n3", "n2"]"#));
+    }
+
+    /// Distinct names log nothing. A name written three times logs one warn,
+    /// counting and sampling only its two dropped entries.
+    #[tracing_test::traced_test]
+    #[test]
+    fn dedup_warns_only_about_dropped_entries() {
+        use crate::untrusted::test_support::lines_counted;
+
+        let _ = flat_index(&[("a", 1), ("b", 1)]);
+        logs_assert(lines_counted("", 0));
+        let _ = flat_index(&[("a", 1), ("a", 1), ("a", 1)]);
+        logs_assert(lines_counted("", 1));
+        assert!(logs_contain("duplicate filename(s)"));
+        assert!(logs_contain("dup_count=2"));
+        assert!(logs_contain("first 2 shown"));
+        assert!(logs_contain(r#"samples=["a", "a"]"#));
+    }
+
+    /// Without a PHI, two FDI directories that differ only by a leading
+    /// slash name one path, and the later directory's entry wins, though
+    /// it names the earlier record.
+    #[test]
+    fn v10_without_phi_keeps_the_last_of_two_joined_paths() {
+        let mut records = Vec::new();
+        write_v10_non_encoded_uncompressed(&mut records, 100, 10);
+        write_v10_non_encoded_uncompressed(&mut records, 200, 10);
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 2,
+            non_encoded_records: records,
+            non_encoded_count: 2,
+            fdi: vec![
+                ("/Content/".into(), vec![("x".into(), -2)]),
+                ("Content/".into(), vec![("x".into(), -1)]),
+            ],
+            has_path_hash_index: false,
+            ..V10Fixture::default()
+        });
+        let index = read_v10(buf, main_size).unwrap();
+        let [entry] = index.entries() else {
+            panic!("expected one entry, got {:?}", index.entries())
+        };
+        assert_eq!(
+            (entry.filename(), entry.header().offset()),
+            ("Content/x", 100)
+        );
+        assert!(std::ptr::eq(index.find("Content/x").unwrap(), entry));
+    }
+
     #[test]
     fn parse_empty_index() {
         let data = build_index_bytes("../../../", |_| 0);
