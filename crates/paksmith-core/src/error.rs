@@ -705,8 +705,9 @@ pub enum IndexParseFault {
     /// `file_count > fdi_size / 9`,
     /// `entry_count > index_size / entry_min_record_bytes(version)`,
     /// `encoded_entries_size > index_size`,
-    /// `fdi_size > MAX_FDI_BYTES`, or the FDI walk's running total of
-    /// encoded blocks `> encoded_entries_size / 4`.
+    /// `fdi_size > MAX_FDI_BYTES`, or the FDI walk's running totals of
+    /// encoded blocks `> encoded_entries_size / 4` and of full-path bytes
+    /// `> 16 * fdi_size`.
     ///
     /// Construction invariant (caller-enforced): `value > limit`.
     BoundsExceeded {
@@ -730,8 +731,10 @@ pub enum IndexParseFault {
         /// Path of the entry the bound applies to, when the field is
         /// per-entry (e.g. [`WireField::UncompressedSize`]), or of the
         /// path whose claim took an archive-level running total past
-        /// its bound ([`WireField::V10EncodedBlockTotal`]). `None` for
-        /// other archive-level bounds (e.g. [`WireField::FdiSize`]).
+        /// its bound ([`WireField::V10EncodedBlockTotal`], and
+        /// [`WireField::FdiFullPathTotal`] when that path's bytes can be
+        /// reserved). `None` for other archive-level bounds (e.g.
+        /// [`WireField::FdiSize`]).
         path: Option<String>,
     },
     /// A `try_reserve` / `try_reserve_exact` call returned `Err`.
@@ -1446,6 +1449,10 @@ pub enum WireField {
     /// the v10+ FDI walk's paths name, summed over the paths read so far,
     /// including the one that took the total past its limit.
     V10EncodedBlockTotal,
+    /// Archive-level: bytes of the full paths the v10+ FDI walk has
+    /// charged, summed over the paths read so far, including the one that
+    /// took the total past its limit.
+    FdiFullPathTotal,
     /// Archive-level: byte size of the main index (footer-declared).
     IndexSize,
 }
@@ -1474,6 +1481,7 @@ impl fmt::Display for WireField {
             Self::PhiEntryCount => "phi_entry_count",
             Self::V10EncodedEntriesSize => "encoded_entries_size",
             Self::V10EncodedBlockTotal => "encoded_block_total",
+            Self::FdiFullPathTotal => "full_path_total",
             Self::IndexSize => "index_size",
         };
         f.write_str(s)
@@ -1585,8 +1593,9 @@ pub enum AllocationContext {
     FStringUtf16CodeUnits,
     /// v10+ FDI full-path string buffer (issue #132 item 3).
     /// Allocated per FDI walk iteration when joining
-    /// `dir_prefix + file_name`. Bounded transitively by the
-    /// per-FString cap (`2 * FSTRING_MAX_LEN`).
+    /// `dir_prefix + file_name`, at most 393,210 bytes (two FStrings of
+    /// 65,535 UTF-16 code units, 3 bytes each once decoded). The walk's
+    /// running total ([`WireField::FdiFullPathTotal`]) bounds their sum.
     FdiFullPathBytes,
     /// Encrypted-index byte buffer (Phase 5a). The on-disk encrypted
     /// index region is slurped (16-aligned) before AES-256-ECB
@@ -8122,6 +8131,7 @@ mod tests {
             (WireField::PhiEntryCount, "phi_entry_count"),
             (WireField::V10EncodedEntriesSize, "encoded_entries_size"),
             (WireField::V10EncodedBlockTotal, "encoded_block_total"),
+            (WireField::FdiFullPathTotal, "full_path_total"),
             (WireField::IndexSize, "index_size"),
         ];
         for (field, expected) in cases {

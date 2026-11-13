@@ -2073,7 +2073,7 @@ fn read_encrypted_index<R: Read + Seek>(
     //       #131 `PhiFdiInconsistency` check, a non-ASCII path hitting
     //       the `fnv64_path` ASCII-only limitation, or FDI paths whose
     //       encoded block counts sum past a quarter of the blob's length
-    //       (#848);
+    //       or whose bytes sum past 16 times the FDI's (#848);
     //   (2) pre-decrypt structural bounds faults, such as
     //       `OffsetPastFileSize` (aligned extent past EOF),
     //       `RegionPastFileSize` (unaligned offset+size past EOF), or
