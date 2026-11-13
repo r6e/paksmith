@@ -5502,6 +5502,92 @@ mod tests {
         );
     }
 
+    /// A v11 pak whose index, at offset 0, is encrypted with `key`: one
+    /// 76-byte encoded entry of 16 blocks, which the FDI's root directory
+    /// names from each of `names`, and no PHI. Returns the pak and its main
+    /// index size.
+    #[cfg(feature = "__test_utils")]
+    fn build_v11_encrypted_index_pak(names: &[&str], key: &AesKey) -> (Vec<u8>, u64) {
+        use crate::testing::v10::{EncodeArgs, V10Fixture, build_v10_buffer, encode_entry_bytes};
+
+        let files = names.iter().map(|name| (name.to_string(), 0)).collect();
+        let (mut pak, main_size) = build_v10_buffer(V10Fixture {
+            // Makes the main index 160 bytes, so the FDI after it starts
+            // an AES block and one pass encrypts both regions.
+            mount: "../../../Mount/".into(),
+            file_count: u32::try_from(names.len()).unwrap(),
+            encoded_entries: encode_entry_bytes(EncodeArgs {
+                offset: 0,
+                uncompressed: 16,
+                compressed: 16,
+                compression_slot_1based: 0,
+                encrypted: false,
+                block_count: 16,
+                block_size: 0,
+                per_block_sizes: &[1; 16],
+            }),
+            fdi: vec![("/".into(), files)],
+            has_path_hash_index: false,
+            ..V10Fixture::default()
+        });
+        assert_eq!(main_size % 16, 0, "the FDI must start an AES block");
+        pak.resize(pak.len().next_multiple_of(16), 0);
+        crypto::aes256_ecb_encrypt(key, &mut pak).unwrap();
+        pak.extend_from_slice(&[0; 16]); // encryption key GUID
+        pak.push(1); // index encrypted
+        pak.extend_from_slice(&version::PAK_MAGIC.to_le_bytes());
+        pak.extend_from_slice(&PakVersion::Fnv64BugFix.wire_version().to_le_bytes());
+        pak.extend_from_slice(&0u64.to_le_bytes()); // index offset
+        pak.extend_from_slice(&main_size.to_le_bytes());
+        pak.extend_from_slice(&[0; 20 + 5 * 32]); // index hash, compression slots
+        (pak, main_size)
+    }
+
+    /// On an encrypted v10+ index, the encoded-block budget's refusal
+    /// surfaces as `Decryption`, as the walk's other bounds faults do (#848).
+    /// The one-path open checks the hand-built archive, and the keyed index
+    /// read shows that the fault the open collapses is the budget's.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn encrypted_v11_index_reports_the_encoded_block_budget_as_decryption() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let (pak, _) = build_v11_encrypted_index_pak(&["a"], &key);
+        let reader = PakReader::from_reader_with_key(Cursor::new(pak), key.clone()).unwrap();
+        assert_eq!(reader.entries().count(), 1);
+
+        let (pak, main_size) = build_v11_encrypted_index_pak(&["a", "b"], &key);
+        let file_size = pak.len() as u64;
+        let err = PakIndex::read_positioned_maybe_encrypted(
+            &mut Cursor::new(pak.clone()),
+            PakVersion::Fnv64BugFix,
+            main_size,
+            file_size,
+            &[],
+            Some(&key),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::V10EncodedBlockTotal,
+                        value: 32,
+                        limit: 19,
+                        unit: BoundsUnit::Items,
+                        path: Some(p),
+                    },
+                } if p == "b"
+            ),
+            "{err:?}"
+        );
+        let err = PakReader::from_reader_with_key(Cursor::new(pak), key).unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::Decryption { path: None }),
+            "{err:?}"
+        );
+    }
+
     /// `index_size > MAX_INDEX_BYTES` on the encrypted path must be rejected
     /// before any allocation attempt. Verified via a crafted fake reader that
     /// reports a >2 GiB file_size and a flat (v8b) footer with an oversized
