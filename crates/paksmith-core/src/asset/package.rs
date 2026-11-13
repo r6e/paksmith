@@ -553,9 +553,8 @@ impl Package {
     /// - [`AssetParseFault::DerivedStringBudgetExceeded`] when the names
     ///   and paths copied while decoding the exports pass the package's
     ///   budget
-    /// - an allocation failure while decoding an export:
-    ///   [`AssetParseFault::AllocationFailed`], or [`PaksmithError::Io`]
-    ///   with `ErrorKind::OutOfMemory`
+    /// - [`AssetParseFault::AllocationFailed`] for an allocation failure
+    ///   while decoding an export
     ///
     /// See [`Self::read_from_with`] to also supply a profile's
     /// engine-version hint (#656).

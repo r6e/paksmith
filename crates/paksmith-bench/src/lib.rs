@@ -15,6 +15,13 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+/// Groups of four empty non-final blocks in the one stream each padded
+/// bench decodes, so `bulk.rs` and `pak.rs` time the same stream.
+pub const PADDING_GROUPS: usize = 26_000;
+
+/// The empty blocks in that stream, four per group.
+pub const PADDED_BLOCKS: usize = 4 * PADDING_GROUPS;
+
 /// Resolve `target/bench-fixtures/<name>` and return it. Walks up
 /// from `CARGO_MANIFEST_DIR` (this crate's directory) to find the
 /// workspace root by looking for the workspace `Cargo.toml`. Falls

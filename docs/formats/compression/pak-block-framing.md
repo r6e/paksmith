@@ -89,8 +89,8 @@ The parser walks these sizes, accumulating a cursor from
 precedes each entry's payload). For unencrypted entries, `cursor`
 advances by `block_compressed_size`. For encrypted entries, it
 advances by `(block_compressed_size + 15) & !15` — i.e., rounded up
-to the next AES-block boundary (16 bytes), because encrypted blocks
-are zero-padded to an AES-aligned length on disk. The unaligned
+to the next AES-block boundary (16 bytes), because each encrypted
+block is padded to an AES-aligned length on disk. The unaligned
 `block_compressed_size` still forms the logical `end - start` for the
 `CompressionBlock` struct; only the cursor advance is aligned.
 
@@ -106,7 +106,8 @@ After parsing, every `CompressionBlock` carries two `u64` offsets:
 - `end` is the byte offset one past the last compressed byte of the block.
 - `len = end - start` bytes of compressed data to read.
 - Paksmith rejects `start > end` as `IndexParseFault::CompressionBlockInvalid { start, end }`.
-- An empty block (`start == end`) is legal but unusual.
+- An empty block (`start == end`) satisfies `start <= end` but holds
+  no codec stream (see [Empty blocks](#empty-blocks)).
 
 The **relativity** of `start` and `end` depends on the pak version:
 
@@ -197,9 +198,10 @@ Wire layout §*Encoded entries (v10+)* and
 
 ### Empty blocks
 
-`start == end` is legal and represents a zero-byte compressed block
-that decompresses to zero bytes. UE writers don't emit empty blocks
-in practice; paksmith handles them defensively for malformed input.
+`start == end` is a zero-byte compressed block, which holds no codec
+stream: a zlib stream is at least 8 bytes (a 2-byte header, a 2-byte
+empty final block and a 4-byte Adler-32), and an LZ4 block opens with a
+token byte.
 
 ## Caps & limits
 
@@ -229,12 +231,16 @@ bullet names; see [`../container/pak.md`](../container/pak.md)
   [`../container/pak.md`](../container/pak.md) §*Implementation
   hardening* says which check reports which.
 - **`MAX_BLOCKS_PER_ENTRY = 16_777_216`**
-  (`crates/paksmith-core/src/container/pak/index/entry_header.rs`).
-  Cap on the number of compression blocks per inline entry
-  (~16M blocks of 64 KiB = 1 TiB entry). Surfaces as
+  (`crates/paksmith-core/src/container/pak/index/entry_header.rs`),
+  read by tests through the `__test_utils` accessor
+  `max_blocks_per_entry()`. Cap on the number of compression blocks per
+  inline entry (~16M blocks of 64 KiB = 1 TiB entry). Surfaces as
   `IndexParseFault::BoundsExceeded { field: WireField::BlockCount, value, limit, unit: BoundsUnit::Items, path }`.
   V10+ encoded entries mask block count to 16 bits (max 65 535) so
-  this cap is unreachable on the encoded path.
+  this cap is unreachable on the encoded path; there, the total the
+  index walk decodes is bounded instead
+  ([`../container/pak.md`](../container/pak.md) §*Implementation
+  hardening*).
 - **Per-block decompression budget** = `remaining + 1`. A block that
   decompresses to more than `remaining` bytes is the canonical
   "decompression bomb" signal. Surfaces as
@@ -257,6 +263,11 @@ See `docs/security/allocation-caps.md` for the broader policy.
   - `tests/fixtures/real_v10_compressed.pak` — V10 counterpart.
   - `tests/fixtures/real_v8a_compressed.pak` / `real_v8b_compressed.pak`
     — V8 family with the u8 vs u32 compression-field width split.
+  - `tests/fixtures/real_v8b_encrypted_compressed.pak` /
+    `real_v11_encrypted_compressed.pak` — UnrealPak-written encrypted
+    zlib entries, key in `tests/fixtures/PROVENANCE-encrypted.md`. Each
+    entry holds one block, and its AES padding repeats the block's
+    first bytes, not zeros.
 - **Hex anchor commands:** (none yet — see [#347](https://github.com/r6e/paksmith/issues/347)).
 - **Cross-validation oracle:** repak[^1] (paksmith's primary pak
   oracle) and CUE4Parse[^2]. Every compressed fixture round-trips
@@ -302,7 +313,7 @@ rejected at `stream_zlib_to` with `UnsupportedVersion`.
 - `DecompressionFault::ZlibStreamError { block_index, kind, message }`
   (zlib path) and `DecompressionFault::Lz4DecodeError { block_index,
   message }` (LZ4 path); other methods get analogous variants when
-  implemented.
+  implemented. An empty block fails with one of these when it is decoded.
 
 **Cap constants:** see *Caps & limits* above.
 

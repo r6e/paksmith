@@ -36,7 +36,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use zeroize::Zeroizing;
 
 use super::compression::CompressionMethod;
-use super::entry_header::PakEntryHeader;
+use super::entry_header::{PakEntryHeader, encoded_block_count};
 use super::fstring::read_fstring;
 use super::{PakIndex, PakIndexEntry, fnv64_path};
 use crate::container::pak::crypto::{self, AesKey};
@@ -46,6 +46,46 @@ use crate::error::{
     PhiFdiInconsistencyKind, WireField, check_region_bounds, try_reserve_index,
 };
 use crate::seams::PakSeam;
+
+/// The header an FDI path names: one decoded from the encoded-entries
+/// blob, or a non-encoded record.
+enum Named<'a> {
+    Encoded(PakEntryHeader),
+    Record(&'a mut NonEncodedRecord),
+}
+
+/// What the FDI walk has done with one non-encoded record so far.
+enum NonEncodedRecord {
+    /// Not yet named by an FDI path.
+    Unnamed(PakEntryHeader),
+    /// Named; the entry at this index is the last to name it.
+    LastNamedBy(usize),
+}
+
+/// The entry for an FDI path, `filename`, naming `record`. The first path
+/// naming a record takes its header; the next moves that header into an
+/// `Arc` and every later one shares it, so aliasing paths never copy a
+/// header (#848). The caller pushes the result at `entries.len()`.
+fn entry_for_record(
+    record: &mut NonEncodedRecord,
+    entries: &mut [PakIndexEntry],
+    filename: String,
+) -> crate::Result<PakIndexEntry> {
+    let next = entries.len();
+    match std::mem::replace(record, NonEncodedRecord::LastNamedBy(next)) {
+        NonEncodedRecord::Unnamed(header) => Ok(PakIndexEntry::from_parts(filename, header)),
+        NonEncodedRecord::LastNamedBy(last) => {
+            // `entries` only grows, so `last` names an entry already pushed.
+            let shared = entries
+                .get_mut(last)
+                .ok_or_else(|| PaksmithError::Internal {
+                    context: format!("non-encoded record last named by entry {last} of {next}"),
+                })?
+                .share_header();
+            Ok(PakIndexEntry::from_shared(filename, shared))
+        }
+    }
+}
 
 /// Read one v10+ index region (`size` logical bytes) from `reader`'s
 /// current position, decrypting when `key` is present (#635).
@@ -311,6 +351,13 @@ impl PakIndex {
         // = 9 bytes`. Used to bound `dir_count` against `fdi_size`
         // upfront, mirroring the per-file cap above. Issue #87.
         const MIN_FDI_DIR_RECORD_BYTES: u64 = 5 + 4;
+        // An encoded record claiming N compression blocks takes at least
+        // 4N + 8 blob bytes, so records that don't overlap claim at most
+        // `blob_len / 4` blocks between them. The FDI walk charges each
+        // path's claim against that limit before decoding it, so paths
+        // naming one record, or pointing inside one, decode at most
+        // `blob_len / 4` blocks in all. #848.
+        const MIN_ENCODED_BYTES_PER_BLOCK: u64 = 4;
 
         // Cap `index_size` before allocating. The footer parser already
         // proved `index_size <= file_size`, but a legitimate-but-bloated
@@ -454,7 +501,7 @@ impl PakIndex {
                 },
             });
         }
-        let mut non_encoded_entries: Vec<PakEntryHeader> = Vec::new();
+        let mut non_encoded_entries: Vec<NonEncodedRecord> = Vec::new();
         try_reserve_index(
             &mut non_encoded_entries,
             non_encoded_count as usize,
@@ -462,11 +509,11 @@ impl PakIndex {
             PakSeam::V10NonEncodedEntries,
         )?;
         for _ in 0..non_encoded_count {
-            non_encoded_entries.push(PakEntryHeader::read_from(
+            non_encoded_entries.push(NonEncodedRecord::Unnamed(PakEntryHeader::read_from(
                 &mut idx,
                 PakVersion::PathHashIndex,
                 compression_methods,
-            )?);
+            )?));
         }
 
         // Issue #127: pre-validate the FDI region's offset+size
@@ -581,6 +628,8 @@ impl PakIndex {
             AllocationContext::V10IndexEntries,
             PakSeam::V10IndexEntries,
         )?;
+        let encoded_block_limit = encoded_entries_blob.len() as u64 / MIN_ENCODED_BYTES_PER_BLOCK;
+        let mut encoded_block_total: u64 = 0;
         for _ in 0..dir_count {
             let dir_name = read_fstring(&mut fdi)?;
             let dir_file_count = fdi.read_u32::<LittleEndian>()?;
@@ -666,7 +715,7 @@ impl PakIndex {
                     }
                 }
 
-                let header = if encoded_offset >= 0 {
+                let named = if encoded_offset >= 0 {
                     // Decode the bit-packed entry from the encoded blob.
                     //
                     // SAFETY: `usize::try_from(positive i32)` is
@@ -700,9 +749,28 @@ impl PakIndex {
                             },
                         });
                     }
-                    let mut blob_cursor = Cursor::new(&encoded_entries_blob[off_usize..]);
-                    PakEntryHeader::read_encoded(&mut blob_cursor, compression_methods)
-                        .map_err(|e| e.with_index_path(&full_path))?
+                    let record = &encoded_entries_blob[off_usize..];
+                    // Charged before the decode reserves anything.
+                    let claim = record
+                        .first_chunk()
+                        .map_or(0, |bits| encoded_block_count(u32::from_le_bytes(*bits)));
+                    encoded_block_total += u64::from(claim);
+                    if encoded_block_total > encoded_block_limit {
+                        return Err(PaksmithError::InvalidIndex {
+                            fault: IndexParseFault::BoundsExceeded {
+                                field: WireField::V10EncodedBlockTotal,
+                                value: encoded_block_total,
+                                limit: encoded_block_limit,
+                                unit: BoundsUnit::Items,
+                                path: Some(full_path),
+                            },
+                        });
+                    }
+                    let mut blob_cursor = Cursor::new(record);
+                    Named::Encoded(
+                        PakEntryHeader::read_encoded(&mut blob_cursor, compression_methods)
+                            .map_err(|e| e.with_index_path(&full_path))?,
+                    )
                 } else {
                     // Negative offset: 1-based index into non-encoded entries.
                     //
@@ -724,9 +792,8 @@ impl PakIndex {
                         }
                     })?;
                     let count = non_encoded_entries.len();
-                    non_encoded_entries
-                        .get(idx)
-                        .ok_or(PaksmithError::InvalidIndex {
+                    let record = non_encoded_entries.get_mut(idx).ok_or_else(|| {
+                        PaksmithError::InvalidIndex {
                             fault: IndexParseFault::Encoded {
                                 kind: EncodedFault::NonEncodedIndexOob {
                                     path: full_path.clone(),
@@ -734,8 +801,9 @@ impl PakIndex {
                                     count,
                                 },
                             },
-                        })?
-                        .clone()
+                        }
+                    })?;
+                    Named::Record(record)
                 };
                 // Per-push budget guard: the FDI's `dir_count × dir_file_count`
                 // must agree with the main-index `file_count`. A malformed
@@ -753,7 +821,11 @@ impl PakIndex {
                         },
                     });
                 }
-                entries.push(PakIndexEntry::from_parts(full_path, header));
+                let entry = match named {
+                    Named::Encoded(header) => PakIndexEntry::from_parts(full_path, header),
+                    Named::Record(record) => entry_for_record(record, &mut entries, full_path)?,
+                };
+                entries.push(entry);
             }
         }
 

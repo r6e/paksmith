@@ -105,9 +105,9 @@ pub fn write_pak_entry(
 /// COMPRESSED entries only (`compression_method != 0`):
 /// `write_pak_entry` omits the block-count u32 and block table
 /// entirely for method-0 records, making those 53 bytes — this
-/// formula does not apply to them. `build_v8b_lz4_pak` pins the
-/// compressed shape against `write_pak_entry`'s actual output at
-/// runtime.
+/// formula does not apply to them. The v8b builders
+/// ([`build_v8b_lz4_pak`], [`build_v8b_zlib_pak`]) pin the compressed
+/// shape against `write_pak_entry`'s actual output at runtime.
 #[must_use]
 pub const fn pak_entry_wire_size(n: u64) -> u64 {
     57 + 16 * n
@@ -141,28 +141,60 @@ pub fn write_legacy_footer(
     buf.extend_from_slice(index_hash);
 }
 
-/// Build a synthetic v8b pak with one LZ4-compressed entry carrying a
-/// REAL entry hash. The repak-written v11 fixture uses the v10+
-/// encoded index, which has no per-entry SHA1 field, so it can never
-/// exercise `verify_entry`'s hash arm (the repak-written v8b fixture
-/// does — its legacy index stores a real hash); this builder also
-/// writes a legacy v8b index (full FPakEntry incl. its SHA1) so the
-/// LZ4 verify routing and the decode-failure negatives are observable
-/// on CRAFTED input, not just on well-formed oracle output. It lets
-/// callers craft inconsistent claims (short / over-expanding /
-/// under-declared blocks) that a real writer never produces.
-///
-/// Footer: guid(16) + encrypted(1) + magic + version 8 + index
-/// offset/size + index hash(20) + FIVE 32-byte compression-name slots
-/// (the 5-slot count is what classifies the footer as v8b rather than
-/// v8a); slot 0 = "LZ4", so the entry's 1-based method index 1
-/// resolves to `CompressionMethod::Lz4`.
+/// Build a synthetic v8b pak with one LZ4-compressed entry, at
+/// [`LZ4_SYNTH_PATH`], carrying a REAL entry hash. The repak-written v11
+/// fixture uses the v10+ encoded index, which has no per-entry SHA1
+/// field, so it can never exercise `verify_entry`'s hash arm (the
+/// repak-written v8b fixture does — its legacy index stores a real
+/// hash); this builder also writes a legacy v8b index (full FPakEntry
+/// incl. its SHA1) so the LZ4 verify routing and the decode-failure
+/// negatives are observable on CRAFTED input, not just on well-formed
+/// oracle output. It lets callers craft inconsistent claims (short /
+/// over-expanding / under-declared blocks) that a real writer never
+/// produces.
 ///
 /// `streams` are pre-compressed raw LZ4 blocks laid back-to-back;
 /// `uncompressed_size` and `block_size` are written as given so tests
 /// can craft inconsistent claims.
 #[must_use]
 pub fn build_v8b_lz4_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size: u32) -> Vec<u8> {
+    build_v8b_pak(
+        "LZ4",
+        LZ4_SYNTH_PATH,
+        streams,
+        uncompressed_size,
+        block_size,
+    )
+}
+
+/// [`build_v8b_lz4_pak`] for zlib: one entry at [`ZLIB_SYNTH_PATH`] whose
+/// `streams` are zlib streams, one per compression block.
+#[must_use]
+pub fn build_v8b_zlib_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size: u32) -> Vec<u8> {
+    build_v8b_pak(
+        "Zlib",
+        ZLIB_SYNTH_PATH,
+        streams,
+        uncompressed_size,
+        block_size,
+    )
+}
+
+/// The v8b pak behind [`build_v8b_lz4_pak`] and [`build_v8b_zlib_pak`]:
+/// one entry at `path` compressed by `method`.
+///
+/// Footer: guid(16) + encrypted(1) + magic + version 8 + index
+/// offset/size + index hash(20) + FIVE 32-byte compression-name slots
+/// (the 5-slot count is what classifies the footer as v8b rather than
+/// v8a); slot 0 = `method`, so the entry's 1-based method index 1
+/// resolves to it.
+fn build_v8b_pak(
+    method: &str,
+    path: &str,
+    streams: &[Vec<u8>],
+    uncompressed_size: u64,
+    block_size: u32,
+) -> Vec<u8> {
     use sha1::{Digest, Sha1};
 
     let header_size = pak_entry_wire_size(streams.len() as u64);
@@ -192,7 +224,7 @@ pub fn build_v8b_lz4_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size
             0,
             compressed_size,
             uncompressed_size,
-            1, // 1-based index into the footer name table → slot 0 = "LZ4"
+            1, // 1-based index into the footer name table → slot 0 = `method`
             &sha1,
             &blocks,
             block_size,
@@ -214,7 +246,7 @@ pub fn build_v8b_lz4_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size
     let mut index = Vec::new();
     write_fstring(&mut index, "../../../");
     index.write_u32::<LittleEndian>(1).unwrap();
-    write_fstring(&mut index, LZ4_SYNTH_PATH);
+    write_fstring(&mut index, path);
     write_entry(&mut index);
 
     let index_offset = data.len() as u64;
@@ -231,7 +263,7 @@ pub fn build_v8b_lz4_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size
     pak.extend_from_slice(&[0u8; 20]); // index hash (zero = skip)
     // v8b: 5 compression-name slots, 32 bytes each, NUL-padded.
     let mut slot0 = [0u8; 32];
-    slot0[..3].copy_from_slice(b"LZ4");
+    slot0[..method.len()].copy_from_slice(method.as_bytes());
     pak.extend_from_slice(&slot0);
     pak.extend_from_slice(&[0u8; 32 * 4]);
 
@@ -240,6 +272,9 @@ pub fn build_v8b_lz4_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size
 
 /// Path of the single entry emitted by [`build_v8b_lz4_pak`].
 pub const LZ4_SYNTH_PATH: &str = "Content/lz4_synth.uasset";
+
+/// Path of the single entry emitted by [`build_v8b_zlib_pak`].
+pub const ZLIB_SYNTH_PATH: &str = "Content/zlib_synth.uasset";
 
 #[cfg(test)]
 mod tests {
@@ -330,6 +365,43 @@ mod tests {
     #[should_panic(expected = "got v7")]
     fn write_legacy_footer_rejects_v7() {
         write_legacy_footer(&mut Vec::new(), 7, 0, 0, &[0; 20]);
+    }
+
+    /// Pins every byte `build_v8b_lz4_pak` writes for one two-block input,
+    /// captured from the builder before it was shared with zlib. The
+    /// compressed size (5), uncompressed size (7) and block size (4)
+    /// differ, so writing one in another's place changes the digest.
+    #[test]
+    fn build_v8b_lz4_pak_output_is_pinned() {
+        use sha1::{Digest, Sha1};
+
+        let pak = build_v8b_lz4_pak(&[vec![1, 2, 3], vec![4, 5]], 7, 4);
+        let digest = crate::hex::to_hex_lower(&Sha1::digest(&pak));
+        assert_eq!(
+            (pak.len(), digest.as_str()),
+            (451, "4643c76c0b3e04be242e72b7d7e6b748dd7d71df")
+        );
+    }
+
+    /// `build_v8b_zlib_pak` names zlib in footer slot 0, and its two-block
+    /// entry reads back through the production zlib path.
+    #[test]
+    fn build_v8b_zlib_pak_round_trips_through_the_reader() {
+        use crate::container::ContainerReader;
+        use crate::container::pak::PakReader;
+        use crate::container::pak::index::CompressionMethod;
+        use crate::testing::bench::zlib_stream;
+
+        let streams = [zlib_stream(b"abc"), zlib_stream(b"de")];
+        let reader = PakReader::from_bytes(build_v8b_zlib_pak(&streams, 5, 3)).unwrap();
+        let entry = reader.index_entry(ZLIB_SYNTH_PATH).unwrap();
+        assert_eq!(
+            entry.header().compression_method(),
+            &CompressionMethod::Zlib
+        );
+        let mut out = Vec::new();
+        assert_eq!(reader.read_entry_to(ZLIB_SYNTH_PATH, &mut out).unwrap(), 5);
+        assert_eq!(out, b"abcde");
     }
 
     /// Compressed variant pins that the block list is present

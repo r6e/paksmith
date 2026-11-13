@@ -93,29 +93,68 @@ pub fn zlib_decompress(compressed: &[u8], expected_size: i64) -> crate::Result<V
 pub fn zlib_compress_framed(payload: &[u8]) -> Vec<u8> {
     const CHUNK: usize = 131_072; // LOADING_COMPRESSION_CHUNK_SIZE
 
-    let pieces: Vec<(Vec<u8>, usize)> = payload
-        .chunks(CHUNK)
-        .map(|c| (zlib_stream(c), c.len()))
-        .collect();
-    let as_i64 = |n: usize| i64::try_from(n).expect("bench payload fits i64");
-    let info = |c: i64, u: i64, out: &mut Vec<u8>| {
-        out.extend_from_slice(&c.to_le_bytes());
-        out.extend_from_slice(&u.to_le_bytes());
-    };
-    let total_comp: usize = pieces.iter().map(|(s, _)| s.len()).sum();
-    let mut out = Vec::new();
-    info(
+    let chunk_size = i64::try_from(CHUNK).expect("128 KiB fits i64");
+    let tag = (
         i64::from(crate::asset::version::PACKAGE_FILE_TAG),
-        as_i64(CHUNK),
-        &mut out,
+        chunk_size,
     );
-    info(as_i64(total_comp), as_i64(payload.len()), &mut out);
-    for (stream, unc) in &pieces {
-        info(as_i64(stream.len()), as_i64(*unc), &mut out);
+    zlib_compress_framed_with(payload, CHUNK, tag, None)
+}
+
+/// Compress `payload` into the chunked framing at `split` bytes per chunk,
+/// writing the tag record `tag` and the v2 compression-format byte
+/// `format_byte` verbatim and deriving the summary and chunk table from
+/// the real sizes. A `tag` chunk size other than `split` lets a test
+/// claim a chunking other than the one used.
+///
+/// # Panics
+/// Panics if `payload` exceeds `i64::MAX` bytes (impossible for a
+/// bench/test input).
+#[must_use]
+pub fn zlib_compress_framed_with(
+    payload: &[u8],
+    split: usize,
+    tag: (i64, i64),
+    format_byte: Option<u8>,
+) -> Vec<u8> {
+    let as_i64 = |n: usize| i64::try_from(n).expect("bench payload fits i64");
+    let mut table = Vec::new();
+    let mut streams = Vec::new();
+    for chunk in payload.chunks(split.max(1)) {
+        let stream = zlib_stream(chunk);
+        table.push((as_i64(stream.len()), as_i64(chunk.len())));
+        streams.extend_from_slice(&stream);
     }
-    for (stream, _) in &pieces {
-        out.extend_from_slice(stream);
+    let summary = (as_i64(streams.len()), as_i64(payload.len()));
+    zlib_framing(tag, format_byte, summary, &table, &streams)
+}
+
+/// The engine's chunked `FCompressedChunkInfo` framing from its parts,
+/// each written verbatim: the tag record (tag, chunk size), the v2
+/// compression-format byte, the summary record (compressed,
+/// uncompressed), the chunk table and the chunk streams. Nothing is
+/// checked, so tests can pass inconsistent values.
+#[must_use]
+pub fn zlib_framing(
+    tag: (i64, i64),
+    format_byte: Option<u8>,
+    summary: (i64, i64),
+    table: &[(i64, i64)],
+    streams: &[u8],
+) -> Vec<u8> {
+    fn push_info(out: &mut Vec<u8>, (compressed, uncompressed): (i64, i64)) {
+        out.extend_from_slice(&compressed.to_le_bytes());
+        out.extend_from_slice(&uncompressed.to_le_bytes());
     }
+
+    let mut out = Vec::new();
+    push_info(&mut out, tag);
+    out.extend(format_byte);
+    push_info(&mut out, summary);
+    for &entry in table {
+        push_info(&mut out, entry);
+    }
+    out.extend_from_slice(streams);
     out
 }
 
@@ -133,6 +172,80 @@ pub fn zlib_stream(payload: &[u8]) -> Vec<u8> {
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
     enc.write_all(payload).expect("in-memory zlib write");
     enc.finish().expect("in-memory zlib finish")
+}
+
+/// One empty non-final stored block (BFINAL 0, BTYPE 00, LEN 0, NLEN !0),
+/// a padding group for [`zlib_padded_stream`].
+pub const EMPTY_STORED_BLOCK: [u8; 5] = [0x00, 0x00, 0x00, 0xFF, 0xFF];
+
+/// Four empty non-final fixed-Huffman blocks (each BFINAL 0, BTYPE 01, then
+/// the 7-bit end-of-block code), 40 bits ending byte-aligned: a padding
+/// group for [`zlib_padded_stream`].
+pub const FOUR_EMPTY_FIXED_BLOCKS: [u8; 5] = [0x02, 0x08, 0x20, 0x80, 0x00];
+
+/// Four empty non-final dynamic-Huffman blocks, 90 bits each, ending
+/// byte-aligned: a padding group for [`zlib_padded_stream`]. Each block's
+/// literal/length code holds only end-of-block and its distance code only
+/// distance code 0, each 1 bit long. RFC 1951 §3.2.7 describes that
+/// one-code form only for distances; zlib, miniz and zlib-rs accept it for
+/// both.
+pub const FOUR_EMPTY_DYNAMIC_BLOCKS: [u8; 45] = [
+    0x04, 0xC0, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00, 0x90, 0xFF, 0x6B, 0x10, 0x00, 0x07, 0x02, 0x00,
+    0x00, 0x00, 0x00, 0x40, 0xFE, 0xAF, 0x41, 0x00, 0x1C, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF9,
+    0xBF, 0x06, 0x01, 0x70, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE4, 0xFF, 0x1A,
+];
+
+/// A zlib stream that decodes to b"B" after `groups` copies of `padding`,
+/// a byte-aligned run of empty non-final blocks: a zlib header, the
+/// padding, then a final stored block holding b"B" and its Adler-32.
+#[must_use]
+pub fn zlib_padded_stream(padding: &[u8], groups: usize) -> Vec<u8> {
+    let (header, stored_b) = STORED_STREAM_B.split_at(2);
+    [header, &padding.repeat(groups), stored_b].concat()
+}
+
+/// A zlib stream holding b"B" in one final stored block: the stream
+/// [`zlib_padded_stream`] builds with no padding.
+pub const STORED_STREAM_B: [u8; 12] = [
+    0x78, 0x01, 0x01, 0x01, 0x00, 0xFE, 0xFF, 0x42, 0x00, 0x43, 0x00, 0x43,
+];
+
+/// A zlib header that asks for a preset dictionary (FDICT) and ends there.
+/// flate2 fails it as a corrupt stream on its miniz backend, which rejects
+/// the header, and as an incomplete one on zlib-rs, which waits for the
+/// dictionary's id; with the id, zlib-rs would ask for the dictionary,
+/// which flate2 also fails as corrupt. A crate in the build that enables
+/// another flate2 backend switches paksmith's decoders with it.
+pub const PRESET_DICTIONARY_HEADER: [u8; 2] = [0x78, 0xBB];
+
+/// A shared-history probe: 131,072 bytes cycling through 1..=251, then an
+/// 11-byte zlib stream whose one match copies the 3 bytes 32 KiB before
+/// its start, with the Adler-32 of the probe's bytes there. A decoder
+/// that kept the first stream's window accepts the second stream; a
+/// fresh one does not.
+#[must_use]
+pub fn shared_history_probe() -> (Vec<u8>, [u8; 11]) {
+    let first = (1..=251u8).cycle().take(131_072).collect();
+    // Zlib header, a final fixed-Huffman block holding one match of
+    // length 3 at distance 32,768, then the Adler-32 trailer.
+    let second = [
+        0x78, 0x01, 0x03, 0xDE, 0xFF, 0x0F, 0x00, 0x03, 0xDF, 0x01, 0xF0,
+    ];
+    (first, second)
+}
+
+/// A zlib stream that yields b"0123456789A" from a non-final stored block,
+/// then holds `empty_blocks` empty non-final stored blocks, then a block of
+/// the reserved type 3 at byte `18 + 5 * empty_blocks`. A decoder that
+/// buffers 32 KiB of input at a time (flate2's `read::ZlibDecoder`) returns
+/// the 11 bytes before it reaches a bad block past its first 32 KiB.
+#[must_use]
+pub fn zlib_stream_corrupt_after(empty_blocks: usize) -> Vec<u8> {
+    let mut stream = vec![0x78, 0x01, 0x00, 0x0B, 0x00, 0xF4, 0xFF];
+    stream.extend_from_slice(b"0123456789A");
+    stream.extend_from_slice(&EMPTY_STORED_BLOCK.repeat(empty_blocks));
+    stream.push(0x06);
+    stream
 }
 
 /// The exact encoded byte length `decode_mip` requires for `format_name` at
@@ -364,6 +477,43 @@ pub fn large_data_table(rows: usize, cols: usize) -> Asset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The probe's second stream ends with the Adler-32 of the 3 bytes it
+    /// copies from 32 KiB back, so it decodes only against the first
+    /// stream's window.
+    #[test]
+    fn shared_history_probe_checksums_the_bytes_it_reaches_back_to() {
+        let (first, second) = shared_history_probe();
+        let leaked = zlib_stream(&first[first.len() - 32_768..][..3]);
+        assert_eq!(second[7..], leaked[leaked.len() - 4..]);
+    }
+
+    /// Each of the group's four 90-bit blocks opens with BFINAL 0, BTYPE 10.
+    #[test]
+    fn four_empty_dynamic_blocks_open_four_dynamic_blocks() {
+        let bit = |i: usize| (FOUR_EMPTY_DYNAMIC_BLOCKS[i / 8] >> (i % 8)) & 1;
+        for start in [0, 90, 180, 270] {
+            let header = bit(start) | (bit(start + 1) << 1) | (bit(start + 2) << 2);
+            assert_eq!(header, 0b100, "block at bit {start}");
+        }
+    }
+
+    /// A valid RFC 1950 §2.2 header apart from FDICT (CM 8, CINFO 7, FCHECK
+    /// valid), so only FDICT separates the backends: miniz rejects it, while
+    /// zlib-rs reads on for the dictionary's id.
+    #[test]
+    fn preset_dictionary_header_is_valid_apart_from_fdict() {
+        let [cmf, flg] = PRESET_DICTIONARY_HEADER;
+        assert_eq!((cmf & 0x0F, cmf >> 4, flg & 0x20), (8, 7, 0x20));
+        assert_eq!(((u16::from(cmf) << 8) | u16::from(flg)) % 31, 0);
+    }
+
+    /// The reserved-type block is the stream's last byte, at `18 + 5 * n`.
+    #[test]
+    fn zlib_stream_corrupt_after_ends_with_its_bad_block() {
+        let stream = zlib_stream_corrupt_after(2);
+        assert_eq!((stream.len(), stream[28]), (29, 0x06));
+    }
 
     #[test]
     fn decode_texture_mip_returns_rgba_for_a_bc1_block() {
