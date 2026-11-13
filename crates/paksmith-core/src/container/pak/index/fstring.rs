@@ -28,7 +28,15 @@ use crate::seams::PakSeam;
 /// Maximum length (in bytes for UTF-8, code units for UTF-16) accepted
 /// for an FString. Sized to comfortably exceed any realistic UE virtual
 /// path while rejecting attacker-controlled multi-GB allocations.
-const FSTRING_MAX_LEN: i32 = 65_536;
+/// Exposed via [`max_fstring_len`].
+pub(super) const FSTRING_MAX_LEN: i32 = 65_536;
+
+/// Test-only accessor for `FSTRING_MAX_LEN`. Same convention as
+/// [`super::path_hash::max_index_bytes`].
+#[cfg(feature = "__test_utils")]
+pub fn max_fstring_len() -> i32 {
+    FSTRING_MAX_LEN
+}
 
 /// Read a length-prefixed FString from `reader`.
 ///

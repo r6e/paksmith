@@ -22,8 +22,15 @@ use crate::error::{
 use crate::seams::PakSeam;
 
 /// Sanity ceiling on compression block count per entry (~16M blocks of
-/// 64KiB would be a 1TiB entry).
-const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
+/// 64KiB would be a 1TiB entry). Exposed via [`max_blocks_per_entry`].
+pub(super) const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
+
+/// Test-only accessor for `MAX_BLOCKS_PER_ENTRY`. Same convention as
+/// [`super::path_hash::max_index_bytes`].
+#[cfg(feature = "__test_utils")]
+pub fn max_blocks_per_entry() -> u32 {
+    MAX_BLOCKS_PER_ENTRY
+}
 
 /// AES-encryption bit of the per-entry flags byte. Bit 1 is a delete
 /// record, which paksmith does not model (issue #742).

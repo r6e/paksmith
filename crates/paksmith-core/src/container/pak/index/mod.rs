@@ -21,14 +21,18 @@ pub(in crate::container::pak) use path_hash::MAX_INDEX_BYTES;
 
 pub use compression::{CompressionBlock, CompressionMethod};
 pub use entry_header::PakEntryHeader;
-// Issue #94 test-utils accessor for the v10+ FDI byte ceiling.
+// Test-utils accessors for the index caps (issue #94 and later).
 // Same `__test_utils`-feature-gated pattern as
 // `crate::container::pak::max_uncompressed_entry_bytes` —
-// boundary tests read the cap from here rather than re-declaring
+// boundary tests read each cap from here rather than re-declaring
 // the literal, eliminating the drift hazard #45/#58 already fixed
 // for the entry-bytes cap.
 #[cfg(feature = "__test_utils")]
+pub use entry_header::max_blocks_per_entry;
+#[cfg(feature = "__test_utils")]
 pub use flat::max_flat_index_entries;
+#[cfg(feature = "__test_utils")]
+pub use fstring::max_fstring_len;
 #[cfg(feature = "__test_utils")]
 pub use path_hash::{max_fdi_bytes, max_index_bytes};
 // `EntryCommon` was previously in the `pub` re-export, but it's dead
@@ -565,6 +569,29 @@ impl PakIndexEntry {
     }
 }
 
+#[cfg(test)]
+mod cap_pins {
+    /// Pins the pak caps' values, so a mutant of a constant's initializer
+    /// fails here even where a boundary test reads the cap through its
+    /// accessor. `MAX_INDEX_BYTES` is pinned by `max_index_bytes_is_one_gib`.
+    #[test]
+    fn caps_pin_expected_values() {
+        assert_eq!(
+            crate::container::pak::MAX_UNCOMPRESSED_ENTRY_BYTES,
+            8_589_934_592,
+            "8 GiB"
+        );
+        assert_eq!(super::path_hash::MAX_FDI_BYTES, 268_435_456, "256 MiB");
+        assert_eq!(super::flat::MAX_FLAT_INDEX_ENTRIES, 10_000_000);
+        assert_eq!(
+            super::entry_header::MAX_BLOCKS_PER_ENTRY,
+            16_777_216,
+            "16 Mi"
+        );
+        assert_eq!(super::fstring::FSTRING_MAX_LEN, 65_536, "64 Ki");
+    }
+}
+
 // Gated on `__test_utils` because the `crate::testing::v10::*` imports
 // below are `#[cfg(feature = "__test_utils")]`-gated. CI runs
 // `cargo test --workspace --all-features` which activates the feature.
@@ -1075,26 +1102,40 @@ mod tests {
         assert_eq!(index.entries()[0].filename(), "Content/Maps/レベル.umap");
     }
 
+    /// A mount-point FString one past `FSTRING_MAX_LEN` fails the cap.
+    /// One at the cap reads, and the empty index after it parses.
     #[test]
-    fn reject_oversized_fstring() {
-        let mut data = Vec::new();
-        // Mount point: claim length of 1MB, but provide nothing.
-        data.write_i32::<LittleEndian>(1_000_000).unwrap();
-        let len = data.len() as u64;
-        let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
-            .unwrap_err();
-        match err {
-            PaksmithError::InvalidIndex { fault } => {
-                let reason = fault.to_string();
-                // Pin the size-cap branch specifically.
-                assert!(
-                    reason.contains("FString length") && reason.contains("maximum"),
-                    "expected FString length cap error, got: {reason}"
-                );
-            }
-            other => panic!("expected InvalidIndex, got {other:?}"),
-        }
+    fn fstring_length_cap_boundary() {
+        let cap = max_fstring_len();
+        let cap_u32 = u32::try_from(cap).unwrap();
+        let read = |len: i32| {
+            let mut data = Vec::new();
+            write_fstring(&mut data, &"a".repeat(usize::try_from(len - 1).unwrap()));
+            data.write_u32::<LittleEndian>(0).unwrap(); // entry_count
+            let n = data.len() as u64;
+            PakIndex::read_from(
+                &mut Cursor::new(data),
+                PakVersion::DeleteRecords,
+                0,
+                n,
+                n,
+                &[],
+            )
+        };
+        let err = read(cap + 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::FStringMalformed {
+                        kind: FStringFault::LengthExceedsMaximum { length, maximum },
+                    },
+                } if length == cap_u32 + 1 && maximum == cap_u32
+            ),
+            "{err:?}"
+        );
+        let index = read(cap).unwrap();
+        assert_eq!(index.mount_point().len(), usize::try_from(cap).unwrap() - 1);
     }
 
     /// Issue #104 regression: a `len == 0` FString length-prefix
@@ -1374,8 +1415,9 @@ mod tests {
         assert_eq!(empty.len(), 0);
     }
 
-    #[test]
-    fn reject_oversized_block_count() {
+    /// Parse a one-entry v6 (`DeleteRecords`) flat index whose zlib entry
+    /// claims `block_count` blocks and carries none of them.
+    fn read_index_with_block_count(block_count: u32) -> crate::Result<PakIndex> {
         let mut data = Vec::new();
         write_fstring(&mut data, "/");
         data.write_u32::<LittleEndian>(1).unwrap();
@@ -1385,21 +1427,66 @@ mod tests {
         data.write_u64::<LittleEndian>(0).unwrap();
         data.write_u32::<LittleEndian>(1).unwrap(); // zlib
         data.extend_from_slice(&[0u8; 20]);
-        data.write_u32::<LittleEndian>(u32::MAX).unwrap(); // huge block count
+        data.write_u32::<LittleEndian>(block_count).unwrap();
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
-            .unwrap_err();
-        match err {
-            PaksmithError::InvalidIndex { fault } => {
-                let reason = fault.to_string();
-                assert!(
-                    reason.contains("block_count"),
-                    "expected block_count cap error, got: {reason}"
-                );
-            }
-            other => panic!("expected InvalidIndex, got {other:?}"),
-        }
+        PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+    }
+
+    /// With the block list's reservation seam armed, a block count one past
+    /// `MAX_BLOCKS_PER_ENTRY` fails the cap before it reaches the
+    /// reservation. One at the cap passes the cap and reaches it.
+    #[test]
+    fn block_count_cap_boundary() {
+        use crate::seams::{PakSeam, SeamSite};
+        use crate::testing::oom::arm_at;
+
+        let cap = max_blocks_per_entry();
+        let _guard = arm_at(SeamSite::Pak(PakSeam::InlineCompressionBlocks), 0);
+        let err = read_index_with_block_count(cap + 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::BlockCount,
+                        value,
+                        limit,
+                        unit: BoundsUnit::Items,
+                        path: None,
+                    },
+                } if value == u64::from(cap) + 1 && limit == u64::from(cap)
+            ),
+            "{err:?}"
+        );
+        let err = read_index_with_block_count(cap).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::InlineCompressionBlocks,
+                        requested,
+                        ..
+                    },
+                } if requested == cap as usize
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// Pins each pak cap's `__test_utils` accessor to its constant.
+    #[test]
+    fn accessors_return_constants() {
+        assert_eq!(
+            crate::container::pak::max_uncompressed_entry_bytes(),
+            crate::container::pak::MAX_UNCOMPRESSED_ENTRY_BYTES
+        );
+        assert_eq!(max_fdi_bytes(), path_hash::MAX_FDI_BYTES);
+        assert_eq!(max_index_bytes(), MAX_INDEX_BYTES);
+        assert_eq!(max_flat_index_entries(), flat::MAX_FLAT_INDEX_ENTRIES);
+        assert_eq!(max_blocks_per_entry(), entry_header::MAX_BLOCKS_PER_ENTRY);
+        assert_eq!(max_fstring_len(), fstring::FSTRING_MAX_LEN);
     }
 
     #[test]
