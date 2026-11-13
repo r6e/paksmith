@@ -2068,17 +2068,20 @@ fn read_encrypted_index<R: Read + Seek>(
     //
     // Accepted trade-off: for the v10+ path this collapse also swallows
     // faults that are NOT wrong-key garbage. Two classes:
-    //   (1) post-parse cross-check faults — a correctly-keyed index that
+    //   (1) checks paksmith adds on a correctly-keyed index — one that
     //       decrypts to structurally valid plaintext but fails the issue
-    //       #131 `PhiFdiInconsistency` check, or a non-ASCII path hitting
-    //       the `fnv64_path` ASCII-only limitation;
+    //       #131 `PhiFdiInconsistency` check, a non-ASCII path hitting
+    //       the `fnv64_path` ASCII-only limitation, or FDI paths whose
+    //       encoded block counts sum past a quarter of the blob's length
+    //       (#848);
     //   (2) pre-decrypt structural bounds faults, such as
     //       `OffsetPastFileSize` (aligned extent past EOF),
     //       `RegionPastFileSize` (unaligned offset+size past EOF), or
     //       `BoundsExceeded` (declared size over its cap).
-    // Both collapse into `Decryption`; the unencrypted path would surface
-    // the specific fault, the encrypted path reports "looks like a wrong
-    // key." This is deliberate and uniform. The FDI/PHI region offsets and
+    // Both collapse into `Decryption`, which drops any path the fault
+    // named, so `test_key` reports the key as wrong; the unencrypted path
+    // would surface the specific fault, the encrypted path reports "looks
+    // like a wrong key." This is deliberate and uniform. The FDI/PHI region offsets and
     // sizes come from the DECRYPTED primary index, so a wrong key's garbage
     // could itself trip class (2) — surfacing the typed fault there would be
     // a wrong-key oracle, and passing class (1) through would leak that the
@@ -4981,6 +4984,22 @@ mod tests {
         assert_eq!(out, b"abcdef");
     }
 
+    /// Pins flate2's miniz backend for an entry's blocks; see
+    /// `PRESET_DICTIONARY_HEADER` (#846).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_zlib_entry_decodes_with_miniz() {
+        use crate::testing::bench::PRESET_DICTIONARY_HEADER;
+
+        let fault = zlib_entry_fault(&[PRESET_DICTIONARY_HEADER.to_vec()], 1, 1, 0);
+        let expected = DecompressionFault::ZlibStreamError {
+            block_index: 0,
+            kind: std::io::ErrorKind::InvalidInput,
+            message: "corrupt deflate stream".to_owned(),
+        };
+        assert_eq!(fault, expected);
+    }
+
     /// The documented AES-256 key for the vendored encrypted fixtures
     /// (`crates/paksmith-fixture-gen/src/encryption.rs::FIXTURE_AES_KEY`).
     /// Hardcoded here because `paksmith-core` must NOT depend on
@@ -5480,6 +5499,92 @@ mod tests {
         assert!(
             matches!(err, PaksmithError::Decryption { .. }),
             "wrong key on a v11 encrypted index must fail closed as Decryption, got: {err:?}"
+        );
+    }
+
+    /// A v11 pak whose index, at offset 0, is encrypted with `key`: one
+    /// 76-byte encoded entry of 16 blocks, which the FDI's root directory
+    /// names from each of `names`, and no PHI. Returns the pak and its main
+    /// index size.
+    #[cfg(feature = "__test_utils")]
+    fn build_v11_encrypted_index_pak(names: &[&str], key: &AesKey) -> (Vec<u8>, u64) {
+        use crate::testing::v10::{EncodeArgs, V10Fixture, build_v10_buffer, encode_entry_bytes};
+
+        let files = names.iter().map(|name| (name.to_string(), 0)).collect();
+        let (mut pak, main_size) = build_v10_buffer(V10Fixture {
+            // Makes the main index 160 bytes, so the FDI after it starts
+            // an AES block and one pass encrypts both regions.
+            mount: "../../../Mount/".into(),
+            file_count: u32::try_from(names.len()).unwrap(),
+            encoded_entries: encode_entry_bytes(EncodeArgs {
+                offset: 0,
+                uncompressed: 16,
+                compressed: 16,
+                compression_slot_1based: 0,
+                encrypted: false,
+                block_count: 16,
+                block_size: 0,
+                per_block_sizes: &[1; 16],
+            }),
+            fdi: vec![("/".into(), files)],
+            has_path_hash_index: false,
+            ..V10Fixture::default()
+        });
+        assert_eq!(main_size % 16, 0, "the FDI must start an AES block");
+        pak.resize(pak.len().next_multiple_of(16), 0);
+        crypto::aes256_ecb_encrypt(key, &mut pak).unwrap();
+        pak.extend_from_slice(&[0; 16]); // encryption key GUID
+        pak.push(1); // index encrypted
+        pak.extend_from_slice(&version::PAK_MAGIC.to_le_bytes());
+        pak.extend_from_slice(&PakVersion::Fnv64BugFix.wire_version().to_le_bytes());
+        pak.extend_from_slice(&0u64.to_le_bytes()); // index offset
+        pak.extend_from_slice(&main_size.to_le_bytes());
+        pak.extend_from_slice(&[0; 20 + 5 * 32]); // index hash, compression slots
+        (pak, main_size)
+    }
+
+    /// On an encrypted v10+ index, the encoded-block budget's refusal
+    /// surfaces as `Decryption`, as the walk's other bounds faults do (#848).
+    /// The one-path open checks the hand-built archive, and the keyed index
+    /// read shows that the fault the open collapses is the budget's.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn encrypted_v11_index_reports_the_encoded_block_budget_as_decryption() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let (pak, _) = build_v11_encrypted_index_pak(&["a"], &key);
+        let reader = PakReader::from_reader_with_key(Cursor::new(pak), key.clone()).unwrap();
+        assert_eq!(reader.entries().count(), 1);
+
+        let (pak, main_size) = build_v11_encrypted_index_pak(&["a", "b"], &key);
+        let file_size = pak.len() as u64;
+        let err = PakIndex::read_positioned_maybe_encrypted(
+            &mut Cursor::new(pak.clone()),
+            PakVersion::Fnv64BugFix,
+            main_size,
+            file_size,
+            &[],
+            Some(&key),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::V10EncodedBlockTotal,
+                        value: 32,
+                        limit: 19,
+                        unit: BoundsUnit::Items,
+                        path: Some(p),
+                    },
+                } if p == "b"
+            ),
+            "{err:?}"
+        );
+        let err = PakReader::from_reader_with_key(Cursor::new(pak), key).unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::Decryption { path: None }),
+            "{err:?}"
         );
     }
 

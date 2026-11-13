@@ -42,7 +42,7 @@ section "Format inventory" for column semantics.
 
 | Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
 |-----|------------|---------------|----------------|-------------------|---------------|
-| `container/pak.md` | complete | complete | `container/pak/` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `ca02fea` |
+| `container/pak.md` | complete | complete | `container/pak/` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `ae60b85` |
 | `container/iostore-utoc.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + retoc @ `885a8dae740cb1ce1e41ff2e74f67f9f0c118237` | `4e81b15` |
 | `container/iostore-ucas.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + retoc @ `885a8dae740cb1ce1e41ff2e74f67f9f0c118237` | `4e81b15` |
 | `container/iostore-directory-index.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` | `3545dc0` |
@@ -50,14 +50,14 @@ section "Format inventory" for column semantics.
 | `asset/uexp.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + unreal_asset @ `f4df5d8e75b1e184832384d1865f0b696b90a614` | `72a41fa` |
 | `asset/ubulk.md` | complete | complete | `asset/bulk_data.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `84af998` |
 | `asset/companion-resolution.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `7066ec9` |
-| `asset/bulk-data.md` | complete | complete | `asset/bulk_data.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `416d11b` |
+| `asset/bulk-data.md` | complete | complete | `asset/bulk_data.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `f695aae` |
 | `property/tagged.md` | complete | complete | `asset/property/tag.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` | `18769d0` |
 | `property/unversioned.md` | complete | partial | `asset/property/unversioned.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + unreal_asset @ `f4df5d8e75b1e184832384d1865f0b696b90a614` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` + UAssetAPI @ `b4e8a012939295a6fd890ddc64e57ea78b709b95` | `4bbd69c` |
 | `property/primitives.md` | complete | complete | `asset/property/primitives.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `property/containers.md` | complete | complete | `asset/property/containers.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `91456be` |
 | `property/struct.md` | complete | partial | `asset/property/containers.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
 | `property/text.md` | complete | partial | `asset/property/text.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `8f56038` |
-| `primitive/fstring.md` | complete | complete | `container/pak/index/fstring.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `8f56038` |
+| `primitive/fstring.md` | complete | complete | `container/pak/index/fstring.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `5d8b6d5` |
 | `primitive/fname.md` | complete | complete | `asset/name_table.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `a35c183` |
 | `primitive/fguid.md` | complete | complete | `asset/guid.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `8f56038` |
 | `primitive/fpackage-index.md` | complete | complete | `asset/package_index.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `8f56038` |
@@ -82,8 +82,8 @@ section "Format inventory" for column semantics.
 | `data/data-asset.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
 | `data/data-table.md` | complete | complete | `asset/exports/data_table.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
 | `data/locres.md` | complete | complete | `localization/locres.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `a35c183` |
-| `compression/pak-block-framing.md` | complete | complete | `container/pak/index/compression.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `cc046a5` |
-| `compression/zlib.md` | complete | complete | `container/pak/mod.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `8f56038` |
+| `compression/pak-block-framing.md` | complete | complete | `container/pak/index/compression.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `ae60b85` |
+| `compression/zlib.md` | complete | complete | `container/pak/mod.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `f695aae` |
 | `compression/lz4.md` | complete | complete | `container/pak/mod.rs` | repak @ `e215472c51db69328b1ce77be2db24d24c1d646b` + CUE4Parse @ `c7e78422ec4858036c9bba5d9d3c55eb197f93c9` | `91bb109` |
 | `compression/oodle.md` | complete | partial | `container/pak/index/compression.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `81dad9c` |
 | `crypto/aes-pak.md` | complete | partial | `container/pak/footer.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `ca02fea` |

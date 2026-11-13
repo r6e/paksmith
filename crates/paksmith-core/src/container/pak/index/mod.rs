@@ -21,14 +21,18 @@ pub(in crate::container::pak) use path_hash::MAX_INDEX_BYTES;
 
 pub use compression::{CompressionBlock, CompressionMethod};
 pub use entry_header::PakEntryHeader;
-// Issue #94 test-utils accessor for the v10+ FDI byte ceiling.
+// Test-utils accessors for the index caps (issue #94 and later).
 // Same `__test_utils`-feature-gated pattern as
 // `crate::container::pak::max_uncompressed_entry_bytes` —
-// boundary tests read the cap from here rather than re-declaring
+// boundary tests read each cap from here rather than re-declaring
 // the literal, eliminating the drift hazard #45/#58 already fixed
 // for the entry-bytes cap.
 #[cfg(feature = "__test_utils")]
+pub use entry_header::max_blocks_per_entry;
+#[cfg(feature = "__test_utils")]
 pub use flat::max_flat_index_entries;
+#[cfg(feature = "__test_utils")]
+pub use fstring::max_fstring_len;
 #[cfg(feature = "__test_utils")]
 pub use path_hash::{max_fdi_bytes, max_index_bytes};
 // `EntryCommon` was previously in the `pub` re-export, but it's dead
@@ -47,7 +51,9 @@ pub use path_hash::{max_fdi_bytes, max_index_bytes};
 #[cfg_attr(not(feature = "__test_utils"), allow(unused_imports))]
 pub(crate) use entry_header::EntryCommon;
 
+use std::fmt;
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 use tracing::warn;
 
@@ -134,7 +140,7 @@ pub(crate) fn fnv64_path(path: &str, seed: PathHashSeed) -> u64 {
 #[derive(Debug, Clone)]
 pub struct PakIndexEntry {
     filename: String,
-    header: PakEntryHeader,
+    header: HeaderSlot,
 }
 
 impl PakIndexEntry {
@@ -147,7 +153,33 @@ impl PakIndexEntry {
     /// (offset, sha1, compression_method, ...) live on the inner
     /// [`PakEntryHeader`]; reach them via `entry.header().X()`.
     pub fn header(&self) -> &PakEntryHeader {
-        &self.header
+        self.header.get()
+    }
+}
+
+/// Where a [`PakIndexEntry`] keeps its header. The FDI paths that name
+/// one non-encoded record share its header rather than each copying it
+/// (#848).
+#[derive(Clone)]
+enum HeaderSlot {
+    Owned(PakEntryHeader),
+    Shared(Arc<PakEntryHeader>),
+}
+
+impl HeaderSlot {
+    fn get(&self) -> &PakEntryHeader {
+        match self {
+            Self::Owned(header) => header,
+            Self::Shared(header) => header,
+        }
+    }
+}
+
+// Formats as the bare header, so `PakIndexEntry`'s `Debug` output is the
+// same whether or not its header is shared.
+impl fmt::Debug for HeaderSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.get().fmt(f)
     }
 }
 
@@ -537,18 +569,48 @@ impl PakIndexEntry {
     /// in [`super::path_hash`] when filenames are recovered from the
     /// directory index rather than read inline.
     pub(super) fn from_parts(filename: String, header: PakEntryHeader) -> Self {
-        Self { filename, header }
+        Self {
+            filename,
+            header: HeaderSlot::Owned(header),
+        }
+    }
+
+    /// Construct an entry that shares `header` with the other FDI paths
+    /// naming the same non-encoded record.
+    pub(super) fn from_shared(filename: String, header: Arc<PakEntryHeader>) -> Self {
+        Self {
+            filename,
+            header: HeaderSlot::Shared(header),
+        }
+    }
+
+    /// Move this entry's header into an `Arc` the entry then shares, if it
+    /// doesn't share one already, and return another handle to it.
+    pub(super) fn share_header(&mut self) -> Arc<PakEntryHeader> {
+        let placeholder = HeaderSlot::Owned(PakEntryHeader::placeholder());
+        let shared = match std::mem::replace(&mut self.header, placeholder) {
+            HeaderSlot::Owned(header) => Arc::new(header),
+            HeaderSlot::Shared(header) => header,
+        };
+        self.header = HeaderSlot::Shared(Arc::clone(&shared));
+        shared
+    }
+
+    /// Whether this entry shares its header with other FDI paths.
+    #[cfg(all(test, feature = "__test_utils"))]
+    fn header_is_shared(&self) -> bool {
+        matches!(self.header, HeaderSlot::Shared(_))
     }
 
     /// Test-only constructor pairing a filename with an already-built
     /// [`PakEntryHeader`]. Used by `pak::mod` unit tests that call the free
-    /// `stream_uncompressed_to` directly with a synthetic entry. Trivial
-    /// struct-literal so it carries no mutable logic of its own; its field
+    /// `stream_uncompressed_to` directly with a synthetic entry. Delegates
+    /// to [`Self::from_parts`] so it carries no logic of its own; its field
     /// pairing is pinned by `pak_index_entry_for_test_pairs_filename_and_header`
     /// in `pak::mod`'s test module.
     #[cfg(test)]
     pub(in crate::container::pak) fn for_test(filename: String, header: PakEntryHeader) -> Self {
-        Self { filename, header }
+        Self::from_parts(filename, header)
     }
 
     /// Read a single (filename FString + FPakEntry record) pair off
@@ -561,7 +623,30 @@ impl PakIndexEntry {
     ) -> crate::Result<Self> {
         let filename = read_fstring(reader)?;
         let header = PakEntryHeader::read_from(reader, version, compression_methods)?;
-        Ok(Self { filename, header })
+        Ok(Self::from_parts(filename, header))
+    }
+}
+
+#[cfg(test)]
+mod cap_pins {
+    /// Pins the pak caps' values, so a mutant of a constant's initializer
+    /// fails here even where a boundary test reads the cap through its
+    /// accessor. `MAX_INDEX_BYTES` is pinned by `max_index_bytes_is_one_gib`.
+    #[test]
+    fn caps_pin_expected_values() {
+        assert_eq!(
+            crate::container::pak::MAX_UNCOMPRESSED_ENTRY_BYTES,
+            8_589_934_592,
+            "8 GiB"
+        );
+        assert_eq!(super::path_hash::MAX_FDI_BYTES, 268_435_456, "256 MiB");
+        assert_eq!(super::flat::MAX_FLAT_INDEX_ENTRIES, 10_000_000);
+        assert_eq!(
+            super::entry_header::MAX_BLOCKS_PER_ENTRY,
+            16_777_216,
+            "16 Mi"
+        );
+        assert_eq!(super::fstring::FSTRING_MAX_LEN, 65_536, "64 Ki");
     }
 }
 
@@ -1075,26 +1160,40 @@ mod tests {
         assert_eq!(index.entries()[0].filename(), "Content/Maps/レベル.umap");
     }
 
+    /// A mount-point FString one past `FSTRING_MAX_LEN` fails the cap.
+    /// One at the cap reads, and the empty index after it parses.
     #[test]
-    fn reject_oversized_fstring() {
-        let mut data = Vec::new();
-        // Mount point: claim length of 1MB, but provide nothing.
-        data.write_i32::<LittleEndian>(1_000_000).unwrap();
-        let len = data.len() as u64;
-        let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
-            .unwrap_err();
-        match err {
-            PaksmithError::InvalidIndex { fault } => {
-                let reason = fault.to_string();
-                // Pin the size-cap branch specifically.
-                assert!(
-                    reason.contains("FString length") && reason.contains("maximum"),
-                    "expected FString length cap error, got: {reason}"
-                );
-            }
-            other => panic!("expected InvalidIndex, got {other:?}"),
-        }
+    fn fstring_length_cap_boundary() {
+        let cap = max_fstring_len();
+        let cap_u32 = u32::try_from(cap).unwrap();
+        let read = |len: i32| {
+            let mut data = Vec::new();
+            write_fstring(&mut data, &"a".repeat(usize::try_from(len - 1).unwrap()));
+            data.write_u32::<LittleEndian>(0).unwrap(); // entry_count
+            let n = data.len() as u64;
+            PakIndex::read_from(
+                &mut Cursor::new(data),
+                PakVersion::DeleteRecords,
+                0,
+                n,
+                n,
+                &[],
+            )
+        };
+        let err = read(cap + 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::FStringMalformed {
+                        kind: FStringFault::LengthExceedsMaximum { length, maximum },
+                    },
+                } if length == cap_u32 + 1 && maximum == cap_u32
+            ),
+            "{err:?}"
+        );
+        let index = read(cap).unwrap();
+        assert_eq!(index.mount_point().len(), usize::try_from(cap).unwrap() - 1);
     }
 
     /// Issue #104 regression: a `len == 0` FString length-prefix
@@ -1374,8 +1473,9 @@ mod tests {
         assert_eq!(empty.len(), 0);
     }
 
-    #[test]
-    fn reject_oversized_block_count() {
+    /// Parse a one-entry v6 (`DeleteRecords`) flat index whose zlib entry
+    /// claims `block_count` blocks and carries none of them.
+    fn read_index_with_block_count(block_count: u32) -> crate::Result<PakIndex> {
         let mut data = Vec::new();
         write_fstring(&mut data, "/");
         data.write_u32::<LittleEndian>(1).unwrap();
@@ -1385,21 +1485,66 @@ mod tests {
         data.write_u64::<LittleEndian>(0).unwrap();
         data.write_u32::<LittleEndian>(1).unwrap(); // zlib
         data.extend_from_slice(&[0u8; 20]);
-        data.write_u32::<LittleEndian>(u32::MAX).unwrap(); // huge block count
+        data.write_u32::<LittleEndian>(block_count).unwrap();
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
-            .unwrap_err();
-        match err {
-            PaksmithError::InvalidIndex { fault } => {
-                let reason = fault.to_string();
-                assert!(
-                    reason.contains("block_count"),
-                    "expected block_count cap error, got: {reason}"
-                );
-            }
-            other => panic!("expected InvalidIndex, got {other:?}"),
-        }
+        PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+    }
+
+    /// With the block list's reservation seam armed, a block count one past
+    /// `MAX_BLOCKS_PER_ENTRY` fails the cap before it reaches the
+    /// reservation. One at the cap passes the cap and reaches it.
+    #[test]
+    fn block_count_cap_boundary() {
+        use crate::seams::{PakSeam, SeamSite};
+        use crate::testing::oom::arm_at;
+
+        let cap = max_blocks_per_entry();
+        let _guard = arm_at(SeamSite::Pak(PakSeam::InlineCompressionBlocks), 0);
+        let err = read_index_with_block_count(cap + 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::BlockCount,
+                        value,
+                        limit,
+                        unit: BoundsUnit::Items,
+                        path: None,
+                    },
+                } if value == u64::from(cap) + 1 && limit == u64::from(cap)
+            ),
+            "{err:?}"
+        );
+        let err = read_index_with_block_count(cap).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::InlineCompressionBlocks,
+                        requested,
+                        ..
+                    },
+                } if requested == cap as usize
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// Pins each pak cap's `__test_utils` accessor to its constant.
+    #[test]
+    fn accessors_return_constants() {
+        assert_eq!(
+            crate::container::pak::max_uncompressed_entry_bytes(),
+            crate::container::pak::MAX_UNCOMPRESSED_ENTRY_BYTES
+        );
+        assert_eq!(max_fdi_bytes(), path_hash::MAX_FDI_BYTES);
+        assert_eq!(max_index_bytes(), MAX_INDEX_BYTES);
+        assert_eq!(max_flat_index_entries(), flat::MAX_FLAT_INDEX_ENTRIES);
+        assert_eq!(max_blocks_per_entry(), entry_header::MAX_BLOCKS_PER_ENTRY);
+        assert_eq!(max_fstring_len(), fstring::FSTRING_MAX_LEN);
     }
 
     #[test]
@@ -2250,21 +2395,33 @@ mod tests {
     #[test]
     fn sha1_accessor_distinguishes_inline_from_encoded() {
         let inline = make_header(0, 0, [0xAA; 20]);
-        let inline_entry = PakIndexEntry {
-            filename: "x".to_string(),
-            header: inline,
-        };
+        let inline_entry = PakIndexEntry::from_parts("x".to_string(), inline);
         assert_eq!(
             inline_entry.header().sha1(),
             Some(Sha1Digest::from([0xAA; 20]))
         );
 
         let encoded = make_encoded_header(0, 0);
-        let encoded_entry = PakIndexEntry {
-            filename: "y".to_string(),
-            header: encoded,
-        };
+        let encoded_entry = PakIndexEntry::from_parts("y".to_string(), encoded);
         assert_eq!(encoded_entry.header().sha1(), None);
+    }
+
+    /// `PakIndexEntry`'s `Debug` shows the bare header, plain and pretty,
+    /// the same before and after `share_header` moves it into an `Arc`.
+    #[test]
+    fn index_entry_debug_shows_the_bare_header() {
+        let header = make_header(0, 0, [0xAA; 20]);
+        let want = format!("PakIndexEntry {{ filename: \"x\", header: {header:?} }}");
+        let pretty = format!("{header:#?}").replace('\n', "\n    ");
+        let want_pretty =
+            format!("PakIndexEntry {{\n    filename: \"x\",\n    header: {pretty},\n}}");
+        let mut entry = PakIndexEntry::from_parts("x".to_string(), header);
+        assert_eq!(format!("{entry:?}"), want);
+        assert_eq!(format!("{entry:#?}"), want_pretty);
+        let _ = entry.share_header();
+        assert!(entry.header_is_shared());
+        assert_eq!(format!("{entry:?}"), want);
+        assert_eq!(format!("{entry:#?}"), want_pretty);
     }
 
     /// Issue #44 regression: an attacker-crafted single-block encoded
@@ -3522,6 +3679,311 @@ mod tests {
             file_size,
             &[],
         )
+    }
+
+    /// A v10 index over `records` uncompressed non-encoded records (record
+    /// `i` at offset `100 * (i + 1)`, so none shares the placeholder
+    /// header's offset 0) and one encoded entry at offset 900, whose FDI
+    /// names `files`.
+    fn aliasing_v10(records: u32, files: Vec<(String, i32)>, has_phi: bool) -> PakIndex {
+        let mut non_enc = Vec::new();
+        for i in 1..=records {
+            write_v10_non_encoded_uncompressed(&mut non_enc, u64::from(i) * 100, 10);
+        }
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: u32::try_from(files.len()).unwrap(),
+            encoded_entries: encode_entry_bytes(EncodeArgs {
+                offset: 900,
+                uncompressed: 10,
+                compressed: 10,
+                compression_slot_1based: 0,
+                encrypted: false,
+                block_count: 0,
+                block_size: 0,
+                per_block_sizes: &[],
+            }),
+            non_encoded_records: non_enc,
+            non_encoded_count: records,
+            fdi: vec![("/Content/".into(), files)],
+            has_path_hash_index: has_phi,
+            ..V10Fixture::default()
+        });
+        read_v10(buf, main_size).unwrap()
+    }
+
+    /// FDI paths that name one non-encoded record share its header, with
+    /// or without a PHI vouching for each path (#848).
+    #[test]
+    fn aliasing_non_encoded_paths_share_one_header() {
+        for has_phi in [false, true] {
+            let files = vec![("a".into(), -1), ("b".into(), -1), ("c".into(), -1)];
+            let index = aliasing_v10(1, files, has_phi);
+            let phi = index.encoded_regions().and_then(EncodedRegions::phi);
+            assert_eq!(phi.is_some(), has_phi);
+            let [a, b, c] = index.entries() else {
+                panic!("expected 3 entries, got {:?}", index.entries())
+            };
+            assert_eq!(a.header().offset(), 100, "phi {has_phi}");
+            assert!(std::ptr::eq(a.header(), b.header()), "phi {has_phi}");
+            assert!(std::ptr::eq(b.header(), c.header()), "phi {has_phi}");
+            assert!(
+                a.header_is_shared() && c.header_is_shared(),
+                "phi {has_phi}"
+            );
+        }
+    }
+
+    /// A record named by one path stays owned by it. Paths over distinct
+    /// records, and an encoded path, share nothing with the aliases.
+    #[test]
+    fn unaliased_paths_keep_their_own_headers() {
+        let files = vec![
+            ("a".into(), -1),
+            ("b".into(), -2),
+            ("c".into(), 0),
+            ("d".into(), -2),
+        ];
+        let index = aliasing_v10(2, files, false);
+        let [a, b, c, d] = index.entries() else {
+            panic!("expected 4 entries, got {:?}", index.entries())
+        };
+        assert!(!a.header_is_shared() && !c.header_is_shared());
+        assert!(b.header_is_shared() && std::ptr::eq(b.header(), d.header()));
+        let offsets = [a, b, c, d].map(|e| e.header().offset());
+        assert_eq!(offsets, [100, 200, 900, 200]);
+    }
+
+    /// A path naming a record past the non-encoded count is reported as
+    /// such even when it is also one path more than `file_count`.
+    #[test]
+    fn read_v10_plus_reports_record_out_of_range_before_file_count() {
+        let mut non_enc = Vec::new();
+        write_v10_non_encoded_uncompressed(&mut non_enc, 0, 10);
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            non_encoded_records: non_enc,
+            non_encoded_count: 1,
+            fdi: vec![("/Content/".into(), vec![("a".into(), -1), ("b".into(), -2)])],
+            ..V10Fixture::default()
+        });
+        let err = read_v10(buf, main_size).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::Encoded {
+                        kind: EncodedFault::NonEncodedIndexOob {
+                            index: 1,
+                            count: 1,
+                            ..
+                        },
+                    },
+                }
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// An uncompressed encoded record of `block_count` one-byte blocks:
+    /// 12 bytes, plus 4 per block when there is more than one.
+    fn encoded_record(block_count: u32) -> Vec<u8> {
+        let sizes = vec![1; block_count as usize];
+        encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: u64::from(block_count),
+            compressed: u64::from(block_count),
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count,
+            block_size: 0,
+            per_block_sizes: &sizes,
+        })
+    }
+
+    /// A v10 index over the encoded-entries `blob`, whose FDI is `dirs`.
+    fn encoded_v10(
+        blob: Vec<u8>,
+        dirs: Vec<(String, Vec<(String, i32)>)>,
+    ) -> crate::Result<PakIndex> {
+        let files: usize = dirs.iter().map(|(_, files)| files.len()).sum();
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: u32::try_from(files).unwrap(),
+            encoded_entries: blob,
+            fdi: dirs,
+            ..V10Fixture::default()
+        });
+        read_v10(buf, main_size)
+    }
+
+    fn assert_block_total_exceeded(err: &PaksmithError, total: u64, limit: u64, path: &str) {
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::V10EncodedBlockTotal,
+                        value,
+                        limit: l,
+                        unit: BoundsUnit::Items,
+                        path: Some(p),
+                    },
+                } if *value == total && *l == limit && p == path
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected error")]
+    fn assert_block_total_exceeded_rejects_another_field() {
+        let err = PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded {
+                field: WireField::FdiFileCount,
+                value: 9,
+                limit: 6,
+                unit: BoundsUnit::Items,
+                path: Some("x".into()),
+            },
+        };
+        assert_block_total_exceeded(&err, 9, 6, "x");
+    }
+
+    /// Each decode of an encoded record charges its blocks against a
+    /// quarter of the blob's length: two paths naming one 24-byte,
+    /// three-block record charge 6 of 6 and are admitted.
+    #[test]
+    fn read_v10_plus_accepts_encoded_aliases_up_to_the_budget() {
+        let blob = encoded_record(3);
+        assert_eq!(blob.len(), 24);
+        let files = vec![("a".into(), 0), ("b".into(), 0)];
+        let index = encoded_v10(blob, vec![("/Content/".into(), files)]).unwrap();
+        let blocks = index
+            .entries()
+            .iter()
+            .map(|e| e.header().compression_blocks().len());
+        assert_eq!(blocks.collect::<Vec<_>>(), [3, 3]);
+    }
+
+    /// A third path naming the record, in another directory, charges 9 of
+    /// 6 and is refused before it decodes.
+    #[test]
+    fn read_v10_plus_refuses_encoded_aliases_past_the_budget() {
+        let dirs = vec![
+            ("/Content/".into(), vec![("a".into(), 0), ("b".into(), 0)]),
+            ("/Other/".into(), vec![("c".into(), 0)]),
+        ];
+        let err = encoded_v10(encoded_record(3), dirs).unwrap_err();
+        assert_block_total_exceeded(&err, 9, 6, "Other/c");
+    }
+
+    /// Single-block entries are charged too: a fourth path naming one
+    /// 12-byte, single-block entry charges 4 of 3. The message names that
+    /// path beside the archive-wide total.
+    #[test]
+    fn read_v10_plus_charges_single_block_aliases() {
+        let files = ["a", "b", "c", "d"]
+            .map(|name| (name.to_string(), 0))
+            .to_vec();
+        let err = encoded_v10(encoded_record(1), vec![("/Content/".into(), files)]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid pak index: entry `Content/d` encoded_block_total 4 exceeds maximum 3 items"
+        );
+    }
+
+    /// A path into a record's block sizes is charged too. Read as a bits
+    /// word, the 20-byte record's first block size claims 65,535 blocks;
+    /// unbudgeted, that decode would run out of blob instead.
+    #[test]
+    fn read_v10_plus_charges_an_alias_into_a_record_block_list() {
+        let blob = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x003F_FFC0,
+            compressed: 0x003F_FFC0,
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count: 2,
+            block_size: 0,
+            per_block_sizes: &[0x003F_FFC0, 0],
+        });
+        assert_eq!(blob.len(), 20);
+        let files = vec![("a".into(), 0), ("b".into(), 12)];
+        let err = encoded_v10(blob, vec![("/Content/".into(), files)]).unwrap_err();
+        assert_block_total_exceeded(&err, 65_537, 5, "Content/b");
+    }
+
+    /// The charge comes before the block list's reservation: with the
+    /// second reservation armed to fail, the second path of a 28-byte,
+    /// four-block record is refused by the budget instead. Armed for the
+    /// first reservation, the seam does fail it, so it is reachable here.
+    #[test]
+    fn read_v10_plus_charges_encoded_blocks_before_reserving_them() {
+        use crate::seams::{PakSeam, SeamSite};
+        use crate::testing::oom::arm_at;
+
+        let site = SeamSite::Pak(PakSeam::EncodedCompressionBlocks);
+        let read = || {
+            let files = vec![("a".into(), 0), ("b".into(), 0)];
+            encoded_v10(encoded_record(4), vec![("/Content/".into(), files)]).unwrap_err()
+        };
+        let guard = arm_at(site, 1);
+        assert_block_total_exceeded(&read(), 8, 7, "Content/b");
+        drop(guard);
+        let _guard = arm_at(site, 0);
+        let err = read();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::EncodedCompressionBlocks,
+                        requested: 4,
+                        path: Some(p),
+                        ..
+                    },
+                } if p == "Content/a"
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// Records that don't overlap stay under the budget even at their
+    /// densest: a 65,535-block record with 4-byte fields and three 12-byte
+    /// single-block records charge 65,538 of 65,547.
+    #[test]
+    fn read_v10_plus_dense_disjoint_encoded_records_stay_under_the_budget() {
+        let mut blob = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0,
+            compressed: 0,
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count: 65_535,
+            block_size: 0,
+            per_block_sizes: &vec![0; 65_535],
+        });
+        let mut files = vec![("big".to_string(), 0)];
+        for name in ["x", "y", "z"] {
+            files.push((name.into(), i32::try_from(blob.len()).unwrap()));
+            blob.extend(encoded_record(1));
+        }
+        assert_eq!(blob.len(), 262_188);
+        let index = encoded_v10(blob, vec![("/".into(), files)]).unwrap();
+        assert_eq!(index.entries().len(), 4);
+    }
+
+    /// A path one to three bytes from the blob's end has no whole bits
+    /// word; the read fails at end of input rather than panicking.
+    #[test]
+    fn read_v10_plus_short_encoded_tail_is_end_of_input() {
+        for off in [9, 10, 11] {
+            let files = vec![("a".into(), off)];
+            let err = encoded_v10(encoded_record(0), vec![("/".into(), files)]).unwrap_err();
+            assert!(
+                matches!(&err, PaksmithError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof),
+                "offset {off}: {err:?}"
+            );
+        }
     }
 
     /// The count is bounded by the index bytes after it, which 52 records

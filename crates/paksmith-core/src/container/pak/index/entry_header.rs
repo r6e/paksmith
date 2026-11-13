@@ -22,12 +22,27 @@ use crate::error::{
 use crate::seams::PakSeam;
 
 /// Sanity ceiling on compression block count per entry (~16M blocks of
-/// 64KiB would be a 1TiB entry).
-const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
+/// 64KiB would be a 1TiB entry). Exposed via [`max_blocks_per_entry`].
+pub(super) const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
+
+/// Test-only accessor for `MAX_BLOCKS_PER_ENTRY`. Same convention as
+/// [`super::path_hash::max_index_bytes`].
+#[cfg(feature = "__test_utils")]
+pub fn max_blocks_per_entry() -> u32 {
+    MAX_BLOCKS_PER_ENTRY
+}
 
 /// AES-encryption bit of the per-entry flags byte. Bit 1 is a delete
 /// record, which paksmith does not model (issue #742).
 const ENTRY_FLAG_ENCRYPTED: u8 = 0x01;
+
+/// The compression-block count in an encoded entry's leading bits word,
+/// `bits[21..=6]`. The 16-bit mask puts it at most 65,535, so
+/// `MAX_BLOCKS_PER_ENTRY` (16M), which [`PakEntryHeader::read_from`]
+/// checks on its raw u32 count, can't be reached here.
+pub(super) fn encoded_block_count(bits: u32) -> u32 {
+    (bits >> 6) & 0xffff
+}
 
 /// On-wire byte width of the per-entry compression-method field. Two
 /// possible widths in the v3+ FPakEntry record:
@@ -203,6 +218,23 @@ pub enum PakEntryHeader {
 }
 
 impl PakEntryHeader {
+    /// An allocation-free header that [`super::PakIndexEntry::share_header`]
+    /// swaps in for the one statement in which it moves the real header
+    /// into an `Arc`.
+    pub(super) fn placeholder() -> Self {
+        Self::Encoded {
+            common: EntryCommon {
+                offset: 0,
+                compressed_size: 0,
+                uncompressed_size: 0,
+                compression_method: CompressionMethod::None,
+                flags: 0,
+                compression_blocks: Vec::new(),
+                compression_block_size: 0,
+            },
+        }
+    }
+
     /// Read the FPakEntry struct from the current reader position.
     ///
     /// Wire format (v3–v7):
@@ -384,12 +416,7 @@ impl PakEntryHeader {
                 .unwrap_or(CompressionMethod::Unknown(n)),
         };
         let is_encrypted = (bits & (1 << 22)) != 0;
-        // 16-bit field by construction (`(bits >> 6) & 0xffff` masks to
-        // u16 range = 0..=65_535), so MAX_BLOCKS_PER_ENTRY (16M) is
-        // unreachable here. The check that exists in
-        // `PakEntryHeader::read_from` (where block_count is a raw u32
-        // off the wire) doesn't apply.
-        let block_count: u32 = (bits >> 6) & 0xffff;
+        let block_count = encoded_block_count(bits);
 
         // Compression-block size: 6-bit field shifted left by 11. Sentinel
         // 0x3f means "doesn't fit; read the actual size as the next u32."
