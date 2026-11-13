@@ -51,7 +51,9 @@ pub use path_hash::{max_fdi_bytes, max_index_bytes};
 #[cfg_attr(not(feature = "__test_utils"), allow(unused_imports))]
 pub(crate) use entry_header::EntryCommon;
 
+use std::fmt;
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 use tracing::warn;
 
@@ -138,7 +140,7 @@ pub(crate) fn fnv64_path(path: &str, seed: PathHashSeed) -> u64 {
 #[derive(Debug, Clone)]
 pub struct PakIndexEntry {
     filename: String,
-    header: PakEntryHeader,
+    header: HeaderSlot,
 }
 
 impl PakIndexEntry {
@@ -151,7 +153,33 @@ impl PakIndexEntry {
     /// (offset, sha1, compression_method, ...) live on the inner
     /// [`PakEntryHeader`]; reach them via `entry.header().X()`.
     pub fn header(&self) -> &PakEntryHeader {
-        &self.header
+        self.header.get()
+    }
+}
+
+/// Where a [`PakIndexEntry`] keeps its header. The FDI paths that name
+/// one non-encoded record share its header rather than each copying it
+/// (#848).
+#[derive(Clone)]
+enum HeaderSlot {
+    Owned(PakEntryHeader),
+    Shared(Arc<PakEntryHeader>),
+}
+
+impl HeaderSlot {
+    fn get(&self) -> &PakEntryHeader {
+        match self {
+            Self::Owned(header) => header,
+            Self::Shared(header) => header,
+        }
+    }
+}
+
+// Formats as the bare header, so `PakIndexEntry`'s `Debug` output is the
+// same whether or not its header is shared.
+impl fmt::Debug for HeaderSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.get().fmt(f)
     }
 }
 
@@ -541,18 +569,48 @@ impl PakIndexEntry {
     /// in [`super::path_hash`] when filenames are recovered from the
     /// directory index rather than read inline.
     pub(super) fn from_parts(filename: String, header: PakEntryHeader) -> Self {
-        Self { filename, header }
+        Self {
+            filename,
+            header: HeaderSlot::Owned(header),
+        }
+    }
+
+    /// Construct an entry that shares `header` with the other FDI paths
+    /// naming the same non-encoded record.
+    pub(super) fn from_shared(filename: String, header: Arc<PakEntryHeader>) -> Self {
+        Self {
+            filename,
+            header: HeaderSlot::Shared(header),
+        }
+    }
+
+    /// Move this entry's header into an `Arc` the entry then shares, if it
+    /// doesn't share one already, and return another handle to it.
+    pub(super) fn share_header(&mut self) -> Arc<PakEntryHeader> {
+        let placeholder = HeaderSlot::Owned(PakEntryHeader::placeholder());
+        let shared = match std::mem::replace(&mut self.header, placeholder) {
+            HeaderSlot::Owned(header) => Arc::new(header),
+            HeaderSlot::Shared(header) => header,
+        };
+        self.header = HeaderSlot::Shared(Arc::clone(&shared));
+        shared
+    }
+
+    /// Whether this entry shares its header with other FDI paths.
+    #[cfg(all(test, feature = "__test_utils"))]
+    fn header_is_shared(&self) -> bool {
+        matches!(self.header, HeaderSlot::Shared(_))
     }
 
     /// Test-only constructor pairing a filename with an already-built
     /// [`PakEntryHeader`]. Used by `pak::mod` unit tests that call the free
-    /// `stream_uncompressed_to` directly with a synthetic entry. Trivial
-    /// struct-literal so it carries no mutable logic of its own; its field
+    /// `stream_uncompressed_to` directly with a synthetic entry. Delegates
+    /// to [`Self::from_parts`] so it carries no logic of its own; its field
     /// pairing is pinned by `pak_index_entry_for_test_pairs_filename_and_header`
     /// in `pak::mod`'s test module.
     #[cfg(test)]
     pub(in crate::container::pak) fn for_test(filename: String, header: PakEntryHeader) -> Self {
-        Self { filename, header }
+        Self::from_parts(filename, header)
     }
 
     /// Read a single (filename FString + FPakEntry record) pair off
@@ -565,7 +623,7 @@ impl PakIndexEntry {
     ) -> crate::Result<Self> {
         let filename = read_fstring(reader)?;
         let header = PakEntryHeader::read_from(reader, version, compression_methods)?;
-        Ok(Self { filename, header })
+        Ok(Self::from_parts(filename, header))
     }
 }
 
@@ -2337,21 +2395,33 @@ mod tests {
     #[test]
     fn sha1_accessor_distinguishes_inline_from_encoded() {
         let inline = make_header(0, 0, [0xAA; 20]);
-        let inline_entry = PakIndexEntry {
-            filename: "x".to_string(),
-            header: inline,
-        };
+        let inline_entry = PakIndexEntry::from_parts("x".to_string(), inline);
         assert_eq!(
             inline_entry.header().sha1(),
             Some(Sha1Digest::from([0xAA; 20]))
         );
 
         let encoded = make_encoded_header(0, 0);
-        let encoded_entry = PakIndexEntry {
-            filename: "y".to_string(),
-            header: encoded,
-        };
+        let encoded_entry = PakIndexEntry::from_parts("y".to_string(), encoded);
         assert_eq!(encoded_entry.header().sha1(), None);
+    }
+
+    /// `PakIndexEntry`'s `Debug` shows the bare header, plain and pretty,
+    /// the same before and after `share_header` moves it into an `Arc`.
+    #[test]
+    fn index_entry_debug_shows_the_bare_header() {
+        let header = make_header(0, 0, [0xAA; 20]);
+        let want = format!("PakIndexEntry {{ filename: \"x\", header: {header:?} }}");
+        let pretty = format!("{header:#?}").replace('\n', "\n    ");
+        let want_pretty =
+            format!("PakIndexEntry {{\n    filename: \"x\",\n    header: {pretty},\n}}");
+        let mut entry = PakIndexEntry::from_parts("x".to_string(), header);
+        assert_eq!(format!("{entry:?}"), want);
+        assert_eq!(format!("{entry:#?}"), want_pretty);
+        let _ = entry.share_header();
+        assert!(entry.header_is_shared());
+        assert_eq!(format!("{entry:?}"), want);
+        assert_eq!(format!("{entry:#?}"), want_pretty);
     }
 
     /// Issue #44 regression: an attacker-crafted single-block encoded
@@ -3609,6 +3679,109 @@ mod tests {
             file_size,
             &[],
         )
+    }
+
+    /// A v10 index over `records` uncompressed non-encoded records (record
+    /// `i` at offset `100 * (i + 1)`, so none shares the placeholder
+    /// header's offset 0) and one encoded entry at offset 900, whose FDI
+    /// names `files`.
+    fn aliasing_v10(records: u32, files: Vec<(String, i32)>, has_phi: bool) -> PakIndex {
+        let mut non_enc = Vec::new();
+        for i in 1..=records {
+            write_v10_non_encoded_uncompressed(&mut non_enc, u64::from(i) * 100, 10);
+        }
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: u32::try_from(files.len()).unwrap(),
+            encoded_entries: encode_entry_bytes(EncodeArgs {
+                offset: 900,
+                uncompressed: 10,
+                compressed: 10,
+                compression_slot_1based: 0,
+                encrypted: false,
+                block_count: 0,
+                block_size: 0,
+                per_block_sizes: &[],
+            }),
+            non_encoded_records: non_enc,
+            non_encoded_count: records,
+            fdi: vec![("/Content/".into(), files)],
+            has_path_hash_index: has_phi,
+            ..V10Fixture::default()
+        });
+        read_v10(buf, main_size).unwrap()
+    }
+
+    /// FDI paths that name one non-encoded record share its header, with
+    /// or without a PHI vouching for each path (#848).
+    #[test]
+    fn aliasing_non_encoded_paths_share_one_header() {
+        for has_phi in [false, true] {
+            let files = vec![("a".into(), -1), ("b".into(), -1), ("c".into(), -1)];
+            let index = aliasing_v10(1, files, has_phi);
+            let phi = index.encoded_regions().and_then(EncodedRegions::phi);
+            assert_eq!(phi.is_some(), has_phi);
+            let [a, b, c] = index.entries() else {
+                panic!("expected 3 entries, got {:?}", index.entries())
+            };
+            assert_eq!(a.header().offset(), 100, "phi {has_phi}");
+            assert!(std::ptr::eq(a.header(), b.header()), "phi {has_phi}");
+            assert!(std::ptr::eq(b.header(), c.header()), "phi {has_phi}");
+            assert!(
+                a.header_is_shared() && c.header_is_shared(),
+                "phi {has_phi}"
+            );
+        }
+    }
+
+    /// A record named by one path stays owned by it. Paths over distinct
+    /// records, and an encoded path, share nothing with the aliases.
+    #[test]
+    fn unaliased_paths_keep_their_own_headers() {
+        let files = vec![
+            ("a".into(), -1),
+            ("b".into(), -2),
+            ("c".into(), 0),
+            ("d".into(), -2),
+        ];
+        let index = aliasing_v10(2, files, false);
+        let [a, b, c, d] = index.entries() else {
+            panic!("expected 4 entries, got {:?}", index.entries())
+        };
+        assert!(!a.header_is_shared() && !c.header_is_shared());
+        assert!(b.header_is_shared() && std::ptr::eq(b.header(), d.header()));
+        let offsets = [a, b, c, d].map(|e| e.header().offset());
+        assert_eq!(offsets, [100, 200, 900, 200]);
+    }
+
+    /// A path naming a record past the non-encoded count is reported as
+    /// such even when it is also one path more than `file_count`.
+    #[test]
+    fn read_v10_plus_reports_record_out_of_range_before_file_count() {
+        let mut non_enc = Vec::new();
+        write_v10_non_encoded_uncompressed(&mut non_enc, 0, 10);
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            non_encoded_records: non_enc,
+            non_encoded_count: 1,
+            fdi: vec![("/Content/".into(), vec![("a".into(), -1), ("b".into(), -2)])],
+            ..V10Fixture::default()
+        });
+        let err = read_v10(buf, main_size).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::Encoded {
+                        kind: EncodedFault::NonEncodedIndexOob {
+                            index: 1,
+                            count: 1,
+                            ..
+                        },
+                    },
+                }
+            ),
+            "got: {err:?}"
+        );
     }
 
     /// The count is bounded by the index bytes after it, which 52 records
