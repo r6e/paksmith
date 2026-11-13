@@ -124,7 +124,8 @@ structural integrity.
 ### Implementation hardening (recommended for any parser)
 
 - **Length cap.** `FSTRING_MAX_LEN = 65_536` bytes (UTF-8) or code units
-  (UTF-16) — `container/pak/index/fstring.rs`. Sized to comfortably
+  (UTF-16) — `container/pak/index/fstring.rs`, read by tests through the
+  `__test_utils` accessor `max_fstring_len()`. Sized to comfortably
   exceed any realistic UE virtual path while rejecting attacker-controlled
   multi-GB allocations. Surfaces as
   `FStringFault::LengthExceedsMaximum { length, maximum }`.

@@ -541,7 +541,8 @@ policy.
 - `crates/paksmith-core/src/container/pak/index/path_hash.rs` — path-hash +
   encoded directory index parser, `max_index_bytes`, `max_fdi_bytes`.
 - `crates/paksmith-core/src/container/pak/index/entry_header.rs` —
-  `PakEntryHeader`, `EntryCommon`, `CompressionFieldWidth`.
+  `PakEntryHeader`, `EntryCommon`, `CompressionFieldWidth`,
+  `max_blocks_per_entry`.
 - `crates/paksmith-core/src/container/pak/index/compression.rs` —
   `CompressionMethod`, `CompressionBlock`.
 
