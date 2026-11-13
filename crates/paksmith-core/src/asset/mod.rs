@@ -919,10 +919,10 @@ pub fn max_decode_warnings() -> u64 {
 
 /// Whether `err` ends a package read instead of degrading one export: a
 /// reported allocation failure at any layer a package read reaches (the
-/// asset parser's own reservations, FString reads among them; a
-/// `.ubulk`/`.uptnl` load or inflate, which reports the pak reader's
-/// fault; a std read that grows its buffer, which reports
-/// `io::ErrorKind::OutOfMemory`), or a refused
+/// asset parser's own reservations and buffer growth, FString reads among
+/// them; a `.ubulk`/`.uptnl` load or inflate, which reports the pak
+/// reader's fault; a [`crate::container::ContainerReader`] that reports
+/// one as `io::ErrorKind::OutOfMemory`), or a refused
 /// [`AssetContext::charge_derived`]. Caps that refuse before allocating,
 /// and the bulk-read budgets, degrade.
 pub(crate) fn ends_package_read(err: &crate::PaksmithError) -> bool {
@@ -946,20 +946,6 @@ pub(crate) fn ends_package_read(err: &crate::PaksmithError) -> bool {
         E::Io(e) => e.kind() == std::io::ErrorKind::OutOfMemory,
         _ => false,
     }
-}
-
-/// `err` kept as [`crate::PaksmithError::Io`] when it reports an
-/// allocation failure, so [`ends_package_read`] ends the read; otherwise
-/// `other(err)`. std's `read_to_end` reports a failed buffer reservation as
-/// `io::ErrorKind::OutOfMemory`.
-pub(crate) fn keep_out_of_memory(
-    err: std::io::Error,
-    other: impl FnOnce(std::io::Error) -> crate::PaksmithError,
-) -> crate::PaksmithError {
-    if err.kind() == std::io::ErrorKind::OutOfMemory {
-        return crate::PaksmithError::Io(err);
-    }
-    other(err)
 }
 
 /// Running total of the bytes charged by
@@ -1213,7 +1199,7 @@ impl AssetContext {
 
 #[cfg(test)]
 mod ends_package_read_tests {
-    use super::{ends_package_read, keep_out_of_memory};
+    use super::ends_package_read;
     use crate::PaksmithError;
     use crate::error::refused_reservation as refused;
     use crate::error::{
@@ -1305,6 +1291,11 @@ mod ends_package_read_tests {
                 resolved: 2,
                 cap: 1,
             }),
+            asset_parse(AssetParseFault::BulkDataChunkSizeTooSmall {
+                chunk_size: 1,
+                chunk_count: 2,
+                minimum: 32_768,
+            }),
             PaksmithError::MappingsParse {
                 fault: MappingsParseFault::AllocationFailed {
                     context: MappingsAllocationContext::NameTable,
@@ -1345,26 +1336,6 @@ mod ends_package_read_tests {
         for err in &degrades {
             assert!(!ends_package_read(err), "{err:?}");
         }
-    }
-
-    #[test]
-    fn keep_out_of_memory_keeps_only_an_allocation_failure() {
-        let fallback = |_: std::io::Error| PaksmithError::EntryNotFound { path: "x".into() };
-
-        let kept = keep_out_of_memory(
-            std::io::Error::from(std::io::ErrorKind::OutOfMemory),
-            fallback,
-        );
-        let mapped = keep_out_of_memory(
-            std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
-            fallback,
-        );
-
-        assert!(ends_package_read(&kept), "{kept:?}");
-        assert!(
-            matches!(mapped, PaksmithError::EntryNotFound { .. }),
-            "{mapped:?}"
-        );
     }
 }
 

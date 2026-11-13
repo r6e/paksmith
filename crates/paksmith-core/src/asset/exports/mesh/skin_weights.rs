@@ -249,31 +249,30 @@ fn read_skin_weights_new<R: Read + ?Sized>(
         Vec::new()
     } else {
         let (_elem_size, count) =
-            // _elem_size intentionally discarded: EOF-bounded byte consumption
-            // via `take` + length-check is the equivalent of CUE4Parse's
-            // ReadBulkArray<byte> elem-size == sizeof(byte) assertion.
+            // _elem_size discarded: the `take` + length check bound
+            // consumption to `count` bytes; CUE4Parse's ReadBulkArray<byte>
+            // elem-size cross-check is deferred, as for the lookup block.
             read::read_bulk_array_header(
                 r,
                 asset_path,
                 AssetWireField::SkinWeightNewData,
                 MAX_SKIN_WEIGHT_DATA_BYTES,
             )?;
-        // Consume incrementally (`take` + `read_to_end`) rather than pre-sizing
-        // a `vec![0; count]` against the attacker-controlled `count` — a count
-        // that lies larger than the data grows the buffer only to the bytes
-        // actually present, then the post-read length check surfaces the
-        // shortfall as EOF (matching the `read.rs` incremental-consumption
-        // contract; `read_to_end` returns `Ok` on a short read, so the explicit
-        // check is required).
+        // Consume incrementally (`take` + `read_to_end_within`) rather than
+        // pre-sizing a `vec![0; count]` against the attacker-controlled
+        // `count` — a count that lies larger than the data grows the buffer
+        // fallibly as bytes arrive, to at most twice those present and never
+        // past `count`, then the post-read length check surfaces the shortfall
+        // as EOF (matching the `read.rs` incremental-consumption contract; a
+        // short read returns `Ok`, so the explicit check is required).
         let mut buf = Vec::new();
-        let _read = r
-            .take(u64::from(count))
-            .read_to_end(&mut buf)
-            .map_err(|e| {
-                crate::asset::keep_out_of_memory(e, |_| {
-                    read::eof(asset_path, AssetWireField::SkinWeightNewData)
-                })
-            })?;
+        let _read = crate::fallible_read::read_to_end_within(
+            &mut r.take(u64::from(count)),
+            &mut buf,
+            count as usize,
+            crate::error::asset_reserved(asset_path, crate::seams::AssetSeam::SkinWeightDataBytes),
+            |_| read::eof(asset_path, AssetWireField::SkinWeightNewData),
+        )?;
         if buf.len() != count as usize {
             return Err(read::eof(asset_path, AssetWireField::SkinWeightNewData));
         }
@@ -718,6 +717,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn skin_weights_new_data_growth_failure_is_allocation_failed() {
+        let mut buf = Vec::new();
+        new_meta(&mut buf, 0, 4, 3, 2, 0);
+        bulk_header(&mut buf, 1, 30_000);
+        buf.resize(buf.len() + 30_000, 0);
+        // Two 8 KiB reads have reserved 16,384 bytes. The third growth would
+        // double to 32,768, so the 30,000-byte count caps it.
+        let _guard = crate::testing::oom::arm_at(
+            crate::seams::SeamSite::Asset(crate::seams::AssetSeam::SkinWeightDataBytes),
+            2,
+        );
+        match read_skin_weight_vertex_buffer(&mut Cursor::new(buf.as_slice()), &new_ctx(), "T") {
+            Err(PaksmithError::AssetParse {
+                fault:
+                    AssetParseFault::AllocationFailed {
+                        context, requested, ..
+                    },
+                ..
+            }) => assert_eq!(
+                (context, requested),
+                (
+                    crate::error::AssetAllocationContext::SkinWeightDataBytes,
+                    13_616
+                )
+            ),
+            other => panic!("expected AllocationFailed, got {other:?}"),
+        }
     }
 
     #[test]

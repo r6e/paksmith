@@ -699,18 +699,20 @@ impl fmt::Display for DecompressionFault {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IndexParseFault {
-    /// A header-claimed count or size exceeds a structural cap.
+    /// A header-claimed count or size, or a running total of them,
+    /// exceeds a structural cap.
     /// E.g. `block_count > MAX_BLOCKS_PER_ENTRY`,
     /// `file_count > fdi_size / 9`,
     /// `entry_count > index_size / entry_min_record_bytes(version)`,
     /// `encoded_entries_size > index_size`,
-    /// `fdi_size > MAX_FDI_BYTES`.
+    /// `fdi_size > MAX_FDI_BYTES`, or the FDI walk's running total of
+    /// encoded blocks `> encoded_entries_size / 4`.
     ///
     /// Construction invariant (caller-enforced): `value > limit`.
     BoundsExceeded {
         /// Wire-format field name. Closed set per [`WireField`] (#134).
         field: WireField,
-        /// The header-claimed value.
+        /// The header-claimed value, or the running total.
         value: u64,
         /// The cap it exceeds.
         limit: u64,
@@ -726,8 +728,10 @@ pub enum IndexParseFault {
         /// field at the call site.
         unit: BoundsUnit,
         /// Path of the entry the bound applies to, when the field is
-        /// per-entry (e.g. [`WireField::UncompressedSize`]). `None`
-        /// for archive-level bounds (e.g. [`WireField::FdiSize`]).
+        /// per-entry (e.g. [`WireField::UncompressedSize`]), or of the
+        /// path whose claim took an archive-level running total past
+        /// its bound ([`WireField::V10EncodedBlockTotal`]). `None` for
+        /// other archive-level bounds (e.g. [`WireField::FdiSize`]).
         path: Option<String>,
     },
     /// A `try_reserve` / `try_reserve_exact` call returned `Err`.
@@ -1438,6 +1442,10 @@ pub enum WireField {
     PhiEntryCount,
     /// Archive-level: byte size of the encoded-entries blob in a v10+ main index.
     V10EncodedEntriesSize,
+    /// Archive-level: compression blocks claimed by the encoded records
+    /// the v10+ FDI walk's paths name, summed over the paths read so far,
+    /// including the one that took the total past its limit.
+    V10EncodedBlockTotal,
     /// Archive-level: byte size of the main index (footer-declared).
     IndexSize,
 }
@@ -1465,6 +1473,7 @@ impl fmt::Display for WireField {
             Self::PhiSize => "phi_size",
             Self::PhiEntryCount => "phi_entry_count",
             Self::V10EncodedEntriesSize => "encoded_entries_size",
+            Self::V10EncodedBlockTotal => "encoded_block_total",
             Self::IndexSize => "index_size",
         };
         f.write_str(s)
@@ -2477,7 +2486,7 @@ pub(crate) fn check_region_bounds(
 /// (issue #94) so tests can use `assert_eq!` alongside `matches!`.
 ///
 /// **Display format** is wire-stable — every variant has a dedicated
-/// `error_display_asset_parse_*` unit test that pins the exact string.
+/// `asset_parse_display_*` unit test that pins the exact string.
 /// Names read from the archive or its `.usmap` mappings render clamped
 /// to 64 chars plus an ellipsis; the fields keep the full value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3061,7 +3070,8 @@ pub enum AssetParseFault {
     /// `reason` names the specific violation. Distinguished from
     /// `BulkDataDecompressLengthMismatch` (which fires when the
     /// framing summary's total disagrees with `ElementCount`,
-    /// before any decoding).
+    /// before any decoding) and `BulkDataChunkSizeTooSmall` (a record
+    /// of more than one chunk under the chunk-size floor).
     BulkDataCompressionDecodeFailed {
         /// Compression method that failed ("zlib", "Oodle", etc.).
         /// `&'static str` for the same forward-compat reason as
@@ -3071,6 +3081,20 @@ pub enum AssetParseFault {
         /// because `flate2`'s `io::Error::to_string()` returns an
         /// owned value; we don't carry a `&'static` constant.
         reason: String,
+    },
+    /// A `BULKDATA_SerializeCompressedZLIB` record of more than one chunk
+    /// names a chunk size under `MIN_BULK_DATA_CHUNK_SIZE` (32 KiB;
+    /// defined in `crate::asset::bulk_data`), caught before its chunk
+    /// table is read (#846). The floor does not apply to a record of at
+    /// most one chunk; a chunk size of zero or less surfaces
+    /// `BulkDataCompressionDecodeFailed` instead.
+    BulkDataChunkSizeTooSmall {
+        /// The tag record's chunk size.
+        chunk_size: i64,
+        /// Chunks the summary's uncompressed total needs at that size.
+        chunk_count: usize,
+        /// The compile-time floor (32 KiB).
+        minimum: i64,
     },
     /// `.ubulk` or `.uptnl` companion file exceeds
     /// `MAX_UBULK_FILE_SIZE` (16 GiB; defined in
@@ -3719,6 +3743,15 @@ impl fmt::Display for AssetParseFault {
             Self::BulkDataCompressionDecodeFailed { method, reason } => {
                 write!(f, "bulk-data {method} decode failed: {reason}")
             }
+            Self::BulkDataChunkSizeTooSmall {
+                chunk_size,
+                chunk_count,
+                minimum,
+            } => write!(
+                f,
+                "zlib bulk-data framing claims {chunk_count} chunks at chunk size {chunk_size}; \
+                 a record of more than one chunk needs a chunk size of at least {minimum}"
+            ),
             Self::BulkDataCompanionTooLarge { kind, size, cap } => {
                 write!(f, ".{kind} companion file size {size} exceeds cap {cap}")
             }
@@ -4951,11 +4984,13 @@ pub enum AssetAllocationContext {
     /// `Vec<FObjectDataResource>` for the UE 5.2+ data-resource
     /// table (#642).
     DataResourceTable,
-    /// `Vec<u8>` for a resolved uncompressed bulk-data record.
+    /// `Vec<u8>` for a resolved uncompressed bulk-data record, or for an
+    /// inline record's payload captured from its export.
     BulkDataBytes,
-    /// `Vec<u8>` for a zlib-compressed bulk-data record's output,
+    /// `Vec<u8>` for a zlib-compressed bulk-data record's output:
     /// reserved for the smaller of the compressed length and
-    /// `ElementCount + 1` (the record's claimed decoded size plus one).
+    /// `ElementCount + 1` (the record's claimed decoded size plus one),
+    /// then grown while inflating, never past `ElementCount + 1`.
     DecompressedBulkDataBytes,
     /// `HashMap` entry for the per-read memo of resolved enum value
     /// tables.
@@ -4970,6 +5005,9 @@ pub enum AssetAllocationContext {
     ClassSchemaMemo,
     /// `Vec<u8>` for an audio passthrough's codec container.
     AudioContainerBytes,
+    /// `Vec<u8>` for a skeletal LOD's new-format skin-weight data
+    /// (`newData`).
+    SkinWeightDataBytes,
 }
 
 impl AssetAllocationContext {
@@ -4985,7 +5023,8 @@ impl AssetAllocationContext {
             | Self::BulkDataBytes
             | Self::DecompressedBulkDataBytes
             | Self::FStringUtf8Bytes
-            | Self::AudioContainerBytes => BoundsUnit::Bytes,
+            | Self::AudioContainerBytes
+            | Self::SkinWeightDataBytes => BoundsUnit::Bytes,
             Self::NameTable
             | Self::ImportTable
             | Self::ExportTable
@@ -5023,6 +5062,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::StructLayoutMemo => "struct layout memo",
             Self::ClassSchemaMemo => "class schema memo",
             Self::AudioContainerBytes => "audio container bytes",
+            Self::SkinWeightDataBytes => "skin weight data bytes",
         };
         f.write_str(s)
     }
@@ -5737,9 +5777,10 @@ pub(crate) fn try_reserve_asset<T>(
 /// through `seam`'s OOM injection and mapped to
 /// [`AssetParseFault::AllocationFailed`]. Every asset-side seam is
 /// reached through here: through [`try_reserve_asset`] for a `Vec`, or
-/// directly with a reservation made elsewhere (a `HashMap`'s, or the
-/// FString decoder's). `seam` is mandatory and the
-/// [`crate::error::AssetAllocationContext`] comes from
+/// directly with a reservation made elsewhere (a `HashMap`'s, the
+/// FString decoder's, or a growth in
+/// [`crate::fallible_read::read_to_end_within`]). `seam` is mandatory
+/// and the [`crate::error::AssetAllocationContext`] comes from
 /// [`crate::seams::AssetSeam::context`], so one variant sets both the
 /// OOM-injection slot and the wire-stable fault context.
 pub(crate) fn check_asset_reserve(
@@ -5757,6 +5798,15 @@ pub(crate) fn check_asset_reserve(
             source,
         },
     })
+}
+
+/// [`check_asset_reserve`] at `seam`, as the `reserved` callback of
+/// [`crate::fallible_read::read_to_end_within`].
+pub(crate) fn asset_reserved(
+    asset_path: &str,
+    seam: crate::seams::AssetSeam,
+) -> impl FnMut(Result<(), std::collections::TryReserveError>, usize) -> crate::Result<()> + '_ {
+    move |reserve, count| check_asset_reserve(reserve, count, asset_path, seam)
 }
 
 /// `src` copied into a buffer reserved by [`try_reserve_asset`] at
@@ -8071,6 +8121,7 @@ mod tests {
             (WireField::PhiSize, "phi_size"),
             (WireField::PhiEntryCount, "phi_entry_count"),
             (WireField::V10EncodedEntriesSize, "encoded_entries_size"),
+            (WireField::V10EncodedBlockTotal, "encoded_block_total"),
             (WireField::IndexSize, "index_size"),
         ];
         for (field, expected) in cases {
@@ -8803,6 +8854,10 @@ mod tests {
                 AssetAllocationContext::AudioContainerBytes,
                 "audio container bytes",
             ),
+            (
+                AssetAllocationContext::SkinWeightDataBytes,
+                "skin weight data bytes",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -8971,6 +9026,10 @@ mod tests {
             (AssetAllocationContext::ClassSchemaMemo, BoundsUnit::Items),
             (
                 AssetAllocationContext::AudioContainerBytes,
+                BoundsUnit::Bytes,
+            ),
+            (
+                AssetAllocationContext::SkinWeightDataBytes,
                 BoundsUnit::Bytes,
             ),
         ];
@@ -9710,6 +9769,40 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `Game/Texture.uasset`: \
              bulk-data zlib decode failed: invalid stored block lengths"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_chunk_size_too_small() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataChunkSizeTooSmall {
+                chunk_size: 4096,
+                chunk_count: 3,
+                minimum: 32_768,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             zlib bulk-data framing claims 3 chunks at chunk size 4096; \
+             a record of more than one chunk needs a chunk size of at least 32768"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_data_resource_index_oob() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::DataResourceIndexOob {
+                index: 7,
+                entry_count: 3,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             bulk-data resource index 7 is out of range for the 3-entry FObjectDataResource table"
         );
     }
 

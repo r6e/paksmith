@@ -947,8 +947,8 @@ mod tests {
         );
         // Only the real vertex is stored, across all 3 channels.
         let want = usize::try_from(num_vertices).unwrap();
-        for ch in 0..3 {
-            assert_eq!(data.uvs[ch].as_ref().unwrap().len(), want);
+        for uv in &data.uvs[..3] {
+            assert_eq!(uv.as_ref().unwrap().len(), want);
         }
     }
 

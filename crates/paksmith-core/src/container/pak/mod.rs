@@ -2068,17 +2068,20 @@ fn read_encrypted_index<R: Read + Seek>(
     //
     // Accepted trade-off: for the v10+ path this collapse also swallows
     // faults that are NOT wrong-key garbage. Two classes:
-    //   (1) post-parse cross-check faults — a correctly-keyed index that
+    //   (1) checks paksmith adds on a correctly-keyed index — one that
     //       decrypts to structurally valid plaintext but fails the issue
-    //       #131 `PhiFdiInconsistency` check, or a non-ASCII path hitting
-    //       the `fnv64_path` ASCII-only limitation;
+    //       #131 `PhiFdiInconsistency` check, a non-ASCII path hitting
+    //       the `fnv64_path` ASCII-only limitation, or FDI paths whose
+    //       encoded block counts sum past a quarter of the blob's length
+    //       (#848);
     //   (2) pre-decrypt structural bounds faults, such as
     //       `OffsetPastFileSize` (aligned extent past EOF),
     //       `RegionPastFileSize` (unaligned offset+size past EOF), or
     //       `BoundsExceeded` (declared size over its cap).
-    // Both collapse into `Decryption`; the unencrypted path would surface
-    // the specific fault, the encrypted path reports "looks like a wrong
-    // key." This is deliberate and uniform. The FDI/PHI region offsets and
+    // Both collapse into `Decryption`, which drops any path the fault
+    // named, so `test_key` reports the key as wrong; the unencrypted path
+    // would surface the specific fault, the encrypted path reports "looks
+    // like a wrong key." This is deliberate and uniform. The FDI/PHI region offsets and
     // sizes come from the DECRYPTED primary index, so a wrong key's garbage
     // could itself trip class (2) — surfacing the typed fault there would be
     // a wrong-key oracle, and passing class (1) through would leak that the
@@ -2155,7 +2158,7 @@ fn read_encrypted_index<R: Read + Seek>(
 /// Returns the number of bytes written (equals `uncompressed_size`).
 ///
 /// When `key` is `Some`, the entry is AES-256-ECB encrypted: the on-disk
-/// payload is 16-byte aligned (padded with trailing zeros by UE's pak writer).
+/// payload is 16-byte aligned.
 /// The full aligned block is read into a `Zeroizing` buffer, decrypted in
 /// place, trimmed to the real `uncompressed_size`, and then written. This
 /// sacrifices the streaming property for encrypted entries — peak allocation
@@ -2546,6 +2549,12 @@ fn check_cumulative_size(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// zlib decoders [`stream_zlib_to`] has built on this thread.
+    static ZLIB_DECODERS_BUILT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Stream the zlib-decompressed payload of `entry` from `file` to
 /// `writer`. Returns the number of decompressed bytes written.
 ///
@@ -2554,9 +2563,10 @@ fn check_cumulative_size(
 /// plus a decompressed-output buffer sized to that block's output.
 /// Both buffers are hoisted outside the per-block loop and reuse
 /// capacity across blocks (#373); the full `uncompressed_size`
-/// never lives in memory at once. A K-block entry pays 2
-/// allocations on the first block, then runs allocator-free for
-/// every subsequent block whose `len()` is `<=` the running peak.
+/// never lives in memory at once. The entry's one zlib decoder is
+/// built on block 0 and reset in place for each later block (#848),
+/// so after block 0 a block allocates only when its input or output
+/// is larger than any before it.
 #[allow(clippy::too_many_lines)] // bounded by per-block error-reporting + zlib-stream branches
 fn stream_zlib_to<R: Read + Seek>(
     file: &mut R,
@@ -2605,6 +2615,9 @@ fn stream_zlib_to<R: Read + Seek>(
     // of whether the allocator was actually consulted.
     let mut compressed: Vec<u8> = Vec::new();
     let mut block_out: Vec<u8> = Vec::new();
+    // Built on block 0's input, which it then owns: later blocks are read
+    // into that same Vec, inside the decoder's cursor.
+    let mut decoder: Option<ZlibDecoder<Cursor<Vec<u8>>>> = None;
 
     // Track the previous block's end so `validate_block_bounds` can
     // enforce monotonic file-order (issue #129) across loop iters.
@@ -2621,15 +2634,11 @@ fn stream_zlib_to<R: Read + Seek>(
             path,
         )?;
 
-        read_compressed_block(
-            file,
-            &mut compressed,
-            block.len(),
-            abs_start,
-            i,
-            "zlib",
-            path,
-        )?;
+        let input = match decoder.as_mut() {
+            Some(reused) => reused.get_mut().get_mut(),
+            None => &mut compressed,
+        };
+        read_compressed_block(file, input, block.len(), abs_start, i, "zlib", path)?;
 
         // Bound the decoder to the remaining output budget plus one byte.
         // The +1 lets us detect "decompressed more than we expected" without
@@ -2638,7 +2647,19 @@ fn stream_zlib_to<R: Read + Seek>(
         // the post-loop length check rejects.
         let remaining = uncompressed_size.saturating_sub(bytes_written);
         let budget = remaining.saturating_add(1);
-        let mut limited = ZlibDecoder::new(&compressed[..]).take(budget);
+        // Resetting the entry's decoder for each later block clears its
+        // window and buffered input, so no block sees another's bytes; the
+        // new cursor starts at the block's first byte.
+        if let Some(reused) = decoder.as_mut() {
+            let input = std::mem::take(reused.get_mut()).into_inner();
+            let _ = reused.reset(Cursor::new(input));
+        }
+        let decoder = decoder.get_or_insert_with(|| {
+            #[cfg(test)]
+            ZLIB_DECODERS_BUILT.with(|built| built.update(|n| n + 1));
+            ZlibDecoder::new(Cursor::new(std::mem::take(&mut compressed)))
+        });
+        let mut limited = decoder.take(budget);
         // Per-block decompressed buffer. We can't `write_all` directly
         // into the output writer because we need the full block's
         // decompressed length for the bomb check and the per-block
@@ -4733,6 +4754,252 @@ mod tests {
         );
     }
 
+    /// An empty LZ4 block holds no token to decode, so it fails.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_lz4_entry_empty_block_rejected() {
+        let streams = [vec![], lz4_flex::block::compress(b"abcd")];
+        let pak = crate::testing::wire::build_v8b_lz4_pak(&streams, 8, 4);
+        let reader = PakReader::from_bytes(pak).expect("synthetic pak parses");
+        let err = reader
+            .read_entry_to(crate::testing::wire::LZ4_SYNTH_PATH, &mut Vec::new())
+            .expect_err("an empty block must be rejected");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::Decompression {
+                    fault: DecompressionFault::Lz4DecodeError { block_index: 0, .. },
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    // ---- Zlib pak-entry decompression (#848) ----
+    // In-package and gated on `__test_utils` for the same reasons as the
+    // LZ4 tests above.
+
+    /// Read back the `build_v8b_zlib_pak` entry made of `streams`.
+    #[cfg(feature = "__test_utils")]
+    fn read_zlib_entry(
+        streams: &[Vec<u8>],
+        uncompressed_size: u64,
+        block_size: u32,
+    ) -> crate::Result<Vec<u8>> {
+        let pak = crate::testing::wire::build_v8b_zlib_pak(streams, uncompressed_size, block_size);
+        let reader = PakReader::from_bytes(pak).expect("synthetic zlib pak parses");
+        let mut out = Vec::new();
+        let written = reader.read_entry_to(crate::testing::wire::ZLIB_SYNTH_PATH, &mut out)?;
+        assert_eq!(written, out.len() as u64);
+        Ok(out)
+    }
+
+    /// The fault `read_zlib_entry` fails with, after checking that it
+    /// points at block `block_index`'s first byte.
+    #[cfg(feature = "__test_utils")]
+    fn zlib_entry_fault(
+        streams: &[Vec<u8>],
+        uncompressed_size: u64,
+        block_size: u32,
+        block_index: usize,
+    ) -> DecompressionFault {
+        let start = crate::testing::wire::pak_entry_wire_size(streams.len() as u64)
+            + streams[..block_index]
+                .iter()
+                .map(|s| s.len() as u64)
+                .sum::<u64>();
+        match read_zlib_entry(streams, uncompressed_size, block_size) {
+            Err(PaksmithError::Decompression { offset, fault, .. }) => {
+                assert_eq!(offset, start, "{fault:?}");
+                fault
+            }
+            other => panic!("expected a decompression fault, got {other:?}"),
+        }
+    }
+
+    /// The zlib decoders `f` builds on this thread.
+    #[cfg(feature = "__test_utils")]
+    fn zlib_decoders_built(f: impl FnOnce()) -> u64 {
+        let before = ZLIB_DECODERS_BUILT.with(std::cell::Cell::get);
+        f();
+        ZLIB_DECODERS_BUILT.with(std::cell::Cell::get) - before
+    }
+
+    /// An entry with blocks builds one decoder, however many it has (#848).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_zlib_entry_builds_one_decoder() {
+        use crate::testing::bench::zlib_stream;
+
+        let streams: Vec<Vec<u8>> = b"abcdefghij".chunks(4).map(zlib_stream).collect();
+        let built = zlib_decoders_built(|| {
+            assert_eq!(read_zlib_entry(&streams, 10, 4).unwrap(), b"abcdefghij");
+        });
+        assert_eq!(built, 1);
+    }
+
+    /// No decoder is built before a block has been read: not for an entry
+    /// without blocks, nor when block 0's input can't be reserved.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_zlib_entry_builds_no_decoder_before_a_block_is_read() {
+        use crate::seams::{PakSeam, SeamSite};
+        use crate::testing::bench::zlib_stream;
+        use crate::testing::oom::arm_at;
+
+        let built = zlib_decoders_built(|| assert_eq!(read_zlib_entry(&[], 0, 4).unwrap(), b""));
+        assert_eq!(built, 0);
+        let built = zlib_decoders_built(|| {
+            let _guard = arm_at(SeamSite::Pak(PakSeam::CompressedReserve), 0);
+            let fault = zlib_entry_fault(&[zlib_stream(b"abcd")], 4, 4, 0);
+            assert!(
+                matches!(
+                    fault,
+                    DecompressionFault::CompressedBlockReserveFailed { block_index: 0, .. }
+                ),
+                "{fault:?}"
+            );
+        });
+        assert_eq!(built, 0);
+    }
+
+    /// A block's stream that is cut short, empty or fails its Adler-32 fails
+    /// with the inflater's error for that block, first or after a block that
+    /// decoded, and so does a later block's stream that reaches back into
+    /// the previous block.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_zlib_entry_stream_errors_name_their_block() {
+        use std::io::ErrorKind::{InvalidInput, UnexpectedEof};
+
+        use crate::testing::bench::{shared_history_probe, zlib_stream};
+
+        let (abcd, ef) = (zlib_stream(b"abcd"), zlib_stream(b"ef"));
+        let cut = |s: &[u8]| s[..s.len() - 1].to_vec();
+        let bad_adler = |s: &[u8]| [&s[..s.len() - 1], &[s[s.len() - 1] ^ 1]].concat();
+        let (first, reaches_back) = shared_history_probe();
+        let history = vec![zlib_stream(&first), reaches_back.to_vec()];
+        let eof = (UnexpectedEof, "incomplete deflate stream");
+        let corrupt = (InvalidInput, "corrupt deflate stream");
+        for (label, streams, size, block_size, block, (kind, message)) in [
+            ("cut short", vec![cut(&abcd), ef.clone()], 6, 4, 0, eof),
+            ("cut short", vec![abcd.clone(), cut(&ef)], 6, 4, 1, eof),
+            ("empty", vec![vec![], ef.clone()], 6, 4, 0, eof),
+            ("empty", vec![abcd.clone(), vec![]], 6, 4, 1, eof),
+            (
+                "bad Adler-32",
+                vec![bad_adler(&abcd), ef.clone()],
+                6,
+                4,
+                0,
+                corrupt,
+            ),
+            (
+                "bad Adler-32",
+                vec![abcd.clone(), bad_adler(&ef)],
+                6,
+                4,
+                1,
+                corrupt,
+            ),
+            ("reaches back", history, 131_075, 131_072, 1, corrupt),
+        ] {
+            let expected = DecompressionFault::ZlibStreamError {
+                block_index: block,
+                kind,
+                message: message.to_owned(),
+            };
+            let fault = zlib_entry_fault(&streams, size, block_size, block);
+            assert_eq!(fault, expected, "{label} at block {block}");
+        }
+    }
+
+    /// The size checks fail the block that breaks them, first or later: a
+    /// block decoding past the entry's size, which the bomb check reports
+    /// even for a non-final block, and a non-final block decoding to
+    /// anything but the block size.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_zlib_entry_size_checks_name_their_block() {
+        use crate::testing::bench::zlib_stream;
+
+        let (abcd, ef, zeros) = (
+            zlib_stream(b"abcd"),
+            zlib_stream(b"ef"),
+            zlib_stream(&[0; 100]),
+        );
+        let fault = |streams: &[Vec<u8>], size, block| {
+            zlib_entry_fault(streams, size, 4, block).to_string()
+        };
+        assert_eq!(
+            fault(&[zeros.clone(), abcd.clone()], 6, 0),
+            "block 0 pushed total to 7 bytes, exceeding uncompressed_size 6"
+        );
+        assert_eq!(
+            fault(&[abcd.clone(), zeros], 6, 1),
+            "block 1 pushed total to 7 bytes, exceeding uncompressed_size 6"
+        );
+        assert_eq!(
+            fault(&[ef.clone(), abcd.clone()], 6, 0),
+            "non-final block 0 decompressed to 2 bytes, expected 4"
+        );
+        assert_eq!(
+            fault(&[abcd, zlib_stream(b"abcdef"), ef], 12, 1),
+            "non-final block 1 decompressed to 6 bytes, expected 4"
+        );
+    }
+
+    /// `read::ZlibDecoder` hands the inflater a block 32 KiB at a time. Two
+    /// one-block entries whose block yields one byte past the entry's size
+    /// pin that within a few bytes: a block corrupt at byte 32,768, just
+    /// past the first 32 KiB, returns the extra byte first and fails the
+    /// bomb check, and one corrupt at byte 32,763, inside it, fails as a
+    /// stream error.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_zlib_entry_reads_a_block_32_kib_at_a_time() {
+        use crate::testing::bench::zlib_stream_corrupt_after;
+
+        let fault = |empty_blocks| {
+            zlib_entry_fault(&[zlib_stream_corrupt_after(empty_blocks)], 10, 10, 0).to_string()
+        };
+        assert_eq!(
+            fault(6_550),
+            "block 0 pushed total to 11 bytes, exceeding uncompressed_size 10"
+        );
+        assert_eq!(fault(6_549), "zlib block 0: corrupt deflate stream");
+    }
+
+    /// Bytes after a block's stream are ignored and don't reach the next
+    /// block (#848).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_zlib_entry_ignores_bytes_after_a_blocks_stream() {
+        use crate::testing::bench::zlib_stream;
+
+        let mut first = zlib_stream(b"abcd");
+        first.extend_from_slice(&[0xEE; 3]);
+        let out = read_zlib_entry(&[first, zlib_stream(b"ef")], 6, 4).unwrap();
+        assert_eq!(out, b"abcdef");
+    }
+
+    /// Pins flate2's miniz backend for an entry's blocks; see
+    /// `PRESET_DICTIONARY_HEADER` (#846).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_zlib_entry_decodes_with_miniz() {
+        use crate::testing::bench::PRESET_DICTIONARY_HEADER;
+
+        let fault = zlib_entry_fault(&[PRESET_DICTIONARY_HEADER.to_vec()], 1, 1, 0);
+        let expected = DecompressionFault::ZlibStreamError {
+            block_index: 0,
+            kind: std::io::ErrorKind::InvalidInput,
+            message: "corrupt deflate stream".to_owned(),
+        };
+        assert_eq!(fault, expected);
+    }
+
     /// The documented AES-256 key for the vendored encrypted fixtures
     /// (`crates/paksmith-fixture-gen/src/encryption.rs::FIXTURE_AES_KEY`).
     /// Hardcoded here because `paksmith-core` must NOT depend on
@@ -5232,6 +5499,92 @@ mod tests {
         assert!(
             matches!(err, PaksmithError::Decryption { .. }),
             "wrong key on a v11 encrypted index must fail closed as Decryption, got: {err:?}"
+        );
+    }
+
+    /// A v11 pak whose index, at offset 0, is encrypted with `key`: one
+    /// 76-byte encoded entry of 16 blocks, which the FDI's root directory
+    /// names from each of `names`, and no PHI. Returns the pak and its main
+    /// index size.
+    #[cfg(feature = "__test_utils")]
+    fn build_v11_encrypted_index_pak(names: &[&str], key: &AesKey) -> (Vec<u8>, u64) {
+        use crate::testing::v10::{EncodeArgs, V10Fixture, build_v10_buffer, encode_entry_bytes};
+
+        let files = names.iter().map(|name| (name.to_string(), 0)).collect();
+        let (mut pak, main_size) = build_v10_buffer(V10Fixture {
+            // Makes the main index 160 bytes, so the FDI after it starts
+            // an AES block and one pass encrypts both regions.
+            mount: "../../../Mount/".into(),
+            file_count: u32::try_from(names.len()).unwrap(),
+            encoded_entries: encode_entry_bytes(EncodeArgs {
+                offset: 0,
+                uncompressed: 16,
+                compressed: 16,
+                compression_slot_1based: 0,
+                encrypted: false,
+                block_count: 16,
+                block_size: 0,
+                per_block_sizes: &[1; 16],
+            }),
+            fdi: vec![("/".into(), files)],
+            has_path_hash_index: false,
+            ..V10Fixture::default()
+        });
+        assert_eq!(main_size % 16, 0, "the FDI must start an AES block");
+        pak.resize(pak.len().next_multiple_of(16), 0);
+        crypto::aes256_ecb_encrypt(key, &mut pak).unwrap();
+        pak.extend_from_slice(&[0; 16]); // encryption key GUID
+        pak.push(1); // index encrypted
+        pak.extend_from_slice(&version::PAK_MAGIC.to_le_bytes());
+        pak.extend_from_slice(&PakVersion::Fnv64BugFix.wire_version().to_le_bytes());
+        pak.extend_from_slice(&0u64.to_le_bytes()); // index offset
+        pak.extend_from_slice(&main_size.to_le_bytes());
+        pak.extend_from_slice(&[0; 20 + 5 * 32]); // index hash, compression slots
+        (pak, main_size)
+    }
+
+    /// On an encrypted v10+ index, the encoded-block budget's refusal
+    /// surfaces as `Decryption`, as the walk's other bounds faults do (#848).
+    /// The one-path open checks the hand-built archive, and the keyed index
+    /// read shows that the fault the open collapses is the budget's.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn encrypted_v11_index_reports_the_encoded_block_budget_as_decryption() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let (pak, _) = build_v11_encrypted_index_pak(&["a"], &key);
+        let reader = PakReader::from_reader_with_key(Cursor::new(pak), key.clone()).unwrap();
+        assert_eq!(reader.entries().count(), 1);
+
+        let (pak, main_size) = build_v11_encrypted_index_pak(&["a", "b"], &key);
+        let file_size = pak.len() as u64;
+        let err = PakIndex::read_positioned_maybe_encrypted(
+            &mut Cursor::new(pak.clone()),
+            PakVersion::Fnv64BugFix,
+            main_size,
+            file_size,
+            &[],
+            Some(&key),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::V10EncodedBlockTotal,
+                        value: 32,
+                        limit: 19,
+                        unit: BoundsUnit::Items,
+                        path: Some(p),
+                    },
+                } if p == "b"
+            ),
+            "{err:?}"
+        );
+        let err = PakReader::from_reader_with_key(Cursor::new(pak), key).unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::Decryption { path: None }),
+            "{err:?}"
         );
     }
 
