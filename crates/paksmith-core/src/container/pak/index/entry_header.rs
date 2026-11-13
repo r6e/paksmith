@@ -36,6 +36,14 @@ pub fn max_blocks_per_entry() -> u32 {
 /// record, which paksmith does not model (issue #742).
 const ENTRY_FLAG_ENCRYPTED: u8 = 0x01;
 
+/// The compression-block count in an encoded entry's leading bits word,
+/// `bits[21..=6]`. The 16-bit mask puts it at most 65,535, so
+/// `MAX_BLOCKS_PER_ENTRY` (16M), which [`PakEntryHeader::read_from`]
+/// checks on its raw u32 count, can't be reached here.
+pub(super) fn encoded_block_count(bits: u32) -> u32 {
+    (bits >> 6) & 0xffff
+}
+
 /// On-wire byte width of the per-entry compression-method field. Two
 /// possible widths in the v3+ FPakEntry record:
 ///
@@ -408,12 +416,7 @@ impl PakEntryHeader {
                 .unwrap_or(CompressionMethod::Unknown(n)),
         };
         let is_encrypted = (bits & (1 << 22)) != 0;
-        // 16-bit field by construction (`(bits >> 6) & 0xffff` masks to
-        // u16 range = 0..=65_535), so MAX_BLOCKS_PER_ENTRY (16M) is
-        // unreachable here. The check that exists in
-        // `PakEntryHeader::read_from` (where block_count is a raw u32
-        // off the wire) doesn't apply.
-        let block_count: u32 = (bits >> 6) & 0xffff;
+        let block_count = encoded_block_count(bits);
 
         // Compression-block size: 6-bit field shifted left by 11. Sentinel
         // 0x3f means "doesn't fit; read the actual size as the next u32."

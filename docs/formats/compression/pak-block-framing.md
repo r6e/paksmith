@@ -237,7 +237,10 @@ bullet names; see [`../container/pak.md`](../container/pak.md)
   inline entry (~16M blocks of 64 KiB = 1 TiB entry). Surfaces as
   `IndexParseFault::BoundsExceeded { field: WireField::BlockCount, value, limit, unit: BoundsUnit::Items, path }`.
   V10+ encoded entries mask block count to 16 bits (max 65 535) so
-  this cap is unreachable on the encoded path.
+  this cap is unreachable on the encoded path; there, the total the
+  index walk decodes is bounded instead
+  ([`../container/pak.md`](../container/pak.md) §*Implementation
+  hardening*).
 - **Per-block decompression budget** = `remaining + 1`. A block that
   decompresses to more than `remaining` bytes is the canonical
   "decompression bomb" signal. Surfaces as

@@ -36,7 +36,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use zeroize::Zeroizing;
 
 use super::compression::CompressionMethod;
-use super::entry_header::PakEntryHeader;
+use super::entry_header::{PakEntryHeader, encoded_block_count};
 use super::fstring::read_fstring;
 use super::{PakIndex, PakIndexEntry, fnv64_path};
 use crate::container::pak::crypto::{self, AesKey};
@@ -351,6 +351,13 @@ impl PakIndex {
         // = 9 bytes`. Used to bound `dir_count` against `fdi_size`
         // upfront, mirroring the per-file cap above. Issue #87.
         const MIN_FDI_DIR_RECORD_BYTES: u64 = 5 + 4;
+        // An encoded record claiming N compression blocks takes at least
+        // 4N + 8 blob bytes, so records that don't overlap claim at most
+        // `blob_len / 4` blocks between them. The FDI walk charges each
+        // path's claim against that limit before decoding it, so paths
+        // naming one record, or pointing inside one, decode at most
+        // `blob_len / 4` blocks in all. #848.
+        const MIN_ENCODED_BYTES_PER_BLOCK: u64 = 4;
 
         // Cap `index_size` before allocating. The footer parser already
         // proved `index_size <= file_size`, but a legitimate-but-bloated
@@ -621,6 +628,8 @@ impl PakIndex {
             AllocationContext::V10IndexEntries,
             PakSeam::V10IndexEntries,
         )?;
+        let encoded_block_limit = encoded_entries_blob.len() as u64 / MIN_ENCODED_BYTES_PER_BLOCK;
+        let mut encoded_block_total: u64 = 0;
         for _ in 0..dir_count {
             let dir_name = read_fstring(&mut fdi)?;
             let dir_file_count = fdi.read_u32::<LittleEndian>()?;
@@ -740,7 +749,24 @@ impl PakIndex {
                             },
                         });
                     }
-                    let mut blob_cursor = Cursor::new(&encoded_entries_blob[off_usize..]);
+                    let record = &encoded_entries_blob[off_usize..];
+                    // Charged before the decode reserves anything.
+                    let claim = record
+                        .first_chunk()
+                        .map_or(0, |bits| encoded_block_count(u32::from_le_bytes(*bits)));
+                    encoded_block_total += u64::from(claim);
+                    if encoded_block_total > encoded_block_limit {
+                        return Err(PaksmithError::InvalidIndex {
+                            fault: IndexParseFault::BoundsExceeded {
+                                field: WireField::V10EncodedBlockTotal,
+                                value: encoded_block_total,
+                                limit: encoded_block_limit,
+                                unit: BoundsUnit::Items,
+                                path: Some(full_path),
+                            },
+                        });
+                    }
+                    let mut blob_cursor = Cursor::new(record);
                     Named::Encoded(
                         PakEntryHeader::read_encoded(&mut blob_cursor, compression_methods)
                             .map_err(|e| e.with_index_path(&full_path))?,
