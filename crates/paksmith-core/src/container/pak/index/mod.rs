@@ -3784,6 +3784,208 @@ mod tests {
         );
     }
 
+    /// An uncompressed encoded record of `block_count` one-byte blocks:
+    /// 12 bytes, plus 4 per block when there is more than one.
+    fn encoded_record(block_count: u32) -> Vec<u8> {
+        let sizes = vec![1; block_count as usize];
+        encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: u64::from(block_count),
+            compressed: u64::from(block_count),
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count,
+            block_size: 0,
+            per_block_sizes: &sizes,
+        })
+    }
+
+    /// A v10 index over the encoded-entries `blob`, whose FDI is `dirs`.
+    fn encoded_v10(
+        blob: Vec<u8>,
+        dirs: Vec<(String, Vec<(String, i32)>)>,
+    ) -> crate::Result<PakIndex> {
+        let files: usize = dirs.iter().map(|(_, files)| files.len()).sum();
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: u32::try_from(files).unwrap(),
+            encoded_entries: blob,
+            fdi: dirs,
+            ..V10Fixture::default()
+        });
+        read_v10(buf, main_size)
+    }
+
+    fn assert_block_total_exceeded(err: &PaksmithError, total: u64, limit: u64, path: &str) {
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::V10EncodedBlockTotal,
+                        value,
+                        limit: l,
+                        unit: BoundsUnit::Items,
+                        path: Some(p),
+                    },
+                } if *value == total && *l == limit && p == path
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected error")]
+    fn assert_block_total_exceeded_rejects_another_field() {
+        let err = PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded {
+                field: WireField::FdiFileCount,
+                value: 9,
+                limit: 6,
+                unit: BoundsUnit::Items,
+                path: Some("x".into()),
+            },
+        };
+        assert_block_total_exceeded(&err, 9, 6, "x");
+    }
+
+    /// Each decode of an encoded record charges its blocks against a
+    /// quarter of the blob's length: two paths naming one 24-byte,
+    /// three-block record charge 6 of 6 and are admitted.
+    #[test]
+    fn read_v10_plus_accepts_encoded_aliases_up_to_the_budget() {
+        let blob = encoded_record(3);
+        assert_eq!(blob.len(), 24);
+        let files = vec![("a".into(), 0), ("b".into(), 0)];
+        let index = encoded_v10(blob, vec![("/Content/".into(), files)]).unwrap();
+        let blocks = index
+            .entries()
+            .iter()
+            .map(|e| e.header().compression_blocks().len());
+        assert_eq!(blocks.collect::<Vec<_>>(), [3, 3]);
+    }
+
+    /// A third path naming the record, in another directory, charges 9 of
+    /// 6 and is refused before it decodes.
+    #[test]
+    fn read_v10_plus_refuses_encoded_aliases_past_the_budget() {
+        let dirs = vec![
+            ("/Content/".into(), vec![("a".into(), 0), ("b".into(), 0)]),
+            ("/Other/".into(), vec![("c".into(), 0)]),
+        ];
+        let err = encoded_v10(encoded_record(3), dirs).unwrap_err();
+        assert_block_total_exceeded(&err, 9, 6, "Other/c");
+    }
+
+    /// Single-block entries are charged too: a fourth path naming one
+    /// 12-byte, single-block entry charges 4 of 3. The message names that
+    /// path beside the archive-wide total.
+    #[test]
+    fn read_v10_plus_charges_single_block_aliases() {
+        let files = ["a", "b", "c", "d"]
+            .map(|name| (name.to_string(), 0))
+            .to_vec();
+        let err = encoded_v10(encoded_record(1), vec![("/Content/".into(), files)]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid pak index: entry `Content/d` encoded_block_total 4 exceeds maximum 3 items"
+        );
+    }
+
+    /// A path into a record's block sizes is charged too. Read as a bits
+    /// word, the 20-byte record's first block size claims 65,535 blocks;
+    /// unbudgeted, that decode would run out of blob instead.
+    #[test]
+    fn read_v10_plus_charges_an_alias_into_a_record_block_list() {
+        let blob = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x003F_FFC0,
+            compressed: 0x003F_FFC0,
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count: 2,
+            block_size: 0,
+            per_block_sizes: &[0x003F_FFC0, 0],
+        });
+        assert_eq!(blob.len(), 20);
+        let files = vec![("a".into(), 0), ("b".into(), 12)];
+        let err = encoded_v10(blob, vec![("/Content/".into(), files)]).unwrap_err();
+        assert_block_total_exceeded(&err, 65_537, 5, "Content/b");
+    }
+
+    /// The charge comes before the block list's reservation: with the
+    /// second reservation armed to fail, the second path of a 28-byte,
+    /// four-block record is refused by the budget instead. Armed for the
+    /// first reservation, the seam does fail it, so it is reachable here.
+    #[test]
+    fn read_v10_plus_charges_encoded_blocks_before_reserving_them() {
+        use crate::seams::{PakSeam, SeamSite};
+        use crate::testing::oom::arm_at;
+
+        let site = SeamSite::Pak(PakSeam::EncodedCompressionBlocks);
+        let read = || {
+            let files = vec![("a".into(), 0), ("b".into(), 0)];
+            encoded_v10(encoded_record(4), vec![("/Content/".into(), files)]).unwrap_err()
+        };
+        let guard = arm_at(site, 1);
+        assert_block_total_exceeded(&read(), 8, 7, "Content/b");
+        drop(guard);
+        let _guard = arm_at(site, 0);
+        let err = read();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::EncodedCompressionBlocks,
+                        requested: 4,
+                        path: Some(p),
+                        ..
+                    },
+                } if p == "Content/a"
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// Records that don't overlap stay under the budget even at their
+    /// densest: a 65,535-block record with 4-byte fields and three 12-byte
+    /// single-block records charge 65,538 of 65,547.
+    #[test]
+    fn read_v10_plus_dense_disjoint_encoded_records_stay_under_the_budget() {
+        let mut blob = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0,
+            compressed: 0,
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count: 65_535,
+            block_size: 0,
+            per_block_sizes: &vec![0; 65_535],
+        });
+        let mut files = vec![("big".to_string(), 0)];
+        for name in ["x", "y", "z"] {
+            files.push((name.into(), i32::try_from(blob.len()).unwrap()));
+            blob.extend(encoded_record(1));
+        }
+        assert_eq!(blob.len(), 262_188);
+        let index = encoded_v10(blob, vec![("/".into(), files)]).unwrap();
+        assert_eq!(index.entries().len(), 4);
+    }
+
+    /// A path one to three bytes from the blob's end has no whole bits
+    /// word; the read fails at end of input rather than panicking.
+    #[test]
+    fn read_v10_plus_short_encoded_tail_is_end_of_input() {
+        for off in [9, 10, 11] {
+            let files = vec![("a".into(), off)];
+            let err = encoded_v10(encoded_record(0), vec![("/".into(), files)]).unwrap_err();
+            assert!(
+                matches!(&err, PaksmithError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof),
+                "offset {off}: {err:?}"
+            );
+        }
+    }
+
     /// The count is bounded by the index bytes after it, which 52 records
     /// fill exactly: a count of 52 is admitted, so the bound is inclusive.
     /// Non-encoded records carry no filename, so their floor is the 53-byte

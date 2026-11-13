@@ -699,18 +699,20 @@ impl fmt::Display for DecompressionFault {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IndexParseFault {
-    /// A header-claimed count or size exceeds a structural cap.
+    /// A header-claimed count or size, or a running total of them,
+    /// exceeds a structural cap.
     /// E.g. `block_count > MAX_BLOCKS_PER_ENTRY`,
     /// `file_count > fdi_size / 9`,
     /// `entry_count > index_size / entry_min_record_bytes(version)`,
     /// `encoded_entries_size > index_size`,
-    /// `fdi_size > MAX_FDI_BYTES`.
+    /// `fdi_size > MAX_FDI_BYTES`, or the FDI walk's running total of
+    /// encoded blocks `> encoded_entries_size / 4`.
     ///
     /// Construction invariant (caller-enforced): `value > limit`.
     BoundsExceeded {
         /// Wire-format field name. Closed set per [`WireField`] (#134).
         field: WireField,
-        /// The header-claimed value.
+        /// The header-claimed value, or the running total.
         value: u64,
         /// The cap it exceeds.
         limit: u64,
@@ -726,8 +728,10 @@ pub enum IndexParseFault {
         /// field at the call site.
         unit: BoundsUnit,
         /// Path of the entry the bound applies to, when the field is
-        /// per-entry (e.g. [`WireField::UncompressedSize`]). `None`
-        /// for archive-level bounds (e.g. [`WireField::FdiSize`]).
+        /// per-entry (e.g. [`WireField::UncompressedSize`]), or of the
+        /// path whose claim took an archive-level running total past
+        /// its bound ([`WireField::V10EncodedBlockTotal`]). `None` for
+        /// other archive-level bounds (e.g. [`WireField::FdiSize`]).
         path: Option<String>,
     },
     /// A `try_reserve` / `try_reserve_exact` call returned `Err`.
@@ -1438,6 +1442,10 @@ pub enum WireField {
     PhiEntryCount,
     /// Archive-level: byte size of the encoded-entries blob in a v10+ main index.
     V10EncodedEntriesSize,
+    /// Archive-level: compression blocks claimed by the encoded records
+    /// the v10+ FDI walk's paths name, summed over the paths read so far,
+    /// including the one that took the total past its limit.
+    V10EncodedBlockTotal,
     /// Archive-level: byte size of the main index (footer-declared).
     IndexSize,
 }
@@ -1465,6 +1473,7 @@ impl fmt::Display for WireField {
             Self::PhiSize => "phi_size",
             Self::PhiEntryCount => "phi_entry_count",
             Self::V10EncodedEntriesSize => "encoded_entries_size",
+            Self::V10EncodedBlockTotal => "encoded_block_total",
             Self::IndexSize => "index_size",
         };
         f.write_str(s)
@@ -8112,6 +8121,7 @@ mod tests {
             (WireField::PhiSize, "phi_size"),
             (WireField::PhiEntryCount, "phi_entry_count"),
             (WireField::V10EncodedEntriesSize, "encoded_entries_size"),
+            (WireField::V10EncodedBlockTotal, "encoded_block_total"),
             (WireField::IndexSize, "index_size"),
         ];
         for (field, expected) in cases {

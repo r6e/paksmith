@@ -2068,17 +2068,20 @@ fn read_encrypted_index<R: Read + Seek>(
     //
     // Accepted trade-off: for the v10+ path this collapse also swallows
     // faults that are NOT wrong-key garbage. Two classes:
-    //   (1) post-parse cross-check faults — a correctly-keyed index that
+    //   (1) checks paksmith adds on a correctly-keyed index — one that
     //       decrypts to structurally valid plaintext but fails the issue
-    //       #131 `PhiFdiInconsistency` check, or a non-ASCII path hitting
-    //       the `fnv64_path` ASCII-only limitation;
+    //       #131 `PhiFdiInconsistency` check, a non-ASCII path hitting
+    //       the `fnv64_path` ASCII-only limitation, or FDI paths whose
+    //       encoded block counts sum past a quarter of the blob's length
+    //       (#848);
     //   (2) pre-decrypt structural bounds faults, such as
     //       `OffsetPastFileSize` (aligned extent past EOF),
     //       `RegionPastFileSize` (unaligned offset+size past EOF), or
     //       `BoundsExceeded` (declared size over its cap).
-    // Both collapse into `Decryption`; the unencrypted path would surface
-    // the specific fault, the encrypted path reports "looks like a wrong
-    // key." This is deliberate and uniform. The FDI/PHI region offsets and
+    // Both collapse into `Decryption`, which drops any path the fault
+    // named, so `test_key` reports the key as wrong; the unencrypted path
+    // would surface the specific fault, the encrypted path reports "looks
+    // like a wrong key." This is deliberate and uniform. The FDI/PHI region offsets and
     // sizes come from the DECRYPTED primary index, so a wrong key's garbage
     // could itself trip class (2) — surfacing the typed fault there would be
     // a wrong-key oracle, and passing class (1) through would leak that the
