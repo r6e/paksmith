@@ -210,6 +210,23 @@ pub enum PakEntryHeader {
 }
 
 impl PakEntryHeader {
+    /// An allocation-free header that [`super::PakIndexEntry::share_header`]
+    /// swaps in for the one statement in which it moves the real header
+    /// into an `Arc`.
+    pub(super) fn placeholder() -> Self {
+        Self::Encoded {
+            common: EntryCommon {
+                offset: 0,
+                compressed_size: 0,
+                uncompressed_size: 0,
+                compression_method: CompressionMethod::None,
+                flags: 0,
+                compression_blocks: Vec::new(),
+                compression_block_size: 0,
+            },
+        }
+    }
+
     /// Read the FPakEntry struct from the current reader position.
     ///
     /// Wire format (v3–v7):
