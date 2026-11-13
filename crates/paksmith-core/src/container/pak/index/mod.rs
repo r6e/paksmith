@@ -34,7 +34,7 @@ pub use flat::max_flat_index_entries;
 #[cfg(feature = "__test_utils")]
 pub use fstring::max_fstring_len;
 #[cfg(feature = "__test_utils")]
-pub use path_hash::{max_fdi_bytes, max_index_bytes};
+pub use path_hash::{max_fdi_bytes, max_full_path_bytes_per_fdi_byte, max_index_bytes};
 // `EntryCommon` was previously in the `pub` re-export, but it's dead
 // external surface (issue #91): consumers can't construct it
 // (`#[non_exhaustive]` + `pub(super)` fields) and can't pattern-match
@@ -647,6 +647,7 @@ mod cap_pins {
             "16 Mi"
         );
         assert_eq!(super::fstring::FSTRING_MAX_LEN, 65_536, "64 Ki");
+        assert_eq!(super::path_hash::MAX_FULL_PATH_BYTES_PER_FDI_BYTE, 16);
     }
 }
 
@@ -1545,6 +1546,10 @@ mod tests {
         assert_eq!(max_flat_index_entries(), flat::MAX_FLAT_INDEX_ENTRIES);
         assert_eq!(max_blocks_per_entry(), entry_header::MAX_BLOCKS_PER_ENTRY);
         assert_eq!(max_fstring_len(), fstring::FSTRING_MAX_LEN);
+        assert_eq!(
+            max_full_path_bytes_per_fdi_byte(),
+            path_hash::MAX_FULL_PATH_BYTES_PER_FDI_BYTE
+        );
     }
 
     #[test]
@@ -3815,19 +3820,33 @@ mod tests {
         read_v10(buf, main_size)
     }
 
-    fn assert_block_total_exceeded(err: &PaksmithError, total: u64, limit: u64, path: &str) {
+    /// The FDI walk's running totals, as the field and unit their faults carry.
+    const BLOCK_TOTAL: (WireField, BoundsUnit) =
+        (WireField::V10EncodedBlockTotal, BoundsUnit::Items);
+    const FULL_PATH_TOTAL: (WireField, BoundsUnit) =
+        (WireField::FdiFullPathTotal, BoundsUnit::Bytes);
+
+    /// `err` is the fault for running total `kind` reaching `total` past
+    /// `limit` at `path`.
+    fn assert_total_exceeded(
+        err: &PaksmithError,
+        kind: (WireField, BoundsUnit),
+        total: u64,
+        limit: u64,
+        path: &str,
+    ) {
         assert!(
             matches!(
                 err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: WireField::V10EncodedBlockTotal,
+                        field,
                         value,
                         limit: l,
-                        unit: BoundsUnit::Items,
+                        unit,
                         path: Some(p),
                     },
-                } if *value == total && *l == limit && p == path
+                } if (*field, *unit) == kind && *value == total && *l == limit && p == path
             ),
             "unexpected error: {err:?}"
         );
@@ -3835,7 +3854,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "unexpected error")]
-    fn assert_block_total_exceeded_rejects_another_field() {
+    fn assert_total_exceeded_rejects_another_field() {
         let err = PaksmithError::InvalidIndex {
             fault: IndexParseFault::BoundsExceeded {
                 field: WireField::FdiFileCount,
@@ -3845,7 +3864,7 @@ mod tests {
                 path: Some("x".into()),
             },
         };
-        assert_block_total_exceeded(&err, 9, 6, "x");
+        assert_total_exceeded(&err, BLOCK_TOTAL, 9, 6, "x");
     }
 
     /// Each decode of an encoded record charges its blocks against a
@@ -3873,7 +3892,7 @@ mod tests {
             ("/Other/".into(), vec![("c".into(), 0)]),
         ];
         let err = encoded_v10(encoded_record(3), dirs).unwrap_err();
-        assert_block_total_exceeded(&err, 9, 6, "Other/c");
+        assert_total_exceeded(&err, BLOCK_TOTAL, 9, 6, "Other/c");
     }
 
     /// Single-block entries are charged too: a fourth path naming one
@@ -3909,7 +3928,7 @@ mod tests {
         assert_eq!(blob.len(), 20);
         let files = vec![("a".into(), 0), ("b".into(), 12)];
         let err = encoded_v10(blob, vec![("/Content/".into(), files)]).unwrap_err();
-        assert_block_total_exceeded(&err, 65_537, 5, "Content/b");
+        assert_total_exceeded(&err, BLOCK_TOTAL, 65_537, 5, "Content/b");
     }
 
     /// The charge comes before the block list's reservation: with the
@@ -3927,7 +3946,7 @@ mod tests {
             encoded_v10(encoded_record(4), vec![("/Content/".into(), files)]).unwrap_err()
         };
         let guard = arm_at(site, 1);
-        assert_block_total_exceeded(&read(), 8, 7, "Content/b");
+        assert_total_exceeded(&read(), BLOCK_TOTAL, 8, 7, "Content/b");
         drop(guard);
         let _guard = arm_at(site, 0);
         let err = read();
@@ -3984,6 +4003,147 @@ mod tests {
                 "offset {off}: {err:?}"
             );
         }
+    }
+
+    /// A v10 buffer, with no PHI, whose FDI holds `dirs`, each naming one
+    /// non-encoded record from each of its file names. Returns it with its
+    /// main index size.
+    fn dirs_v10(dirs: &[(&str, &[String])]) -> (Vec<u8>, u64) {
+        let mut record = Vec::new();
+        write_v10_non_encoded_uncompressed(&mut record, 0, 10);
+        let files: usize = dirs.iter().map(|(_, names)| names.len()).sum();
+        let fdi = dirs.iter().map(|(dir, names)| {
+            let files = names.iter().map(|name| (name.clone(), -1)).collect();
+            (dir.to_string(), files)
+        });
+        build_v10_buffer(V10Fixture {
+            file_count: u32::try_from(files).unwrap(),
+            non_encoded_records: record,
+            non_encoded_count: 1,
+            fdi: fdi.collect(),
+            has_path_hash_index: false,
+            ..V10Fixture::default()
+        })
+    }
+
+    /// [`dirs_v10`] with one directory.
+    fn one_dir_v10(dir: &str, names: &[String]) -> (Vec<u8>, u64) {
+        dirs_v10(&[(dir, names)])
+    }
+
+    /// `count` distinct two-character file names.
+    fn two_char_names(count: usize) -> Vec<String> {
+        (0..count).map(|i| format!("{i:02x}")).collect()
+    }
+
+    /// The walk copies a directory's name into every path in it: a
+    /// 190-byte name and 203 two-character file names give 38,976 bytes
+    /// of paths from a 2,436-byte FDI, exactly 16 times its size, and
+    /// are admitted.
+    #[test]
+    fn read_v10_plus_accepts_full_paths_up_to_the_budget() {
+        let dir = format!("{}/", "d".repeat(189));
+        let (buf, main_size) = one_dir_v10(&dir, &two_char_names(203));
+        assert_eq!(read_v10(buf, main_size).unwrap().entries().len(), 203);
+    }
+
+    /// A 204th path takes the total to 39,168 bytes, past 16 times the
+    /// 2,447-byte FDI, and is refused by name.
+    #[test]
+    fn read_v10_plus_refuses_full_paths_past_the_budget() {
+        let dir = format!("{}/", "d".repeat(189));
+        let (buf, main_size) = one_dir_v10(&dir, &two_char_names(204));
+        let err = read_v10(buf, main_size).unwrap_err();
+        let path = format!("{dir}cb");
+        assert_total_exceeded(&err, FULL_PATH_TOTAL, 39_168, 39_152, &path);
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "invalid pak index: entry `{path}` full_path_total 39168 exceeds maximum 39152 bytes"
+            )
+        );
+    }
+
+    /// Every path is charged, including repeats the index later drops, by
+    /// the length the path keeps: under a 161-byte directory name with a
+    /// leading slash, 174 empty file names charge 160 bytes each, 27,840
+    /// of 27,840, and leave one entry; a 175th charges 28,000 of 27,984.
+    #[test]
+    fn read_v10_plus_charges_duplicate_paths_without_the_leading_slash() {
+        let prefix = format!("{}/", "d".repeat(159));
+        let dir = format!("/{prefix}");
+        let (buf, main_size) = one_dir_v10(&dir, &vec![String::new(); 174]);
+        assert_eq!(read_v10(buf, main_size).unwrap().entries().len(), 1);
+        let (buf, main_size) = one_dir_v10(&dir, &vec![String::new(); 175]);
+        let err = read_v10(buf, main_size).unwrap_err();
+        assert_total_exceeded(&err, FULL_PATH_TOTAL, 28_000, 27_984, &prefix);
+    }
+
+    /// The total runs across directories: two 160-byte directories of 172
+    /// empty file names each charge 55,040 of 55,008, which neither
+    /// reaches alone.
+    #[test]
+    fn read_v10_plus_charges_full_paths_across_directories() {
+        let (first, second) = (
+            format!("{}/", "d".repeat(159)),
+            format!("{}/", "e".repeat(159)),
+        );
+        let names = vec![String::new(); 172];
+        let (buf, main_size) = dirs_v10(&[(&first, &names), (&second, &names)]);
+        let err = read_v10(buf, main_size).unwrap_err();
+        assert_total_exceeded(&err, FULL_PATH_TOTAL, 55_040, 55_008, &second);
+    }
+
+    /// Paths are charged in bytes, not characters: a directory name of 100
+    /// three-byte characters costs 300 bytes per path, so 33 empty file
+    /// names charge 9,900 of 16 times a 610-byte FDI.
+    #[test]
+    fn read_v10_plus_charges_full_paths_in_bytes() {
+        let dir = "\u{4e00}".repeat(100);
+        let (buf, main_size) = one_dir_v10(&dir, &vec![String::new(); 33]);
+        let err = read_v10(buf, main_size).unwrap_err();
+        assert_total_exceeded(&err, FULL_PATH_TOTAL, 9_900, 9_760, &dir);
+    }
+
+    /// The charge comes before the path's reservation: with the 204th
+    /// reservation armed to fail, the 204th path is refused by the budget
+    /// instead. Armed for the 203rd, the seam does fail it.
+    #[test]
+    fn read_v10_plus_charges_full_paths_before_reserving_them() {
+        use crate::seams::{PakSeam, SeamSite};
+        use crate::testing::oom::arm_at;
+
+        let dir = format!("{}/", "d".repeat(189));
+        let read = || {
+            let (buf, main_size) = one_dir_v10(&dir, &two_char_names(204));
+            read_v10(buf, main_size).unwrap_err()
+        };
+        let site = SeamSite::Pak(PakSeam::FdiFullPath);
+        let guard = arm_at(site, 203);
+        assert_total_exceeded(
+            &read(),
+            FULL_PATH_TOTAL,
+            39_168,
+            39_152,
+            &format!("{dir}cb"),
+        );
+        drop(guard);
+        let _guard = arm_at(site, 202);
+        let err = read();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::FdiFullPathBytes,
+                        requested: 192,
+                        path: None,
+                        ..
+                    },
+                }
+            ),
+            "{err:?}"
+        );
     }
 
     /// The count is bounded by the index bytes after it, which 52 records

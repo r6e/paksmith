@@ -202,6 +202,22 @@ pub(super) const MAX_FDI_BYTES: u64 = 256 * 1024 * 1024;
 // up front — must enforce this cap itself.
 pub(in crate::container::pak) const MAX_INDEX_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// Most bytes of full paths the v10+ FDI walk builds per byte of FDI.
+/// The walk copies each directory's name into every path in it, so its
+/// paths can total far more than the FDI holds; this bounds the ratio,
+/// not memory: 4 GiB of paths at [`MAX_FDI_BYTES`]. An ASCII archive
+/// stays within it if every path's directory name is at most 15 times
+/// its file name's length plus 144 bytes, since each file record takes
+/// 9 bytes beyond its name. Exposed via [`max_full_path_bytes_per_fdi_byte`].
+pub(super) const MAX_FULL_PATH_BYTES_PER_FDI_BYTE: u64 = 16;
+
+/// Test-only accessor for `MAX_FULL_PATH_BYTES_PER_FDI_BYTE`. Same
+/// convention as [`max_fdi_bytes`].
+#[cfg(feature = "__test_utils")]
+pub fn max_full_path_bytes_per_fdi_byte() -> u64 {
+    MAX_FULL_PATH_BYTES_PER_FDI_BYTE
+}
+
 /// Test-only accessor for `MAX_FDI_BYTES`. Same convention as
 /// [`crate::container::pak::max_uncompressed_entry_bytes`] — the cap
 /// is an implementation detail of the v10+ FDI parser, but boundary
@@ -630,6 +646,8 @@ impl PakIndex {
         )?;
         let encoded_block_limit = encoded_entries_blob.len() as u64 / MIN_ENCODED_BYTES_PER_BLOCK;
         let mut encoded_block_total: u64 = 0;
+        let full_path_limit = fdi_size * MAX_FULL_PATH_BYTES_PER_FDI_BYTE;
+        let mut full_path_total: u64 = 0;
         for _ in 0..dir_count {
             let dir_name = read_fstring(&mut fdi)?;
             let dir_file_count = fdi.read_u32::<LittleEndian>()?;
@@ -650,13 +668,31 @@ impl PakIndex {
                 // fault. The encoded-entries blob walk doesn't know
                 // the FDI-derived path on its own — that's the
                 // enrichment opportunity issue #57 closes.
-                // Issue #132 item 3: fallible allocation — same
-                // discipline as the surrounding parser. Bounded
-                // transitively by `read_fstring`'s per-string cap
-                // (each segment ≤ FSTRING_MAX_LEN bytes, so the
-                // sum ≤ 128 KiB).
+                // Issue #132 item 3: fallible allocation. The running
+                // total is charged first, so a refused path reserves
+                // nothing (#848).
                 let full_path = {
                     let total = dir_prefix.len() + file_name.len();
+                    full_path_total += total as u64;
+                    if full_path_total > full_path_limit {
+                        // The fault names the path when its bytes can be
+                        // reserved, outside the reservation's seam.
+                        let mut path = String::new();
+                        let path = path.try_reserve_exact(total).ok().map(|()| {
+                            path.push_str(dir_prefix);
+                            path.push_str(&file_name);
+                            path
+                        });
+                        return Err(PaksmithError::InvalidIndex {
+                            fault: IndexParseFault::BoundsExceeded {
+                                field: WireField::FdiFullPathTotal,
+                                value: full_path_total,
+                                limit: full_path_limit,
+                                unit: BoundsUnit::Bytes,
+                                path,
+                            },
+                        });
+                    }
                     let mut s = String::new();
                     let reserve_res = s.try_reserve_exact(total);
                     crate::seams::seam_check!(

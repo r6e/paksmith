@@ -13,6 +13,11 @@
 # by the PR-title gate), so spell-checking these is pure noise.
 extend-exclude = ["CHANGELOG.md", "**/CHANGELOG.md"]
 
+[default]
+# Commit SHAs in backticks, such as docs/formats/README.md's Last
+# verified column, are hex, not words: `88ba3f2` would flag `ba`.
+extend-ignore-re = ["`[0-9a-f]{7,40}`"]
+
 [default.extend-words]
 # Unreal Engine abbreviation — flagged as "USE" / "DUE"
 UE = "UE"
