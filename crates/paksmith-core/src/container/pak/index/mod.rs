@@ -59,7 +59,8 @@ use tracing::warn;
 
 use crate::container::pak::crypto::AesKey;
 use crate::container::pak::version::PakVersion;
-use crate::error::{AllocationContext, IndexParseFault, PaksmithError};
+use crate::error::{AllocationContext, check_index_reserve};
+use crate::seams::PakSeam;
 
 /// Cap on how many duplicate filenames we sample for the dedupe warning.
 /// Prevents the warn-log payload from growing with `dup_count`.
@@ -468,12 +469,9 @@ impl PakIndex {
     /// require pre-tuning the hint to account for the load factor or
     /// risk a reallocation during `insert`.
     ///
-    /// **Test-coverage note:** the `try_reserve` failure path itself
-    /// is unreachable in any portable test — triggering it would
-    /// require either an injectable allocator harness or raising the
-    /// per-path bounds enough to actually exhaust the test runner's
-    /// memory. The bound checks at the call sites provide the
-    /// user-facing protection; this function's role is to surface
+    /// The seams `PakSeam::DedupTracker` and `PakSeam::ByPathLookup` fail
+    /// these reservations in tests. The bound checks at the call sites
+    /// provide the user-facing protection; these two reservations surface
     /// alloc failure as a typed error rather than `handle_alloc_error`.
     pub(super) fn from_entries(
         mount_point: String,
@@ -501,15 +499,12 @@ impl PakIndex {
         // again to restore original wire order.
         let entries_len = entries.len();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        seen.try_reserve(entries_len)
-            .map_err(|source| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::AllocationFailed {
-                    context: AllocationContext::DedupTracker,
-                    requested: entries_len,
-                    source,
-                    path: None,
-                },
-            })?;
+        check_index_reserve(
+            seen.try_reserve(entries_len),
+            entries_len,
+            AllocationContext::DedupTracker,
+            PakSeam::DedupTracker,
+        )?;
         let mut sampled_dups: Vec<String> = Vec::new();
         let mut deduped_rev: Vec<PakIndexEntry> = Vec::with_capacity(entries_len);
         for entry in entries.into_iter().rev() {
@@ -538,16 +533,13 @@ impl PakIndex {
         // as the same-shape uniqueness oracle.
         let mut by_path: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-        by_path
-            .try_reserve(entries.len())
-            .map_err(|source| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::AllocationFailed {
-                    context: AllocationContext::ByPathLookup,
-                    requested: entries.len(),
-                    source,
-                    path: None,
-                },
-            })?;
+        let survivors = entries.len();
+        check_index_reserve(
+            by_path.try_reserve(survivors),
+            survivors,
+            AllocationContext::ByPathLookup,
+            PakSeam::ByPathLookup,
+        )?;
         for (i, entry) in entries.iter().enumerate() {
             // Guaranteed-fresh insert — `seen` already enforced
             // uniqueness in the dedup loop above. The discarded
@@ -676,8 +668,8 @@ mod tests {
     use super::*;
     use crate::digest::Sha1Digest;
     use crate::error::{
-        BoundsUnit, EncodedFault, FStringEncoding, FStringFault, IndexRegionKind,
-        PhiFdiInconsistencyKind, RegionPastFileSizeKind, WireField,
+        BoundsUnit, EncodedFault, FStringEncoding, FStringFault, IndexParseFault, IndexRegionKind,
+        PaksmithError, PhiFdiInconsistencyKind, RegionPastFileSizeKind, WireField,
     };
     // Issue #68: V10+ fixture builder shared with the integration
     // proptest in `paksmith-core-tests/tests/index_proptest.rs`. The
@@ -1069,9 +1061,9 @@ mod tests {
         );
     }
 
-    /// A flat index of uncompressed entries named and sized by `entries`,
-    /// parsed.
-    fn flat_index(entries: &[(&str, u64)]) -> PakIndex {
+    /// Parse a flat index of uncompressed entries named and sized by
+    /// `entries`.
+    fn try_flat_index(entries: &[(&str, u64)]) -> crate::Result<PakIndex> {
         let data = build_index_bytes("../../../", |buf| {
             for &(name, size) in entries {
                 write_uncompressed_entry(buf, name, 0, size);
@@ -1087,7 +1079,11 @@ mod tests {
             len,
             &[],
         )
-        .unwrap()
+    }
+
+    /// [`try_flat_index`], which must succeed.
+    fn flat_index(entries: &[(&str, u64)]) -> PakIndex {
+        try_flat_index(entries).unwrap()
     }
 
     /// Each entry's name and size, in order.
@@ -1145,6 +1141,62 @@ mod tests {
         assert!(logs_contain("dup_count=2"));
         assert!(logs_contain("first 2 shown"));
         assert!(logs_contain(r#"samples=["a", "a"]"#));
+    }
+
+    /// `from_entries` reserves its dedup set for every entry before it
+    /// dedups or warns, and a failed reservation surfaces as a typed fault.
+    #[tracing_test::traced_test]
+    #[test]
+    fn from_entries_surfaces_dedup_tracker_allocation_failed() {
+        use crate::seams::SeamSite;
+        use crate::testing::oom::arm_at;
+        use crate::untrusted::test_support::lines_counted;
+
+        let _guard = arm_at(SeamSite::Pak(PakSeam::DedupTracker), 0);
+        let err = try_flat_index(&[("a", 1), ("a", 1)]).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::DedupTracker,
+                        requested: 2,
+                        path: None,
+                        ..
+                    },
+                }
+            ),
+            "{err:?}"
+        );
+        logs_assert(lines_counted("", 0));
+    }
+
+    /// `from_entries` warns about the dropped entries before it reserves
+    /// the lookup for the survivors, so a failed reservation still logs
+    /// the warn and asks for two slots, not three.
+    #[tracing_test::traced_test]
+    #[test]
+    fn from_entries_warns_before_reserving_by_path() {
+        use crate::seams::SeamSite;
+        use crate::testing::oom::arm_at;
+
+        let _guard = arm_at(SeamSite::Pak(PakSeam::ByPathLookup), 0);
+        let err = try_flat_index(&[("a", 1), ("b", 1), ("a", 1)]).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::ByPathLookup,
+                        requested: 2,
+                        path: None,
+                        ..
+                    },
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(logs_contain("dup_count=1"));
     }
 
     /// Without a PHI, two FDI directories that differ only by a leading
