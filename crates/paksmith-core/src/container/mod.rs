@@ -10,6 +10,7 @@
 pub mod pak;
 
 use std::io::Write;
+use std::ops::Range;
 
 use serde::Serialize;
 
@@ -248,8 +249,9 @@ pub(crate) fn classify_sha1_claim(
 /// **Implementors must do two things**: call [`Self::new`] with the
 /// four values every container has, then chain a `with_*` builder for
 /// each OPTIONAL detail the format can supply — [`Self::with_offset`],
-/// [`Self::with_compression_method`], [`Self::with_sha1`]. Details the
-/// format genuinely lacks are correctly left unset.
+/// [`Self::with_compression_method`], [`Self::with_sha1`],
+/// [`Self::with_payload_extent`]. Details the format genuinely lacks are
+/// correctly left unset.
 ///
 /// Omission is not uniformly harmless, and the stakes differ by field.
 /// Skipping `with_offset` or `with_compression_method` costs a display
@@ -258,7 +260,8 @@ pub(crate) fn classify_sha1_claim(
 /// [`EntryIntegrity::NotInIndex`], which consumers state as fact ("the
 /// index record carries no hash field"). Leave that one out only when
 /// it is TRUE of the format, not because the value was inconvenient to
-/// plumb.
+/// plumb. Skipping `with_payload_extent` hides the span a read of the entry
+/// touches from a consumer that budgets reads by it.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct EntryMetadata {
@@ -270,6 +273,7 @@ pub struct EntryMetadata {
     pub(crate) offset: Option<u64>,
     pub(crate) compression_method: Option<std::sync::Arc<str>>,
     pub(crate) sha1: Option<crate::digest::Sha1Digest>,
+    pub(crate) payload_extent: Option<Range<u64>>,
 }
 
 impl EntryMetadata {
@@ -287,10 +291,11 @@ impl EntryMetadata {
     /// silent semantic bug.
     ///
     /// Takes only the values EVERY container has. The optional details
-    /// — offset, compression-method name, stored SHA-1 — default to
-    /// `None` here and are supplied by chaining [`Self::with_offset`],
-    /// [`Self::with_compression_method`] and [`Self::with_sha1`]. An
-    /// implementor that stops at `new` leaves all three unset — which
+    /// — offset, compression-method name, stored SHA-1, payload extent —
+    /// default to `None` here and are supplied by chaining
+    /// [`Self::with_offset`], [`Self::with_compression_method`],
+    /// [`Self::with_sha1`] and [`Self::with_payload_extent`]. An
+    /// implementor that stops at `new` leaves them all unset — which
     /// for the SHA-1 in particular publishes "this format's index has no
     /// such field", a claim display surfaces state as fact; see the
     /// struct doc.
@@ -309,6 +314,7 @@ impl EntryMetadata {
             offset: None,
             compression_method: None,
             sha1: None,
+            payload_extent: None,
         }
     }
 
@@ -397,6 +403,13 @@ impl EntryMetadata {
     #[must_use]
     pub fn with_sha1(mut self, sha1: crate::digest::Sha1Digest) -> Self {
         self.sha1 = Some(sha1);
+        self
+    }
+
+    /// Record the entry's payload extent: see [`Self::payload_extent`].
+    #[must_use]
+    pub fn with_payload_extent(mut self, extent: Range<u64>) -> Self {
+        self.payload_extent = Some(extent);
         self
     }
 
@@ -507,6 +520,18 @@ impl EntryMetadata {
     pub fn is_encrypted(&self) -> bool {
         self.is_encrypted
     }
+
+    /// The span of the container file that reading the entry may read
+    /// once its in-data header copy matches its index record, from the
+    /// record's [`Self::offset`] through the furthest payload byte the
+    /// record names. Index entries may name overlapping spans, and the end
+    /// can lie past the file, up to `u64::MAX` when the record's sizes
+    /// overflow. `None` when the reader recorded none, as for containers
+    /// whose entries don't sit in one file span.
+    #[must_use]
+    pub fn payload_extent(&self) -> Option<Range<u64>> {
+        self.payload_extent.clone()
+    }
 }
 
 /// Trait for reading archive containers regardless of format.
@@ -535,7 +560,7 @@ pub trait ContainerReader: Send + Sync {
     /// `Arc`s, so callers must compare names by value, never by pointer
     /// identity. See [`EntryMetadata::with_compression_method`].
     ///
-    /// Each value is ~100 bytes plus its path. Callers that RETAIN one
+    /// Each value is ~120 bytes plus its path. Callers that RETAIN one
     /// per entry for a multi-million-entry archive should consume this
     /// iterator streaming-fashion (build the derived structure as
     /// entries arrive) rather than collecting it first.
@@ -827,6 +852,7 @@ mod tests {
         assert_eq!(m.offset(), None);
         assert_eq!(m.compression_method_shared(), None);
         assert_eq!(m.sha1(), None);
+        assert_eq!(m.payload_extent(), None);
     }
 
     #[test]
@@ -843,9 +869,11 @@ mod tests {
         )
         .with_offset(0x1234)
         .with_compression_method("Zlib".to_string())
-        .with_sha1(digest);
+        .with_sha1(digest)
+        .with_payload_extent(0x1234..0x1300);
         assert_eq!(m.offset(), Some(0x1234));
         assert_eq!(m.compression_method_shared().as_deref(), Some("Zlib"));
         assert_eq!(m.sha1(), Some(digest));
+        assert_eq!(m.payload_extent(), Some(0x1234..0x1300));
     }
 }

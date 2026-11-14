@@ -922,6 +922,48 @@ impl PakEntryHeader {
         size
     }
 
+    /// `offset + wire_size + payload_len`: the end of this record's header
+    /// copy plus `payload_len` bytes. `None` on overflow. Open bounds
+    /// `payload_len = compressed_size` by the file size;
+    /// [`Self::payload_extent`] widens it.
+    pub(in crate::container::pak) fn record_end(&self, payload_len: u64) -> Option<u64> {
+        self.offset()
+            .checked_add(self.wire_size())?
+            .checked_add(payload_len)
+    }
+
+    /// The span of the file a read of the entry may touch once its in-data
+    /// header copy matches the index's (a forged copy can make a failing
+    /// read parse further), for
+    /// [`EntryMetadata::payload_extent`](crate::container::EntryMetadata::payload_extent).
+    /// The payload is `compressed_size`, or `uncompressed_size` if larger
+    /// for a stored entry (its read takes that many), AES-aligned when
+    /// encrypted. From v5 the span also reaches `offset +` each compression
+    /// block's end, since an inline record's blocks may point anywhere and
+    /// are checked only as each is read. A `version` before v5 stores block
+    /// offsets file-relative, and a read refuses such an entry before it
+    /// follows them, so they are left out. An end past `u64::MAX` saturates.
+    pub(in crate::container::pak) fn payload_extent(
+        &self,
+        version: PakVersion,
+    ) -> std::ops::Range<u64> {
+        let offset = self.offset();
+        let mut payload = self.compressed_size();
+        if *self.compression_method() == CompressionMethod::None {
+            payload = payload.max(self.uncompressed_size());
+        }
+        if self.is_encrypted() {
+            payload = payload.checked_next_multiple_of(16).unwrap_or(u64::MAX);
+        }
+        let mut end = self.record_end(payload).unwrap_or(u64::MAX);
+        if version.has_relative_chunk_offsets() {
+            for block in self.compression_blocks() {
+                end = end.max(offset.saturating_add(block.end()));
+            }
+        }
+        offset..end
+    }
+
     /// Smallest [`Self::wire_size`] for `version`: an uncompressed
     /// record with no block table (50 bytes for V8A, 53 otherwise).
     #[must_use]

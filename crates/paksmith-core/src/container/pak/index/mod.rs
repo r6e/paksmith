@@ -156,6 +156,21 @@ impl PakIndexEntry {
     pub fn header(&self) -> &PakEntryHeader {
         self.header.get()
     }
+
+    /// The header's [`PakEntryHeader::payload_extent`] in an archive of
+    /// `version`, computed once for a shared header so that listing its
+    /// aliases doesn't walk its blocks once per path. Only the v10+ walk
+    /// shares headers, so a shared one keeps the extent it was shared with
+    /// and ignores `version`.
+    pub(in crate::container::pak) fn payload_extent(
+        &self,
+        version: PakVersion,
+    ) -> std::ops::Range<u64> {
+        match &self.header {
+            HeaderSlot::Owned(header) => header.payload_extent(version),
+            HeaderSlot::Shared(shared) => shared.payload_extent.clone(),
+        }
+    }
 }
 
 /// Where a [`PakIndexEntry`] keeps its header. The FDI paths that name
@@ -164,14 +179,20 @@ impl PakIndexEntry {
 #[derive(Clone)]
 enum HeaderSlot {
     Owned(PakEntryHeader),
-    Shared(Arc<PakEntryHeader>),
+    Shared(Arc<SharedHeader>),
+}
+
+/// A header several FDI paths share, with its payload extent.
+struct SharedHeader {
+    header: PakEntryHeader,
+    payload_extent: std::ops::Range<u64>,
 }
 
 impl HeaderSlot {
     fn get(&self) -> &PakEntryHeader {
         match self {
             Self::Owned(header) => header,
-            Self::Shared(header) => header,
+            Self::Shared(shared) => &shared.header,
         }
     }
 }
@@ -583,7 +604,7 @@ impl PakIndexEntry {
 
     /// Construct an entry that shares `header` with the other FDI paths
     /// naming the same non-encoded record.
-    pub(super) fn from_shared(filename: String, header: Arc<PakEntryHeader>) -> Self {
+    fn from_shared(filename: String, header: Arc<SharedHeader>) -> Self {
         Self {
             filename,
             header: HeaderSlot::Shared(header),
@@ -592,11 +613,16 @@ impl PakIndexEntry {
 
     /// Move this entry's header into an `Arc` the entry then shares, if it
     /// doesn't share one already, and return another handle to it.
-    pub(super) fn share_header(&mut self) -> Arc<PakEntryHeader> {
+    fn share_header(&mut self) -> Arc<SharedHeader> {
         let placeholder = HeaderSlot::Owned(PakEntryHeader::placeholder());
         let shared = match std::mem::replace(&mut self.header, placeholder) {
-            HeaderSlot::Owned(header) => Arc::new(header),
-            HeaderSlot::Shared(header) => header,
+            // Only the v10+ walk shares headers, and it parses its records
+            // as `PathHashIndex`.
+            HeaderSlot::Owned(header) => Arc::new(SharedHeader {
+                payload_extent: header.payload_extent(PakVersion::PathHashIndex),
+                header,
+            }),
+            HeaderSlot::Shared(shared) => shared,
         };
         self.header = HeaderSlot::Shared(Arc::clone(&shared));
         shared
@@ -3990,6 +4016,26 @@ mod tests {
                 "phi {has_phi}"
             );
         }
+    }
+
+    /// Every path naming a shared record reports that record's payload
+    /// extent, and a path naming a record alone reports its own.
+    #[test]
+    fn aliased_paths_report_their_records_payload_extent() {
+        let files = vec![("a".into(), -1), ("b".into(), -1), ("c".into(), -2)];
+        let index = aliasing_v10(2, files, false);
+        let [a, b, c] = index.entries() else {
+            panic!("expected 3 entries, got {:?}", index.entries())
+        };
+        assert!(a.header_is_shared() && !c.header_is_shared());
+        let version = PakVersion::PathHashIndex;
+        let record = a.header().payload_extent(version);
+        assert_eq!(record.start, 100);
+        assert_eq!(a.payload_extent(version), record);
+        assert_eq!(b.payload_extent(version), record);
+        let own = c.header().payload_extent(version);
+        assert_eq!(own.start, 200);
+        assert_eq!(c.payload_extent(version), own);
     }
 
     /// A record named by one path stays owned by it. Paths over distinct

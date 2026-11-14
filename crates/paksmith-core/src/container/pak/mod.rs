@@ -521,15 +521,15 @@ impl PakReader {
             // time we reach this loop. The remaining attack vector
             // is per-entry header lies, which this loop closes.
             let in_data_size = header.wire_size();
-            let payload_end = offset
-                .checked_add(in_data_size)
-                .and_then(|p| p.checked_add(compressed))
-                .ok_or_else(|| PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::U64ArithmeticOverflow {
-                        path: Some(entry.filename().to_string()),
-                        operation: OverflowSite::PayloadEnd,
-                    },
-                })?;
+            let payload_end =
+                header
+                    .record_end(compressed)
+                    .ok_or_else(|| PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::U64ArithmeticOverflow {
+                            path: Some(entry.filename().to_string()),
+                            operation: OverflowSite::PayloadEnd,
+                        },
+                    })?;
             if payload_end > file_size {
                 warn!(
                     path = entry.filename(),
@@ -1833,7 +1833,8 @@ impl ContainerReader for PakReader {
                     encrypted: e.header().is_encrypted(),
                 },
             )
-            .with_offset(e.header().offset());
+            .with_offset(e.header().offset())
+            .with_payload_extent(e.payload_extent(self.version()));
             if compressed {
                 meta = meta.with_compression_method(interned_method_name(&mut method_pool, method));
             }
@@ -2578,7 +2579,7 @@ fn stream_zlib_to<R: Read + Seek>(
 ) -> crate::Result<u64> {
     let path = entry.filename();
 
-    if version < PakVersion::RelativeChunkOffsets {
+    if !version.has_relative_chunk_offsets() {
         // Pre-v5 paks store compression-block offsets as absolute file offsets
         // rather than entry-relative (v5+); this read path doesn't implement
         // the absolute-offset case. repak CAN emit a compressed v4 archive
@@ -6955,6 +6956,143 @@ mod tests {
             stats.index_verified(),
             "verify() must report the main index as verified (non-default stats)"
         );
+    }
+
+    /// The extent of a v5 inline header at offset 1000 with sizes
+    /// `(compressed, uncompressed)`, zlib over `blocks` if there are any.
+    #[cfg(feature = "__test_utils")]
+    fn extent_of(sizes: (u64, u64), blocks: &[(u64, u64)], flags: u8) -> std::ops::Range<u64> {
+        extent_at(PakVersion::RelativeChunkOffsets, sizes, blocks, flags)
+    }
+
+    /// [`extent_of`] for an archive of `version`.
+    #[cfg(feature = "__test_utils")]
+    fn extent_at(
+        version: PakVersion,
+        (c, u): (u64, u64),
+        blocks: &[(u64, u64)],
+        flags: u8,
+    ) -> std::ops::Range<u64> {
+        let method = u32::from(!blocks.is_empty());
+        let mut record = Vec::new();
+        crate::testing::wire::write_pak_entry(
+            &mut record,
+            1000,
+            c,
+            u,
+            method,
+            &[0; 20],
+            blocks,
+            0,
+            flags,
+        );
+        PakEntryHeader::read_from(&mut Cursor::new(record), version, &[])
+            .unwrap()
+            .payload_extent(version)
+    }
+
+    /// The extent runs from the record through the payload a read takes:
+    /// a stored entry's `uncompressed_size` even past `compressed_size`,
+    /// and a compressed entry's `compressed_size` after its 57 +
+    /// 16-per-block header copy, even past its last block's end, each
+    /// AES-aligned when encrypted. Sizes that overflow saturate the end.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn payload_extent_spans_the_header_copy_and_the_payload_read() {
+        assert_eq!(extent_of((10, 10), &[], 0), 1000..1063);
+        assert_eq!(extent_of((10, 30), &[], 0), 1000..1083);
+        assert_eq!(extent_of((30, 10), &[], 0), 1000..1083);
+        assert_eq!(extent_of((446, 446), &[], 1), 1000..1501);
+        assert_eq!(extent_of((446, 450), &[], 1), 1000..1517);
+        let blocks = [(89, 100), (100, 120)];
+        assert_eq!(extent_of((40, 200), &blocks, 0), 1000..1129);
+        assert_eq!(extent_of((40, 200), &blocks, 1), 1000..1137);
+        assert_eq!(extent_of((u64::MAX - 8, 0), &[], 1).end, u64::MAX);
+        assert_eq!(extent_of((u64::MAX - 8, 0), &[], 0).end, u64::MAX);
+    }
+
+    /// A block naming bytes past `compressed_size`, as a forward alias
+    /// into another entry's region does, widens the extent to its end,
+    /// whichever block it is; an end past `u64::MAX` saturates.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn payload_extent_widens_to_the_furthest_block_end() {
+        assert_eq!(
+            extent_of((31, 200), &[(89, 100), (5000, 5040)], 0),
+            1000..6040
+        );
+        assert_eq!(
+            extent_of((31, 200), &[(5000, 5040), (89, 100)], 0),
+            1000..6040
+        );
+        assert_eq!(extent_of((31, 200), &[(89, u64::MAX)], 0).end, u64::MAX);
+    }
+
+    /// Before v5 block offsets are file-relative, and a read refuses the
+    /// entry before following them, so the extent leaves them out.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn payload_extent_leaves_out_pre_v5_blocks() {
+        let blocks = [(89, 100), (5000, 5040)];
+        assert_eq!(
+            extent_at(PakVersion::IndexEncryption, (31, 200), &blocks, 0),
+            1000..1120
+        );
+        for version in [PakVersion::RelativeChunkOffsets, PakVersion::PathHashIndex] {
+            assert_eq!(extent_at(version, (31, 200), &blocks, 0), 1000..6040);
+        }
+    }
+
+    /// v5 flat pak with one record at offset 0 holding `payload`, stored,
+    /// or zlib over `blocks` when there are any, and an index naming it
+    /// once per entry of `names`. Its SHA-1 is the payload's when
+    /// `hashed`, else zero, an unclaimed hash under the zero index hash.
+    #[cfg(feature = "__test_utils")]
+    fn aliased_v5_pak(
+        names: &[&str],
+        payload: &[u8],
+        blocks: &[(u64, u64)],
+        hashed: bool,
+    ) -> Vec<u8> {
+        use byteorder::{LittleEndian, WriteBytesExt};
+        use sha1::{Digest, Sha1};
+
+        use crate::testing::wire::{write_fstring, write_legacy_footer, write_pak_entry};
+
+        let size = payload.len() as u64;
+        let sha1: [u8; 20] = Sha1::digest(payload).into();
+        let sha1 = if hashed { sha1 } else { [0; 20] };
+        let method = u32::from(!blocks.is_empty());
+        let record = |buf: &mut Vec<u8>| {
+            write_pak_entry(buf, 0, size, size, method, &sha1, blocks, 0, 0);
+        };
+        let mut pak = Vec::new();
+        record(&mut pak);
+        pak.extend_from_slice(payload);
+        let index_offset = pak.len() as u64;
+        write_fstring(&mut pak, "../../../");
+        pak.write_u32::<LittleEndian>(u32::try_from(names.len()).unwrap())
+            .unwrap();
+        for name in names {
+            write_fstring(&mut pak, name);
+            record(&mut pak);
+        }
+        let index_size = pak.len() as u64 - index_offset;
+        write_legacy_footer(&mut pak, 5, index_offset, index_size, &[0; 20]);
+        pak
+    }
+
+    /// Open checks only `offset + header + compressed_size` against the
+    /// file, so an entry whose block runs past it still opens, and its
+    /// extent reaches that block's end.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn open_accepts_a_block_past_the_file_and_its_extent_reaches_it() {
+        let pak = aliased_v5_pak(&["Content/a.bin"], &[7; 16], &[(73, 1 << 20)], true);
+        assert!(pak.len() < 1 << 20);
+        let reader = PakReader::from_bytes(pak).unwrap();
+        let meta = reader.entries().next().unwrap();
+        assert_eq!(meta.payload_extent(), Some(0..1 << 20));
     }
 
     /// SPEC.md round-trip properties: compress→decompress and
