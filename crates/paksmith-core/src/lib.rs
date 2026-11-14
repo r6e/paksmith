@@ -67,8 +67,8 @@ mod untrusted;
 /// activates `__test_utils` gets these symbols in its release artifact.
 /// The leading `__` is convention; cargo does not enforce it. See the
 /// feature-unification caveat in this crate's `Cargo.toml` before
-/// adding a dependency to a released crate or changing release.yml's
-/// `-p` set. Issue #68 promoted the v10+ fixture builder out
+/// adding a dependency to a released crate or changing the `-p` set in
+/// `.github/actions/package`. Issue #68 promoted the v10+ fixture builder out
 /// of the in-source test module so the integration proptest doesn't
 /// need to duplicate ~30 lines of wire-format assembly.
 #[cfg(feature = "__test_utils")]

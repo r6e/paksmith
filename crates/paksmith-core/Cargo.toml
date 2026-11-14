@@ -100,11 +100,12 @@ proc-macro2.workspace = true
 # globally per package across the selected dep graph, so any build
 # that includes `paksmith-fixture-gen` (e.g. `cargo build --workspace`)
 # compiles the gated symbols into paksmith-core's non-test build.
-# The shipped release artifacts stay clean because release.yml builds
-# only `-p paksmith-cli -p paksmith-gui`. The leading `__` is
-# convention only; cargo doesn't enforce it. Reviewers changing
-# release.yml's `-p` set, or giving a released crate a dependency that
-# enables this feature, should check that it stays off there.
+# The shipped artifacts stay clean because .github/actions/package
+# builds only `-p paksmith-cli -p paksmith-gui`.
+# The leading `__` is convention only; cargo doesn't enforce it.
+# Reviewers changing that `-p` set, or giving a released crate a
+# dependency that enables this feature, should check that it stays off
+# there.
 __test_utils = []
 
 # Cross-parser fixture generation (uses the trumank/repak git dep) and

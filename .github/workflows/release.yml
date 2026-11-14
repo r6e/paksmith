@@ -76,69 +76,19 @@ jobs:
           # Debian stable / RHEL 8-9 / older Ubuntu LTS.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            archive_ext: tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
-            archive_ext: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive_ext: zip
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-rust
-      - name: Build release binaries
-        run: cargo build --release --locked -p paksmith-cli -p paksmith-gui
-      # Ad-hoc codesigning of macOS release binaries. paksmith does
-      # not pay for Apple Developer Program membership, so Developer
-      # ID notarization is not on the roadmap (#168 closed won't-
-      # fix) — this is the permanent macOS signing strategy.
-      #
-      # aarch64 Mach-O binaries on Apple Silicon already carry a
-      # linker-applied ad-hoc signature (CS_LINKER_SIGNED flag set)
-      # — this step replaces it with an explicit ad-hoc signature
-      # (same `-` identity, CS_LINKER_SIGNED cleared). The delta is
-      # narrow but real: a subclass of sandbox APIs (NSTask spawn
-      # checks, certain entitlement gates) accepts explicit ad-hoc
-      # but rejects linker-signed. Gatekeeper still blocks first-
-      # run permanently; users follow the workaround documented in
-      # the README (#165).
-      - name: Ad-hoc codesign binaries (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          for bin in paksmith paksmith-gui; do
-            codesign --force --sign - "target/release/${bin}"
-            codesign --verify --strict "target/release/${bin}"
-          done
-      - name: Stage archive contents (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        env:
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          staging="paksmith-${TAG}-${TARGET}"
-          mkdir -p "${staging}"
-          cp target/release/paksmith "${staging}/"
-          cp target/release/paksmith-gui "${staging}/"
-          cp LICENSE README.md "${staging}/"
-          tar czf "${staging}.tar.gz" "${staging}"
-          shasum -a 256 "${staging}.tar.gz" > "SHA256SUMS-${TARGET}.txt"
-      - name: Stage archive contents (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          $staging = "paksmith-${env:TAG}-${env:TARGET}"
-          New-Item -ItemType Directory -Force -Path $staging | Out-Null
-          Copy-Item target/release/paksmith.exe -Destination $staging
-          Copy-Item target/release/paksmith-gui.exe -Destination $staging
-          Copy-Item LICENSE, README.md -Destination $staging
-          Compress-Archive -Path $staging -DestinationPath "${staging}.zip"
-          $hash = (Get-FileHash -Algorithm SHA256 "${staging}.zip").Hash.ToLower()
-          # Issue #167: LF (not CRLF) for `sha256sum -c --strict` on Linux.
-          [System.IO.File]::WriteAllText("$pwd/SHA256SUMS-${env:TARGET}.txt", "${hash}  ${staging}.zip`n")
+      - name: Build and package
+        id: package
+        uses: ./.github/actions/package
+        with:
+          label: ${{ needs.release-please.outputs.tag_name }}
+          target: ${{ matrix.target }}
       # `gh release upload --clobber` so a workflow retry overwrites
       # prior uploads instead of erroring on duplicate asset name. No
       # new action publisher needed (gh CLI ships on the runner).
@@ -146,10 +96,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
-          TARGET: ${{ matrix.target }}
-          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          CHECKSUMS: ${{ steps.package.outputs.checksums }}
         shell: bash
-        run: |
-          archive="paksmith-${TAG}-${TARGET}.${ARCHIVE_EXT}"
-          checksums="SHA256SUMS-${TARGET}.txt"
-          gh release upload "${TAG}" "${archive}" "${checksums}" --clobber
+        run: gh release upload "${TAG}" "${ARCHIVE}" "${CHECKSUMS}" --clobber
