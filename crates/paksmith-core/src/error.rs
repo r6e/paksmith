@@ -5700,8 +5700,8 @@ pub enum MappingsParseFault {
 ///
 /// - **HashMap/HashSet receivers** (`mod.rs::DedupTracker`,
 ///   `ByPathLookup`, `path_hash.rs::V10PhiEntries`) use
-///   `try_reserve` rather than `try_reserve_exact`; different stdlib
-///   method, kept inline.
+///   `try_reserve` rather than `try_reserve_exact`; the first two pass
+///   it to [`check_index_reserve`], and the PHI map's stays inline.
 /// - **String receivers** (`path_hash.rs` FDI full-path) use
 ///   `String::try_reserve_exact`; the helper specializes on `Vec<T>`.
 /// - **Per-entry reservations** (`pak::read_entry` payload) carry
@@ -5721,8 +5721,9 @@ pub enum MappingsParseFault {
 /// surface as `DecompressionFault`, not `IndexParseFault`, so a unified
 /// `PakSeam::context() -> AllocationContext` accessor would be a
 /// partial function. Those direct-call variants never reach this
-/// helper, and neither do `FdiFullPath` (open-coded) or `FstringUtf16`
-/// and `FstringUtf8` (through [`check_index_reserve`] directly), so
+/// helper, and neither do `FdiFullPath` (open-coded) or `FstringUtf16`,
+/// `FstringUtf8`, `DedupTracker` and `ByPathLookup` (through
+/// [`check_index_reserve`] directly), so
 /// the remaining 9 helper-routed variants do pair 1:1
 /// with their contexts — but the structural binding lives in
 /// [`crate::seams::PakSeam`]'s per-variant doc-comments rather than
@@ -5747,7 +5748,8 @@ pub(crate) fn try_reserve_index<T>(
 /// injection and mapped to [`IndexParseFault::AllocationFailed`] with
 /// `context` and `path: None`. [`try_reserve_index`] calls it for a
 /// `Vec`; the pak index's FString reads call it with the shared
-/// decoder's reservation.
+/// decoder's reservation, and `PakIndex::from_entries` with its hash
+/// tables'.
 pub(crate) fn check_index_reserve(
     reserve: Result<(), std::collections::TryReserveError>,
     count: usize,
