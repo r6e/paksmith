@@ -1602,6 +1602,11 @@ pub enum AllocationContext {
     /// decryption and parse. Bounded by `MAX_INDEX_BYTES` (1 GiB),
     /// capped on the decrypt path before the reservation.
     EncryptedIndexBytes,
+    /// Per-walk survivor flags, one per entry, marking which entries the
+    /// dedup keeps.
+    DedupSurvivorFlags,
+    /// One surviving filename copied as its `by_path` lookup key.
+    ByPathKeyBytes,
 }
 
 impl AllocationContext {
@@ -1622,11 +1627,13 @@ impl AllocationContext {
             | Self::V10PhiBytes
             | Self::FStringUtf8Bytes
             | Self::FdiFullPathBytes
-            | Self::EncryptedIndexBytes => BoundsUnit::Bytes,
+            | Self::EncryptedIndexBytes
+            | Self::ByPathKeyBytes => BoundsUnit::Bytes,
             Self::InlineCompressionBlocks
             | Self::EncodedCompressionBlocks
             | Self::FlatIndexEntries
             | Self::DedupTracker
+            | Self::DedupSurvivorFlags
             | Self::ByPathLookup
             | Self::V10NonEncodedEntries
             | Self::V10PhiEntries
@@ -1662,6 +1669,8 @@ impl fmt::Display for AllocationContext {
             Self::FStringUtf16CodeUnits => "FString UTF-16 code units",
             Self::FdiFullPathBytes => "FDI full-path buffer",
             Self::EncryptedIndexBytes => "encrypted index",
+            Self::DedupSurvivorFlags => "dedup survivor flags for entries",
+            Self::ByPathKeyBytes => "by-path lookup key",
         };
         f.write_str(s)
     }
@@ -5689,21 +5698,22 @@ pub enum MappingsParseFault {
 ///
 /// `seam`: names the [`crate::seams::PakSeam`] variant paired with
 /// this reservation. Mandatory (no `Option`) — every helper-routed
-/// index-side allocation is structurally bound to one of the 9
+/// index-side allocation is structurally bound to one of the 10
 /// helper-routed [`crate::seams::PakSeam`] variants. Armed from
 /// integration tests via `crate::testing::oom::arm_at`; the seam
 /// check is `__test_utils`-gated and production builds discard the
 /// dispatch.
 ///
 /// Covers the canonical pak-index allocation shape: `Vec<T>`
-/// receiver, no per-entry path. Variable sites stay open-coded:
+/// receiver, no per-entry path. Variable sites take another route:
 ///
 /// - **HashMap/HashSet receivers** (`mod.rs::DedupTracker`,
 ///   `ByPathLookup`, `path_hash.rs::V10PhiEntries`) use
 ///   `try_reserve` rather than `try_reserve_exact`; the first two pass
 ///   it to [`check_index_reserve`], and the PHI map's stays inline.
-/// - **String receivers** (`path_hash.rs` FDI full-path) use
-///   `String::try_reserve_exact`; the helper specializes on `Vec<T>`.
+/// - **String receivers** (`path_hash.rs` FDI full-path, `mod.rs`
+///   `by_path` keys) go through [`try_index_string`]; this helper
+///   specializes on `Vec<T>`.
 /// - **Per-entry reservations** (`pak::read_entry` payload) carry
 ///   `path: Some(...)` and a `warn!()` log call alongside; kept
 ///   inline so the log macro stays at the failure site.
@@ -5721,10 +5731,10 @@ pub enum MappingsParseFault {
 /// surface as `DecompressionFault`, not `IndexParseFault`, so a unified
 /// `PakSeam::context() -> AllocationContext` accessor would be a
 /// partial function. Those direct-call variants never reach this
-/// helper, and neither do `FdiFullPath` (open-coded) or `FstringUtf16`,
-/// `FstringUtf8`, `DedupTracker` and `ByPathLookup` (through
-/// [`check_index_reserve`] directly), so
-/// the remaining 9 helper-routed variants do pair 1:1
+/// helper, and neither do `FdiFullPath` and `ByPathKey` (through
+/// [`try_index_string`]) or `DedupTracker`, `ByPathLookup`,
+/// `FstringUtf16` and `FstringUtf8` (through [`check_index_reserve`]
+/// directly), so the remaining 10 helper-routed variants do pair 1:1
 /// with their contexts — but the structural binding lives in
 /// [`crate::seams::PakSeam`]'s per-variant doc-comments rather than
 /// a `const fn` accessor. Future cleanup path: split `PakSeam` into
@@ -5747,9 +5757,9 @@ pub(crate) fn try_reserve_index<T>(
 /// `reserve`, a reservation of `count` slots, run through `seam`'s OOM
 /// injection and mapped to [`IndexParseFault::AllocationFailed`] with
 /// `context` and `path: None`. [`try_reserve_index`] calls it for a
-/// `Vec`; the pak index's FString reads call it with the shared
-/// decoder's reservation, and `PakIndex::from_entries` with its hash
-/// tables'.
+/// `Vec` and [`try_index_string`] for a `String`; the pak index's
+/// FString reads call it with the shared decoder's reservation, and
+/// `PakIndex::from_entries` with its hash tables'.
 pub(crate) fn check_index_reserve(
     reserve: Result<(), std::collections::TryReserveError>,
     count: usize,
@@ -5767,6 +5777,20 @@ pub(crate) fn check_index_reserve(
             path: None,
         },
     })
+}
+
+/// An empty `String` with exactly `capacity` bytes reserved through
+/// [`check_index_reserve`] at `seam`, for the caller to fill with
+/// `push_str`, where `to_owned` or `format!` would abort on allocation
+/// failure.
+pub(crate) fn try_index_string(
+    capacity: usize,
+    context: AllocationContext,
+    seam: crate::seams::PakSeam,
+) -> crate::Result<String> {
+    let mut s = String::new();
+    check_index_reserve(s.try_reserve_exact(capacity), capacity, context, seam)?;
+    Ok(s)
 }
 
 /// Fallibly reserve `count` slots on `vec`, routing any allocator
@@ -8199,6 +8223,11 @@ mod tests {
             ),
             (AllocationContext::FdiFullPathBytes, "FDI full-path buffer"),
             (AllocationContext::EncryptedIndexBytes, "encrypted index"),
+            (
+                AllocationContext::DedupSurvivorFlags,
+                "dedup survivor flags for entries",
+            ),
+            (AllocationContext::ByPathKeyBytes, "by-path lookup key"),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -8244,6 +8273,8 @@ mod tests {
             (AllocationContext::FStringUtf16CodeUnits, BoundsUnit::Items),
             (AllocationContext::FdiFullPathBytes, BoundsUnit::Bytes),
             (AllocationContext::EncryptedIndexBytes, BoundsUnit::Bytes),
+            (AllocationContext::DedupSurvivorFlags, BoundsUnit::Items),
+            (AllocationContext::ByPathKeyBytes, BoundsUnit::Bytes),
         ];
         for (context, expected) in cases {
             assert_eq!(
