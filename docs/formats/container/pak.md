@@ -344,9 +344,10 @@ variant — see Verification → Known divergences.
 ### Implementation hardening (recommended for any parser)
 
 paksmith enforces structural caps to prevent attacker-controlled allocation
-amplification. Every cap exposes a `#[cfg(feature = "__test_utils")]`
-accessor so boundary tests can read the live value rather than re-declaring
-the literal.
+amplification, and budgets the payload bytes `verify()` parses and hashes.
+Every cap constant exposes a
+`#[cfg(feature = "__test_utils")]` accessor so boundary tests can read the
+live value rather than re-declaring the literal.
 
 On an encrypted index, `read_encrypted_index`
 (`crates/paksmith-core/src/container/pak/mod.rs`) reports a fault from
@@ -418,6 +419,25 @@ does not surface as the fault its bullet names.
   `IndexParseFault::BoundsExceeded { field: WireField::FdiFullPathTotal, unit: BoundsUnit::Bytes, path, … }`,
   whose `path` names the refused path unless its bytes can't be
   reserved.
+- **Payload extents per `verify()`**
+  (`crates/paksmith-core/src/container/mod.rs`).
+  Index entries may name the same payload bytes, and an inline record's
+  blocks may point into another entry's, so a pass over every entry can
+  read one region once per name. Before hashing each entry,
+  `PakReader::verify` charges its payload extent (§*Paksmith
+  implementation*) to a `PayloadLedger` for the file, which counts the
+  part inside the file and refuses the entry that takes the total past
+  the file's size. Extents that lie in the file without overlapping sum
+  to at most its size. Entries it skips aren't charged. Surfaces as
+  `IndexParseFault::BoundsExceeded { field: WireField::PayloadExtentTotal, unit: BoundsUnit::Bytes, path: Some(..), … }`.
+- **In-data header copies**
+  (`crates/paksmith-core/src/container/pak/mod.rs`).
+  A read or verify parses an entry's in-data header copy only to its
+  index record's size, so a copy claiming more is refused within that
+  size rather than parsed past the entry's extent: as an
+  `IndexParseFault::FieldMismatch` on `WireField::RecordSize` when its
+  parse needs bytes past it, or sooner by the block-count cap, a failed
+  block-table reservation or an invalid block.
 
 See `docs/security/allocation-caps.md` for the broader allocation-cap
 policy.
@@ -603,13 +623,13 @@ policy.
   stored claim against it, yielding
   `EntryIntegrity::{NotInIndex, NoClaim, Stripped, Claim}`. Each
   `EntryMetadata` from `entries()` carries a `payload_extent()`, the span
-  a read of the entry may touch once its in-data header copy matches its
-  index record: from the record's offset through its header copy and
-  payload (`compressed_size`, or `uncompressed_size` if larger for a
-  stored entry, aligned to 16 when encrypted), widened from v5 to
-  `offset +` each compression block's end. v3-v4 block offsets are
-  file-relative, and a read refuses those entries before following them,
-  so their blocks are left out.
+  a read or verify of the entry may touch: from the record's offset
+  through its header copy and payload (`compressed_size`, or
+  `uncompressed_size` if larger for a stored entry, aligned to 16 when
+  encrypted), widened from v5 to `offset +` each compression block's
+  end. v3-v4 block offsets are file-relative, and no read or verify
+  follows them, so their blocks are left out. `verify()` charges these
+  to a `PayloadLedger`, which a caller reading every entry can use too.
 - `pub struct PakFooter` — `version()`, `index_offset()`, `index_size()`,
   `index_hash()`, `is_encrypted()`, `encryption_key_guid()`, `frozen_index()`.
 - `pub enum PakVersion` — `Initial`, `NoTimestamps`, …, `Fnv64BugFix`
@@ -623,7 +643,7 @@ the full enum):
 - `PaksmithError::UnsupportedVersion { version }` — a version or
   version-specific feature paksmith does not read: for example a version
   outside 3–11, a frozen V9 index, or a zlib-compressed entry in a V3/V4
-  archive.
+  archive (read, or verified unless it is encrypted).
 - `PaksmithError::InvalidFooter { fault: InvalidFooterFault::* }` —
   `OtherUnpromoted { reason }` (catch-all for magic mismatch and the other
   footer faults not yet promoted to typed variants),

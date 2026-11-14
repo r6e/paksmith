@@ -705,9 +705,12 @@ pub enum IndexParseFault {
     /// `file_count > fdi_size / 9`,
     /// `entry_count > index_size / entry_min_record_bytes(version)`,
     /// `encoded_entries_size > index_size`,
-    /// `fdi_size > MAX_FDI_BYTES`, or the FDI walk's running totals of
+    /// `fdi_size > MAX_FDI_BYTES`, the FDI walk's running totals of
     /// encoded blocks `> encoded_entries_size / 4` and of full-path bytes
-    /// `> 16 * fdi_size`.
+    /// `> 16 * fdi_size`, or a
+    /// [`PayloadLedger`](crate::container::PayloadLedger)'s charged total
+    /// plus the in-file part of the extent it refuses `>` the archive's
+    /// size.
     ///
     /// Construction invariant (caller-enforced): `value > limit`.
     BoundsExceeded {
@@ -731,7 +734,8 @@ pub enum IndexParseFault {
         /// Path of the entry the bound applies to, when the field is
         /// per-entry (e.g. [`WireField::UncompressedSize`]), or of the
         /// path whose claim took an archive-level running total past
-        /// its bound ([`WireField::V10EncodedBlockTotal`], and
+        /// its bound ([`WireField::V10EncodedBlockTotal`],
+        /// [`WireField::PayloadExtentTotal`], and
         /// [`WireField::FdiFullPathTotal`] when that path's bytes can be
         /// reserved). `None` for other archive-level bounds (e.g.
         /// [`WireField::FdiSize`]).
@@ -1453,6 +1457,14 @@ pub enum WireField {
     /// charged, summed over the paths read so far, including the one that
     /// took the total past its limit.
     FdiFullPathTotal,
+    /// Archive-level: bytes of the entries' payload extents a
+    /// [`PayloadLedger`](crate::container::PayloadLedger) has charged,
+    /// including the entry that took the total past its budget.
+    PayloadExtentTotal,
+    /// Per-entry: byte size of an FPakEntry record. An in-data copy whose
+    /// parse needs bytes past its index record's size is a
+    /// [`IndexParseFault::FieldMismatch`] on it.
+    RecordSize,
     /// Archive-level: byte size of the main index (footer-declared).
     IndexSize,
 }
@@ -1482,6 +1494,8 @@ impl fmt::Display for WireField {
             Self::V10EncodedEntriesSize => "encoded_entries_size",
             Self::V10EncodedBlockTotal => "encoded_block_total",
             Self::FdiFullPathTotal => "full_path_total",
+            Self::PayloadExtentTotal => "payload_extent_total",
+            Self::RecordSize => "record_size",
             Self::IndexSize => "index_size",
         };
         f.write_str(s)
@@ -8158,6 +8172,8 @@ mod tests {
             (WireField::V10EncodedEntriesSize, "encoded_entries_size"),
             (WireField::V10EncodedBlockTotal, "encoded_block_total"),
             (WireField::FdiFullPathTotal, "full_path_total"),
+            (WireField::PayloadExtentTotal, "payload_extent_total"),
+            (WireField::RecordSize, "record_size"),
             (WireField::IndexSize, "index_size"),
         ];
         for (field, expected) in cases {

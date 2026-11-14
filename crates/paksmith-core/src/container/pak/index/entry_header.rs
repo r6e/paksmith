@@ -932,17 +932,15 @@ impl PakEntryHeader {
             .checked_add(payload_len)
     }
 
-    /// The span of the file a read of the entry may touch once its in-data
-    /// header copy matches the index's (a forged copy can make a failing
-    /// read parse further), for
+    /// The span of the file a read or verify of the entry may touch, for
     /// [`EntryMetadata::payload_extent`](crate::container::EntryMetadata::payload_extent).
     /// The payload is `compressed_size`, or `uncompressed_size` if larger
     /// for a stored entry (its read takes that many), AES-aligned when
     /// encrypted. From v5 the span also reaches `offset +` each compression
     /// block's end, since an inline record's blocks may point anywhere and
     /// are checked only as each is read. A `version` before v5 stores block
-    /// offsets file-relative, and a read refuses such an entry before it
-    /// follows them, so they are left out. An end past `u64::MAX` saturates.
+    /// offsets file-relative, which no read or verify follows, so they are
+    /// left out. An end past `u64::MAX` saturates.
     pub(in crate::container::pak) fn payload_extent(
         &self,
         version: PakVersion,
