@@ -43,7 +43,7 @@ use crate::container::pak::crypto::{self, AesKey};
 use crate::container::pak::version::PakVersion;
 use crate::error::{
     AllocationContext, BoundsUnit, EncodedFault, IndexParseFault, IndexRegionKind, PaksmithError,
-    PhiFdiInconsistencyKind, WireField, check_region_bounds, try_reserve_index,
+    PhiFdiInconsistencyKind, WireField, check_region_bounds, try_index_string, try_reserve_index,
 };
 use crate::seams::PakSeam;
 
@@ -531,6 +531,8 @@ impl PakIndex {
                 compression_methods,
             )?));
         }
+        // Parsed in full; free the main index before the FDI read.
+        drop(index_bytes);
 
         // Issue #127: pre-validate the FDI region's offset+size
         // against `file_size` BEFORE the `MAX_FDI_BYTES` cap below.
@@ -693,20 +695,11 @@ impl PakIndex {
                             },
                         });
                     }
-                    let mut s = String::new();
-                    let reserve_res = s.try_reserve_exact(total);
-                    crate::seams::seam_check!(
-                        reserve_res,
-                        crate::testing::oom::SeamSite::Pak(PakSeam::FdiFullPath)
-                    );
-                    reserve_res.map_err(|source| PaksmithError::InvalidIndex {
-                        fault: IndexParseFault::AllocationFailed {
-                            context: AllocationContext::FdiFullPathBytes,
-                            requested: total,
-                            source,
-                            path: None,
-                        },
-                    })?;
+                    let mut s = try_index_string(
+                        total,
+                        AllocationContext::FdiFullPathBytes,
+                        PakSeam::FdiFullPath,
+                    )?;
                     s.push_str(dir_prefix);
                     s.push_str(&file_name);
                     s
@@ -912,6 +905,11 @@ impl PakIndex {
             });
         }
 
+        // Free what the walk read before `from_entries` builds on top.
+        drop(encoded_entries_blob);
+        drop(non_encoded_entries);
+        drop(fdi_bytes);
+        drop(phi_map);
         Self::from_entries(mount_point, entries, encoded_regions)
     }
 }

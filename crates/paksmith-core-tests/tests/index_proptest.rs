@@ -386,9 +386,9 @@ proptest! {
         // generates random `(dir, [files])` tuples without uniqueness
         // constraints, so two `(dir, file)` pairs can collide on full
         // path (issue #88: `from_entries` last-wins-dedups them).
-        // Apply the same dedup the production code does (reverse-walk
-        // + skip-if-seen + reverse) so oracles 2/3 don't false-fail
-        // on collision-shrunk inputs. Issue #88 follow-through.
+        // Apply the production code's last-wins dedup so oracles 2/3
+        // don't false-fail on collision-shrunk inputs. Issue #88
+        // follow-through.
         let expected_paths_full_walk: Vec<String> = fdi
             .iter()
             .flat_map(|(dir_name, files)| {

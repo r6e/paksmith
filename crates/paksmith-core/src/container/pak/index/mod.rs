@@ -59,7 +59,7 @@ use tracing::warn;
 
 use crate::container::pak::crypto::AesKey;
 use crate::container::pak::version::PakVersion;
-use crate::error::{AllocationContext, check_index_reserve};
+use crate::error::{AllocationContext, check_index_reserve, try_index_string, try_reserve_index};
 use crate::seams::PakSeam;
 
 /// Cap on how many duplicate filenames we sample for the dedupe warning.
@@ -458,24 +458,21 @@ impl PakIndex {
     ///
     /// Fallible because `entries.len()` is bounded by the parsers'
     /// per-path `try_reserve_exact`, which can legitimately accept
-    /// tens of millions of entries on a multi-GB pak. Actual HashMap
-    /// memory is roughly `entries.len() / load_factor *
-    /// sizeof(bucket) + sum(filename_bytes)`; hashbrown's load factor
-    /// is ~7/8 so a 1M-entry index over-reserves to ~1.14M buckets,
-    /// totalling hundreds of MiB at high entry counts. The
-    /// `try_reserve` (NOT `try_reserve_exact`) call below preserves
-    /// the prior `with_capacity(N)` behavior exactly — switching to
-    /// `try_reserve_exact` would more tightly bound memory but would
-    /// require pre-tuning the hint to account for the load factor or
-    /// risk a reallocation during `insert`.
+    /// tens of millions of entries on a multi-GB pak. It reserves
+    /// fallibly a set of the filenames borrowed from `entries` and a
+    /// survivor flag per entry, both freed before it reserves the
+    /// survivors' lookup map and a copy of each survivor's filename as
+    /// its key.
     ///
-    /// The seams `PakSeam::DedupTracker` and `PakSeam::ByPathLookup` fail
-    /// these reservations in tests. The bound checks at the call sites
-    /// provide the user-facing protection; these two reservations surface
-    /// alloc failure as a typed error rather than `handle_alloc_error`.
+    /// A fallible reservation returns a typed error only when the
+    /// request is refused up front, not when pages committed later run
+    /// out; the bound checks at the call sites provide the user-facing
+    /// protection. The seams
+    /// `PakSeam::DedupTracker`, `DedupSurvivorFlags`, `ByPathLookup` and
+    /// `ByPathKey` fail these reservations in tests.
     pub(super) fn from_entries(
         mount_point: String,
-        entries: Vec<PakIndexEntry>,
+        mut entries: Vec<PakIndexEntry>,
         encoded_regions: Option<EncodedRegions>,
     ) -> crate::Result<Self> {
         // **Last-wins dedup**. UE writers may emit duplicate filenames
@@ -494,39 +491,50 @@ impl PakIndex {
         // single aggregated `warn!` documents the dropped count + a
         // sample so no information is lost in the operator log.
         //
-        // Implementation: reverse-walk + skip-if-seen yields the
-        // last occurrence of each filename (the survivor); reverse
-        // again to restore original wire order.
+        // Implementation: a reverse walk flags the last occurrence of
+        // each filename (the survivor), latest first, and `retain` keeps
+        // the flagged entries in wire order.
         let entries_len = entries.len();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        check_index_reserve(
-            seen.try_reserve(entries_len),
-            entries_len,
-            AllocationContext::DedupTracker,
-            PakSeam::DedupTracker,
-        )?;
-        let mut sampled_dups: Vec<String> = Vec::new();
-        let mut deduped_rev: Vec<PakIndexEntry> = Vec::with_capacity(entries_len);
-        for entry in entries.into_iter().rev() {
-            if seen.insert(entry.filename.clone()) {
-                deduped_rev.push(entry);
-            } else if sampled_dups.len() < MAX_SAMPLED_DUPS {
-                sampled_dups.push(entry.filename.clone());
+        let survives = {
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            check_index_reserve(
+                seen.try_reserve(entries_len),
+                entries_len,
+                AllocationContext::DedupTracker,
+                PakSeam::DedupTracker,
+            )?;
+            let mut survives: Vec<bool> = Vec::new();
+            try_reserve_index(
+                &mut survives,
+                entries_len,
+                AllocationContext::DedupSurvivorFlags,
+                PakSeam::DedupSurvivorFlags,
+            )?;
+            let mut sampled_dups: Vec<&str> = Vec::new();
+            for entry in entries.iter().rev() {
+                let fresh = seen.insert(entry.filename());
+                if !fresh && sampled_dups.len() < MAX_SAMPLED_DUPS {
+                    sampled_dups.push(entry.filename());
+                }
+                survives.push(fresh);
             }
-        }
-        let dup_count = entries_len - deduped_rev.len();
-        deduped_rev.reverse();
-        let entries = deduped_rev;
+            let dup_count = entries_len - seen.len();
 
-        if dup_count > 0 {
-            warn!(
-                dup_count,
-                samples = ?sampled_dups,
-                "pak index contains {dup_count} duplicate filename(s) — last entry wins for each; \
-                 first {} shown",
-                sampled_dups.len()
-            );
-        }
+            if dup_count > 0 {
+                warn!(
+                    dup_count,
+                    samples = ?sampled_dups,
+                    "pak index contains {dup_count} duplicate filename(s) — last entry wins for each; \
+                     first {} shown",
+                    sampled_dups.len()
+                );
+            }
+            survives
+        };
+        entries.retain({
+            let mut flags = survives.into_iter().rev();
+            move |_| flags.next() == Some(true)
+        });
 
         // Build by_path against the deduped entries. No collisions
         // possible at this point — the dedup loop above used `seen`
@@ -541,10 +549,16 @@ impl PakIndex {
             PakSeam::ByPathLookup,
         )?;
         for (i, entry) in entries.iter().enumerate() {
+            let mut key = try_index_string(
+                entry.filename().len(),
+                AllocationContext::ByPathKeyBytes,
+                PakSeam::ByPathKey,
+            )?;
+            key.push_str(entry.filename());
             // Guaranteed-fresh insert — `seen` already enforced
             // uniqueness in the dedup loop above. The discarded
             // `Option<usize>` is `None` for every iteration here.
-            let _ = by_path.insert(entry.filename.clone(), i);
+            let _ = by_path.insert(key, i);
         }
 
         Ok(Self {
@@ -1197,6 +1211,86 @@ mod tests {
             "{err:?}"
         );
         assert!(logs_contain("dup_count=1"));
+    }
+
+    /// `from_entries` reserves a survivor flag for every entry before it
+    /// logs anything, and a failed reservation surfaces as a typed fault.
+    #[tracing_test::traced_test]
+    #[test]
+    fn from_entries_surfaces_dedup_survivor_flags_allocation_failed() {
+        use crate::seams::SeamSite;
+        use crate::testing::oom::arm_at;
+        use crate::untrusted::test_support::lines_counted;
+
+        let _guard = arm_at(SeamSite::Pak(PakSeam::DedupSurvivorFlags), 0);
+        let err = try_flat_index(&[("a", 1), ("a", 1)]).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::DedupSurvivorFlags,
+                        requested: 2,
+                        path: None,
+                        ..
+                    },
+                }
+            ),
+            "{err:?}"
+        );
+        logs_assert(lines_counted("", 0));
+    }
+
+    /// `from_entries` reserves its dedup set before the survivor flags: with
+    /// both reservations armed to fail, the set's is the one reported.
+    #[test]
+    fn from_entries_reserves_its_dedup_set_before_its_flags() {
+        use crate::seams::SeamSite;
+        use crate::testing::oom::arm_at;
+
+        let _flags = arm_at(SeamSite::Pak(PakSeam::DedupSurvivorFlags), 0);
+        let _set = arm_at(SeamSite::Pak(PakSeam::DedupTracker), 0);
+        let err = try_flat_index(&[("a", 1), ("a", 1)]).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::DedupTracker,
+                        ..
+                    },
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// `from_entries` copies each survivor's name into its own key, in
+    /// order: armed for the second copy, `bbb`'s three bytes are refused;
+    /// armed for the first, `aa`'s two.
+    #[test]
+    fn from_entries_copies_by_path_keys_fallibly_in_order() {
+        use crate::seams::SeamSite;
+        use crate::testing::oom::arm_at;
+
+        let refused = |skip| {
+            let _guard = arm_at(SeamSite::Pak(PakSeam::ByPathKey), skip);
+            let err = try_flat_index(&[("aa", 1), ("bbb", 1)]).unwrap_err();
+            match err {
+                PaksmithError::InvalidIndex {
+                    fault:
+                        IndexParseFault::AllocationFailed {
+                            context: AllocationContext::ByPathKeyBytes,
+                            requested,
+                            path: None,
+                            ..
+                        },
+                } => requested,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(refused(1), 3);
+        assert_eq!(refused(0), 2);
     }
 
     /// Without a PHI, two FDI directories that differ only by a leading

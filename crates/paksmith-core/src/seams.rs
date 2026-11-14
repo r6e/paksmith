@@ -85,9 +85,10 @@ pub enum PakSeam {
     /// [`crate::error::IndexParseFault::AllocationFailed`] with
     /// `context: AllocationContext::FStringUtf8Bytes`.
     FstringUtf8,
-    /// FDI walk's `dir + file` full-path `String::try_reserve_exact`.
-    /// Surfaces as [`crate::error::IndexParseFault::AllocationFailed`]
-    /// with `context: AllocationContext::FdiFullPathBytes`.
+    /// FDI walk's `dir + file` full-path reservation, through
+    /// `crate::error::try_index_string`. Surfaces as
+    /// [`crate::error::IndexParseFault::AllocationFailed`] with
+    /// `context: AllocationContext::FdiFullPathBytes`.
     ///
     /// `skip_count >= 1` is the typical knob — the first FDI entry's
     /// path reservation succeeds and the failure fires on a later
@@ -133,13 +134,23 @@ pub enum PakSeam {
     /// [`crate::error::IndexParseFault::AllocationFailed`] with
     /// `context: AllocationContext::ByPathLookup`.
     ByPathLookup,
+    /// `PakIndex::from_entries`' flag per entry marking the survivors of
+    /// its dedup (#848). Surfaces as
+    /// [`crate::error::IndexParseFault::AllocationFailed`] with
+    /// `context: AllocationContext::DedupSurvivorFlags`.
+    DedupSurvivorFlags,
+    /// `PakIndex::from_entries`' copy of each survivor's filename as its
+    /// lookup key (#848), through `crate::error::try_index_string`.
+    /// Surfaces as [`crate::error::IndexParseFault::AllocationFailed`]
+    /// with `context: AllocationContext::ByPathKeyBytes`.
+    ByPathKey,
 }
 
 impl PakSeam {
     /// Total number of pak-side seam sites. Pinned by the `const _`
     /// guard below and by the exhaustive `match` in
     /// [`SeamSite::slot`].
-    pub const COUNT: usize = 17;
+    pub const COUNT: usize = 19;
 }
 
 // Compile-time guard: refuses to build when `COUNT` and the largest
@@ -147,7 +158,7 @@ impl PakSeam {
 // the `AssetSeam` guard below): variants are declared in source order
 // with no explicit `= N` assignments and no gaps, so that
 // `last as usize + 1` equals the variant count.
-const _: [(); PakSeam::COUNT] = [(); PakSeam::ByPathLookup as usize + 1];
+const _: [(); PakSeam::COUNT] = [(); PakSeam::ByPathKey as usize + 1];
 
 /// Asset parser OOM seams (#276). The inner enum of [`SeamSite::Asset`].
 ///
@@ -394,10 +405,11 @@ mod tests {
 
     /// Every [`SeamSite`] variant names its end-to-end coverage test.
     /// Pak/index/decompression variants are tested in
-    /// `paksmith-core-tests/tests/oom_pak.rs`, except `DedupTracker` and
-    /// `ByPathLookup`, tested in `container/pak/index/mod.rs` so that
-    /// cargo-mutants credits them; asset-side variants
-    /// are tested in `paksmith-core-tests/tests/oom_asset.rs`, except
+    /// `paksmith-core-tests/tests/oom_pak.rs`, except `DedupTracker`,
+    /// `ByPathLookup`, `DedupSurvivorFlags` and `ByPathKey`, tested in
+    /// `container/pak/index/mod.rs` so that cargo-mutants credits them;
+    /// asset-side variants are tested in
+    /// `paksmith-core-tests/tests/oom_asset.rs`, except
     /// `SkinWeightDataBytes`, tested in
     /// `asset/exports/mesh/skin_weights.rs` because `testing` builds no
     /// wire-level skeletal mesh; `.usmap`
@@ -453,6 +465,10 @@ mod tests {
                 }
                 PakSeam::DedupTracker => "from_entries_surfaces_dedup_tracker_allocation_failed",
                 PakSeam::ByPathLookup => "from_entries_warns_before_reserving_by_path",
+                PakSeam::DedupSurvivorFlags => {
+                    "from_entries_surfaces_dedup_survivor_flags_allocation_failed"
+                }
+                PakSeam::ByPathKey => "from_entries_copies_by_path_keys_fallibly_in_order",
             }
         }
         const fn asset_integration_test_name(site: AssetSeam) -> &'static str {
@@ -567,6 +583,8 @@ mod tests {
                 PakSeam::Lz4OutputReserve => 14,
                 PakSeam::DedupTracker => 15,
                 PakSeam::ByPathLookup => 16,
+                PakSeam::DedupSurvivorFlags => 17,
+                PakSeam::ByPathKey => 18,
             }
         }
         const fn expected_asset_slot(site: AssetSeam) -> usize {
@@ -617,6 +635,8 @@ mod tests {
             PakSeam::Lz4OutputReserve,
             PakSeam::DedupTracker,
             PakSeam::ByPathLookup,
+            PakSeam::DedupSurvivorFlags,
+            PakSeam::ByPathKey,
         ];
         assert_eq!(pak_all.len(), PakSeam::COUNT);
         for site in pak_all {
