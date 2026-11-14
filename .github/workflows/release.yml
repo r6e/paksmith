@@ -81,8 +81,16 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
+      # No persisted token: this job holds `contents: write` and runs
+      # every dependency's build script. No restored cache: the binaries
+      # are handed to users, and the cache scope is shared with every
+      # other job on main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-rust
+        with:
+          cache: "false"
       - name: Build and package
         id: package
         uses: ./.github/actions/package
