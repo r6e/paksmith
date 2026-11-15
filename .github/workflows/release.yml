@@ -1,12 +1,17 @@
 name: Release
 
 # release-please opens release PRs from conventional commits on main.
-# Merging the release PR re-triggers this workflow; release-please
-# creates the tag + GitHub Release, and `build-release` uploads
-# per-platform binaries via output-chain (same workflow run).
+# Merging the release PR re-triggers this workflow, and release-please
+# creates the tag and a draft GitHub Release. The tag push starts
+# release-assets.yml, which attaches the binaries and publishes.
 #
-# release-please uses an App-minted token (PR creation, downstream-
-# workflow trigger). build-release uses GITHUB_TOKEN for asset upload.
+# release-please-config.json sets `draft` because a published release
+# accepts no more assets, and `force-tag-creation` because a draft
+# alone has no tag. All three crates share one tag, so only the
+# paksmith-cli entry creates a release.
+#
+# If a run fails, re-run it: release-please picks up from the merged
+# release PR.
 on:
   push:
     branches: [main]
@@ -16,34 +21,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false # never cancel a release-PR update mid-flight
 
-permissions:
-  # Workflow-level grant to the default GITHUB_TOKEN. `contents: write`
-  # is used by build-release's `gh release upload`. release-please's
-  # PR/tag/release creation goes through the App token instead — no
-  # `pull-requests: write` on GITHUB_TOKEN needed.
-  contents: write
+# release-please works through the App token alone.
+permissions: {}
 
 jobs:
   release-please:
     name: release-please
+    # A dispatch from another ref would run that ref's copy of this file.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    outputs:
-      # `releases_created` (plural) is the always-emitted top-level
-      # boolean. The singular `release_created` is ONLY emitted when
-      # a package sits at repo root `.`, which paksmith doesn't have
-      # (all three packages live under crates/) — so the singular form
-      # would always be empty, silently skipping build-release forever.
-      # `tag_name` uses the cli path's per-path output; linked-versions
-      # keeps all three at the same version, so any path works.
-      release_created: ${{ steps.rp.outputs.releases_created }}
-      tag_name: ${{ steps.rp.outputs['crates/paksmith-cli--tag_name'] }}
     steps:
       # Mints a 1h installation token via the `paksmith-release-please`
       # App (installed on this repo only). The App token unblocks PR
       # creation (which GITHUB_TOKEN can't do here) and lets the
-      # release tag trigger downstream workflows for any future split-
-      # workflow design (e.g. Issue #166's crates.io publish).
+      # release tag trigger downstream workflows.
       # Scope, blast-radius, and rotation procedure:
       # SECURITY.md#paksmith-release-please.
       - name: Mint installation token (paksmith-release-please App)
@@ -53,60 +45,7 @@ jobs:
           client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-        id: rp
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           token: ${{ steps.app-token.outputs.token }}
-
-  build-release:
-    name: build-release (${{ matrix.target }})
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    permissions:
-      contents: write # `gh release upload`
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # ubuntu-22.04 (glibc 2.35) for broader downstream compat —
-          # ubuntu-latest is 24.04 with glibc 2.39 which breaks on
-          # Debian stable / RHEL 8-9 / older Ubuntu LTS.
-          #
-          # Keep in step with nightly.yml's build matrix.
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-    steps:
-      # No persisted token: this job holds `contents: write` and runs
-      # every dependency's build script. No restored cache: the binaries
-      # are handed to users, and the cache scope is shared with every
-      # other job on main.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          cache: "false"
-      - name: Build and package
-        id: package
-        uses: ./.github/actions/package
-        with:
-          label: ${{ needs.release-please.outputs.tag_name }}
-          target: ${{ matrix.target }}
-      # `gh release upload --clobber` so a workflow retry overwrites
-      # prior uploads instead of erroring on duplicate asset name. No
-      # new action publisher needed (gh CLI ships on the runner).
-      - name: Upload artifacts to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-          ARCHIVE: ${{ steps.package.outputs.archive }}
-          CHECKSUMS: ${{ steps.package.outputs.checksums }}
-        shell: bash
-        run: gh release upload "${TAG}" "${ARCHIVE}" "${CHECKSUMS}" --clobber

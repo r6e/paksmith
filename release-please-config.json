@@ -5,10 +5,12 @@
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
   "bootstrap-sha": "92fc1dc99a01c9ac0fdfe4ec521277fab71a8808",
+  "draft": true,
+  "force-tag-creation": true,
   "packages": {
-    "crates/paksmith-core": {},
+    "crates/paksmith-core": { "skip-github-release": true },
     "crates/paksmith-cli": {},
-    "crates/paksmith-gui": {}
+    "crates/paksmith-gui": { "skip-github-release": true }
   },
   "plugins": [
     { "type": "cargo-workspace", "merge": false },

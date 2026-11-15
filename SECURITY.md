@@ -56,13 +56,13 @@ paksmith uses installation-scoped GitHub Apps for workflows that need permission
 
 ### paksmith-release-please
 
-A GitHub App installed only on `r6e/paksmith`. `.github/workflows/release.yml` uses [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token) to mint a 1-hour installation token that authenticates the `googleapis/release-please-action` step. This pattern is in place because the default `GITHUB_TOKEN` cannot create pull requests here (the org-wide "Allow GitHub Actions to create and approve pull requests" setting is intentionally off), and an App token is more durable than a PAT and is GitHub's endorsed pattern for 2024+. Background: PR #173.
+A GitHub App installed only on `r6e/paksmith`. `.github/workflows/release.yml` uses [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token) to mint a 1-hour installation token that authenticates the `googleapis/release-please-action` step. The release tag that step creates starts `.github/workflows/release-assets.yml`, which builds the tagged commit and publishes the release. This pattern is in place because the default `GITHUB_TOKEN` cannot create pull requests here (the org-wide "Allow GitHub Actions to create and approve pull requests" setting is intentionally off), and an App token is more durable than a PAT and is GitHub's endorsed pattern for 2024+. Background: PR #173.
 
-**Repository permissions**: Contents read+write (release-branch commits), Pull requests read+write (release PRs), Metadata read (default).
+**Repository permissions**: Contents read+write (release-branch commits, the release tag, the draft release), Pull requests read+write (release PRs), Metadata read (default).
 
 **Repo configuration**: `vars.APP_CLIENT_ID` (App Client ID, non-secret), `secrets.APP_PRIVATE_KEY` (App private key, PEM-encoded).
 
-**Blast radius if compromised**: an attacker with `APP_PRIVATE_KEY` can mint tokens scoped to **Contents + Pull Requests + Metadata on `r6e/paksmith` only** — no other repos, no org-wide resources, no Issues/Actions/Secrets/Packages access. Realistic worst case: forged commits to release branches and forged release PRs, both visible in the audit log.
+**Blast radius if compromised**: an attacker with `APP_PRIVATE_KEY` can mint tokens scoped to **Contents + Pull Requests + Metadata on `r6e/paksmith` only** — no other repos, no org-wide resources, no Issues/Actions/Secrets/Packages access. Realistic worst case: forged commits to release branches, forged release PRs, and a forged release. Contents write lets the holder tag any commit, which `release-assets.yml` then builds and publishes, or attach assets to a draft. Releases are immutable, so a forged release's version can never be reused. All of it is visible in the audit log.
 
 #### Rotation procedure
 
