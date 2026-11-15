@@ -1,16 +1,18 @@
 name: Release assets
 
 # Builds the archives for a release tag, attaches them to that tag's
-# draft GitHub Release, and publishes it. release.yml's release-please
-# creates the tag and the draft; the tag push starts this workflow.
+# draft GitHub Release, and publishes it. release.yml describes how the
+# tag and the draft come to exist.
 #
-# The release is a draft until every asset is on it because the
-# repository's releases are immutable: a published release accepts no
-# more assets, and its tag can never be reused.
-#
-# If a run fails before publishing, the draft stays and "Re-run all
-# jobs" finishes it. If no run started for a tag, dispatch this
-# workflow from main with that tag.
+# Recovery, while the release is still a draft:
+# - A job failed: "Re-run failed jobs".
+# - This file is wrong, the artifacts have expired, or no run started
+#   for the tag: fix main if needed, then dispatch this workflow from
+#   main with the tag. A tag push runs the tagged commit's copy of
+#   this file, re-runs included, and a dispatch runs main's. The local
+#   actions come from the tagged commit either way.
+# - The tag exists without a draft: re-run release.yml, which accepts
+#   the existing tag and creates the draft, then dispatch this workflow.
 on:
   push:
     tags: ["v*"]
@@ -31,10 +33,40 @@ env:
   TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
-  build:
-    name: build (${{ matrix.target }})
+  # Pins the commit once, so every build leg and the publish job agree
+  # on it even if the tag moves or a job is re-run later.
+  check:
+    name: check
     # A dispatch from another ref would run that ref's copy of this file.
     if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.tag.outputs.sha }}
+    steps:
+      - name: Resolve the tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::'${TAG}' is not a release tag"
+            exit 1
+          }
+          sha="$(gh api "repos/${GH_REPO}/commits/refs/tags/${TAG}" --jq .sha)"
+          [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::${TAG} resolved to '${sha}', not a commit"
+            exit 1
+          }
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: check
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
@@ -56,20 +88,13 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - name: Check the tag
-        shell: bash
-        run: |
-          [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "::error::'${TAG}' is not a release tag"
-            exit 1
-          }
       # This job runs every dependency's build script, so it gets a
       # read-only token that is not persisted. No restored cache: the
       # binaries are handed to users, and the cache scope is shared
       # with every other job on main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.TAG }}
+          ref: ${{ needs.check.outputs.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
@@ -94,7 +119,7 @@ jobs:
   # release, so the write token never meets a build script.
   publish:
     name: publish
-    needs: build
+    needs: [check, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -103,20 +128,21 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: assets
-      # Publishing cannot be undone, so it happens only for a draft and
-      # only with exactly the expected files, each from its own
-      # target's artifact.
+      # Publishing cannot be undone, so it happens only for a draft
+      # whose tag still names the built commit, and only when the draft
+      # carries exactly the expected files, each from its own target's
+      # artifact.
       - name: Attach the assets and publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          BUILT_SHA: ${{ needs.check.outputs.sha }}
         run: |
           set -euo pipefail
           fail() {
             echo "::error::$1"
             exit 1
           }
-          [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "'${TAG}' is not a release tag"
           files=()
           for entry in \
             x86_64-unknown-linux-gnu:tar.gz \
@@ -133,6 +159,13 @@ jobs:
           [[ "${found}" -eq "${#files[@]}" ]] || fail "expected ${#files[@]} files under assets/, found ${found}"
           draft="$(gh release view "${TAG}" --json isDraft --jq .isDraft)"
           [[ "${draft}" == true ]] || fail "release ${TAG} is not a draft"
+          tagged="$(gh api "repos/${GH_REPO}/commits/refs/tags/${TAG}" --jq .sha)"
+          [[ "${tagged}" == "${BUILT_SHA}" ]] ||
+            fail "${TAG} names ${tagged}, but the assets were built from ${BUILT_SHA}"
           # `--clobber` replaces assets an earlier attempt left on the draft.
           gh release upload "${TAG}" "${files[@]}" --clobber
+          expected="$(printf '%s\n' "${files[@]##*/}" | sort)"
+          attached="$(gh release view "${TAG}" --json assets --jq '.assets[].name' | sort)"
+          [[ "${attached}" == "${expected}" ]] ||
+            fail "release ${TAG} must carry only the built assets, but carries: ${attached//$'\n'/ }"
           gh release edit "${TAG}" --draft=false

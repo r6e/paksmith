@@ -9,6 +9,9 @@ name: Release
 # accepts no more assets, and `force-tag-creation` because a draft
 # alone has no tag. All three crates share one tag, so only the
 # paksmith-cli entry creates a release.
+#
+# If a run fails, re-run it: release-please picks up from the merged
+# release PR.
 on:
   push:
     branches: [main]
@@ -32,7 +35,7 @@ jobs:
       # Mints a 1h installation token via the `paksmith-release-please`
       # App (installed on this repo only). The App token unblocks PR
       # creation (which GITHUB_TOKEN can't do here) and lets the
-      # release tag trigger release-assets.yml.
+      # release tag trigger downstream workflows.
       # Scope, blast-radius, and rotation procedure:
       # SECURITY.md#paksmith-release-please.
       - name: Mint installation token (paksmith-release-please App)
