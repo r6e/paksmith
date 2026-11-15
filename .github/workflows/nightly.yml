@@ -104,6 +104,7 @@ jobs:
           label: ${{ needs.check.outputs.label }}
           target: ${{ matrix.target }}
           retention-days: 30
+          version-label: ${{ needs.check.outputs.label }}
 
   # Signs a statement that this run built each archive, for
   # `gh attestation verify` to check. It runs no repository code, so the

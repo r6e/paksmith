@@ -375,7 +375,10 @@ fn version_flag() {
     cmd.arg("--version");
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("paksmith"));
+        .stdout(predicate::str::starts_with(concat!(
+            "paksmith ",
+            env!("CARGO_PKG_VERSION")
+        )));
 }
 
 // ── AES key integration tests ──────────────────────────────────────────────
