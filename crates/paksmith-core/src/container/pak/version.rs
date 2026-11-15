@@ -153,6 +153,12 @@ impl PakVersion {
         self >= Self::PathHashIndex
     }
 
+    /// Whether this version stores compression-block offsets relative to
+    /// the entry (v5+) rather than to the file.
+    pub(crate) fn has_relative_chunk_offsets(self) -> bool {
+        self >= Self::RelativeChunkOffsets
+    }
+
     /// The wire-format version number this variant serializes to.
     /// V8A and V8B both return `8` (they share the on-disk version
     /// field; the slot count in the footer disambiguates).
@@ -283,5 +289,12 @@ mod tests {
         assert!(!PakVersion::FrozenIndex.has_path_hash_index());
         assert!(PakVersion::PathHashIndex.has_path_hash_index());
         assert!(PakVersion::Fnv64BugFix.has_path_hash_index());
+    }
+
+    #[test]
+    fn relative_chunk_offsets_threshold() {
+        assert!(!PakVersion::IndexEncryption.has_relative_chunk_offsets());
+        assert!(PakVersion::RelativeChunkOffsets.has_relative_chunk_offsets());
+        assert!(PakVersion::Fnv64BugFix.has_relative_chunk_offsets());
     }
 }

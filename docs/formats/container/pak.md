@@ -601,7 +601,15 @@ policy.
   `archive_claims_integrity()` is private), and
   `ContainerReader::entry_integrity(&meta)` classifies one entry's
   stored claim against it, yielding
-  `EntryIntegrity::{NotInIndex, NoClaim, Stripped, Claim}`.
+  `EntryIntegrity::{NotInIndex, NoClaim, Stripped, Claim}`. Each
+  `EntryMetadata` from `entries()` carries a `payload_extent()`, the span
+  a read of the entry may touch once its in-data header copy matches its
+  index record: from the record's offset through its header copy and
+  payload (`compressed_size`, or `uncompressed_size` if larger for a
+  stored entry, aligned to 16 when encrypted), widened from v5 to
+  `offset +` each compression block's end. v3-v4 block offsets are
+  file-relative, and a read refuses those entries before following them,
+  so their blocks are left out.
 - `pub struct PakFooter` — `version()`, `index_offset()`, `index_size()`,
   `index_hash()`, `is_encrypted()`, `encryption_key_guid()`, `frozen_index()`.
 - `pub enum PakVersion` — `Initial`, `NoTimestamps`, …, `Fnv64BugFix`
