@@ -83,8 +83,10 @@ different scope: repak substitutes the entry's `uncompressed` size
 whenever there is exactly one block (`entry.rs`, `ranges.len() == 1`
 branch, all versions), while CUE4Parse does so ONLY in its
 encoded-entry (v10+) constructor (`compressionBlocksCount == 1 →
-UncompressedSize`) — its legacy v3-v9 reader takes the stored
-`compression_block_size` raw and rejects the inconsistent shape.
+UncompressedSize`) — its legacy reader, which reads the records of
+an unfrozen v3-v9 index and the non-encoded records of a v10+ one,
+takes the stored `compression_block_size` raw (as does its reader for
+a frozen v9 index) and rejects the inconsistent shape.[^2]
 Paksmith's final-block budget is observably equivalent to the
 normalization where it applies: a single block is also the final
 block, so its budget is the full `uncompressed_size` regardless of
@@ -92,15 +94,18 @@ the stored `compression_block_size` — a single-block entry declaring
 a `compression_block_size` *smaller* than its `uncompressed_size`
 (a shape no writer in paksmith's fixture corpus produces) decodes
 here exactly as repak decodes it, on the paths where it reaches the
-decoder at all (the v3-v9 inline index — the v10+ encoded index
-rejects it upstream at parse; see the next paragraph).
+decoder at all (an inline record, in an unfrozen v3-v9 index or
+among a v10+ index's non-encoded records — an encoded record is
+rejected upstream at parse; see the next paragraph).
 
 The inconsistent claim `uncompressed_size > block_count ×
-compression_block_size` splits by index generation: the v10+
-**encoded** index rejects it at parse time
+compression_block_size` splits by record form: an **encoded** record
+(v10+) is rejected at parse time
 (`IndexParseFault::BoundsExceeded`, fail-closed, both codecs),
-while the v3-v9 **inline** index applies no parse-time bound — the
-shape reaches the decoder, where BOTH sub-shapes decode.
+while an **inline** record (every record of an unfrozen v3-v9 index,
+and every v10+ non-encoded one; paksmith refuses a frozen v9 index,
+#637) gets no parse-time bound — the shape reaches the decoder, where
+BOTH sub-shapes decode.
 Single-block entries decode via the final-block budget (see above,
 matching repak; CUE4Parse's legacy reader rejects this shape — the
 references disagree with each other here, and paksmith sides with
@@ -191,15 +196,18 @@ raw-block `LZ4Codec.Decode`) — both anchors agree the block is raw
 and the output size is caller-derived.[^1]
 
 Integrity-path coverage: repak writes a **real** entry SHA1, but
-only the *legacy* directory index (v8b) stores a per-entry hash
-field, so `verify_entry` on `real_v8b_lz4.pak` reaches the hash arm
-and returns `Verified` — an end-to-end check that paksmith's entry
-hashing matches repak's over real blocks. The v10+ **encoded** index
-(v11) carries no per-entry hash field, so `verify_entry` on
-`real_v11_lz4.pak` returns `SkippedNoHash` (structural, not a zeroed
-slot). Negative behavior (short non-final block, short final block,
-over-expanding block, structural corruption, OOM at the output
-reservation) is pinned by synthetic v8b paks built with
+`verify_entry` reads it from the entry's *index* record, and only an
+inline index record (a record of an unfrozen v3-v9 index, as in v8b,
+or a v10+ non-encoded one) has the field, so `verify_entry` on
+`real_v8b_lz4.pak` reaches the hash arm and returns `Verified` — an
+end-to-end check that paksmith's entry hashing matches repak's over
+real blocks. An **encoded** index record (v10+) has no per-entry hash
+field, though the entry's in-data copy carries one, and
+`real_v11_lz4.pak`'s one entry is encoded, so `verify_entry` on it
+returns `SkippedNoHash` (structural, not a zeroed slot). Negative
+behavior (short non-final block, short final block, over-expanding
+block, structural corruption, OOM at the output reservation) is
+pinned by synthetic v8b paks built with
 `testing::wire::build_v8b_lz4_pak`, which writes a legacy index with
 a real hash so the hash arm and the decode-failure faults are
 observable — and lets tests craft the inconsistent claims a real
@@ -210,15 +218,16 @@ writer never produces.
 **Status:** `complete`. Three documented derivation divergences vs
 at least one cited reference remain, all on adversarial-only shapes
 (see "Per-block decompressed size derivation"; note the references
-also disagree with EACH OTHER on the v3-v9 single-block case):
-(1) on the v10+ **encoded** index, a single-block entry whose
-stored `compression_block_size` is smaller than its
+also disagree with EACH OTHER on the inline-record single-block case):
+(1) a single-block **encoded** record (v10+) whose stored
+`compression_block_size` is smaller than its
 `uncompressed_size` is rejected fail-closed at index parse
 (`IndexParseFault::BoundsExceeded`) rather than decoded via the
 single-block normalization both references apply there — issue
-#685. (2) On v3-v9, the same single-block shape decodes (matching
-repak) where CUE4Parse's legacy reader rejects it. (3) On v3-v9, a
-multi-block entry whose FINAL block carries the excess decodes
+#685. (2) The same single-block shape in an inline record (unfrozen
+v3-v9, or v10+ non-encoded) decodes (matching repak) where
+CUE4Parse's legacy reader rejects it. (3) An inline multi-block
+record whose FINAL block carries the excess decodes
 (lenient, consistent with paksmith's own zlib path) where both
 references reject it.
 
@@ -263,3 +272,4 @@ references reject it.
 ## References
 
 [^1]: Decode-side oracle: `FabianFG/CUE4Parse/CUE4Parse/Compression/Compression.cs@c7e78422ec4858036c9bba5d9d3c55eb197f93c9` (routes `CompressionMethod.LZ4` to the K4os raw-block `LZ4Codec.Decode`). Write-side oracle: `trumank/repak/repak/src/data.rs@e215472c51db69328b1ce77be2db24d24c1d646b` (`lz4_flex::block::compress`) and `trumank/repak/repak/src/entry.rs@e215472c51db69328b1ce77be2db24d24c1d646b` (`lz4_flex::block::decompress_into` with `chunks_mut(chunk_size)`, where `chunk_size` is the entry's `uncompressed` size for single-block entries and `compression_block_size` otherwise — see "Per-block decompressed size derivation" for how that maps onto the formula this doc specifies). Block-format specification: the LZ4 project's `lz4_Block_format.md` (`lz4/lz4` on GitHub).
+[^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/PakFileReader.cs@c7e78422ec4858036c9bba5d9d3c55eb197f93c9` — `Mount` (L251-L269) sends a v10+ index to `ReadIndexUpdated` (game-specific readers aside), a frozen one to `ReadFrozenIndex` and any other to `ReadIndexLegacy`. L326 (`ReadIndexLegacy`) and L398 (a v10+ index's non-encoded records) build entries with the `FPakEntry(PakFileReader, string, FArchive)` constructor, and L570 (`ReadFrozenIndex`) with `FPakEntry(PakFileReader, FMemoryImageArchive)`. At the same revision, `CUE4Parse/UE4/Pak/Objects/FPakEntry.cs` L39 and L272 declare those two constructors, which read `CompressionBlockSize` as stored (L119 and L280), and L228-L230 set an encoded single-block entry's `CompressionBlockSize` to its `UncompressedSize`.
