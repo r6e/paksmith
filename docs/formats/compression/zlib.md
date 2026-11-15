@@ -135,9 +135,14 @@ UE's writer doesn't use the optional preset-dictionary feature (RFC 1950 FDICT b
 The decompression-bomb defense is the load-bearing safety layer.
 Three nested controls:
 
-- **Entry-level cap.** `uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`
-  rejected at index-parse time (`IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, … }`).
-  `stream_zlib_to` never runs for these entries.
+- **Entry-level cap.** `MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`.
+  Once the index is parsed, `PakReader::open` checks every entry's
+  `uncompressed_size` against it and refuses the archive when one is
+  larger (`IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, … }`),
+  so `stream_zlib_to` never runs for that entry.
+  [`../container/pak.md`](../container/pak.md) §*Implementation
+  hardening* lists the other sizes the cap bounds and says which check
+  reports which.
 - **Per-block budget cap.** Each block decompresses against a
   `take(budget)` adapter where `budget = remaining_uncompressed + 1`.
   A block that pushes the cumulative decompressed total past
