@@ -705,9 +705,12 @@ pub enum IndexParseFault {
     /// `file_count > fdi_size / 9`,
     /// `entry_count > index_size / entry_min_record_bytes(version)`,
     /// `encoded_entries_size > index_size`,
-    /// `fdi_size > MAX_FDI_BYTES`, or the FDI walk's running totals of
+    /// `fdi_size > MAX_FDI_BYTES`, the FDI walk's running totals of
     /// encoded blocks `> encoded_entries_size / 4` and of full-path bytes
-    /// `> 16 * fdi_size`.
+    /// `> 16 * fdi_size`, or a
+    /// [`PayloadLedger`](crate::container::PayloadLedger)'s charged total
+    /// plus the in-file part of the extent it refuses `>` the archive's
+    /// size.
     ///
     /// Construction invariant (caller-enforced): `value > limit`.
     BoundsExceeded {
@@ -731,7 +734,8 @@ pub enum IndexParseFault {
         /// Path of the entry the bound applies to, when the field is
         /// per-entry (e.g. [`WireField::UncompressedSize`]), or of the
         /// path whose claim took an archive-level running total past
-        /// its bound ([`WireField::V10EncodedBlockTotal`], and
+        /// its bound ([`WireField::V10EncodedBlockTotal`],
+        /// [`WireField::PayloadExtentTotal`], and
         /// [`WireField::FdiFullPathTotal`] when that path's bytes can be
         /// reserved). `None` for other archive-level bounds (e.g.
         /// [`WireField::FdiSize`]).
@@ -796,7 +800,7 @@ pub enum IndexParseFault {
     /// A v10+ archive's main index header declared no full directory
     /// index. Required for paksmith's filename-recovery path.
     MissingFullDirectoryIndex,
-    /// An offset arithmetic operation on a `u64` overflowed. Surfaced
+    /// A `u64` offset or running-total computation overflowed. Surfaced
     /// rather than wrapping silently.
     U64ArithmeticOverflow {
         /// Path of the entry whose computation overflowed. `None` for
@@ -806,8 +810,8 @@ pub enum IndexParseFault {
         /// the `Option<String>` shape used by `BoundsExceeded` and
         /// `U64ExceedsPlatformUsize` for the same reason.
         path: Option<String>,
-        /// Which parse site produced the overflow. See
-        /// [`OverflowSite`] for the closed set.
+        /// Which site produced the overflow. See [`OverflowSite`] for the
+        /// closed set.
         operation: OverflowSite,
     },
     /// An entry read produced fewer bytes than the entry claimed.
@@ -1453,6 +1457,14 @@ pub enum WireField {
     /// charged, summed over the paths read so far, including the one that
     /// took the total past its limit.
     FdiFullPathTotal,
+    /// Archive-level: bytes of the entries' payload extents a
+    /// [`PayloadLedger`](crate::container::PayloadLedger) has charged,
+    /// including the entry that took the total past its budget.
+    PayloadExtentTotal,
+    /// Per-entry: byte size of an FPakEntry record. An in-data copy whose
+    /// parse needs bytes past its index record's size is a
+    /// [`IndexParseFault::FieldMismatch`] on it.
+    RecordSize,
     /// Archive-level: byte size of the main index (footer-declared).
     IndexSize,
 }
@@ -1482,6 +1494,8 @@ impl fmt::Display for WireField {
             Self::V10EncodedEntriesSize => "encoded_entries_size",
             Self::V10EncodedBlockTotal => "encoded_block_total",
             Self::FdiFullPathTotal => "full_path_total",
+            Self::PayloadExtentTotal => "payload_extent_total",
+            Self::RecordSize => "record_size",
             Self::IndexSize => "index_size",
         };
         f.write_str(s)
@@ -1676,7 +1690,7 @@ impl fmt::Display for AllocationContext {
     }
 }
 
-/// Parser site that produced an [`IndexParseFault::U64ArithmeticOverflow`].
+/// Site that produced an [`IndexParseFault::U64ArithmeticOverflow`].
 ///
 /// Closed set of names rather than `&'static str` so callers and tests
 /// get compile-time exhaustiveness: a typo at a callsite is a
@@ -1720,6 +1734,11 @@ pub enum OverflowSite {
     /// advance, AES-aligned for encrypted blocks). Defensive for the
     /// same reason as [`Self::EncodedBlockEnd`].
     EncodedBlockCursor,
+    /// `charged` plus the in-file part of an extent in a
+    /// [`PayloadLedger`](crate::container::PayloadLedger): a running total
+    /// past `u64::MAX`, which only a ledger for an archive over half that
+    /// size can reach.
+    PayloadExtentTotal,
 }
 
 impl fmt::Display for OverflowSite {
@@ -1736,6 +1755,7 @@ impl fmt::Display for OverflowSite {
             Self::EncodedSingleBlockEnd => "encoded_single_block_end",
             Self::EncodedBlockEnd => "encoded_block_end",
             Self::EncodedBlockCursor => "encoded_block_cursor",
+            Self::PayloadExtentTotal => "payload_extent_total",
         };
         f.write_str(s)
     }
@@ -8103,10 +8123,11 @@ mod tests {
 
     /// Pin all `OverflowSite` Display tokens. Only `OffsetPlusHeader`
     /// and `EncodedSingleBlockEnd` are exercised through the
-    /// `U64ArithmeticOverflow` parent-variant tests — the remaining 5
+    /// `U64ArithmeticOverflow` parent-variant tests — the rest
     /// (`BlockStart`, `BlockEnd`, `PayloadEnd`, `EncodedBlockEnd`,
-    /// `EncodedBlockCursor`) need a dedicated pin since their tokens
-    /// are wire-stable log/dashboard keys per the variant docs.
+    /// `EncodedBlockCursor`, `PayloadExtentTotal`) need a dedicated pin
+    /// since their tokens are wire-stable log/dashboard keys per the
+    /// variant docs.
     #[test]
     fn overflow_site_display_tokens_are_wire_stable() {
         let cases: &[(OverflowSite, &str)] = &[
@@ -8120,6 +8141,7 @@ mod tests {
             ),
             (OverflowSite::EncodedBlockEnd, "encoded_block_end"),
             (OverflowSite::EncodedBlockCursor, "encoded_block_cursor"),
+            (OverflowSite::PayloadExtentTotal, "payload_extent_total"),
         ];
         for (site, expected) in cases {
             assert_eq!(site.to_string(), *expected);
@@ -8158,6 +8180,8 @@ mod tests {
             (WireField::V10EncodedEntriesSize, "encoded_entries_size"),
             (WireField::V10EncodedBlockTotal, "encoded_block_total"),
             (WireField::FdiFullPathTotal, "full_path_total"),
+            (WireField::PayloadExtentTotal, "payload_extent_total"),
+            (WireField::RecordSize, "record_size"),
             (WireField::IndexSize, "index_size"),
         ];
         for (field, expected) in cases {

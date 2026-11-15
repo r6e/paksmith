@@ -14,6 +14,8 @@ use std::ops::Range;
 
 use serde::Serialize;
 
+use crate::error::{BoundsUnit, IndexParseFault, OverflowSite, PaksmithError, WireField};
+
 /// Supported archive container formats.
 ///
 /// Marked `#[non_exhaustive]` for forward-compat — the Phase 8 IoStore
@@ -521,16 +523,81 @@ impl EntryMetadata {
         self.is_encrypted
     }
 
-    /// The span of the container file that reading the entry may read
-    /// once its in-data header copy matches its index record, from the
-    /// record's [`Self::offset`] through the furthest payload byte the
-    /// record names. Index entries may name overlapping spans, and the end
-    /// can lie past the file, up to `u64::MAX` when the record's sizes
-    /// overflow. `None` when the reader recorded none, as for containers
-    /// whose entries don't sit in one file span.
+    /// The span of the container file that reading or verifying the entry
+    /// may read, from its record's [`Self::offset`] through the furthest
+    /// payload byte its record names. Index entries may name overlapping
+    /// spans, so a walk over every entry should charge these against a
+    /// [`PayloadLedger`], and the end can lie past the file, up to
+    /// `u64::MAX` when the record's sizes overflow. `None` when the reader
+    /// recorded none, as for containers whose entries don't sit in one file
+    /// span.
     #[must_use]
     pub fn payload_extent(&self) -> Option<Range<u64>> {
         self.payload_extent.clone()
+    }
+}
+
+/// Running total of the payload extents a walk over an archive's entries
+/// has charged, refused once it passes the archive's size.
+///
+/// Index entries can name the same on-disk bytes, so a walk that reads
+/// every entry can read one region once per name. Charging each entry's
+/// extent before reading it bounds the bytes the walk parses and hashes
+/// by the archive's size, and extents that lie in the archive without
+/// overlapping sum to no more than that, so the ledger never refuses them.
+#[derive(Debug)]
+pub struct PayloadLedger {
+    file_size: u64,
+    charged: u64,
+}
+
+impl PayloadLedger {
+    /// A ledger for a walk over an archive of `file_size` bytes.
+    #[must_use]
+    pub fn new(file_size: u64) -> Self {
+        Self {
+            file_size,
+            charged: 0,
+        }
+    }
+
+    /// Charge the part of `extent`, the span of the file reading the entry
+    /// at `path` can touch, that lies inside the file: bytes past its end
+    /// can't be read.
+    ///
+    /// # Errors
+    ///
+    /// [`PaksmithError::InvalidIndex`] with
+    /// [`IndexParseFault::BoundsExceeded`] on
+    /// [`WireField::PayloadExtentTotal`], naming `path`, when the charge
+    /// takes the total past the archive's size, or with
+    /// [`IndexParseFault::U64ArithmeticOverflow`] on
+    /// [`OverflowSite::PayloadExtentTotal`] when it would take the total
+    /// past `u64::MAX`. A refused charge is not kept.
+    pub fn charge(&mut self, path: &str, extent: Range<u64>) -> crate::Result<()> {
+        let end = extent.end.min(self.file_size);
+        let total = self
+            .charged
+            .checked_add(end.saturating_sub(extent.start))
+            .ok_or_else(|| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::U64ArithmeticOverflow {
+                    path: Some(path.to_string()),
+                    operation: OverflowSite::PayloadExtentTotal,
+                },
+            })?;
+        if total > self.file_size {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BoundsExceeded {
+                    field: WireField::PayloadExtentTotal,
+                    value: total,
+                    limit: self.file_size,
+                    unit: BoundsUnit::Bytes,
+                    path: Some(path.to_string()),
+                },
+            });
+        }
+        self.charged = total;
+        Ok(())
     }
 }
 
@@ -875,5 +942,89 @@ mod tests {
         assert_eq!(m.compression_method_shared().as_deref(), Some("Zlib"));
         assert_eq!(m.sha1(), Some(digest));
         assert_eq!(m.payload_extent(), Some(0x1234..0x1300));
+    }
+
+    /// The ledger admits charges totalling the archive's size and refuses
+    /// the one that takes the total a byte past, naming that entry. The
+    /// refused charge is not kept, so an empty one after it still fits.
+    #[test]
+    fn payload_ledger_admits_its_budget_and_refuses_one_byte_past() {
+        let mut ledger = PayloadLedger::new(100);
+        ledger.charge("a", 10..60).unwrap();
+        ledger.charge("b", 50..100).unwrap();
+        let err = ledger.charge("c", 7..8).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::PayloadExtentTotal,
+                        value: 101,
+                        limit: 100,
+                        unit: BoundsUnit::Bytes,
+                        path: Some(p),
+                    },
+                } if p == "c"
+            ),
+            "got: {err:?}"
+        );
+        ledger.charge("d", 5..5).unwrap();
+    }
+
+    /// Only the part of an extent inside the file is charged, nothing for
+    /// one that lies wholly past it.
+    #[test]
+    fn payload_ledger_charges_only_the_part_inside_the_file() {
+        let mut ledger = PayloadLedger::new(100);
+        ledger.charge("a", 90..1000).unwrap();
+        ledger.charge("b", 200..300).unwrap();
+        ledger.charge("c", 0..90).unwrap();
+        let err = ledger.charge("d", 0..1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded { value: 101, .. },
+                }
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// A charge that would carry the total past `u64::MAX` is refused as an
+    /// overflow, even by a ledger whose budget is `u64::MAX`; one that
+    /// lands on `u64::MAX` past a smaller budget is refused as past it.
+    #[test]
+    fn payload_ledger_refuses_a_total_past_u64_max() {
+        let mut ledger = PayloadLedger::new(u64::MAX);
+        ledger.charge("a", 0..u64::MAX).unwrap();
+        let err = ledger.charge("b", 0..1).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::U64ArithmeticOverflow {
+                        path: Some(p),
+                        operation: OverflowSite::PayloadExtentTotal,
+                    },
+                } if p == "b"
+            ),
+            "got: {err:?}"
+        );
+        let mut ledger = PayloadLedger::new(u64::MAX - 1);
+        ledger.charge("a", 0..u64::MAX - 1).unwrap();
+        let err = ledger.charge("b", 0..1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        value: u64::MAX,
+                        ..
+                    },
+                }
+            ),
+            "got: {err:?}"
+        );
     }
 }

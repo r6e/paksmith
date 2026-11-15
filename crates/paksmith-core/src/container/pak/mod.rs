@@ -97,7 +97,9 @@ use sha1::{Digest, Sha1};
 use tracing::{debug, error, warn};
 use zeroize::Zeroizing;
 
-use crate::container::{ContainerFormat, ContainerReader, EntryFlags, EntryMetadata};
+use crate::container::{
+    ContainerFormat, ContainerReader, EntryFlags, EntryMetadata, PayloadLedger,
+};
 use crate::digest::Sha1Digest;
 use crate::error::{
     AllocationContext, BlockBoundsKind, BoundsUnit, DecompressionFault, HashTarget,
@@ -996,8 +998,9 @@ impl PakReader {
     ///
     /// **Scope:** the entry's stored SHA1 covers payload bytes only, NOT
     /// the in-data FPakEntry record header. Tampering inside the in-data
-    /// header is caught earlier by `PakEntryHeader::matches_payload` and
-    /// surfaces as `InvalidIndex`, not `HashMismatch`.
+    /// header is caught earlier, by `PakEntryHeader::matches_payload` or,
+    /// for a copy claiming more than its index record, within that record's
+    /// size, and surfaces as `InvalidIndex`, not `HashMismatch`.
     ///
     /// # Archive-wide integrity policy
     ///
@@ -1049,17 +1052,19 @@ impl PakReader {
     /// - `Err(EntryNotFound)` for unknown paths.
     /// - `Err(Decompression)` for a PLAINTEXT entry in an unsupported
     ///   compression method (Gzip, Oodle, Zstd, UnknownByName, Unknown).
-    ///   Plaintext Zlib and LZ4 verify normally (the entry SHA1 covers
+    ///   From v5, plaintext Zlib and LZ4 verify normally (the entry SHA1 covers
     ///   the on-disk compressed bytes, so no decompression happens on the
     ///   verify path); for unsupported methods we refuse to hash raw
     ///   compressed bytes we can't interpret. This method gate applies
     ///   ONLY to plaintext entries — encrypted entries hash opaque
     ///   ciphertext (see above), so the method never matters for them.
+    /// - `Err(UnsupportedVersion)` for a plaintext Zlib entry in a v3-v4
+    ///   archive, whose block offsets are file-relative (#637), as a read
+    ///   refuses it.
     /// - `Err(InvalidIndex)` for offset/bounds problems uncovered while
     ///   reading.
     /// - `Err(HashMismatch { target: Entry { path }, .. })` when the
     ///   stored hash disagrees with the recomputed digest.
-    #[allow(clippy::too_many_lines)] // bounded by the per-block error branches
     pub fn verify_entry(&self, path: &str) -> crate::Result<VerifyOutcome> {
         let entry = self
             .index
@@ -1067,6 +1072,19 @@ impl PakReader {
             .ok_or_else(|| PaksmithError::EntryNotFound {
                 path: path.to_string(),
             })?;
+        self.verify_index_entry(entry, None)
+    }
+
+    /// [`Self::verify_entry`] for a resolved `entry`. When there is a
+    /// `ledger`, an entry with a SHA-1 to check has its payload extent
+    /// charged to it before anything of the entry is read.
+    #[allow(clippy::too_many_lines)] // bounded by the per-block error branches
+    fn verify_index_entry(
+        &self,
+        entry: &PakIndexEntry,
+        ledger: Option<&mut PayloadLedger>,
+    ) -> crate::Result<VerifyOutcome> {
+        let path = entry.filename();
 
         // Task-4 RESOLVED (#634): UE stores the entry SHA1 over the on-disk
         // CIPHERTEXT truncated to `compressed_size` — verified empirically
@@ -1117,6 +1135,9 @@ impl PakReader {
             crate::container::EntryIntegrity::Claim(d) => d,
         };
 
+        if let Some(ledger) = ledger {
+            ledger.charge(path, entry.payload_extent(self.version()))?;
+        }
         let mut guard = self.locked();
         let mut file = BufReader::new(&mut *guard);
         let in_data = self.open_entry_into(&mut file, entry)?;
@@ -1174,6 +1195,7 @@ impl PakReader {
                     sha1_of_reader(&mut file, entry.header().uncompressed_size(), &mut buf)?
                 }
                 CompressionMethod::Zlib | CompressionMethod::Lz4 => {
+                    require_relative_chunk_offsets(self.version())?;
                     // Plaintext compressed entry: hash the on-disk compressed
                     // bytes block-by-block (encrypted entries are hashed
                     // contiguously above). Blocks are contiguous so this
@@ -1256,6 +1278,13 @@ impl PakReader {
     /// intact" or "some bytes weren't verifiable" — avoiding the silent
     /// partial-success failure mode that returning bare
     /// `Result<()>` would create.
+    ///
+    /// Before hashing each entry this charges its
+    /// [`EntryMetadata::payload_extent`] to a [`PayloadLedger`] for the
+    /// archive, failing with `BoundsExceeded` on
+    /// [`WireField::PayloadExtentTotal`] at the entry that crosses it (or
+    /// with `U64ArithmeticOverflow` should the total pass `u64::MAX`);
+    /// skipped entries and [`Self::verify_entry`] charge nothing.
     pub fn verify(&self) -> crate::Result<VerifyStats> {
         let mut stats = VerifyStats::default();
         // Drive each region with its own helper rather than calling
@@ -1302,8 +1331,9 @@ impl PakReader {
                 });
             }
         };
+        let mut ledger = PayloadLedger::new(self.file_size);
         for entry in self.index.entries() {
-            match self.verify_entry(entry.filename())? {
+            match self.verify_index_entry(entry, Some(&mut ledger))? {
                 VerifyOutcome::Verified => stats.entries_verified += 1,
                 VerifyOutcome::SkippedNoHash => stats.entries_skipped_no_hash += 1,
                 VerifyOutcome::SkippedEncrypted => stats.entries_skipped_encrypted += 1,
@@ -1373,11 +1403,31 @@ impl PakReader {
         }
 
         let _ = reader.seek(SeekFrom::Start(entry.header().offset()))?;
-        let in_data = PakEntryHeader::read_from(
-            reader,
+        // A copy that matches the index record has its wire size, so one
+        // that claims more (say a block table the index lacks) is refused
+        // within that size rather than parsed past the entry's payload
+        // extent.
+        let wire_size = entry.header().wire_size();
+        let mut bounded = reader.by_ref().take(wire_size);
+        let parsed = PakEntryHeader::read_from(
+            &mut bounded,
             self.footer.version(),
             self.footer.compression_methods(),
-        )?;
+        );
+        if let Err(PaksmithError::Io(err)) = &parsed
+            && err.kind() == std::io::ErrorKind::UnexpectedEof
+            && bounded.limit() == 0
+        {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::FieldMismatch {
+                    path: path.to_string(),
+                    field: WireField::RecordSize,
+                    index_value: wire_size.to_string(),
+                    payload_value: format!("over {wire_size}"),
+                },
+            });
+        }
+        let in_data = parsed?;
 
         entry.header().matches_payload(&in_data, path)?;
         Ok(in_data)
@@ -2247,6 +2297,18 @@ fn stream_uncompressed_to<R: Read + Seek>(
     Ok(written)
 }
 
+/// Refuse a pre-v5 archive's compressed entry, whose block offsets are
+/// file-relative: neither the read path nor `verify` follows them (#637,
+/// see the module doc).
+fn require_relative_chunk_offsets(version: PakVersion) -> crate::Result<()> {
+    if version.has_relative_chunk_offsets() {
+        return Ok(());
+    }
+    Err(PaksmithError::UnsupportedVersion {
+        version: version.wire_version(),
+    })
+}
+
 /// Compute an entry's payload start (`offset + in-data record size`),
 /// mapping an overflow to the typed `OffsetPlusHeader` fault. The
 /// `checked_payload_end` sibling for the leading-add half of the same
@@ -2579,17 +2641,7 @@ fn stream_zlib_to<R: Read + Seek>(
 ) -> crate::Result<u64> {
     let path = entry.filename();
 
-    if !version.has_relative_chunk_offsets() {
-        // Pre-v5 paks store compression-block offsets as absolute file offsets
-        // rather than entry-relative (v5+); this read path doesn't implement
-        // the absolute-offset case. repak CAN emit a compressed v4 archive
-        // (verified by probe; v3 shares the same pre-v8 path), so an oracle
-        // exists — this is a low-value deferral, not a capability gap. Reject
-        // explicitly rather than silently produce garbage; wontfix — see #637.
-        return Err(PaksmithError::UnsupportedVersion {
-            version: version.wire_version(),
-        });
-    }
+    require_relative_chunk_offsets(version)?;
 
     let uncompressed_size = entry.header().uncompressed_size();
     let mut bytes_written: u64 = 0;
@@ -7043,6 +7095,30 @@ mod tests {
         }
     }
 
+    /// Append a flat index naming each `(name, record)`, a record being a
+    /// `write_pak_entry` copy, then a legacy footer of `version` over it.
+    #[cfg(feature = "__test_utils")]
+    fn append_legacy_index<S: AsRef<str>>(
+        pak: &mut Vec<u8>,
+        version: u32,
+        entries: &[(S, Vec<u8>)],
+    ) {
+        use byteorder::{LittleEndian, WriteBytesExt};
+
+        use crate::testing::wire::{write_fstring, write_legacy_footer};
+
+        let index_offset = pak.len() as u64;
+        write_fstring(pak, "../../../");
+        pak.write_u32::<LittleEndian>(u32::try_from(entries.len()).unwrap())
+            .unwrap();
+        for (name, record) in entries {
+            write_fstring(pak, name.as_ref());
+            pak.extend_from_slice(record);
+        }
+        let index_size = pak.len() as u64 - index_offset;
+        write_legacy_footer(pak, version, index_offset, index_size, &[0; 20]);
+    }
+
     /// v5 flat pak with one record at offset 0 holding `payload`, stored,
     /// or zlib over `blocks` when there are any, and an index naming it
     /// once per entry of `names`. Its SHA-1 is the payload's when
@@ -7054,32 +7130,28 @@ mod tests {
         blocks: &[(u64, u64)],
         hashed: bool,
     ) -> Vec<u8> {
-        use byteorder::{LittleEndian, WriteBytesExt};
         use sha1::{Digest, Sha1};
 
-        use crate::testing::wire::{write_fstring, write_legacy_footer, write_pak_entry};
+        use crate::testing::wire::write_pak_entry;
 
         let size = payload.len() as u64;
         let sha1: [u8; 20] = Sha1::digest(payload).into();
         let sha1 = if hashed { sha1 } else { [0; 20] };
         let method = u32::from(!blocks.is_empty());
-        let record = |buf: &mut Vec<u8>| {
-            write_pak_entry(buf, 0, size, size, method, &sha1, blocks, 0, 0);
-        };
-        let mut pak = Vec::new();
-        record(&mut pak);
+        let mut record = Vec::new();
+        write_pak_entry(&mut record, 0, size, size, method, &sha1, blocks, 0, 0);
+        let mut pak = record.clone();
         pak.extend_from_slice(payload);
-        let index_offset = pak.len() as u64;
-        write_fstring(&mut pak, "../../../");
-        pak.write_u32::<LittleEndian>(u32::try_from(names.len()).unwrap())
-            .unwrap();
-        for name in names {
-            write_fstring(&mut pak, name);
-            record(&mut pak);
-        }
-        let index_size = pak.len() as u64 - index_offset;
-        write_legacy_footer(&mut pak, 5, index_offset, index_size, &[0; 20]);
+        let entries: Vec<_> = names.iter().map(|name| (*name, record.clone())).collect();
+        append_legacy_index(&mut pak, 5, &entries);
         pak
+    }
+
+    /// One hashed zlib entry whose only block runs to 1 MiB, past the
+    /// end of the few-hundred-byte archive.
+    #[cfg(feature = "__test_utils")]
+    fn block_past_the_file_pak() -> Vec<u8> {
+        aliased_v5_pak(&["Content/a.bin"], &[7; 16], &[(73, 1 << 20)], true)
     }
 
     /// Open checks only `offset + header + compressed_size` against the
@@ -7088,11 +7160,272 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn open_accepts_a_block_past_the_file_and_its_extent_reaches_it() {
-        let pak = aliased_v5_pak(&["Content/a.bin"], &[7; 16], &[(73, 1 << 20)], true);
+        let pak = block_past_the_file_pak();
         assert!(pak.len() < 1 << 20);
         let reader = PakReader::from_bytes(pak).unwrap();
         let meta = reader.entries().next().unwrap();
         assert_eq!(meta.payload_extent(), Some(0..1 << 20));
+    }
+
+    /// The sum of the extents `reader.entries()` reports.
+    #[cfg(feature = "__test_utils")]
+    fn extent_total(reader: &PakReader) -> u64 {
+        reader
+            .entries()
+            .map(|m| m.payload_extent().unwrap())
+            .map(|e| e.end - e.start)
+            .sum()
+    }
+
+    /// `verify()` charges an entry before reading it: the second entry's
+    /// extent takes the total past the archive's size, so its in-data copy,
+    /// which disagrees with its index record, is never read.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn verify_charges_an_entry_before_reading_it() {
+        use sha1::{Digest, Sha1};
+
+        use crate::testing::wire::write_pak_entry;
+
+        let payload = [7; 256];
+        let sha1: [u8; 20] = Sha1::digest(payload).into();
+        let record = |size| {
+            let mut record = Vec::new();
+            write_pak_entry(&mut record, 0, size, size, 0, &sha1, &[], 0, 0);
+            record
+        };
+        let mut pak = record(256);
+        pak.extend_from_slice(&payload);
+        append_legacy_index(
+            &mut pak,
+            5,
+            &[
+                ("Content/a.bin", record(256)),
+                ("Content/b.bin", record(400)),
+            ],
+        );
+        let reader = PakReader::from_bytes(pak).unwrap();
+        let alone = reader.verify_entry("Content/b.bin").unwrap_err();
+        assert!(
+            matches!(
+                alone,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::FieldMismatch {
+                        field: WireField::CompressedSize,
+                        ..
+                    },
+                }
+            ),
+            "got: {alone:?}"
+        );
+        let err = reader.verify().unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::PayloadExtentTotal,
+                        path: Some(p),
+                        ..
+                    },
+                } if p == "Content/b.bin"
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// `verify()` charges each entry it hashes against the archive's size,
+    /// so two names of one record are refused at the second, whose extent
+    /// takes the total past it. That name still verifies alone, and one
+    /// name of the same record verifies in a whole-archive pass.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn verify_refuses_aliases_whose_extents_exceed_the_archive() {
+        let names = ["Content/a.bin", "Content/b.bin"];
+        let pak = aliased_v5_pak(&names, &[7; 256], &[], true);
+        let file_size = pak.len() as u64;
+        let reader = PakReader::from_bytes(pak).unwrap();
+        let charged = extent_total(&reader);
+        assert!(charged > file_size, "{charged} must exceed {file_size}");
+        let err = reader.verify().unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::PayloadExtentTotal,
+                        value,
+                        limit,
+                        unit: BoundsUnit::Bytes,
+                        path: Some(p),
+                    },
+                } if *value == charged && *limit == file_size && p == names[1]
+            ),
+            "got: {err:?}"
+        );
+        let alone = reader.verify_entry(names[1]).unwrap();
+        assert_eq!(alone, VerifyOutcome::Verified);
+        let single = aliased_v5_pak(&names[..1], &[7; 256], &[], true);
+        let stats = PakReader::from_bytes(single).unwrap().verify().unwrap();
+        assert_eq!(stats.entries_verified(), 1);
+    }
+
+    /// Entries `verify()` skips read nothing, so they aren't charged.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn verify_does_not_charge_skipped_entries() {
+        let names = ["Content/a.bin", "Content/b.bin"];
+        let pak = aliased_v5_pak(&names, &[7; 256], &[], false);
+        let file_size = pak.len() as u64;
+        let reader = PakReader::from_bytes(pak).unwrap();
+        let extents = extent_total(&reader);
+        assert!(extents > file_size, "{extents} must exceed {file_size}");
+        assert_eq!(reader.verify().unwrap().entries_skipped_no_hash(), 2);
+    }
+
+    /// `verify()` admits ordinary archives under its ledger.
+    #[test]
+    fn verify_admits_archives_whose_entries_do_not_alias() {
+        for name in ["minimal_v6.pak", "real_v8b_encrypted_entries.pak"] {
+            let reader = PakReader::open(fixture(name)).unwrap();
+            let stats = reader.verify().unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert!(stats.entries_verified() > 0, "{name}");
+        }
+    }
+
+    /// v4 flat pak of `count` zlib records, each a 32-byte payload under
+    /// one block at its file-relative position, AES-flagged when
+    /// `encrypted`, each SHA-1 its payload's.
+    #[cfg(feature = "__test_utils")]
+    fn v4_compressed_pak(count: u8, encrypted: bool) -> Vec<u8> {
+        use sha1::{Digest, Sha1};
+
+        use crate::testing::wire::write_pak_entry;
+
+        let flags = u8::from(encrypted);
+        let mut pak = Vec::new();
+        let mut entries = Vec::new();
+        for i in 0..count {
+            let offset = pak.len() as u64;
+            let payload = [i; 32];
+            let len = payload.len() as u64;
+            let sha1: [u8; 20] = Sha1::digest(payload).into();
+            let start = offset + crate::testing::wire::pak_entry_wire_size(1);
+            let blocks = [(start, start + len)];
+            write_pak_entry(&mut pak, 0, len, 64, 1, &sha1, &blocks, 64, flags);
+            pak.extend_from_slice(&payload);
+            let mut record = Vec::new();
+            write_pak_entry(&mut record, offset, len, 64, 1, &sha1, &blocks, 64, flags);
+            entries.push((format!("Content/{i}.bin"), record));
+        }
+        append_legacy_index(&mut pak, 4, &entries);
+        pak
+    }
+
+    /// `verify()` hashes a v4 encrypted compressed entry as contiguous
+    /// ciphertext and never follows its file-relative blocks, so it charges
+    /// its record and payload alone. Taken as entry-relative, these six
+    /// entries' extents would sum past the archive's size.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn verify_charges_pre_v5_entries_without_their_blocks() {
+        let pak = v4_compressed_pak(6, true);
+        let file_size = pak.len() as u64;
+        let reader = PakReader::from_bytes(pak).unwrap();
+        let as_relative: u64 = reader
+            .index
+            .entries()
+            .iter()
+            .map(|e| e.payload_extent(PakVersion::RelativeChunkOffsets))
+            .map(|e| e.end - e.start)
+            .sum();
+        assert!(as_relative > file_size, "{as_relative} vs {file_size}");
+        assert_eq!(reader.verify().unwrap().entries_verified(), 6);
+    }
+
+    /// Like a read (#637), `verify()` refuses a plaintext compressed entry
+    /// whose v4 blocks are file-relative.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn verify_refuses_pre_v5_plaintext_compressed_entries() {
+        let reader = PakReader::from_bytes(v4_compressed_pak(2, false)).unwrap();
+        let errs = [
+            reader.verify().unwrap_err(),
+            reader.verify_entry("Content/1.bin").unwrap_err(),
+        ];
+        for err in errs {
+            assert!(
+                matches!(err, PaksmithError::UnsupportedVersion { version: 4 }),
+                "got: {err:?}"
+            );
+        }
+    }
+
+    /// The ledger charges only the part of an extent inside the file, so a
+    /// lone entry whose block runs past it is refused for that block, as
+    /// `verify_entry` refuses it.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn verify_names_a_block_past_the_file() {
+        let pak = block_past_the_file_pak();
+        let reader = PakReader::from_bytes(pak).unwrap();
+        let errs = [
+            reader.verify().unwrap_err(),
+            reader.verify_entry("Content/a.bin").unwrap_err(),
+        ];
+        for err in errs {
+            assert!(
+                matches!(
+                    err,
+                    PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::BlockBoundsViolation { .. },
+                    }
+                ),
+                "got: {err:?}"
+            );
+        }
+    }
+
+    /// An in-data copy that claims more than its index record, here a block
+    /// table on a stored entry, is parsed only to the index record's size,
+    /// so reading and verifying it stop there with a record-size mismatch.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn in_data_copy_is_parsed_only_to_its_index_records_size() {
+        use sha1::{Digest, Sha1};
+
+        use crate::testing::wire::write_pak_entry;
+
+        let payload = [7; 16];
+        let sha1: [u8; 20] = Sha1::digest(payload).into();
+        let mut pak = Vec::new();
+        write_pak_entry(&mut pak, 0, 16, 16, 1, &sha1, &[(0, 0); 64], 0, 0);
+        pak.extend_from_slice(&payload);
+        let mut record = Vec::new();
+        write_pak_entry(&mut record, 0, 16, 16, 0, &sha1, &[], 0, 0);
+        append_legacy_index(&mut pak, 5, &[("Content/a.bin", record)]);
+
+        let reader = PakReader::from_bytes(pak).unwrap();
+        let errs = [
+            reader.read_entry("Content/a.bin").unwrap_err(),
+            reader.verify_entry("Content/a.bin").unwrap_err(),
+        ];
+        for err in errs {
+            assert!(
+                matches!(
+                    &err,
+                    PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::FieldMismatch {
+                            path,
+                            field: WireField::RecordSize,
+                            index_value,
+                            payload_value,
+                        },
+                    } if path == "Content/a.bin" && index_value == "53" && payload_value == "over 53"
+                ),
+                "got: {err:?}"
+            );
+        }
     }
 
     /// SPEC.md round-trip properties: compress→decompress and
