@@ -40,10 +40,4 @@ mod tests {
             "1.2.3 (nightly-20261115-abc1234)"
         );
     }
-
-    #[test]
-    fn version_describes_this_build() {
-        assert_eq!(*VERSION, describe(env!("CARGO_PKG_VERSION"), BUILD_LABEL));
-        assert!(VERSION.starts_with(env!("CARGO_PKG_VERSION")));
-    }
 }

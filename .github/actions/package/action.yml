@@ -71,11 +71,8 @@ runs:
         EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
       run: |
         reported="$("target/release/paksmith${EXE}" --version)"
-        if [[ -n "${VERSION_LABEL}" ]]; then
-          [[ "${reported}" == *" (${VERSION_LABEL})" ]]
-        else
-          [[ "${reported}" != *"("* ]]
-        fi || {
+        suffix="${VERSION_LABEL:+ (${VERSION_LABEL})}"
+        [[ "${reported}" =~ ^paksmith\ [^\ ]+"${suffix}"$ ]] || {
           echo "::error::paksmith reports '${reported}' for the label '${VERSION_LABEL}'"
           exit 1
         }
