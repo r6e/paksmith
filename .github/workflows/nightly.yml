@@ -97,22 +97,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # No restored cache, as in release-assets.yml's build.
-      - uses: ./.github/actions/setup-rust
-        with:
-          cache: "false"
-      - name: Build and package
-        id: package
+      - name: Build, package and upload
         uses: ./.github/actions/package
         with:
           label: ${{ needs.check.outputs.label }}
           target: ${{ matrix.target }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ steps.package.outputs.name }}
-          path: |
-            ${{ steps.package.outputs.archive }}
-            ${{ steps.package.outputs.checksums }}
-          if-no-files-found: error
-          overwrite: true # a re-run replaces the earlier attempt's upload
           retention-days: 30

@@ -10,7 +10,8 @@ name: Release assets
 #   for the tag: fix main if needed, then dispatch this workflow from
 #   main with the tag. A tag push runs the tagged commit's copy of
 #   this file, re-runs included, and a dispatch runs main's. The local
-#   actions come from the tagged commit either way.
+#   actions come from the tagged commit either way, so a fault in one
+#   of them needs a new tag.
 # - The tag exists without a draft: re-run release.yml, which accepts
 #   the existing tag and creates the draft, then dispatch this workflow.
 on:
@@ -89,30 +90,16 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       # This job runs every dependency's build script, so it gets a
-      # read-only token that is not persisted. No restored cache: the
-      # binaries are handed to users, and the cache scope is shared
-      # with every other job on main.
+      # read-only token that is not persisted.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.check.outputs.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          cache: "false"
-      - name: Build and package
-        id: package
+      - name: Build, package and upload
         uses: ./.github/actions/package
         with:
           label: ${{ env.TAG }}
           target: ${{ matrix.target }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ steps.package.outputs.name }}
-          path: |
-            ${{ steps.package.outputs.archive }}
-            ${{ steps.package.outputs.checksums }}
-          if-no-files-found: error
-          overwrite: true # a re-run replaces the earlier attempt's upload
           retention-days: 7
 
   # Runs no repository code: it only moves the built files onto the
@@ -143,6 +130,7 @@ jobs:
             echo "::error::$1"
             exit 1
           }
+          # .github/actions/package names the artifacts and their files.
           files=()
           for entry in \
             x86_64-unknown-linux-gnu:tar.gz \
