@@ -1282,7 +1282,8 @@ impl PakReader {
     /// Before hashing each entry this charges its
     /// [`EntryMetadata::payload_extent`] to a [`PayloadLedger`] for the
     /// archive, failing with `BoundsExceeded` on
-    /// [`WireField::PayloadExtentTotal`] at the entry that crosses it;
+    /// [`WireField::PayloadExtentTotal`] at the entry that crosses it (or
+    /// with `U64ArithmeticOverflow` should the total pass `u64::MAX`);
     /// skipped entries and [`Self::verify_entry`] charge nothing.
     pub fn verify(&self) -> crate::Result<VerifyStats> {
         let mut stats = VerifyStats::default();

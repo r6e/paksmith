@@ -14,7 +14,7 @@ use std::ops::Range;
 
 use serde::Serialize;
 
-use crate::error::{BoundsUnit, IndexParseFault, PaksmithError, WireField};
+use crate::error::{BoundsUnit, IndexParseFault, OverflowSite, PaksmithError, WireField};
 
 /// Supported archive container formats.
 ///
@@ -570,13 +570,21 @@ impl PayloadLedger {
     /// [`PaksmithError::InvalidIndex`] with
     /// [`IndexParseFault::BoundsExceeded`] on
     /// [`WireField::PayloadExtentTotal`], naming `path`, when the charge
-    /// takes the total past the archive's size. A refused charge is not
-    /// kept.
+    /// takes the total past the archive's size, or with
+    /// [`IndexParseFault::U64ArithmeticOverflow`] on
+    /// [`OverflowSite::PayloadExtentTotal`] when it would take the total
+    /// past `u64::MAX`. A refused charge is not kept.
     pub fn charge(&mut self, path: &str, extent: Range<u64>) -> crate::Result<()> {
         let end = extent.end.min(self.file_size);
         let total = self
             .charged
-            .saturating_add(end.saturating_sub(extent.start));
+            .checked_add(end.saturating_sub(extent.start))
+            .ok_or_else(|| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::U64ArithmeticOverflow {
+                    path: Some(path.to_string()),
+                    operation: OverflowSite::PayloadExtentTotal,
+                },
+            })?;
         if total > self.file_size {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
@@ -983,13 +991,29 @@ mod tests {
         );
     }
 
-    /// The running total saturates rather than wrapping, so a charge that
-    /// would carry it past `u64::MAX` is still refused.
+    /// A charge that would carry the total past `u64::MAX` is refused as an
+    /// overflow, even by a ledger whose budget is `u64::MAX`; one that
+    /// lands on `u64::MAX` past a smaller budget is refused as past it.
     #[test]
-    fn payload_ledger_saturates_its_total() {
+    fn payload_ledger_refuses_a_total_past_u64_max() {
+        let mut ledger = PayloadLedger::new(u64::MAX);
+        ledger.charge("a", 0..u64::MAX).unwrap();
+        let err = ledger.charge("b", 0..1).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::U64ArithmeticOverflow {
+                        path: Some(p),
+                        operation: OverflowSite::PayloadExtentTotal,
+                    },
+                } if p == "b"
+            ),
+            "got: {err:?}"
+        );
         let mut ledger = PayloadLedger::new(u64::MAX - 1);
         ledger.charge("a", 0..u64::MAX - 1).unwrap();
-        let err = ledger.charge("b", 0..2).unwrap_err();
+        let err = ledger.charge("b", 0..1).unwrap_err();
         assert!(
             matches!(
                 err,

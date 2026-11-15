@@ -429,7 +429,9 @@ does not surface as the fault its bullet names.
   part inside the file and refuses the entry that takes the total past
   the file's size. Extents that lie in the file without overlapping sum
   to at most its size. Entries it skips aren't charged. Surfaces as
-  `IndexParseFault::BoundsExceeded { field: WireField::PayloadExtentTotal, unit: BoundsUnit::Bytes, path: Some(..), … }`.
+  `IndexParseFault::BoundsExceeded { field: WireField::PayloadExtentTotal, unit: BoundsUnit::Bytes, path: Some(..), … }`,
+  or as `IndexParseFault::U64ArithmeticOverflow { operation: OverflowSite::PayloadExtentTotal, … }`
+  should the total pass `u64::MAX`.
 - **In-data header copies**
   (`crates/paksmith-core/src/container/pak/mod.rs`).
   A read or verify parses an entry's in-data header copy only to its
