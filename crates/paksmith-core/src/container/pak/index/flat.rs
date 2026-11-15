@@ -24,10 +24,10 @@ use crate::seams::PakSeam;
 
 /// Hard ceiling on `entry_count` for v3-v9 flat-layout pak indexes.
 /// Issue #181 (#128 follow-up): the byte-budget check below still
-/// allowed ~946M entries against a 50 GB archive. Sibling to v10+'s
-/// [`super::path_hash::MAX_INDEX_BYTES`]; the unit differs because
-/// the bounded dimension differs (v10+ allocates a byte buffer;
-/// v3-v9 reserves a `Vec<PakIndexEntry>`).
+/// allowed hundreds of millions of entries against a 50 GB archive.
+/// Sibling to v10+'s [`super::path_hash::MAX_INDEX_BYTES`]; the unit
+/// differs because the bounded dimension differs (v10+ allocates a
+/// byte buffer; v3-v9 reserves a `Vec<PakIndexEntry>`).
 ///
 /// Cost model: at the cap, `try_reserve_exact(10M)` requests address
 /// space for `10M × sizeof(PakIndexEntry)` ≈ 1-2 GiB depending on
@@ -38,9 +38,9 @@ use crate::seams::PakSeam;
 /// loop below: each `entries.push(PakIndexEntry::read_from(...))`
 /// initializes a struct slot (memory commit) AND heap-allocates a
 /// filename `String`. Without the cap, an attacker-recorded
-/// `entry_count = 946M` would drive 946M loop iterations, each
-/// doing the per-entry heap allocation + slot commit, while
-/// upstream-bounded only by the much-larger
+/// `entry_count` in the hundreds of millions would drive as many
+/// loop iterations, each doing the per-entry heap allocation + slot
+/// commit, while upstream-bounded only by the much-larger
 /// `index_size / entry_min_record_bytes(version)` byte-budget cap.
 ///
 /// See `docs/security/allocation-caps.md` for the empirical data

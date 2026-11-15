@@ -58,8 +58,8 @@ as `paksmith-core/src/container/pak/`.
 | 5 | `RelativeChunkOffsets` | UE 4.20 | Compression-block offsets became entry-relative instead of file-relative. | Same[^1] |
 | 6 | `DeleteRecords` | — (no stock release) | Added entry delete markers (used during patching). | Same[^1] |
 | 7 | `EncryptionKeyGuid` | UE 4.21 | Added 16-byte encryption-key GUID to the footer. | Same[^1] |
-| 8 | `V8A` | UE 4.22 (brief) | Added 4-slot compression-method FName table; per-entry compression byte is `u8`. | Same[^1] |
-| 8 | `V8B` | UE 4.23 – 4.24 | Compression-method table grew to 5 slots; compression byte returned to `u32`. | Same[^1] |
+| 8 | `V8A` | UE 4.22 (brief) | Added 4-slot compression-method FName table; per-entry `compression` field is `u8`. | Same[^1] |
+| 8 | `V8B` | UE 4.23 – 4.24 | Compression-method table grew to 5 slots; `compression` field returned to `u32`. | Same[^1] |
 | 9 | `FrozenIndex` | UE 4.25 | Added 1-byte frozen-index writer flag. | Same[^1] |
 | 10 | `PathHashIndex` | — (no stock release) | Replaced flat index with FNV-1a-64 path-hash index + encoded directory index. | Same[^1] |
 | 11 | `Fnv64BugFix` | UE 4.26 – 5.6 | Fixed Unicode-aware lowercasing bug in path-hash hashing (ASCII paths byte-equivalent to v10). | Same[^1] |
@@ -269,17 +269,27 @@ Followed by, in order:
     each block is derived by cursor accumulation; encrypted entries
     advance the cursor with AES-block alignment.
 
+`in_data_record_size` is the length of the entry's in-data copy. For a
+v10+ entry with a payload, that copy is an inline-form record
+(§*Entry header (inline form)*) with the V8B+ `u32` compression field:
+53 bytes, plus `4 + 16 × block_count` when `compression != 0`.[^5]
+CUE4Parse tests the method an encoded entry's index resolves to rather
+than the index, so it sizes the copy at 53 bytes when that is `None`
+(Known divergences → *Compression-slot name*).[^4]
+
 A typical single-block compressed entry with u32 fields fits the index
 record in ~16–20 bytes; an uncompressed entry with u32 offset and size
 is 12 bytes. The high u32 word plus fields encodes the structure
 compactly without per-entry length prefixes.
 
-V10+ encoded entries **omit the per-entry SHA1**. Paksmith's
-`PakReader::verify_entry` returns `Ok(VerifyOutcome::SkippedNoHash)` for
-v10+ encoded entries — the `Encoded` variant returns `None` from
-`sha1()`, an absent field, distinct from a present-but-zero digest on an
-`Inline` entry. A zero digest is itself ambiguous and paksmith resolves
-it by the archive-level bit: `PaksmithError::IntegrityStripped` fires
+A V10+ encoded index record **omits the per-entry SHA1**, though the
+entry's in-data copy carries the field. Paksmith's
+`PakReader::verify_entry` reads the index record, so it returns
+`Ok(VerifyOutcome::SkippedNoHash)` for v10+ encoded entries — the
+`Encoded` variant returns `None` from `sha1()`, an absent field,
+distinct from a present-but-zero digest on an `Inline` entry. A zero
+digest is itself ambiguous and paksmith resolves it by the
+archive-level bit: `PaksmithError::IntegrityStripped` fires
 only for `Inline` entries with an all-zero SHA1 **when the archive's
 index hash is non-zero** (a zero index hash makes the same entry
 `SkippedNoHash`), or for FDI/PHI region-hash verification via
@@ -315,7 +325,7 @@ Both write `version = 8` on the wire[^1]. Disambiguated by:
 |--|-----|-----|
 | Footer total size | 189 bytes | 221 bytes |
 | Compression-method table slots | 4 | 5 |
-| Per-entry compression byte width | `u8` (1 byte) | `u32` (4 bytes) |
+| Per-entry `compression` field width | `u8` (1 byte) | `u32` (4 bytes) |
 | UE versions | 4.22 (brief) | 4.23 – 4.24 |
 
 These are repak's names; CUE4Parse calls the 4-slot footer `Size8` and
@@ -550,11 +560,23 @@ policy.
     and ignores the rest of the slot, then matches codec names
     case-insensitively. repak removes every NUL in the slot and joins the
     remaining bytes (`(ch != 0).then_some(ch as char)`), and its
-    `Compression` parse is case-sensitive. So `LZ4\0turbo` is LZ4 to
-    paksmith but `LZ4turbo`, no method, raw output, to repak; `\0Zlib` is
-    an empty slot to paksmith but Zlib to repak; and `lz4` is LZ4 to
-    paksmith but no method to repak. UE zero-fills the slot after the name
-    and writes canonical case, so cooked archives are unaffected.
+    `Compression` parse is case-sensitive. CUE4Parse strips only the
+    slot's trailing NULs and matches the rest with `Enum.TryParse`,
+    ignoring case; a name that does not parse is `Unknown` to it[^3].
+    So `LZ4\0turbo` is LZ4 to paksmith, `LZ4turbo` (no method, raw
+    output) to repak and `Unknown` to CUE4Parse; `\0Zlib` is an empty
+    slot to paksmith, Zlib to repak and `Unknown` to CUE4Parse; and
+    `lz4` is LZ4 to paksmith and CUE4Parse but no method to repak. UE
+    zero-fills the slot after the name and writes canonical case, so
+    cooked archives are unaffected by these three. `Enum.TryParse` also
+    accepts a number, as the `CompressionMethod` value it spells, and
+    the name `None`[^3], so a slot reading `1` is Zlib to CUE4Parse and
+    one reading `None` is no compression; paksmith reads `1` and `None`
+    as unrecognized names. For an entry selecting a `None` slot,
+    CUE4Parse reads no block table from an inline record and no
+    `compressed_size` from an encoded one[^4]. It also sizes such an
+    encoded record's in-data copy at 53 bytes, where repak and paksmith
+    add `4 + 16 × blocks`[^4][^5].
   - **Compression-slot rejection (no NUL / non-UTF-8).** Two exits from
     `read_compression_method_table`, both fail-closed where repak is
     total. A slot with no NUL in its 32 bytes is
@@ -568,7 +590,9 @@ policy.
     unmatched name simply resolves to no method. So a pak with a
     32-character codec FName, 0xFF padding with no NUL, or a CP-1252 name opens in
     repak and is REJECTED by paksmith — a whole-archive refusal, not a
-    per-entry difference.
+    per-entry difference. CUE4Parse takes all 32 bytes of a slot with no
+    NUL as its name, and logs a name `Enum.TryParse` does not match and
+    reads it as `Unknown` rather than refusing the footer[^3].
   - **Compression index resolution.** repak[^5] and paksmith resolve
     index `N` by position, to slot `N - 1`, empty slots included.
     CUE4Parse lists no-method followed by the named slots, skipping
@@ -695,13 +719,30 @@ fixtures generated by `paksmith-fixture-gen` and cross-validated against
     hardening rather than something this oracle attests.
 [^3]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakInfo.cs@ecc4878950336126f125af0747190edf474b2a21` —
     footer probe sizes, the slots read for each, and the
-    compression-method list build.
+    compression-method list build. L326 decodes each 32-byte slot whole
+    and strips only its trailing NULs; L329-L333 match the name with
+    `Enum.TryParse`, ignoring case, and log one that does not parse and
+    read it as `Unknown`. At the same revision,
+    `CUE4Parse/Compression/CompressionMethod.cs` L9-L19 lists the names
+    it matches, from `None = 0` and `Zlib = 1`. `Enum.TryParse` also
+    parses an integer string as the enum value it spells, per the .NET
+    API reference for `System.Enum.TryParse`.
 [^4]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/Objects/FPakEntry.cs@ecc4878950336126f125af0747190edf474b2a21` —
     the per-entry lookup that indexes the compression-method list with
-    the entry's compression index.
+    the entry's compression index. When the method it finds is `None`,
+    L109-L110 read no block table from an inline record, and L200-L210
+    read no `compressed_size` from an encoded one, taking
+    `uncompressed_size`.
+    L226-L229 size an encoded entry's in-data record: 53 bytes, plus
+    `4 + 16 × blocks` unless its method is `None`.
 [^5]: `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` —
     the per-entry index decode (`0` is none, `n` is slot `n - 1`) and
-    the unchecked slot lookup in `read_file`.
+    the unchecked slot lookup in `read_file`. L71-L99
+    (`get_serialized_size`) size the in-data record, 53 bytes at V8B+
+    widths plus `4 + 16 × blocks` for a non-zero index; L229-L237 take
+    that size as the start of an encoded entry's first block; and L345,
+    in `read_file`, reads the in-data copy with `Entry::read` at the
+    archive's version.
 [^6]: `trumank/repak/repak/src/footer.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` —
     L26-L29 (`Footer::read`: the GUID from V7, then the flag from V4 via
     `read_bool`, both ahead of the magic) and L90-L92 (the writer emits

@@ -118,14 +118,14 @@ for _ in 0..n {
 The cap bounds the loop iteration count. Each `push` initializes one
 Vec slot (small commit) AND `PakIndexEntry::read_from` heap-allocates
 a filename `String`. Without the cap, an attacker-recorded
-`entry_count = 946M` would drive 946M loop iterations doing the
-per-entry allocation + slot commit, even though the `try_reserve_exact`
-call itself is microseconds.
+`entry_count` in the hundreds of millions would drive as many loop
+iterations doing the per-entry allocation + slot commit, even though
+the `try_reserve_exact` call itself is microseconds.
 
 (The upstream `index_size / entry_min_record_bytes(version)` byte-budget check
 truncates `entry_count` against the actual index byte size — but at a
-50 GB archive that's still ~946M permitted entries without the
-`MAX_FLAT_INDEX_ENTRIES` cap fired on top.)
+50 GB archive that's still hundreds of millions of permitted entries
+without the `MAX_FLAT_INDEX_ENTRIES` cap fired on top.)
 
 ## Decision: caps stay as-is (macOS-confirmed)
 

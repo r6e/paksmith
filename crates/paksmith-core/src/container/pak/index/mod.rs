@@ -3575,8 +3575,8 @@ mod tests {
     /// `MAX_FLAT_INDEX_ENTRIES`, a header claiming
     /// `entry_count > 10M` would pass the prior `entry_count >
     /// index_size / entry_min_record_bytes(version)` byte-budget check
-    /// against a 50 GB archive (~946M allowed) and then drive a
-    /// huge `try_reserve_exact` attempt. Cap surfaces as
+    /// against a 50 GB archive (hundreds of millions allowed) and
+    /// then drive a huge `try_reserve_exact` attempt. Cap surfaces as
     /// `BoundsExceeded { EntryCount, value, limit, .. }` BEFORE
     /// allocation; explicit field assertions catch a future
     /// regression that swaps to a wider numeric type or relaxes
