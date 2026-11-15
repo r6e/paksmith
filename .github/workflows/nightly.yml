@@ -85,7 +85,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Keep in step with release.yml's build-release matrix, which
+          # Keep in step with release-assets.yml's build matrix, which
           # explains the runner choices.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
@@ -97,7 +97,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # No restored cache, as in release.yml's build-release.
+      # No restored cache, as in release-assets.yml's build.
       - uses: ./.github/actions/setup-rust
         with:
           cache: "false"
