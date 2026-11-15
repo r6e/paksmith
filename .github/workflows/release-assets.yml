@@ -10,10 +10,10 @@ name: Release assets
 #   or no run started for the tag: fix main if needed, then dispatch
 #   this workflow from main with the tag. A tag push runs the tagged
 #   commit's copy of this file, re-runs included, and a dispatch runs
-#   main's. The local
-#   actions come from the tagged commit either way, so a fault in one
-#   of them needs a new tag. A dispatched run's attestations name main
-#   and its head commit as their source, not the tag and its commit.
+#   main's. The local actions come from the tagged commit either way,
+#   so a fault in one of them needs a new tag. A dispatched run's
+#   attestations name main and its head commit as their source, not
+#   the tag and its commit.
 # - The tag exists without a draft: re-run release.yml, which accepts
 #   the existing tag and creates the draft, then dispatch this workflow.
 on:
