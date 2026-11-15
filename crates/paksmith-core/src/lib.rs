@@ -205,7 +205,7 @@ mod send_sync_assertions {
     use crate::container::pak::version::PakVersion;
     use crate::container::pak::{AesKey, PakReader, RegionVerifyState, VerifyOutcome, VerifyStats};
     use crate::container::{
-        ContainerFormat, EntryFlags, EntryIntegrity, EntryMetadata, PayloadLedger,
+        ContainerFormat, EntryFlags, EntryIntegrity, EntryMetadata, OpenOptions, PayloadLedger,
     };
     use crate::error::{
         AssetParseFault, CompanionFileKind, DecompressionFault, IndexParseFault,
@@ -254,8 +254,11 @@ mod send_sync_assertions {
         assert_send_sync::<VerifyOutcome>();
         assert_send_sync::<VerifyStats>();
         assert_send_sync::<RegionVerifyState>();
-        // Built per walk, not stored on `PakReader`.
+        // Built per `verify()` walk; a budgeted `PakReader` holds one
+        // only inside its private budget.
         assert_send_sync::<PayloadLedger>();
+        // Taken by `container::open_with`, not stored.
+        assert_send_sync::<OpenOptions>();
 
         // Asset top-level
         assert_send_sync::<Asset>();

@@ -360,7 +360,16 @@ impl PakIndex {
 
     /// Find an entry by filename in O(1).
     pub fn find(&self, path: &str) -> Option<&PakIndexEntry> {
-        self.by_path.get(path).map(|&i| &self.entries[i])
+        self.find_slot(path).map(|(_, entry)| entry)
+    }
+
+    /// The entry at `path`, with its position in [`Self::entries`].
+    pub(in crate::container::pak) fn find_slot(
+        &self,
+        path: &str,
+    ) -> Option<(usize, &PakIndexEntry)> {
+        let slot = *self.by_path.get(path)?;
+        Some((slot, self.entries.get(slot)?))
     }
 
     /// V10+ region descriptors (FDI and optional PHI) parsed from
@@ -680,6 +689,7 @@ mod cap_pins {
         );
         assert_eq!(super::fstring::FSTRING_MAX_LEN, 65_536, "64 Ki");
         assert_eq!(super::path_hash::MAX_FULL_PATH_BYTES_PER_FDI_BYTE, 16);
+        assert_eq!(crate::container::pak::MAX_READS_PER_ENTRY, 2);
     }
 }
 

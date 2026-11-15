@@ -354,8 +354,9 @@ variant — see Verification → Known divergences.
 ### Implementation hardening (recommended for any parser)
 
 paksmith enforces structural caps to prevent attacker-controlled allocation
-amplification, and budgets the payload bytes `verify()` parses and hashes.
-Every cap constant exposes a
+amplification. It also budgets the payload bytes `verify()` parses and
+hashes, and the payload extents a reader that opts in charges on each
+entry's first read. Every cap constant exposes a
 `#[cfg(feature = "__test_utils")]` accessor so boundary tests can read the
 live value rather than re-declaring the literal.
 
@@ -442,6 +443,17 @@ does not surface as the fault its bullet names.
   `IndexParseFault::BoundsExceeded { field: WireField::PayloadExtentTotal, unit: BoundsUnit::Bytes, path: Some(..), … }`,
   or as `IndexParseFault::U64ArithmeticOverflow { operation: OverflowSite::PayloadExtentTotal, … }`
   should the total pass `u64::MAX`.
+- **Payload extents per budgeted reader**
+  (`crates/paksmith-core/src/container/pak/mod.rs`).
+  A caller reading many entries can opt in with
+  `PakReader::with_read_budget`, or `container::open_with` given
+  `OpenOptions::with_read_budget`. `read_entry` and `read_entry_to` then
+  charge an entry's payload extent to a `PayloadLedger` for the file on
+  its first read, before reading anything of it, so each name of one
+  region pays its own charge. A second read of the entry is free, and a
+  read past `MAX_READS_PER_ENTRY` (2) is refused. `verify()` keeps its
+  own ledger. Surfaces as the ledger's faults above, or for that read as
+  `IndexParseFault::BoundsExceeded { field: WireField::EntryReads, value: 3, limit: 2, unit: BoundsUnit::Items, path: Some(..) }`.
 - **In-data header copies**
   (`crates/paksmith-core/src/container/pak/mod.rs`).
   A read or verify parses an entry's in-data header copy only to its
@@ -640,9 +652,10 @@ policy.
 **Status:** `complete`.
 
 **Public surface:**
-- `pub struct PakReader` — `open()`, `entries()`, `read_entry(path)`,
-  `read_entry_to(path, writer)`, `verify_index()`, `verify_entry(path)`,
-  `verify()`. The archive-level integrity bit is reachable through the
+- `pub struct PakReader` — `open()`, `with_read_budget()`, `entries()`,
+  `read_entry(path)`, `read_entry_to(path, writer)`, `verify_index()`,
+  `verify_entry(path)`, `verify()`. The archive-level integrity bit is
+  reachable through the
   `ContainerReader::claims_integrity()` trait method (the inherent
   `archive_claims_integrity()` is private), and
   `ContainerReader::entry_integrity(&meta)` classifies one entry's
@@ -654,8 +667,13 @@ policy.
   `uncompressed_size` if larger for a stored entry, aligned to 16 when
   encrypted), widened from v5 to `offset +` each compression block's
   end. v3-v4 block offsets are file-relative, and no read or verify
-  follows them, so their blocks are left out. `verify()` charges these
-  to a `PayloadLedger`, which a caller reading every entry can use too.
+  follows them, so their blocks are left out. `verify()` and a budgeted
+  reader (§*Implementation hardening*) charge these to a
+  `PayloadLedger`, which a caller reading every entry can use too.
+- `pub fn container::open_with(path, key, &OpenOptions)` — `open()` with
+  options; `OpenOptions::with_read_budget()` asks for a budgeted reader.
+  A reader that reports it didn't apply an option is refused with
+  `PaksmithError::InvalidArgument`; pak's reader applies every option.
 - `pub struct PakFooter` — `version()`, `index_offset()`, `index_size()`,
   `index_hash()`, `is_encrypted()`, `encryption_key_guid()`, `frozen_index()`.
 - `pub enum PakVersion` — `Initial`, `NoTimestamps`, …, `Fnv64BugFix`

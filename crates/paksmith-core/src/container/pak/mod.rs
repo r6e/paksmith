@@ -106,9 +106,6 @@ use crate::error::{
     IndexParseFault, IndexRegionKind, OffsetPastFileSizeKind, OverflowSite, PaksmithError,
     WireField, check_region_bounds,
 };
-// Unused in the no-`__test_utils` lib-test compile (seam machinery
-// no-ops there); exercised by CI's package-scoped compile guard.
-#[cfg_attr(not(feature = "__test_utils"), allow(unused_imports))]
 use crate::seams::PakSeam;
 
 use self::footer::PakFooter;
@@ -141,6 +138,17 @@ pub(in crate::container::pak) const MAX_UNCOMPRESSED_ENTRY_BYTES: u64 = 8 * 1024
 #[cfg(feature = "__test_utils")]
 pub fn max_uncompressed_entry_bytes() -> u64 {
     MAX_UNCOMPRESSED_ENTRY_BYTES
+}
+
+/// The reads of one entry a [`PakReader::with_read_budget`] reader
+/// admits. Exposed to tests via [`max_reads_per_entry`].
+const MAX_READS_PER_ENTRY: u8 = 2;
+
+/// Test-only accessor for `MAX_READS_PER_ENTRY`, gated behind the
+/// `__test_utils` feature like [`max_uncompressed_entry_bytes`].
+#[cfg(feature = "__test_utils")]
+pub fn max_reads_per_entry() -> u8 {
+    MAX_READS_PER_ENTRY
 }
 
 /// Trait alias for the bounds [`PakReader`] needs on its underlying
@@ -194,6 +202,52 @@ pub struct PakReader {
     /// the pre-key behavior (encrypted archives are rejected with
     /// [`PaksmithError::Decryption`]).
     key: Option<AesKey>,
+    /// Set by [`Self::with_read_budget`]. Its lock is released before a
+    /// read takes the file's.
+    read_budget: Option<Mutex<ReadBudget>>,
+}
+
+/// A [`PakReader::with_read_budget`] reader's budget: its ledger and how
+/// many reads of each index slot it has admitted.
+#[derive(Debug)]
+struct ReadBudget {
+    ledger: PayloadLedger,
+    reads: Vec<u8>,
+}
+
+impl ReadBudget {
+    /// Admit a read of `entry`, the index's entry at `slot`: charge its
+    /// extent on its first read, admit its second free, and refuse any
+    /// read after that. A refused read isn't counted.
+    fn admit(
+        &mut self,
+        slot: usize,
+        entry: &PakIndexEntry,
+        version: PakVersion,
+    ) -> crate::Result<()> {
+        let path = entry.filename();
+        let Some(reads) = self.reads.get_mut(slot) else {
+            return Err(PaksmithError::Internal {
+                context: format!("read budget has no count for index slot {slot}"),
+            });
+        };
+        if *reads >= MAX_READS_PER_ENTRY {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BoundsExceeded {
+                    field: WireField::EntryReads,
+                    value: u64::from(MAX_READS_PER_ENTRY) + 1,
+                    limit: u64::from(MAX_READS_PER_ENTRY),
+                    unit: BoundsUnit::Items,
+                    path: Some(path.to_string()),
+                },
+            });
+        }
+        if *reads == 0 {
+            self.ledger.charge(path, entry.payload_extent(version))?;
+        }
+        *reads += 1;
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for PakReader {
@@ -208,6 +262,7 @@ impl std::fmt::Debug for PakReader {
             // `AesKey`'s own Debug is redacted, so this never leaks key
             // bytes; it only reveals presence/absence of a key.
             .field("key", &self.key)
+            .field("read_budget", &self.has_read_budget())
             .finish()
     }
 }
@@ -589,7 +644,47 @@ impl PakReader {
             index,
             reader: Mutex::new(reader),
             key,
+            read_budget: None,
         })
+    }
+
+    /// This reader with a read budget, for a caller that reads many of its
+    /// entries, replacing any budget it had.
+    ///
+    /// [`ContainerReader::read_entry`] and
+    /// [`ContainerReader::read_entry_to`] then charge an entry's
+    /// [`EntryMetadata::payload_extent`] to a [`PayloadLedger`] for the
+    /// archive on its first read, before reading anything of it, and
+    /// refuse the read whose charge the ledger refuses. A second read of
+    /// an entry is free, and a third is refused. [`Self::verify`] and
+    /// [`Self::verify_entry`] don't use the budget.
+    ///
+    /// # Errors
+    ///
+    /// [`PaksmithError::InvalidIndex`] with
+    /// [`IndexParseFault::AllocationFailed`] on
+    /// [`AllocationContext::EntryReadCounts`] when the count of reads per
+    /// entry can't be reserved.
+    pub fn with_read_budget(mut self) -> crate::Result<Self> {
+        let entries = self.index.entries().len();
+        let mut reads = Vec::new();
+        crate::error::try_reserve_index(
+            &mut reads,
+            entries,
+            AllocationContext::EntryReadCounts,
+            PakSeam::EntryReadCounts,
+        )?;
+        reads.resize(entries, 0);
+        self.read_budget = Some(Mutex::new(ReadBudget {
+            ledger: PayloadLedger::new(self.file_size),
+            reads,
+        }));
+        Ok(self)
+    }
+
+    /// Whether [`Self::with_read_budget`] gave this reader a budget.
+    pub(in crate::container) fn has_read_budget(&self) -> bool {
+        self.read_budget.is_some()
     }
 
     /// The pak format version of this archive.
@@ -1433,6 +1528,24 @@ impl PakReader {
         Ok(in_data)
     }
 
+    /// The entry at `path`, for `read_entry` and `read_entry_to` to read,
+    /// once its read is admitted by the budget, if there is one.
+    fn resolve_for_read(&self, path: &str) -> crate::Result<&PakIndexEntry> {
+        let (slot, entry) =
+            self.index
+                .find_slot(path)
+                .ok_or_else(|| PaksmithError::EntryNotFound {
+                    path: path.to_string(),
+                })?;
+        if let Some(budget) = &self.read_budget {
+            budget
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .admit(slot, entry, self.version())?;
+        }
+        Ok(entry)
+    }
+
     /// Inner streaming primitive shared by `read_entry_to` (trait method,
     /// looks up the entry by path) and `read_entry` (override, looks up
     /// the entry by path AND wraps with try_reserve_exact). Takes a
@@ -1903,12 +2016,7 @@ impl ContainerReader for PakReader {
 
     #[tracing::instrument(level = "debug", name = "entry_read", skip_all, fields(path = path))]
     fn read_entry_to(&self, path: &str, writer: &mut dyn Write) -> crate::Result<u64> {
-        let entry = self
-            .index
-            .find(path)
-            .ok_or_else(|| PaksmithError::EntryNotFound {
-                path: path.to_string(),
-            })?;
+        let entry = self.resolve_for_read(path)?;
         self.stream_entry_to(entry, writer)
     }
 
@@ -1919,15 +2027,11 @@ impl ContainerReader for PakReader {
     /// Implements the trait's required `read_entry` (no default — see
     /// the trait docstring for why). Reserves the full uncompressed
     /// size via `Vec::try_reserve_exact` upfront, surfacing OOM as a
-    /// typed `InvalidIndex` before any I/O begins.
+    /// typed `InvalidIndex` before any I/O begins, once a budgeted
+    /// reader's budget admits the read ([`PakReader::with_read_budget`]).
     #[tracing::instrument(level = "debug", name = "entry_read", skip_all, fields(path = path))]
     fn read_entry(&self, path: &str) -> crate::Result<Vec<u8>> {
-        let entry = self
-            .index
-            .find(path)
-            .ok_or_else(|| PaksmithError::EntryNotFound {
-                path: path.to_string(),
-            })?;
+        let entry = self.resolve_for_read(path)?;
 
         let uncompressed_size = entry.header().uncompressed_size();
         // No `uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES` re-check
@@ -7177,12 +7281,11 @@ mod tests {
             .sum()
     }
 
-    /// `verify()` charges an entry before reading it: the second entry's
-    /// extent takes the total past the archive's size, so its in-data copy,
-    /// which disagrees with its index record, is never read.
+    /// v5 flat pak whose `Content/a.bin` and `Content/b.bin` both name the
+    /// hashed 256-byte stored record at offset 0. `b`'s index record claims
+    /// 400 bytes, so its in-data copy disagrees with it.
     #[cfg(feature = "__test_utils")]
-    #[test]
-    fn verify_charges_an_entry_before_reading_it() {
+    fn mismatched_alias_pak() -> Vec<u8> {
         use sha1::{Digest, Sha1};
 
         use crate::testing::wire::write_pak_entry;
@@ -7204,7 +7307,16 @@ mod tests {
                 ("Content/b.bin", record(400)),
             ],
         );
-        let reader = PakReader::from_bytes(pak).unwrap();
+        pak
+    }
+
+    /// `verify()` charges an entry before reading it: the second entry's
+    /// extent takes the total past the archive's size, so its in-data copy,
+    /// which disagrees with its index record, is never read.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn verify_charges_an_entry_before_reading_it() {
+        let reader = PakReader::from_bytes(mismatched_alias_pak()).unwrap();
         let alone = reader.verify_entry("Content/b.bin").unwrap_err();
         assert!(
             matches!(
@@ -7426,6 +7538,267 @@ mod tests {
                 "got: {err:?}"
             );
         }
+    }
+
+    type ReadFn = fn(&dyn ContainerReader, &str) -> crate::Result<Vec<u8>>;
+
+    /// The two ways to read an entry: `read_entry`, and `read_entry_to`
+    /// into a `Vec`.
+    const READS: [ReadFn; 2] = [
+        |reader, path| reader.read_entry(path),
+        |reader, path| {
+            let mut out = Vec::new();
+            reader.read_entry_to(path, &mut out).map(|_| out)
+        },
+    ];
+
+    #[cfg(feature = "__test_utils")]
+    fn budgeted(pak: &[u8]) -> PakReader {
+        PakReader::from_bytes(pak.to_vec())
+            .unwrap()
+            .with_read_budget()
+            .unwrap()
+    }
+
+    /// Whether `err` is the budget's refusal of `path` for taking the
+    /// total of payload extents past the archive's size.
+    #[cfg(feature = "__test_utils")]
+    fn is_extent_refusal(err: &PaksmithError, path: &str) -> bool {
+        matches!(
+            err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BoundsExceeded {
+                    field: WireField::PayloadExtentTotal,
+                    path: Some(p),
+                    ..
+                },
+            } if p == path
+        )
+    }
+
+    /// A budgeted reader refuses, by either read, the second name of one
+    /// record, whose extent takes the total past the archive's size, and
+    /// refuses it again on a retry. An unbudgeted reader reads both.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_budget_refuses_the_alias_past_the_archives_size() {
+        let names = ["Content/a.bin", "Content/b.bin"];
+        let payload = [7; 256];
+        let pak = aliased_v5_pak(&names, &payload, &[], false);
+        let file_size = pak.len() as u64;
+        for read in READS {
+            let unbudgeted = PakReader::from_bytes(pak.clone()).unwrap();
+            for name in names {
+                assert_eq!(read(&unbudgeted, name).unwrap(), payload, "{name}");
+            }
+            let charged = extent_total(&unbudgeted);
+            assert!(charged > file_size, "{charged} must exceed {file_size}");
+            let reader = budgeted(&pak);
+            assert_eq!(read(&reader, names[0]).unwrap(), payload);
+            let err = read(&reader, names[1]).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::BoundsExceeded {
+                            field: WireField::PayloadExtentTotal,
+                            value,
+                            limit,
+                            unit: BoundsUnit::Bytes,
+                            path: Some(p),
+                        },
+                    } if *value == charged && *limit == file_size && p == names[1]
+                ),
+                "got: {err:?}"
+            );
+            let again = read(&reader, names[1]).unwrap_err();
+            assert!(is_extent_refusal(&again, names[1]), "got: {again:?}");
+        }
+    }
+
+    /// A budgeted reader charges an entry once: its later reads are
+    /// admitted up to the limit though a second charge of its extent would
+    /// pass the archive's size, and the read past the limit is refused.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_budget_admits_a_second_read_free_and_refuses_a_third() {
+        let name = "Content/a.bin";
+        let payload = [7; 256];
+        let pak = aliased_v5_pak(&[name], &payload, &[], false);
+        let file_size = pak.len() as u64;
+        let extent = extent_total(&PakReader::from_bytes(pak.clone()).unwrap());
+        assert!(2 * extent > file_size, "{extent} vs {file_size}");
+        let limit = u64::from(max_reads_per_entry());
+        for read in READS {
+            let reader = budgeted(&pak);
+            for _ in 0..limit {
+                assert_eq!(read(&reader, name).unwrap(), payload);
+            }
+            let err = read(&reader, name).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::BoundsExceeded {
+                            field: WireField::EntryReads,
+                            value,
+                            limit: l,
+                            unit: BoundsUnit::Items,
+                            path: Some(p),
+                        },
+                    } if *value == limit + 1 && *l == limit && p == name
+                ),
+                "got: {err:?}"
+            );
+        }
+    }
+
+    /// A budgeted reader reports a path it lacks as `EntryNotFound`, and
+    /// still reads the entries it has.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_budget_keeps_entry_not_found() {
+        let payload = [7; 256];
+        let pak = aliased_v5_pak(&["Content/a.bin"], &payload, &[], false);
+        for read in READS {
+            let reader = budgeted(&pak);
+            let err = read(&reader, "Content/b.bin").unwrap_err();
+            assert!(
+                matches!(&err, PaksmithError::EntryNotFound { path } if path == "Content/b.bin"),
+                "got: {err:?}"
+            );
+            assert_eq!(read(&reader, "Content/a.bin").unwrap(), payload);
+        }
+    }
+
+    /// A budgeted reader charges an entry before reading it: the second
+    /// entry's extent takes the total past the archive's size, so its
+    /// in-data copy, which disagrees with its index record, is never read.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_budget_charges_an_entry_before_reading_it() {
+        let pak = mismatched_alias_pak();
+        for read in READS {
+            let unbudgeted = PakReader::from_bytes(pak.clone()).unwrap();
+            let alone = read(&unbudgeted, "Content/b.bin").unwrap_err();
+            assert!(
+                matches!(
+                    alone,
+                    PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::FieldMismatch {
+                            field: WireField::CompressedSize,
+                            ..
+                        },
+                    }
+                ),
+                "got: {alone:?}"
+            );
+            let reader = budgeted(&pak);
+            let _ = read(&reader, "Content/a.bin").unwrap();
+            let err = read(&reader, "Content/b.bin").unwrap_err();
+            assert!(is_extent_refusal(&err, "Content/b.bin"), "got: {err:?}");
+        }
+    }
+
+    /// A failed reservation of the budget's read counts surfaces as a
+    /// typed fault asking for one count per entry.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_budget_surfaces_entry_read_counts_allocation_failed() {
+        use crate::seams::SeamSite;
+        use crate::testing::oom::arm_at;
+
+        let names = ["Content/a.bin", "Content/b.bin"];
+        let reader = PakReader::from_bytes(aliased_v5_pak(&names, &[7; 16], &[], false)).unwrap();
+        let _guard = arm_at(SeamSite::Pak(PakSeam::EntryReadCounts), 0);
+        let err = reader.with_read_budget().unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::EntryReadCounts,
+                        requested: 2,
+                        path: None,
+                        ..
+                    },
+                }
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// `open` and `open_with` under the default options give an unbudgeted
+    /// reader, and `open_with` asked for a read budget a budgeted one.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn open_with_budgets_the_reader_only_when_asked() {
+        use crate::container::{OpenOptions, open, open_with};
+
+        let names = ["Content/a.bin", "Content/b.bin"];
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), aliased_v5_pak(&names, &[7; 256], &[], false)).unwrap();
+        let unbudgeted = [
+            open(file.path(), None).unwrap(),
+            open_with(file.path(), None, &OpenOptions::default()).unwrap(),
+            open_with(file.path(), None, &OpenOptions::new()).unwrap(),
+        ];
+        for reader in unbudgeted {
+            for name in names {
+                let _ = reader.read_entry(name).unwrap();
+            }
+        }
+        let options = OpenOptions::new().with_read_budget();
+        let reader = open_with(file.path(), None, &options).unwrap();
+        let _ = reader.read_entry(names[0]).unwrap();
+        let err = reader.read_entry(names[1]).unwrap_err();
+        assert!(is_extent_refusal(&err, names[1]), "got: {err:?}");
+    }
+
+    /// Every `real_*.pak` fixture fits the read budget: the parts of its
+    /// entries' extents inside the file sum to at most its size, and a
+    /// budgeted reader reads each entry by both reads exactly as an
+    /// unbudgeted one does, failures included. The fixture key opens the
+    /// encrypted-index fixtures and decrypts the encrypted entries; the
+    /// rest don't use it.
+    #[test]
+    fn real_fixtures_fit_the_read_budget() {
+        use crate::container::{OpenOptions, open_with};
+
+        let mut names: Vec<String> = std::fs::read_dir(fixture(""))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "pak"))
+            .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
+            .filter(|name| name.starts_with("real_"))
+            .collect();
+        names.sort();
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let options = OpenOptions::new().with_read_budget();
+        let mut reads_ok = 0;
+        for name in &names {
+            let path = fixture(name);
+            let file_size = std::fs::metadata(&path).unwrap().len();
+            let baseline = PakReader::open_with_key(&path, key.clone())
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let in_file: u64 = baseline
+                .entries()
+                .map(|m| m.payload_extent().unwrap())
+                .map(|e| e.end.min(file_size).saturating_sub(e.start))
+                .sum();
+            assert!(in_file <= file_size, "{name}: {in_file} > {file_size}");
+            let reader = open_with(&path, Some(&key), &options).unwrap();
+            for meta in baseline.entries() {
+                let entry = meta.path();
+                let want = baseline.read_entry(entry).map_err(|e| e.to_string());
+                reads_ok += usize::from(want.is_ok());
+                for read in READS {
+                    let got = read(&*reader, entry).map_err(|e| e.to_string());
+                    assert_eq!(got, want, "{name}: {entry}");
+                }
+            }
+        }
+        assert!(reads_ok > 0);
     }
 
     /// SPEC.md round-trip properties: compress→decompress and
