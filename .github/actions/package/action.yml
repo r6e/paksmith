@@ -1,35 +1,43 @@
 name: Package
 description: |
-  Build the release binaries for the runner's native target and stage
-  them as `paksmith-<label>-<target>.<ext>` beside a
-  `SHA256SUMS-<target>.txt`, both in the workspace root.
+  Build the release binaries for the runner's native target and upload
+  them as the workflow artifact `paksmith-<label>-<target>`, holding
+  `paksmith-<label>-<target>.<ext>` and `SHA256SUMS-<target>.txt`.
 
-  Expects a checkout with `persist-credentials: false` and
-  `./.github/actions/setup-rust` with `cache: "false"` to have run.
+  Expects a checkout with `persist-credentials: false`.
 
 inputs:
   label:
     description: Version part of the archive name, such as a release tag.
     required: true
   target:
-    description: Target triple, used in the archive and checksum file names.
+    description: Target triple the runner builds natively; names the archive and checksum file.
     required: true
-
-outputs:
-  name:
-    description: Archive file name without its extension.
-    value: ${{ steps.names.outputs.staging }}
-  archive:
-    description: Archive file name.
-    value: ${{ steps.names.outputs.archive }}
-  checksums:
-    description: Checksum file name.
-    value: ${{ steps.names.outputs.checksums }}
+  retention-days:
+    description: Days the artifact is kept.
+    required: true
 
 runs:
   using: composite
   steps:
-    - name: Name the outputs
+    # No restored cache: the binaries are handed to users, and the cache
+    # scope is shared with every other job on main.
+    - uses: ./.github/actions/setup-rust
+      with:
+        cache: "false"
+    # The build is for the runner's host, so a `target` naming anything
+    # else would label the archive with a triple it was not built for.
+    - name: Check the target
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        host="$(rustc -vV | sed -n 's/^host: //p')"
+        [[ "${host}" == "${TARGET}" ]] || {
+          echo "::error::this runner builds ${host}, not ${TARGET}"
+          exit 1
+        }
+    - name: Name the files
       id: names
       shell: bash
       env:
@@ -99,3 +107,12 @@ runs:
         $hash = (Get-FileHash -Algorithm SHA256 $env:ARCHIVE).Hash.ToLower()
         # Issue #167: LF (not CRLF) for `sha256sum -c --strict` on Linux.
         [System.IO.File]::WriteAllText("$pwd/${env:CHECKSUMS}", "${hash}  ${env:ARCHIVE}`n")
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.names.outputs.staging }}
+        path: |
+          ${{ steps.names.outputs.archive }}
+          ${{ steps.names.outputs.checksums }}
+        if-no-files-found: error
+        overwrite: true # a re-run replaces the earlier attempt's upload
+        retention-days: ${{ inputs.retention-days }}
