@@ -24,6 +24,8 @@ permissions: {}
 jobs:
   release-please:
     name: release-please
+    # A dispatch from another ref would run that ref's copy of this file.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
