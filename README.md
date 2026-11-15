@@ -109,12 +109,18 @@ Background: notarization is permanently off the roadmap ([#168](https://github.c
 
 ### Windows first-run note
 
-The `x86_64-pc-windows-msvc` binaries in releases and nightlies are **not code-signed**. Windows marks files that came from the internet, and SmartScreen may block the first run with *"Windows protected your PC."*
+The `x86_64-pc-windows-msvc` binaries in releases and nightlies are **not code-signed**. Windows tags a file downloaded with a browser as coming from the internet (the Mark of the Web), and Explorer passes the tag to the files it extracts. SmartScreen may then block a binary started from Explorer with *"Windows protected your PC."* Running `paksmith` from an open terminal does not normally prompt.
 
-After verifying the download, clear the mark in PowerShell:
+Windows has no `shasum`. In PowerShell, print the archive's SHA-256 and compare it with the one in `SHA256SUMS-x86_64-pc-windows-msvc.txt`:
 
 ```powershell
-Unblock-File .\paksmith.exe
+Get-FileHash .\paksmith-vX.Y.Z-x86_64-pc-windows-msvc.zip
+```
+
+Then clear the tag from the archive before extracting it, so neither binary inherits it:
+
+```powershell
+Unblock-File .\paksmith-vX.Y.Z-x86_64-pc-windows-msvc.zip
 ```
 
 Or in the SmartScreen dialog: **More info** → **Run anyway**.
