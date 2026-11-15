@@ -6,10 +6,11 @@ name: Release assets
 #
 # Recovery, while the release is still a draft:
 # - A job failed: "Re-run failed jobs".
-# - This file is wrong, the artifacts have expired, or no run started
-#   for the tag: fix main if needed, then dispatch this workflow from
-#   main with the tag. A tag push runs the tagged commit's copy of
-#   this file, re-runs included, and a dispatch runs main's. The local
+# - This file is wrong, the artifacts have expired, the tag was moved,
+#   or no run started for the tag: fix main if needed, then dispatch
+#   this workflow from main with the tag. A tag push runs the tagged
+#   commit's copy of this file, re-runs included, and a dispatch runs
+#   main's. The local
 #   actions come from the tagged commit either way, so a fault in one
 #   of them needs a new tag. A dispatched run's attestations name main
 #   and its head commit as their source, not the tag and its commit.
@@ -66,8 +67,15 @@ jobs:
           }
           # A tag push's attestations name the pushed commit as their
           # source, so that must be the commit the build checks out.
-          [[ "${GITHUB_EVENT_NAME}" != push || "${sha}" == "${GITHUB_SHA}" ]] || {
-            echo "::error::${TAG} now names ${sha}, but this run was started for ${GITHUB_SHA}"
+          if [[ "${GITHUB_EVENT_NAME}" == push && "${sha}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::${TAG} now names ${sha}, but this run was started for ${GITHUB_SHA}; dispatch from main to build it"
+            exit 1
+          fi
+          # A release is a commit of main, so a tag on anything else is
+          # not built or attested.
+          status="$(gh api "repos/${GH_REPO}/compare/${sha}...refs/heads/main" --jq .status)"
+          [[ "${status}" == ahead || "${status}" == identical ]] || {
+            echo "::error::${TAG} names ${sha}, which is not on main"
             exit 1
           }
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
