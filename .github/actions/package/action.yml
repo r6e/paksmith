@@ -1,0 +1,101 @@
+name: Package
+description: |
+  Build the release binaries for the runner's native target and stage
+  them as `paksmith-<label>-<target>.<ext>` beside a
+  `SHA256SUMS-<target>.txt`, both in the workspace root.
+
+  Expects a checkout with `persist-credentials: false` and
+  `./.github/actions/setup-rust` with `cache: "false"` to have run.
+
+inputs:
+  label:
+    description: Version part of the archive name, such as a release tag.
+    required: true
+  target:
+    description: Target triple, used in the archive and checksum file names.
+    required: true
+
+outputs:
+  name:
+    description: Archive file name without its extension.
+    value: ${{ steps.names.outputs.staging }}
+  archive:
+    description: Archive file name.
+    value: ${{ steps.names.outputs.archive }}
+  checksums:
+    description: Checksum file name.
+    value: ${{ steps.names.outputs.checksums }}
+
+runs:
+  using: composite
+  steps:
+    - name: Name the outputs
+      id: names
+      shell: bash
+      env:
+        LABEL: ${{ inputs.label }}
+        TARGET: ${{ inputs.target }}
+        EXT: ${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+      run: |
+        staging="paksmith-${LABEL}-${TARGET}"
+        {
+          echo "staging=${staging}"
+          echo "archive=${staging}.${EXT}"
+          echo "checksums=SHA256SUMS-${TARGET}.txt"
+        } >> "${GITHUB_OUTPUT}"
+    # Before changing the `-p` set, read the `__test_utils` caveat in
+    # crates/paksmith-core/Cargo.toml.
+    - name: Build release binaries
+      shell: bash
+      run: cargo build --release --locked -p paksmith-cli -p paksmith-gui
+    # Ad-hoc codesigning of macOS binaries. paksmith does not pay for
+    # Apple Developer Program membership, so Developer ID notarization
+    # is not on the roadmap (#168 closed won't-fix) — this is the
+    # permanent macOS signing strategy.
+    #
+    # aarch64 Mach-O binaries on Apple Silicon already carry a
+    # linker-applied ad-hoc signature (CS_LINKER_SIGNED flag set) —
+    # this step replaces it with an explicit ad-hoc signature (same
+    # `-` identity, CS_LINKER_SIGNED cleared). The delta is narrow but
+    # real: a subclass of sandbox APIs (NSTask spawn checks, certain
+    # entitlement gates) accepts explicit ad-hoc but rejects
+    # linker-signed. Gatekeeper still blocks first-run permanently;
+    # users follow the workaround documented in the README (#165).
+    - name: Ad-hoc codesign binaries (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        for bin in paksmith paksmith-gui; do
+          codesign --force --sign - "target/release/${bin}"
+          codesign --verify --strict "target/release/${bin}"
+        done
+    - name: Stage archive contents (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        STAGING: ${{ steps.names.outputs.staging }}
+        ARCHIVE: ${{ steps.names.outputs.archive }}
+        CHECKSUMS: ${{ steps.names.outputs.checksums }}
+      run: |
+        mkdir -p "${STAGING}"
+        cp target/release/paksmith "${STAGING}/"
+        cp target/release/paksmith-gui "${STAGING}/"
+        cp LICENSE README.md "${STAGING}/"
+        tar czf "${ARCHIVE}" "${STAGING}"
+        shasum -a 256 "${ARCHIVE}" > "${CHECKSUMS}"
+    - name: Stage archive contents (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        STAGING: ${{ steps.names.outputs.staging }}
+        ARCHIVE: ${{ steps.names.outputs.archive }}
+        CHECKSUMS: ${{ steps.names.outputs.checksums }}
+      run: |
+        New-Item -ItemType Directory -Force -Path $env:STAGING | Out-Null
+        Copy-Item target/release/paksmith.exe -Destination $env:STAGING
+        Copy-Item target/release/paksmith-gui.exe -Destination $env:STAGING
+        Copy-Item LICENSE, README.md -Destination $env:STAGING
+        Compress-Archive -Path $env:STAGING -DestinationPath $env:ARCHIVE
+        $hash = (Get-FileHash -Algorithm SHA256 $env:ARCHIVE).Hash.ToLower()
+        # Issue #167: LF (not CRLF) for `sha256sum -c --strict` on Linux.
+        [System.IO.File]::WriteAllText("$pwd/${env:CHECKSUMS}", "${hash}  ${env:ARCHIVE}`n")
