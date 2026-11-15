@@ -71,11 +71,13 @@ Verify the download against the published checksum file before running. The chec
 shasum -a 256 -c SHA256SUMS-<target>.txt
 ```
 
-Each archive also has a signed [build provenance attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations) recording that this repository's release workflow built it. Check it with the [GitHub CLI](https://cli.github.com/):
+Each archive also has a signed [build provenance attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations) recording which workflow run built it. It does not show that the release itself was authorised. With the [GitHub CLI](https://cli.github.com/), check that the release workflow built the archive from its tag:
 
 ```sh
-gh attestation verify paksmith-vX.Y.Z-<target>.tar.gz -R r6e/paksmith --signer-workflow r6e/paksmith/.github/workflows/release-assets.yml
+gh attestation verify <archive> -R r6e/paksmith --signer-workflow r6e/paksmith/.github/workflows/release-assets.yml --source-ref refs/tags/vX.Y.Z
 ```
+
+A release rebuilt after a failed run is signed from `main` instead of its tag. If the check fails, repeat it with `--source-ref refs/heads/main`, which shows only that the release workflow on `main` built the archive for some release.
 
 ### Nightly builds
 
@@ -100,7 +102,7 @@ gh run download "$run" -R r6e/paksmith -n "${name:?no nightly found}" -D "$name"
 Either way you get the archive and its `SHA256SUMS-<target>.txt` (the browser download wraps them in a zip). Verify and extract them as for a release. A nightly's attestation names the nightly workflow and `main`:
 
 ```sh
-gh attestation verify paksmith-nightly-<date>-<commit>-<target>.tar.gz -R r6e/paksmith --signer-workflow r6e/paksmith/.github/workflows/nightly.yml --source-ref refs/heads/main
+gh attestation verify <archive> -R r6e/paksmith --signer-workflow r6e/paksmith/.github/workflows/nightly.yml --source-ref refs/heads/main
 ```
 
 ### macOS first-run note

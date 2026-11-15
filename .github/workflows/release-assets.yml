@@ -12,7 +12,7 @@ name: Release assets
 #   this file, re-runs included, and a dispatch runs main's. The local
 #   actions come from the tagged commit either way, so a fault in one
 #   of them needs a new tag. A dispatched run's attestations name main
-#   as their source, not the tag.
+#   and its head commit as their source, not the tag and its commit.
 # - The tag exists without a draft: re-run release.yml, which accepts
 #   the existing tag and creates the draft, then dispatch this workflow.
 on:
@@ -62,6 +62,12 @@ jobs:
           sha="$(gh api "repos/${GH_REPO}/commits/refs/tags/${TAG}" --jq .sha)"
           [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || {
             echo "::error::${TAG} resolved to '${sha}', not a commit"
+            exit 1
+          }
+          # A tag push's attestations name the pushed commit as their
+          # source, so that must be the commit the build checks out.
+          [[ "${GITHUB_EVENT_NAME}" != push || "${sha}" == "${GITHUB_SHA}" ]] || {
+            echo "::error::${TAG} now names ${sha}, but this run was started for ${GITHUB_SHA}"
             exit 1
           }
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
@@ -126,7 +132,7 @@ jobs:
   # release, so the write token never meets a build script.
   publish:
     name: publish
-    # Waits for `attest`, so no release is published without provenance.
+    # Waits for `attest`, so a failed attestation blocks the release.
     needs: [check, build, attest]
     runs-on: ubuntu-latest
     timeout-minutes: 10
