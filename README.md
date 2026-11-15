@@ -65,15 +65,37 @@ Pre-built binaries are published on the [GitHub Releases page](https://github.co
 
 Each archive contains the `paksmith` CLI and the `paksmith-gui` stub (the GUI is a Phase 6 deliverable; today it prints a banner). Extract the archive, then move `paksmith` somewhere on your `PATH`.
 
-Verify the download against the published checksum file before running:
+Verify the download against the published checksum file before running. The checksum is written by the job that built the archive, so it only catches a damaged download:
 
 ```sh
 shasum -a 256 -c SHA256SUMS-<target>.txt
 ```
 
+### Nightly builds
+
+The [Nightly workflow](https://github.com/r6e/paksmith/actions/workflows/nightly.yml) builds the same three archives from `main` on any night `main` has changed. They are attached to that workflow run as artifacts named `paksmith-nightly-<date>-<commit>-<target>`, not published as releases. Nightlies are unsupported snapshots of `main`.
+
+Artifacts need a signed-in GitHub account to download and are kept for 30 days, so there is no nightly to download once `main` has been unchanged for longer than that.
+
+**In a browser:** open the [list of nightly runs](https://github.com/r6e/paksmith/actions/workflows/nightly.yml?query=branch%3Amain+is%3Asuccess) and pick the newest scheduled or manually started run that has an Artifacts section. Ignore a run that belongs to a pull request: it was not built from `main`. A run without the section found `main` unchanged and built nothing. Download the artifact for your platform.
+
+**With the [GitHub CLI](https://cli.github.com/):** this downloads the newest nightly for one target into a directory named after the artifact; delete that directory to download the same nightly again. Set `target` to `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` or `x86_64-pc-windows-msvc`. It needs a POSIX shell (Git Bash on Windows).
+
+```sh
+target=x86_64-unknown-linux-gnu
+name=
+for run in $(gh run list -R r6e/paksmith -w nightly.yml -b main -s success -L 100 --json databaseId,event -q '.[] | select(.event == "schedule" or .event == "workflow_dispatch") | .databaseId'); do
+  name=$(gh api "repos/r6e/paksmith/actions/runs/$run/artifacts" -q ".artifacts[] | select(.expired | not) | .name | select(endswith(\"-$target\"))") || { name=; break; }
+  [ -n "$name" ] && break
+done
+gh run download "$run" -R r6e/paksmith -n "${name:?no nightly found}" -D "$name"
+```
+
+Either way you get the archive and its `SHA256SUMS-<target>.txt` (the browser download wraps them in a zip). Verify and extract them as for a release.
+
 ### macOS first-run note
 
-The `aarch64-apple-darwin` binaries shipped to GitHub Releases are ad-hoc codesigned but **not Apple-notarized**. On first run, macOS Gatekeeper blocks with *"`paksmith` cannot be opened because the developer cannot be verified."* It's one-time per binary.
+The `aarch64-apple-darwin` binaries in releases and nightlies are ad-hoc codesigned but **not Apple-notarized**. On first run, macOS Gatekeeper blocks with *"`paksmith` cannot be opened because the developer cannot be verified."* It's one-time per binary.
 
 After verifying with `shasum` above, clear the quarantine attribute:
 

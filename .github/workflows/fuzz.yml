@@ -8,7 +8,8 @@ name: Fuzz
 #
 # Nightly cron is offset from the CI baseline so runs don't pile up on
 # the same runner-pool window: CI runs are user-triggered (random),
-# audit runs at 7am UTC, CodeQL Monday 8am UTC. Fuzz runs at 4am UTC.
+# audit runs at 7am UTC, CodeQL Monday 8am UTC, the nightly build at
+# 9:17am UTC. Fuzz runs at 4am UTC.
 on:
   schedule:
     - cron: "0 4 * * *"

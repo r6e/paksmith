@@ -1,0 +1,118 @@
+name: Nightly
+
+# On nights `main` has moved since the last nightly, builds the three
+# release archives from it and attaches them to the workflow run as
+# artifacts. Nothing is published as a GitHub Release.
+#
+# A scheduled or manual run on `main` builds only when no earlier such
+# run succeeded for its commit, so a successful run is the record that
+# the commit was built and no state is stored. Artifacts expire after
+# 30 days and are not rebuilt. Re-running the failed jobs of a run
+# skips the check and builds its commit again.
+#
+# GitHub disables a scheduled workflow after 60 days without repository
+# activity and does not turn it back on; re-enable it from the Actions
+# tab.
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+# One run at a time, so a run sees the result of the one before it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  check:
+    name: check
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read # read this workflow's runs
+    outputs:
+      moved: ${{ steps.moved.outputs.moved }}
+      label: ${{ steps.moved.outputs.label }}
+    steps:
+      - name: Look for a nightly of this commit
+        id: moved
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # A pull request from a fork's `main` runs the fork's copy of
+          # this file and is listed under the same workflow and branch
+          # name, so only this repository's own scheduled and manual
+          # runs count.
+          built="$(gh api \
+            "repos/${REPO}/actions/workflows/nightly.yml/runs?branch=main&head_sha=${SHA}&status=success&per_page=100" \
+            --jq '[.workflow_runs[] | select(
+              .head_sha == $ENV.SHA
+              and (.event == "schedule" or .event == "workflow_dispatch")
+              and .head_repository.full_name == .repository.full_name
+            )] | length')"
+          if [ "${built}" != 0 ]; then
+            echo "moved=false" >> "${GITHUB_OUTPUT}"
+            echo "main is unchanged since the last nightly (${SHA}); nothing to build." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          # Dated by the run's creation, not by today, so a re-run
+          # uploads under the same names as the attempt before it.
+          created="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" \
+            --jq '.created_at[:10] | gsub("-"; "")')"
+          label="nightly-${created}-${SHA:0:7}"
+          {
+            echo "moved=true"
+            echo "label=${label}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Building ${label}." >> "${GITHUB_STEP_SUMMARY}"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: check
+    if: needs.check.outputs.moved == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep in step with release.yml's build-release matrix, which
+          # explains the runner choices.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No restored cache, as in release.yml's build-release.
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache: "false"
+      - name: Build and package
+        id: package
+        uses: ./.github/actions/package
+        with:
+          label: ${{ needs.check.outputs.label }}
+          target: ${{ matrix.target }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksums }}
+          if-no-files-found: error
+          overwrite: true # a re-run replaces the earlier attempt's upload
+          retention-days: 30
