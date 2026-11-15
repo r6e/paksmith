@@ -107,6 +107,18 @@ Or via Finder: right-click the binary → **Open** → confirm in the dialog.
 
 Background: notarization is permanently off the roadmap ([#168](https://github.com/r6e/paksmith/issues/168)).
 
+### Windows first-run note
+
+The `x86_64-pc-windows-msvc` binaries in releases and nightlies are **not code-signed**. Windows marks files that came from the internet, and SmartScreen may block the first run with *"Windows protected your PC."*
+
+After verifying the download, clear the mark in PowerShell:
+
+```powershell
+Unblock-File .\paksmith.exe
+```
+
+Or in the SmartScreen dialog: **More info** → **Run anyway**.
+
 ## Running
 
 The commands below run paksmith from a source checkout (`cargo run -p paksmith-cli`). If you installed a pre-built binary, substitute `paksmith` for `cargo run -p paksmith-cli --`.
