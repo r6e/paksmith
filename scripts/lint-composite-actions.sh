@@ -22,6 +22,9 @@ fail() {
 for tool in yq shellcheck; do
   command -v "${tool}" > /dev/null || fail "this check needs ${tool}"
 done
+# The Python wrapper around jq is also called yq, and has no `tag`.
+[[ "$(yq --null-input '"a" | tag' 2> /dev/null)" == '!!str' ]] ||
+  fail "this check needs mikefarah's yq v4, and the yq on PATH is something else"
 
 if (($# > 0)); then
   actions=("$@")
@@ -50,7 +53,16 @@ for action in "${actions[@]}"; do
   }
   for ((i = 0; i < steps; i++)); do
     step="explode(.) | .runs.steps[${i}]"
-    [[ "$(yq "${step} | has(\"run\")" "${action}")" == true ]] || continue
+    # Anything but one true or false means a step that is not a map, or a
+    # file with several documents; neither may pass unlinted.
+    case "$(yq "${step} | select(tag == \"!!map\") | has(\"run\")" "${action}" 2> /dev/null || true)" in
+      true) ;;
+      false) continue ;;
+      *)
+        report "${action}" "step ${i} could not be read as a single step"
+        continue
+        ;;
+    esac
     name="$(yq "${step} | .name // \"step ${i}\"" "${action}")"
     shell="$(yq "${step} | .shell // \"\"" "${action}")"
     script="$(yq "${step} | .run" "${action}")"
