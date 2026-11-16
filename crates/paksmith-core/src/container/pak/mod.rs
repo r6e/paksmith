@@ -3404,9 +3404,10 @@ impl VerifyStats {
     ///
     /// **PHI ↔ FDI consistency (issue #131):** for v10+ archives
     /// with a PHI region, `is_fully_verified() == true` now also
-    /// implies that the PHI's `(fnv64(path) → encoded_offset)`
-    /// mappings agree with the FDI's `(path → encoded_offset)`
-    /// walk for every file. The cross-check fires at
+    /// implies that every PHI `(fnv64(path) → encoded_offset)` entry
+    /// is claimed by one FDI file record and holds that record's
+    /// `encoded_offset`, and that only a file whose `encoded_offset`
+    /// is `i32::MIN` may have no entry. The cross-check fires at
     /// `PakReader::open` time — any disagreement surfaces as
     /// `IndexParseFault::PhiFdiInconsistency` before this accessor
     /// is reachable. Pre-#131 the gap was a documented caveat: an
@@ -5682,19 +5683,23 @@ mod tests {
     }
 
     /// A v11 pak whose index, at offset 0, is encrypted with `key`: one
-    /// 76-byte encoded entry of 16 blocks, which the FDI's root directory
-    /// names from each of `names`, and no PHI. Returns the pak and its main
-    /// index size.
+    /// 76-byte encoded entry of 16 blocks, at offset 0, an FDI whose root
+    /// directory names `files` at their offsets, and no PHI. Returns the
+    /// pak and its main index size.
     #[cfg(feature = "__test_utils")]
-    fn build_v11_encrypted_index_pak(names: &[&str], key: &AesKey) -> (Vec<u8>, u64) {
+    fn build_v11_encrypted_index_pak(files: &[(&str, i32)], key: &AesKey) -> (Vec<u8>, u64) {
         use crate::testing::v10::{EncodeArgs, V10Fixture, build_v10_buffer, encode_entry_bytes};
 
-        let files = names.iter().map(|name| (name.to_string(), 0)).collect();
+        let file_count = u32::try_from(files.len()).unwrap();
+        let files = files
+            .iter()
+            .map(|&(name, offset)| (name.to_string(), offset))
+            .collect();
         let (mut pak, main_size) = build_v10_buffer(V10Fixture {
             // Makes the main index 160 bytes, so the FDI after it starts
             // an AES block and one pass encrypts both regions.
             mount: "../../../Mount/".into(),
-            file_count: u32::try_from(names.len()).unwrap(),
+            file_count,
             encoded_entries: encode_entry_bytes(EncodeArgs {
                 offset: 0,
                 uncompressed: 16,
@@ -5730,11 +5735,11 @@ mod tests {
     #[test]
     fn encrypted_v11_index_reports_the_encoded_block_budget_as_decryption() {
         let key = AesKey::new(FIXTURE_AES_KEY);
-        let (pak, _) = build_v11_encrypted_index_pak(&["a"], &key);
+        let (pak, _) = build_v11_encrypted_index_pak(&[("a", 0)], &key);
         let reader = PakReader::from_reader_with_key(Cursor::new(pak), key.clone()).unwrap();
         assert_eq!(reader.entries().count(), 1);
 
-        let (pak, main_size) = build_v11_encrypted_index_pak(&["a", "b"], &key);
+        let (pak, main_size) = build_v11_encrypted_index_pak(&[("a", 0), ("b", 0)], &key);
         let file_size = pak.len() as u64;
         let err = PakIndex::read_positioned_maybe_encrypted(
             &mut Cursor::new(pak.clone()),
@@ -5767,6 +5772,18 @@ mod tests {
         );
     }
 
+    /// An encrypted v11 index whose FDI skips a file at `i32::MIN` opens
+    /// with the right key and lists the rest (#848).
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn encrypted_v11_index_skips_a_file_at_i32_min() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let (pak, _) = build_v11_encrypted_index_pak(&[("a", 0), ("gone", i32::MIN)], &key);
+        let reader = PakReader::from_reader_with_key(Cursor::new(pak), key).unwrap();
+        let paths: Vec<String> = reader.entries().map(|e| e.path().to_string()).collect();
+        assert_eq!(paths, ["a"]);
+    }
+
     /// The debug line for a fault the encrypted open collapses into
     /// `Decryption` clamps the entry path the fault names.
     #[cfg(feature = "__test_utils")]
@@ -5776,7 +5793,7 @@ mod tests {
         use crate::untrusted::test_support::{hostile_path, lines_clamped};
 
         let key = AesKey::new(FIXTURE_AES_KEY);
-        let (pak, _) = build_v11_encrypted_index_pak(&["a", &hostile_path("KEY")], &key);
+        let (pak, _) = build_v11_encrypted_index_pak(&[("a", 0), (&hostile_path("KEY"), 0)], &key);
         assert!(PakReader::from_reader_with_key(Cursor::new(pak), key).is_err());
         logs_assert(lines_clamped("likely wrong key", "KEY"));
     }

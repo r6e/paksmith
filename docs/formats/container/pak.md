@@ -193,7 +193,7 @@ Two layouts, gated by version:
 
 - **Path-hash + encoded directory index** (v10+)[^1]. The main index holds, in order:
   - `FString mount_point`
-  - `u32 file_count` (bounds the FDI entries allocation and validates that the FDI yields exactly this many entries)
+  - `u32 file_count` (bounds the FDI entries allocation; paksmith requires it to lie between the number of FDI file records whose `encoded_offset` is not `i32::MIN` and the number of all FDI file records)
   - `u64 path_hash_seed` (consumed by PHI/FDI cross-validation — see issue #131)
   - `u32` path-hash index (PHI) flag, a bool (`0` or `1`); if set, the PHI descriptor: `u64 offset`, `u64 size`, 20-byte SHA-1
   - `u32` full directory index (FDI) flag, a bool; if set, the FDI descriptor, in the same shape
@@ -207,15 +207,18 @@ Two layouts, gated by version:
 
   An `encoded_offset` of `0` or more is a position in the EntryData blob.
   A negative one, `-N`, selects non-encoded record `N - 1`; `i32::MIN`
-  selects none. A parser must bound the position by the blob's size and
-  `N - 1` by `non_encoded_count`; readers differ on an offset that
-  selects no record (see Known divergences). Several FDI paths may name
-  the same `encoded_offset` or non-encoded record; both oracles accept
-  it.[^10]
+  selects none, and repak, CUE4Parse and paksmith skip that file.[^13]
+  A parser must bound the position by the blob's size and `N - 1` by
+  `non_encoded_count`; readers differ on another offset that selects no
+  record (see Known divergences). Several FDI paths may name the same
+  `encoded_offset` or non-encoded record; both oracles accept it.[^10]
 
 The FDI is the source of truth for paksmith's `(path → entry)` lookups. The
-PHI is consulted at `PakReader::open` time as a cross-check: any mismatch
-between PHI mappings and FDI walk surfaces as
+PHI is consulted at `PakReader::open` time as a cross-check: each FDI file
+record claims the PHI entry for its path's hash, which must hold the
+record's `encoded_offset`. A record whose offset is `i32::MIN` may have no
+entry; a record whose entry another record claimed, and an entry no record
+claims, are refused. Any mismatch surfaces as
 `IndexParseFault::PhiFdiInconsistency`.
 
 See `docs/formats/primitive/fstring.md` for FString and
@@ -422,8 +425,9 @@ does not surface as the fault its bullet names.
   can total far more than the FDI that names them: one 65,535-unit UTF-16
   directory name decodes to up to 196,605 bytes, copied into every
   file's path. Before building each path, the FDI walk adds its decoded
-  length to a running total, counting repeats the index later drops, and
-  refuses the path that takes the total past 16 times `fdi_size`
+  length to a running total, counting repeats the index later drops and
+  the files it skips at `i32::MIN`, and refuses the path that takes the
+  total past 16 times `fdi_size`
   (`MAX_FULL_PATH_BYTES_PER_FDI_BYTE`). That bounds a ratio, not memory:
   4 GiB of paths at `MAX_FDI_BYTES`. An ASCII archive stays within it if
   every path's directory name is at most 15 times its file name's length
@@ -529,7 +533,8 @@ policy.
     `to_ascii_lowercase` rather than Unicode-aware lowercasing, matching
     UE's V10 bug exactly and V11's Unicode-aware lowercasing on ASCII
     paths only. Non-ASCII paths produce a hash that disagrees with UE,
-    triggering `IndexParseFault::PhiFdiInconsistency` at open time. Real
+    triggering `IndexParseFault::PhiFdiInconsistency` at open time,
+    unless the path is a skipped file the PHI leaves out. Real
     cooked archives use ASCII-only paths, so the practical impact is nil
     — but a non-ASCII fixture would fail to open. See
     `crates/paksmith-core/src/container/pak/index/mod.rs` `fn fnv64_path`.
@@ -548,13 +553,15 @@ policy.
     take any nonzero value as set and read an index without a PHI.
     Paksmith refuses one without an FDI; repak reads it as holding no
     files.
-  - **FDI offsets that select no record.** repak[^1] and CUE4Parse[^2]
-    skip a file whose FDI `encoded_offset` is `i32::MIN`; repak's source
-    calls it a deleted or pruned entry in the UE5 pak format. On a
-    negative offset past the last non-encoded record, CUE4Parse logs a
-    warning and skips the file, and repak's unchecked lookup panics.
-    Paksmith refuses the whole archive in both cases; it reads `i32::MIN`
-    as non-encoded record `2^31 - 1`, always out of range.
+  - **FDI offsets that select no record.** When one directory names a
+    file twice, first at an entry and last at `i32::MIN`, repak lists
+    neither record, since it keeps only the last record of a name
+    repeated in one directory and skips afterwards; CUE4Parse lists the
+    earlier record, and so does paksmith in an index without a
+    PHI.[^12] On another negative offset past the last non-encoded
+    record, CUE4Parse logs a warning and skips the file, repak's
+    unchecked lookup panics, and paksmith refuses the whole
+    archive.[^13]
   - **Encoded entries named by many FDI paths.** repak and CUE4Parse
     decode an encoded entry again for every FDI path naming it, and
     allocate its block list each time.[^10][^11] Paksmith refuses the
@@ -824,3 +831,13 @@ fixtures generated by `paksmith-fixture-gen` and cross-validated against
     L427-L449 decode each directory and file name into a pool of 256
     `char`s (UTF-16 code units), throwing on a longer one, and build a
     path string per file, and L472 keeps the last entry per path.
+[^13]: `trumank/repak/repak/src/pak.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` —
+    L484-L488: the comment calling `i32::MIN` "a deleted/pruned entry
+    sentinel in the UE5 PAK format", then the skip; L492-L494 index the
+    non-encoded records unchecked. At
+    `trumank/repak/repak/src/pak.rs@d594642d6a4f5a480d688e8001e43fac10a3e4d2`
+    (2023-05-29), L304-L307 print a file whose offset is `0x80000000` as
+    having an invalid offset and skip it. At
+    `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/PakFileReader.cs@77b94fa26cde08d34e80be2ced29c8f8885ff0a7`,
+    L451-L452 skip an `int.MinValue` offset, and L461-L466 log a warning
+    for a negative offset past the non-encoded records and skip its file.
