@@ -17,7 +17,7 @@ inputs:
     description: Days the artifact is kept.
     required: true
   version-label:
-    description: Label `paksmith --version` prints after the version. Empty for a release.
+    description: Label `paksmith --version` and the GUI's About panel show after the version. Empty for a release.
     required: false
     default: ""
 
@@ -74,6 +74,12 @@ runs:
         suffix="${VERSION_LABEL:+ (${VERSION_LABEL})}"
         [[ "${reported}" =~ ^paksmith\ [^\ ]+"${suffix}"$ ]] || {
           echo "::error::paksmith reports '${reported}' for the label '${VERSION_LABEL}'"
+          exit 1
+        }
+        # The GUI shows its version only in a window, so look for the
+        # label in its binary instead.
+        [[ -z "${VERSION_LABEL}" ]] || grep -aqF -- "${VERSION_LABEL}" "target/release/paksmith-gui${EXE}" || {
+          echo "::error::paksmith-gui does not contain the label '${VERSION_LABEL}'"
           exit 1
         }
     # Ad-hoc codesigning of macOS binaries. paksmith does not pay for

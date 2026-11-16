@@ -2716,6 +2716,14 @@ pub fn accent_button(
     }
 }
 
+/// The About panel's heading: the program name and this build's version.
+fn about_title() -> String {
+    format!(
+        "Paksmith  v{}",
+        paksmith_core::build::version_text(env!("CARGO_PKG_VERSION"))
+    )
+}
+
 /// Renders the current application state as a widget tree.
 /// ```text
 /// ┌─────────────────────────────────────────┐
@@ -2914,7 +2922,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let body: Element<'_, Message> = if app.about_visible {
         container(
             column![
-                text(concat!("Paksmith  v", env!("CARGO_PKG_VERSION")))
+                text(about_title())
                     .size(f32::from(TEXT_XL))
                     .style(|theme: &iced::Theme| iced::widget::text::Style {
                         color: Some(theme.palette().text),
@@ -5481,6 +5489,11 @@ mod tests {
     // `Message::About` does `app.about_visible = !app.about_visible`.
     // The `delete !` mutant turns this into a no-op (always stays false).
     // Dispatching twice verifies the toggle: false→true→false.
+
+    #[test]
+    fn about_title_names_this_build() {
+        assert!(about_title().starts_with(concat!("Paksmith  v", env!("CARGO_PKG_VERSION"))));
+    }
 
     #[test]
     fn about_toggles_on_each_dispatch() {
