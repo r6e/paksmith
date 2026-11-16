@@ -26,6 +26,7 @@
 use byteorder::{LittleEndian, WriteBytesExt};
 
 pub use super::wire::write_fstring;
+use super::wire::{write_pak_entry, write_v8b_plus_footer};
 use crate::container::pak::index::fnv64_path;
 
 /// Append an FDI ("full directory index") body to `buf` from a
@@ -463,4 +464,81 @@ pub fn encode_entry_bytes(args: EncodeArgs<'_>) -> Vec<u8> {
         }
     }
     buf
+}
+
+// --- A v11 pak whose second index record may be encoded (#848) --------
+
+/// The `(path, payload)` entries of [`hash_presence_v11_pak`], in
+/// archive order.
+pub const HASH_PRESENCE_V11_ENTRIES: [(&str, &[u8]); 2] =
+    [("a", b"alpha payload"), ("b", b"bravo")];
+
+/// A v11 pak of the [`HASH_PRESENCE_V11_ENTRIES`], stored uncompressed
+/// and unencrypted, with a zero footer hash. "a"'s index record is
+/// non-encoded and carries its payload's SHA-1. "b"'s is encoded, with
+/// no hash field, when `b_encoded` is set, and otherwise is like "a"'s,
+/// so only an encoded "b" makes the archive mix hash presence. Each
+/// entry's in-data record and payload follow the index regions.
+pub fn hash_presence_v11_pak(b_encoded: bool) -> Vec<u8> {
+    let mut data = Vec::new();
+    let mut starts = Vec::new();
+    for (_, payload) in HASH_PRESENCE_V11_ENTRIES {
+        starts.push(data.len() as u64);
+        write_stored_record(&mut data, 0, payload);
+        data.extend_from_slice(payload);
+    }
+    let index = |base: u64| {
+        let offsets: Vec<u64> = starts.iter().map(|start| base + start).collect();
+        build_v10_buffer(hash_presence_v11_index(&offsets, b_encoded))
+    };
+    // An encoded record's offset is a varint, four bytes while it fits a
+    // u32, so the index's length doesn't depend on these offsets.
+    let base = index(0).0.len() as u64;
+    let (mut pak, index_size) = index(base);
+    assert_eq!(pak.len() as u64, base, "the index changed size");
+    pak.extend_from_slice(&data);
+    write_v8b_plus_footer(&mut pak, 11, 0, index_size, "");
+    pak
+}
+
+/// [`hash_presence_v11_pak`]'s index, with its entries at `offsets`.
+fn hash_presence_v11_index(offsets: &[u64], b_encoded: bool) -> V10Fixture {
+    let [(a, a_payload), (b, b_payload)] = HASH_PRESENCE_V11_ENTRIES;
+    let mut non_encoded_records = Vec::new();
+    write_stored_record(&mut non_encoded_records, offsets[0], a_payload);
+    let (encoded_entries, non_encoded_count, b_offset) = if b_encoded {
+        let size = b_payload.len() as u64;
+        let record = encode_entry_bytes(EncodeArgs {
+            offset: offsets[1],
+            uncompressed: size,
+            compressed: size,
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count: 0,
+            block_size: 0,
+            per_block_sizes: &[],
+        });
+        (record, 1, 0)
+    } else {
+        write_stored_record(&mut non_encoded_records, offsets[1], b_payload);
+        (Vec::new(), 2, -2)
+    };
+    V10Fixture {
+        file_count: 2,
+        encoded_entries,
+        non_encoded_records,
+        non_encoded_count,
+        fdi: vec![("/".into(), vec![(a.into(), -1), (b.into(), b_offset)])],
+        ..V10Fixture::default()
+    }
+}
+
+/// Write an uncompressed, unencrypted record of `payload` carrying its
+/// SHA-1, with `offset` in its offset field.
+fn write_stored_record(buf: &mut Vec<u8>, offset: u64, payload: &[u8]) {
+    use sha1::{Digest, Sha1};
+
+    let size = payload.len() as u64;
+    let sha1: [u8; 20] = Sha1::digest(payload).into();
+    write_pak_entry(buf, offset, size, size, 0, &sha1, &[], 0, 0);
 }

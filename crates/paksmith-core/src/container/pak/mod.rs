@@ -98,7 +98,8 @@ use tracing::{debug, error, warn};
 use zeroize::Zeroizing;
 
 use crate::container::{
-    ContainerFormat, ContainerReader, EntryFlags, EntryMetadata, PayloadLedger, extent_in_file,
+    ContainerFormat, ContainerReader, EntryFlags, EntryIntegrity, EntryMetadata, IntegritySurvey,
+    PayloadLedger, extent_in_file,
 };
 use crate::digest::Sha1Digest;
 use crate::error::{
@@ -1209,16 +1210,27 @@ impl PakReader {
             .ok_or_else(|| PaksmithError::EntryNotFound {
                 path: path.to_string(),
             })?;
-        self.verify_index_entry(entry, None)
+        self.verify_index_entry(entry, self.classify_entry(entry), None)
     }
 
-    /// [`Self::verify_entry`] for a resolved `entry`. When there is a
+    /// What `entry`'s index record claims, by the shared classifier (#662),
+    /// so the Info pane's label and a verify's verdict can't disagree.
+    fn classify_entry(&self, entry: &PakIndexEntry) -> EntryIntegrity {
+        crate::container::classify_sha1_claim(
+            entry.header().sha1(),
+            self.archive_claims_integrity(),
+        )
+    }
+
+    /// [`Self::verify_entry`] for a resolved `entry`, whose state
+    /// [`Self::classify_entry`] gave as `integrity`. When there is a
     /// `ledger`, an entry with a SHA-1 to check has its payload extent
     /// charged to it before anything of the entry is read.
     #[allow(clippy::too_many_lines)] // bounded by the per-block error branches
     fn verify_index_entry(
         &self,
         entry: &PakIndexEntry,
+        integrity: EntryIntegrity,
         ledger: Option<&mut PayloadLedger>,
     ) -> crate::Result<VerifyOutcome> {
         let path = entry.filename();
@@ -1233,17 +1245,11 @@ impl PakReader {
         // hash arms as plaintext entries: the bytes on disk are exactly
         // what the hash covers. No `is_encrypted` branch is needed here.
 
-        // Which of the three no-hash-to-check states (if any) this entry
-        // is in comes from the SHARED classifier (#662), so the Info
-        // pane's label and this verdict can never disagree. Note an
-        // absent field means the INDEX record omits it (v10+ bit-packed);
-        // the entry's in-data record still stores a hash, but
+        // An absent field means the INDEX record omits it (v10+
+        // bit-packed); the entry's in-data record still stores a hash, but
         // verification reads the index header.
-        let expected_sha1 = match crate::container::classify_sha1_claim(
-            entry.header().sha1(),
-            self.archive_claims_integrity(),
-        ) {
-            crate::container::EntryIntegrity::NotInIndex => {
+        let expected_sha1 = match integrity {
+            EntryIntegrity::NotInIndex => {
                 debug!(
                     path = &*clamp_path(path),
                     "entry has no recorded SHA1 in the index (encoded entry); \
@@ -1251,14 +1257,14 @@ impl PakReader {
                 );
                 return Ok(VerifyOutcome::SkippedNoHash);
             }
-            crate::container::EntryIntegrity::NoClaim => {
+            EntryIntegrity::NoClaim => {
                 debug!(
                     path = &*clamp_path(path),
                     "entry has no recorded SHA1; skipping verification"
                 );
                 return Ok(VerifyOutcome::SkippedNoHash);
             }
-            crate::container::EntryIntegrity::Stripped => {
+            EntryIntegrity::Stripped => {
                 error!(
                     path = &*clamp_path(path),
                     expected = "non-zero (archive-wide integrity claimed)",
@@ -1272,7 +1278,7 @@ impl PakReader {
                     },
                 });
             }
-            crate::container::EntryIntegrity::Claim(d) => d,
+            EntryIntegrity::Claim(d) => d,
         };
 
         if let Some(ledger) = ledger {
@@ -1419,6 +1425,12 @@ impl PakReader {
     /// partial-success failure mode that returning bare
     /// `Result<()>` would create.
     ///
+    /// Each entry's [`EntryIntegrity`], from the classification that
+    /// decides whether to hash it, is counted in [`VerifyStats::integrity`],
+    /// and the warning that some bytes went unhashed carries its
+    /// `not_in_index`, `no_claim` and `mixes_hash_presence`. Neither fails
+    /// the verify.
+    ///
     /// Before hashing each entry this charges its
     /// [`EntryMetadata::payload_extent`] to a [`PayloadLedger`] for the
     /// archive, failing with `BoundsExceeded` on
@@ -1473,7 +1485,9 @@ impl PakReader {
         };
         let mut ledger = PayloadLedger::new(self.file_size);
         for entry in self.index.entries() {
-            match self.verify_index_entry(entry, Some(&mut ledger))? {
+            let integrity = self.classify_entry(entry);
+            stats.integrity.record(integrity);
+            match self.verify_index_entry(entry, integrity, Some(&mut ledger))? {
                 VerifyOutcome::Verified => stats.entries_verified += 1,
                 VerifyOutcome::SkippedNoHash => stats.entries_skipped_no_hash += 1,
                 VerifyOutcome::SkippedEncrypted => stats.entries_skipped_encrypted += 1,
@@ -1493,6 +1507,9 @@ impl PakReader {
                 phi_skipped,
                 encrypted = stats.entries_skipped_encrypted,
                 no_hash = stats.entries_skipped_no_hash,
+                not_in_index = stats.integrity.not_in_index(),
+                no_claim = stats.integrity.no_claim(),
+                mixes_hash_presence = stats.integrity.mixes_hash_presence(),
                 verified = stats.entries_verified,
                 "verify(): some bytes were not hashed; inspect VerifyStats"
             );
@@ -3487,6 +3504,9 @@ pub enum RegionVerifyState {
 /// struct's internal representation free to change (e.g., split a
 /// counter into per-reason buckets) without breaking downstream
 /// consumers.
+///
+/// The entry counts are per path: paths that share one index record count
+/// once each.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct VerifyStats {
@@ -3501,6 +3521,7 @@ pub struct VerifyStats {
     pub(crate) entries_verified: usize,
     pub(crate) entries_skipped_no_hash: usize,
     pub(crate) entries_skipped_encrypted: usize,
+    pub(crate) integrity: IntegritySurvey,
 }
 
 impl VerifyStats {
@@ -3543,6 +3564,8 @@ impl VerifyStats {
     /// (which omits SHA1 from the wire format). A zeroed hash alone is
     /// NOT sufficient — under a claiming archive it is
     /// [`PaksmithError::IntegrityStripped`], not a skip.
+    /// [`Self::integrity`] splits it into its two [`EntryIntegrity`]
+    /// states.
     pub fn entries_skipped_no_hash(&self) -> usize {
         self.entries_skipped_no_hash
     }
@@ -3562,6 +3585,25 @@ impl VerifyStats {
     /// and downstream "did anything get skipped?" predicates.
     pub fn total_skipped_entries(&self) -> usize {
         self.entries_skipped_no_hash + self.entries_skipped_encrypted
+    }
+
+    /// How many entries were in each [`EntryIntegrity`] state. A verify
+    /// that fails returns no survey, but folding
+    /// [`ContainerReader::entry_integrity`] over
+    /// [`ContainerReader::entries`] gives the same one without a verify.
+    ///
+    /// On a report from an `Ok` verify:
+    /// - `claim()` equals [`Self::entries_verified`];
+    /// - `skipped_no_hash()`, which is `not_in_index()` plus `no_claim()`,
+    ///   equals [`Self::entries_skipped_no_hash`];
+    /// - `stripped()` is 0, since a stripped entry fails the verify.
+    ///
+    /// So what the survey adds to the report is that split of the skips,
+    /// and its [`IntegritySurvey::mixes_hash_presence`] holds exactly
+    /// when both `entries_verified()` and `entries_skipped_no_hash()` are
+    /// non-zero.
+    pub fn integrity(&self) -> IntegritySurvey {
+        self.integrity
     }
 
     /// True iff every byte the verifier could see was hashed and matched.
@@ -3595,6 +3637,10 @@ impl VerifyStats {
     /// attacker who rewrote the PHI's stored SHA-1 could redirect
     /// a known hash to a different offset without triggering any
     /// signal. That cross-check is now load-bearing at open time.
+    ///
+    /// A v10+ pak whose records are all encoded fails this, having no
+    /// entry hash in its index. So does one whose every hashed record was
+    /// re-encoded, and [`Self::integrity`] can't tell the two apart.
     pub fn is_fully_verified(&self) -> bool {
         // Region state passes if Verified or NotPresent — the latter
         // is the legitimate "no FDI/PHI in this archive" case for
@@ -8457,18 +8503,10 @@ mod tests {
     fn real_fixtures_fit_the_read_budget() {
         use crate::container::{OpenOptions, open_with};
 
-        let mut names: Vec<String> = std::fs::read_dir(fixture(""))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "pak"))
-            .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
-            .filter(|name| name.starts_with("real_"))
-            .collect();
-        names.sort();
         let key = AesKey::new(FIXTURE_AES_KEY);
         let options = OpenOptions::new().with_read_budget();
         let mut reads_ok = 0;
-        for name in &names {
+        for name in &real_fixture_names() {
             let path = fixture(name);
             let file_size = std::fs::metadata(&path).unwrap().len();
             let baseline = PakReader::open_with_key(&path, key.clone())
@@ -8487,6 +8525,131 @@ mod tests {
             }
         }
         assert!(reads_ok > 0);
+    }
+
+    /// The file names of the `real_*.pak` fixtures, sorted.
+    fn real_fixture_names() -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(fixture(""))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "pak"))
+            .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
+            .filter(|name| name.starts_with("real_"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The survey in `stats` agrees with its counters, as an `Ok` one does.
+    fn assert_survey_matches_counters(stats: &VerifyStats) {
+        let survey = stats.integrity();
+        assert_eq!(survey.claim(), stats.entries_verified());
+        assert_eq!(survey.skipped_no_hash(), stats.entries_skipped_no_hash());
+        assert_eq!(survey.stripped(), 0);
+    }
+
+    /// Over the real fixtures and `minimal_v6.pak`, `verify()`'s survey is
+    /// the fold of `entry_integrity` over `entries()`. Their v10+ entries
+    /// are all encoded and the rest all hashed, so none mixes hash presence.
+    #[test]
+    fn real_fixtures_survey_hash_presence_as_verify_counts_it() {
+        use crate::container::IntegritySurvey;
+
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let mut names = real_fixture_names();
+        names.push("minimal_v6.pak".to_owned());
+        let mut by_layout = [0; 2];
+        for name in &names {
+            let reader = PakReader::open_with_key(fixture(name), key.clone())
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let stats = reader.verify().unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let survey = stats.integrity();
+            let folded: IntegritySurvey = reader
+                .entries()
+                .map(|meta| reader.entry_integrity(&meta))
+                .collect();
+            assert_eq!(survey, folded, "{name}");
+            assert_survey_matches_counters(&stats);
+            let v10_plus = reader.version().has_path_hash_index();
+            by_layout[usize::from(v10_plus)] += 1;
+            let uniform = if v10_plus {
+                survey.not_in_index()
+            } else {
+                survey.claim()
+            };
+            assert_eq!(uniform, reader.entries().count(), "{name}");
+            assert!(!survey.mixes_hash_presence(), "{name}");
+        }
+        assert!(by_layout.iter().all(|&n| n > 0), "{by_layout:?}");
+    }
+
+    /// Re-encoding "b"'s hashed record turns its verify from `Verified`
+    /// into `SkippedNoHash`, and the archive, whose "a" keeps its hash,
+    /// then mixes hash presence. Both layouts read back their payloads.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn re_encoding_a_hashed_entry_mixes_hash_presence() {
+        use crate::testing::v10::{HASH_PRESENCE_V11_ENTRIES, hash_presence_v11_pak};
+
+        for (b_encoded, b_outcome, claim, not_in_index, mixes) in [
+            (false, VerifyOutcome::Verified, 2, 0, false),
+            (true, VerifyOutcome::SkippedNoHash, 1, 1, true),
+        ] {
+            let reader = PakReader::from_bytes(hash_presence_v11_pak(b_encoded)).unwrap();
+            for (path, payload) in HASH_PRESENCE_V11_ENTRIES {
+                assert_eq!(reader.read_entry(path).unwrap(), payload, "{path}");
+            }
+            assert_eq!(reader.verify_entry("a").unwrap(), VerifyOutcome::Verified);
+            assert_eq!(reader.verify_entry("b").unwrap(), b_outcome);
+            let stats = reader.verify().unwrap();
+            let survey = stats.integrity();
+            assert_eq!(
+                (survey.claim(), survey.not_in_index(), survey.no_claim()),
+                (claim, not_in_index, 0)
+            );
+            assert_eq!(survey.mixes_hash_presence(), mixes);
+            assert_survey_matches_counters(&stats);
+            assert!(logs_contain(&format!(
+                "not_in_index={not_in_index} no_claim=0 mixes_hash_presence={mixes}"
+            )));
+        }
+    }
+
+    /// Under a claiming footer hash an encoded entry is `NotInIndex`, not
+    /// `Stripped`: its record has no hash field to have been zeroed.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn a_claiming_footer_leaves_an_encoded_entry_not_in_index() {
+        use crate::container::IntegritySurvey;
+        use crate::testing::v10::hash_presence_v11_pak;
+
+        let mut pak = hash_presence_v11_pak(true);
+        // The footer ends with the index hash, then five 32-byte slots.
+        let hash_end = pak.len() - 5 * 32;
+        pak[hash_end - 20..hash_end].fill(0xAB);
+        let reader = PakReader::from_bytes(pak).unwrap();
+        assert!(reader.claims_integrity());
+        let survey: IntegritySurvey = reader
+            .entries()
+            .map(|meta| reader.entry_integrity(&meta))
+            .collect();
+        assert_eq!(
+            (survey.claim(), survey.not_in_index(), survey.stripped()),
+            (1, 1, 0)
+        );
+        assert!(survey.mixes_hash_presence());
+    }
+
+    /// The survey counts each path, so the paths sharing one record count
+    /// once each, as the skip counter does.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn verify_surveys_each_path_of_a_shared_record() {
+        let reader = PakReader::from_bytes(shared_record_v11_pak(64, 32)).unwrap();
+        let stats = reader.verify().unwrap();
+        assert_eq!(stats.integrity().no_claim(), 32);
+        assert_eq!(stats.entries_skipped_no_hash(), 32);
     }
 
     /// The open-time log lines clamp the entry path.
