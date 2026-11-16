@@ -13,8 +13,8 @@ name: Release assets
 #   commit's copy of this file, re-runs included, and a dispatch runs
 #   main's. The local actions come from the tagged commit either way,
 #   so a fault in one of them needs a new tag. So does a crate's
-#   changelog with no section for the version, because the notes are
-#   read from the tagged commit. A dispatched run's
+#   changelog that is missing or has no section for the version,
+#   because the notes are read from the tagged commit. A dispatched run's
 #   attestations name main and its head commit as their source, not
 #   the tag and its commit.
 # - The tag exists without a draft: re-run release.yml, which accepts
@@ -159,7 +159,7 @@ jobs:
       # whose tag still names the built commit, and only when the draft
       # carries exactly the expected files, each from its own target's
       # artifact. The notes are built before anything is uploaded, and
-      # set by the edit that publishes.
+      # applied by the edit that publishes.
       - name: Attach the assets and publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -212,8 +212,8 @@ jobs:
             [[ "${section}" =~ [^[:space:]] ]] || section="No changes in this crate."
             printf '## %s\n%s\n\n' "${crate}" "${section}" >> notes.md
           done
-          # GitHub refuses a release body over 125,000 characters. Bytes
-          # are counted here, which are never fewer.
+          # GitHub refuses a release body over 125,000 characters. Counting
+          # bytes instead can only overcount them.
           if (($(wc -c < notes.md) > 120000)); then
             echo "::warning::the notes are too long for a release body, so the release links to the changelogs instead"
             printf "The changes in this release are listed in each crate's changelog:\n\n" > notes.md
