@@ -1,17 +1,19 @@
 name: Release assets
 
-# Builds the archives for a release tag, attaches them to that tag's
-# draft GitHub Release, and publishes it. release.yml describes how the
-# tag and the draft come to exist.
+# Builds the archives for a release tag, attests their provenance,
+# attaches them to that tag's draft GitHub Release, and publishes it.
+# release.yml describes how the tag and the draft come to exist.
 #
 # Recovery, while the release is still a draft:
 # - A job failed: "Re-run failed jobs".
-# - This file is wrong, the artifacts have expired, or no run started
-#   for the tag: fix main if needed, then dispatch this workflow from
-#   main with the tag. A tag push runs the tagged commit's copy of
-#   this file, re-runs included, and a dispatch runs main's. The local
-#   actions come from the tagged commit either way, so a fault in one
-#   of them needs a new tag.
+# - This file is wrong, the artifacts have expired, the tag was moved,
+#   or no run started for the tag: fix main if needed, then dispatch
+#   this workflow from main with the tag. A tag push runs the tagged
+#   commit's copy of this file, re-runs included, and a dispatch runs
+#   main's. The local actions come from the tagged commit either way,
+#   so a fault in one of them needs a new tag. A dispatched run's
+#   attestations name main and its head commit as their source, not
+#   the tag and its commit.
 # - The tag exists without a draft: re-run release.yml, which accepts
 #   the existing tag and creates the draft, then dispatch this workflow.
 on:
@@ -63,6 +65,19 @@ jobs:
             echo "::error::${TAG} resolved to '${sha}', not a commit"
             exit 1
           }
+          # A tag push's attestations name the pushed commit as their
+          # source, so that must be the commit the build checks out.
+          if [[ "${GITHUB_EVENT_NAME}" == push && "${sha}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::${TAG} now names ${sha}, but this run was started for ${GITHUB_SHA}; dispatch from main to build it"
+            exit 1
+          fi
+          # A release is a commit of main, so a tag on anything else is
+          # not built or attested.
+          status="$(gh api "repos/${GH_REPO}/compare/${sha}...refs/heads/main" --jq .status)"
+          [[ "${status}" == ahead || "${status}" == identical ]] || {
+            echo "::error::${TAG} names ${sha}, which is not on main"
+            exit 1
+          }
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
 
   build:
@@ -102,11 +117,31 @@ jobs:
           target: ${{ matrix.target }}
           retention-days: 7
 
+  # Signs a statement that this run built each archive, for
+  # `gh attestation verify` to check. It runs no repository code, so the
+  # signing identity never meets a build script.
+  attest:
+    name: attest
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write # request the signing certificate
+      attestations: write # store the attestation
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: assets
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: assets/*/paksmith-*
+
   # Runs no repository code: it only moves the built files onto the
   # release, so the write token never meets a build script.
   publish:
     name: publish
-    needs: [check, build]
+    # Waits for `attest`, so a failed attestation blocks the release.
+    needs: [check, build, attest]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

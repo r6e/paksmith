@@ -26,7 +26,7 @@ Only the latest release on `main` is actively supported with security fixes.
 ## Security Practices
 
 - `unsafe` code is denied workspace-wide via lint configuration.
-- All dependencies are subject to `cargo audit`, run automatically on every push/PR via the `Security Audit` job in `.github/workflows/ci.yml`.
+- The root workspace's dependencies are subject to `cargo audit`, which the `Security Audit` workflow (`.github/workflows/audit.yml`) runs daily and on every push that changes a `Cargo.toml` or `Cargo.lock`. The `fuzz/` workspace's advisories are checked by `cargo deny` in `.github/workflows/deny.yml`.
 - Fuzzing targets for binary parsers will be added as the format handling matures.
 - AES keys are never logged. Tracing spans for decryption operations omit key material.
 - Network requests use HTTPS exclusively. Registry endpoints validate TLS certificates.
@@ -62,7 +62,7 @@ A GitHub App installed only on `r6e/paksmith`. `.github/workflows/release.yml` u
 
 **Repo configuration**: `vars.APP_CLIENT_ID` (App Client ID, non-secret), `secrets.APP_PRIVATE_KEY` (App private key, PEM-encoded).
 
-**Blast radius if compromised**: an attacker with `APP_PRIVATE_KEY` can mint tokens scoped to **Contents + Pull Requests + Metadata on `r6e/paksmith` only** — no other repos, no org-wide resources, no Issues/Actions/Secrets/Packages access. Realistic worst case: forged commits to release branches, forged release PRs, and a forged release. Contents write lets the holder tag any commit, which `release-assets.yml` then builds and publishes, or attach assets to a draft. Releases are immutable, so a forged release's version can never be reused. All of it is visible in the audit log.
+**Blast radius if compromised**: an attacker with `APP_PRIVATE_KEY` can mint tokens scoped to **Contents + Pull Requests + Metadata on `r6e/paksmith` only** — no other repos, no org-wide resources, no Issues/Actions/Secrets/Packages access. Realistic worst case: forged commits to release branches, forged release PRs, and a forged release. Contents write lets the holder tag any commit, which `release-assets.yml` then builds and publishes, or attach assets to a draft. Releases are immutable, so a forged release's version can never be reused. A forged release's archives carry valid provenance attestations: an attestation records which workflow built an archive, not that the tag was authorized. All of it is visible in the audit log.
 
 #### Rotation procedure
 
