@@ -115,21 +115,24 @@ impl EntryFlags {
 /// LIMITS — this classifies one entry, so it cannot see a cross-entry
 /// anomaly. In a v10+ index the shape is chosen per record (the sign of
 /// an FDI record's `encoded_offset` selects a hash-less encoded header
-/// or an Inline one carrying a digest), so an archive may MIX both, and
-/// re-encoding a hash-carrying record into the hash-less form turns
+/// or an Inline one carrying a digest), so one archive can hold both,
+/// and re-encoding a hash-carrying record into the hash-less form turns
 /// what would have been a `HashMismatch` into `NotInIndex` here and
-/// `SkippedNoHash` in `verify_entry`. The archive-level signal
-/// survives — `verify()` counts every such entry in
-/// `VerifyStats::entries_skipped_no_hash` and warns that some bytes
-/// went unhashed — but no per-entry state can say "this entry's
-/// siblings carry hashes and it does not". Surveying that is #755. Exhaustive
-/// matching is the safety property — a fifth state must break every
-/// consumer at compile time rather than fall into a catch-all that
-/// shows the wrong prose about an integrity claim. Consumers MAY fold
-/// states deliberately (`verify_region` gives `NoClaim` and
-/// `NotInIndex` one arm, since a fixed-width region slot cannot be
-/// absent); what the missing attribute buys is that folding must be
-/// written down, not inherited from a wildcard.
+/// `SkippedNoHash` in `verify_entry`. No per-entry state can say "this
+/// entry's siblings carry hashes and it does not";
+/// [`IntegritySurvey::mixes_hash_presence`] over every entry can. That is
+/// information, an anomaly signal rather than tamper-proofing:
+/// re-encoding every hashed record leaves no sibling to set an entry
+/// against, and an entry the encoded form can't represent has only a
+/// record shape with a hash field, so a v10+ archive that holds one
+/// beside encoded entries can set the predicate with no tampering at all
+/// (see [`IntegritySurvey`]). Exhaustive matching is the safety property
+/// — a fifth state must break every consumer at compile time rather than
+/// fall into a catch-all that shows the wrong prose about an integrity
+/// claim. Consumers MAY fold states deliberately (`verify_region` gives
+/// `NoClaim` and `NotInIndex` one arm, since a fixed-width region slot
+/// cannot be absent); what the missing attribute buys is that folding
+/// must be written down, not inherited from a wildcard.
 ///
 /// SCOPE: `Claim` carries a [`Sha1Digest`](crate::digest::Sha1Digest)
 /// because that is the digest the metadata surface exposes
@@ -220,6 +223,102 @@ pub(crate) fn classify_sha1_claim(
             }
         }
         Some(d) => EntryIntegrity::Claim(d),
+    }
+}
+
+/// How many of an archive's entries are in each [`EntryIntegrity`]
+/// state. Fold it from [`ContainerReader::entry_integrity`] over
+/// [`ContainerReader::entries`], by [`Self::record`], [`Extend`] or
+/// [`FromIterator`]. An entry is a path, so paths that share one index
+/// record count once each.
+///
+/// The survey is information only: no read or verify fails on it. Where
+/// [`Self::mixes_hash_presence`] holds, some entries carry a claim and
+/// others count in [`Self::skipped_no_hash`], which is an anomaly
+/// signal, not tamper-proofing:
+/// - Re-encoding every hashed record of a v10+ pak leaves no claim to
+///   set the rest against, and the result looks like a pak written with
+///   every record encoded.
+/// - The encoded form can't represent every entry (in pak, one with more
+///   blocks than its 16-bit count holds), and the only other v10+ record
+///   shape has a hash field, so a v10+ archive that holds such an entry
+///   beside encoded ones holds both record forms.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IntegritySurvey {
+    claim: usize,
+    not_in_index: usize,
+    no_claim: usize,
+    stripped: usize,
+}
+
+impl IntegritySurvey {
+    /// Count one entry's state.
+    pub fn record(&mut self, integrity: EntryIntegrity) {
+        let count = match integrity {
+            EntryIntegrity::Claim(_) => &mut self.claim,
+            EntryIntegrity::NotInIndex => &mut self.not_in_index,
+            EntryIntegrity::NoClaim => &mut self.no_claim,
+            EntryIntegrity::Stripped => &mut self.stripped,
+        };
+        *count = count.saturating_add(1);
+    }
+
+    /// Entries in [`EntryIntegrity::Claim`].
+    pub fn claim(&self) -> usize {
+        self.claim
+    }
+
+    /// Entries in [`EntryIntegrity::NotInIndex`].
+    pub fn not_in_index(&self) -> usize {
+        self.not_in_index
+    }
+
+    /// Entries in [`EntryIntegrity::NoClaim`].
+    pub fn no_claim(&self) -> usize {
+        self.no_claim
+    }
+
+    /// Entries in [`EntryIntegrity::Stripped`].
+    pub fn stripped(&self) -> usize {
+        self.stripped
+    }
+
+    /// [`Self::not_in_index`] plus [`Self::no_claim`]: the entries a
+    /// verify skips as `SkippedNoHash`. A [`EntryIntegrity::Stripped`]
+    /// entry's verify is `IntegrityStripped` instead.
+    pub fn skipped_no_hash(&self) -> usize {
+        self.not_in_index.saturating_add(self.no_claim)
+    }
+
+    /// Every entry counted.
+    pub fn total(&self) -> usize {
+        self.claim
+            .saturating_add(self.skipped_no_hash())
+            .saturating_add(self.stripped)
+    }
+
+    /// True when some entry carries a claim and some other counts in
+    /// [`Self::skipped_no_hash`]. [`EntryIntegrity::Stripped`] entries
+    /// count on neither side.
+    pub fn mixes_hash_presence(&self) -> bool {
+        self.claim > 0 && self.skipped_no_hash() > 0
+    }
+}
+
+impl Extend<EntryIntegrity> for IntegritySurvey {
+    fn extend<I: IntoIterator<Item = EntryIntegrity>>(&mut self, iter: I) {
+        for integrity in iter {
+            self.record(integrity);
+        }
+    }
+}
+
+impl FromIterator<EntryIntegrity> for IntegritySurvey {
+    fn from_iter<I: IntoIterator<Item = EntryIntegrity>>(iter: I) -> Self {
+        let mut survey = Self::default();
+        survey.extend(iter);
+        survey
     }
 }
 
@@ -985,6 +1084,67 @@ mod tests {
             classify_sha1_claim(Some(real), true),
             EntryIntegrity::Claim(real)
         );
+    }
+
+    /// An [`EntryIntegrity::Claim`] for the survey tests.
+    fn a_claim() -> EntryIntegrity {
+        EntryIntegrity::Claim(crate::digest::Sha1Digest::from([0xAB; 20]))
+    }
+
+    /// Each state lands in its own count, so swapping two of `record`'s
+    /// arms fails; `extend` folds the same way `collect` does.
+    #[test]
+    fn integrity_survey_counts_each_state() {
+        use EntryIntegrity::{NoClaim, NotInIndex, Stripped};
+        let states = [vec![NotInIndex], vec![NoClaim; 2], vec![Stripped; 3]].concat();
+        let mut survey: IntegritySurvey = states.into_iter().collect();
+        survey.extend([a_claim(); 4]);
+        assert_eq!(survey.not_in_index(), 1);
+        assert_eq!(survey.no_claim(), 2);
+        assert_eq!(survey.stripped(), 3);
+        assert_eq!(survey.claim(), 4);
+        assert_eq!(survey.skipped_no_hash(), 3);
+        assert_eq!(survey.total(), 10);
+    }
+
+    /// An archive mixes hash presence only when some entry carries a
+    /// claim and some other has no hash to check; a zeroed hash under a
+    /// claiming archive is neither.
+    #[test]
+    fn integrity_survey_mixes_hash_presence_only_beside_a_claim() {
+        use EntryIntegrity::{NoClaim, NotInIndex, Stripped};
+        let claim = a_claim();
+        let cases: [(&[EntryIntegrity], bool); 8] = [
+            (&[], false),
+            (&[claim], false),
+            (&[NotInIndex], false),
+            (&[NoClaim], false),
+            (&[claim, Stripped], false),
+            (&[Stripped, NotInIndex], false),
+            (&[claim, NotInIndex], true),
+            (&[claim, NoClaim], true),
+        ];
+        for (states, mixes) in cases {
+            let survey: IntegritySurvey = states.iter().copied().collect();
+            assert_eq!(survey.mixes_hash_presence(), mixes, "{states:?}");
+        }
+    }
+
+    /// The counts saturate rather than overflow.
+    #[test]
+    fn integrity_survey_saturates() {
+        let mut survey = IntegritySurvey {
+            claim: usize::MAX,
+            not_in_index: usize::MAX,
+            ..IntegritySurvey::default()
+        };
+        survey.record(EntryIntegrity::NotInIndex);
+        survey.record(EntryIntegrity::NoClaim);
+        survey.record(EntryIntegrity::Stripped);
+        assert_eq!(survey.not_in_index(), usize::MAX);
+        assert_eq!(survey.stripped(), 1);
+        assert_eq!(survey.skipped_no_hash(), usize::MAX);
+        assert_eq!(survey.total(), usize::MAX);
     }
 
     /// `into_path` has no in-core caller — both consumers are in the
