@@ -181,14 +181,10 @@ pub fn build_v8b_zlib_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_siz
 }
 
 /// The v8b pak behind [`build_v8b_lz4_pak`] and [`build_v8b_zlib_pak`]:
-/// one entry at `path` compressed by `method`.
-///
-/// Footer: guid(16) + encrypted(1) + magic + version 8 + index
-/// offset/size + index hash(20) + FIVE 32-byte compression-name slots
-/// (the 5-slot count is what classifies the footer as v8b rather than
-/// v8a); slot 0 = `method`, so the entry's 1-based method index 1
-/// resolves to it.
-fn build_v8b_pak(
+/// one entry at `path` compressed by `method`, under a
+/// [`write_v8b_plus_footer`] naming `method` in slot 0, so the entry's
+/// 1-based method index 1 resolves to it.
+pub(crate) fn build_v8b_pak(
     method: &str,
     path: &str,
     streams: &[Vec<u8>],
@@ -254,10 +250,35 @@ fn build_v8b_pak(
     let mut pak = data;
     pak.extend_from_slice(&index);
 
+    write_v8b_plus_footer(&mut pak, 8, index_offset, index_size, method);
+    pak
+}
+
+/// Append the footer v8b, v10 and v11 share to `pak`: guid(16) +
+/// encrypted(1) + magic + `version` + index offset/size + index
+/// hash(20) + FIVE 32-byte compression-name slots (the 5-slot count is
+/// what classifies a version-8 footer as v8b rather than v8a). It is
+/// unencrypted, its index hash is zero, and slot 0 holds `method`.
+///
+/// # Panics
+///
+/// If `version` is not 8, 10 or 11: v9 adds a frozen-index byte after
+/// the hash. Also if `method` is longer than its 32-byte slot.
+pub(crate) fn write_v8b_plus_footer(
+    pak: &mut Vec<u8>,
+    version: u32,
+    index_offset: u64,
+    index_size: u64,
+    method: &str,
+) {
+    assert!(
+        matches!(version, 8 | 10 | 11),
+        "write_v8b_plus_footer writes v8b, v10 and v11 footers; got v{version}"
+    );
     pak.extend_from_slice(&[0u8; 16]); // encryption GUID
     pak.push(0); // not encrypted
     pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-    pak.write_u32::<LittleEndian>(8).unwrap();
+    pak.write_u32::<LittleEndian>(version).unwrap();
     pak.write_u64::<LittleEndian>(index_offset).unwrap();
     pak.write_u64::<LittleEndian>(index_size).unwrap();
     pak.extend_from_slice(&[0u8; 20]); // index hash (zero = skip)
@@ -266,8 +287,6 @@ fn build_v8b_pak(
     slot0[..method.len()].copy_from_slice(method.as_bytes());
     pak.extend_from_slice(&slot0);
     pak.extend_from_slice(&[0u8; 32 * 4]);
-
-    pak
 }
 
 /// Path of the single entry emitted by [`build_v8b_lz4_pak`].
@@ -365,6 +384,12 @@ mod tests {
     #[should_panic(expected = "got v7")]
     fn write_legacy_footer_rejects_v7() {
         write_legacy_footer(&mut Vec::new(), 7, 0, 0, &[0; 20]);
+    }
+
+    #[test]
+    #[should_panic(expected = "got v9")]
+    fn write_v8b_plus_footer_rejects_v9() {
+        write_v8b_plus_footer(&mut Vec::new(), 9, 0, 0, "");
     }
 
     /// Pins every byte `build_v8b_lz4_pak` writes for one two-block input,
