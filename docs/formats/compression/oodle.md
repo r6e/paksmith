@@ -284,12 +284,13 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 There are two rejection layers:
 
-- **`:1020` (`stream_entry_to` early-reject)** and **`:824` (`verify_entry`)**
-  — the user-facing paths. Both return
+- **`check_read` (a read's early-reject)** and **`verify_entry`'s
+  plaintext arm** — the user-facing paths. Both return
   `PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }`.
-- **`:1074` (`stream_entry_to` match exhaustiveness arm)** — a dead-code
-  guard that only fires if the early-reject at `:1020` is bypassed by
-  a future refactor. Returns
+- **`stream_entry_to`'s match exhaustiveness arm** — a guard a read
+  doesn't reach, which fires only when the early-reject in `check_read`
+  is bypassed, as a direct call in a test does or a future refactor
+  might. Returns
   `PaksmithError::InvalidIndex { fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression { method } }`.
   Operators seeing this variant should treat it as a bug, not an
   expected Oodle rejection.
