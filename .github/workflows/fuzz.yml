@@ -379,7 +379,7 @@ jobs:
             if ! entries="$(gh api --paginate -X GET "repos/${GH_REPO}/actions/caches" \
               -f key="${prefix}" -f ref="${GITHUB_REF}" \
               -f sort=created_at -f direction=desc -F per_page=100 \
-              --jq ".actions_caches[] | select(.key | test(\"\\\\A${prefix}[0-9]+\\\\z\")) | \"\\(.id) \\(.key)\"")"; then
+              --jq '.actions_caches[] | select(.key | test("\\A'"${prefix}"'[0-9]+\\z")) | "\(.id) \(.key)"')"; then
               echo "::warning::${target}: could not list the corpus caches"
               continue
             fi
@@ -397,7 +397,9 @@ jobs:
       # Raises the cmin alert, which would otherwise show only in the
       # run's summary. The title is fixed per target, so later failures
       # comment on the open issue. A failure here fails the job: this
-      # is the only notice of a cmin regression.
+      # is the only notice of a cmin regression. Recover with "Re-run
+      # all jobs": a re-run of this job alone looks for a marker from
+      # its own attempt and finds none.
       - name: Alert on cmin failure
         if: ${{ !cancelled() && steps.targets.outcome == 'success' }}
         env:
