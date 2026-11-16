@@ -12,7 +12,9 @@ name: Release assets
 #   this workflow from main with the tag. A tag push runs the tagged
 #   commit's copy of this file, re-runs included, and a dispatch runs
 #   main's. The local actions come from the tagged commit either way,
-#   so a fault in one of them needs a new tag. A dispatched run's
+#   so a fault in one of them needs a new tag. So does a crate's
+#   changelog with no section for the version, because the notes are
+#   read from the tagged commit. A dispatched run's
 #   attestations name main and its head commit as their source, not
 #   the tag and its commit.
 # - The tag exists without a draft: re-run release.yml, which accepts
@@ -138,8 +140,9 @@ jobs:
         with:
           subject-path: assets/*/paksmith-*
 
-  # Runs no repository code: it only moves the built files onto the
-  # release, so the write token never meets a build script.
+  # Runs no repository code: it moves the built files onto the release
+  # and copies changelog text into its notes, so the write token never
+  # meets a build script.
   publish:
     name: publish
     # Waits for `attest`, so a failed attestation blocks the release.
@@ -155,7 +158,8 @@ jobs:
       # Publishing cannot be undone, so it happens only for a draft
       # whose tag still names the built commit, and only when the draft
       # carries exactly the expected files, each from its own target's
-      # artifact.
+      # artifact. The notes are built before anything is uploaded, and
+      # set by the edit that publishes.
       - name: Attach the assets and publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -190,20 +194,30 @@ jobs:
           # release-please writes one changelog per crate and puts only
           # paksmith-cli's section on the draft, because the three crates
           # share the tag. The notes below carry all three sections.
+          crates=(paksmith-cli paksmith-gui paksmith-core)
           : > notes.md
-          for crate in paksmith-cli paksmith-gui paksmith-core; do
+          for crate in "${crates[@]}"; do
             changelog="$(gh api "repos/${GH_REPO}/contents/crates/${crate}/CHANGELOG.md?ref=${BUILT_SHA}" \
               -H "Accept: application/vnd.github.raw")" || fail "could not read ${crate}'s changelog at ${BUILT_SHA}"
+            # A missing heading means the changelog is not this release's.
+            # A heading with nothing under it is a crate that did not change.
             section="$(awk -v version="${TAG#v}" '
-              /^## / { on = index($0, "## [" version "]") == 1 || index($0, "## " version " ") == 1; next }
-              on' <<< "${changelog}")"
-            [[ "${section}" =~ [^[:space:]] ]] || fail "${crate}'s changelog has no section for ${TAG#v}"
+              /^## / {
+                on = index($0, "## [" version "]") == 1 || index($0, "## " version " ") == 1
+                found = found || on
+                next
+              }
+              on
+              END { exit !found }' <<< "${changelog}")" || fail "${crate}'s changelog has no section for ${TAG#v}"
+            [[ "${section}" =~ [^[:space:]] ]] || section="No changes in this crate."
             printf '## %s\n%s\n\n' "${crate}" "${section}" >> notes.md
           done
-          # GitHub refuses a release body over 125,000 characters.
-          if (($(wc -m < notes.md) > 120000)); then
-            printf 'The changes in this release are listed in each crate'"'"'s changelog:\n\n' > notes.md
-            for crate in paksmith-cli paksmith-gui paksmith-core; do
+          # GitHub refuses a release body over 125,000 characters. Bytes
+          # are counted here, which are never fewer.
+          if (($(wc -c < notes.md) > 120000)); then
+            echo "::warning::the notes are too long for a release body, so the release links to the changelogs instead"
+            printf "The changes in this release are listed in each crate's changelog:\n\n" > notes.md
+            for crate in "${crates[@]}"; do
               printf -- '- [%s](https://github.com/%s/blob/%s/crates/%s/CHANGELOG.md)\n' \
                 "${crate}" "${GH_REPO}" "${TAG}" "${crate}" >> notes.md
             done
