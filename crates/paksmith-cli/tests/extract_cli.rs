@@ -1157,3 +1157,43 @@ fn extract_fails_an_asset_whose_companion_read_is_refused() {
     assert_eq!(failure["entry"], "Content/A.uasset");
     assert_eq!(failure["error"], refusal("Content/A.uexp"));
 }
+
+/// An entry whose block runs past the file fails with its own bounds fault
+/// before the budget charges it, so the healthy entry after it, which the
+/// whole file's charge would otherwise refuse, still extracts.
+#[test]
+fn extract_a_healthy_entry_next_to_one_whose_block_runs_past_the_file() {
+    let healthy: Vec<u8> = (0..512u16)
+        .map(|i| u8::try_from(i % 251).unwrap())
+        .collect();
+    let work = tempdir().unwrap();
+    let cfg = tempdir().unwrap();
+    let pak = work.path().join("damaged.pak");
+    let bytes = common::block_past_the_file_pak(&healthy);
+    let fault = format!(
+        "invalid pak index: entry `Content/a.bin` block 0 end exceeds file_size: observed={} limit={}",
+        1 << 20,
+        bytes.len()
+    );
+    fs::write(&pak, bytes).unwrap();
+    for jobs in ["1", "4"] {
+        let run = common::paksmith_json(cfg.path())
+            .arg("extract")
+            .arg(&pak)
+            .args(["--jobs", jobs, "-o"])
+            .arg(work.path().join(format!("out{jobs}")))
+            .output()
+            .unwrap();
+        assert_eq!(run.status.code(), Some(1), "{run:?}");
+        let summary: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+        assert_eq!(summary["counts"]["raw_copied"], 1, "{summary}");
+        assert_eq!(summary["counts"]["failed"], 1, "{summary}");
+        let output = &summary["outputs"][0];
+        assert_eq!(output["entry"], "Content/b.bin", "{summary}");
+        let written = fs::read(output["output"].as_str().unwrap()).unwrap();
+        assert!(written == healthy, "--jobs {jobs}");
+        let failure = &summary["failures"][0];
+        assert_eq!(failure["entry"], "Content/a.bin", "{summary}");
+        assert_eq!(failure["error"], fault, "--jobs {jobs}");
+    }
+}
