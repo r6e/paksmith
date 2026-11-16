@@ -1,9 +1,9 @@
 name: actionlint
 
 # Lints the workflow files, including their `run` scripts through
-# shellcheck, and checks that the release and nightly workflows name
-# the same build targets. It does not read the composite actions under
-# .github/actions/.
+# shellcheck, runs shellcheck over the composite actions' bash steps,
+# which actionlint does not read, and checks that the release and
+# nightly workflows name the same build targets.
 #
 # No `paths` filter: a workflow the filter skips never reports its
 # check, so a filtered workflow could not be made a required check.
@@ -50,5 +50,7 @@ jobs:
           # runner image supplies it, and its version is not pinned.
           shellcheck --version
           "${RUNNER_TEMP}/actionlint" -color
+      - name: Lint the composite actions
+        run: scripts/lint-composite-actions.sh
       - name: Check the release targets agree
         run: scripts/check-release-targets.sh
