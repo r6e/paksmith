@@ -63,7 +63,7 @@ paksmith-core = { path = "../paksmith-core", version = "0.1" }
 rodio.workspace = true
 # Phase 6 Task 7: native file picker (open dialog) for macOS/Windows/Linux.
 # MIT/Apache-2.0.
-rfd = "0.17"
+rfd = "0.18"
 # Phase 6 Task 7: thiserror for OpenError.
 thiserror.workspace = true
 # Phase 6 Task 11: structured logging for menu build failure (non-fatal, continues
