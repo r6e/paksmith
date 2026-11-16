@@ -787,8 +787,9 @@ const _: fn() = || {
 /// implementations never reference a specific container type").
 ///
 /// Today this always constructs a [`pak::PakReader`]; Phase 8 adds
-/// format dispatch here (sniff `.pak` vs `.utoc`/IoStore) as a branch
-/// inside this ONE function, leaving every consumer untouched.
+/// format dispatch (sniff `.pak` vs `.utoc`/IoStore) as a branch
+/// inside [`open_with`], which this calls with the default
+/// [`OpenOptions`], leaving every consumer untouched.
 ///
 /// Delegates to [`pak::PakReader::open`] / [`pak::PakReader::open_with_key`],
 /// so their documented behaviors — the symlink defense-in-depth warning
@@ -814,11 +815,84 @@ pub fn open(
     path: &std::path::Path,
     key: Option<&crate::AesKey>,
 ) -> crate::Result<std::sync::Arc<dyn ContainerReader>> {
+    open_with(path, key, &OpenOptions::default())
+}
+
+/// How [`open_with`] sets up the reader it opens. The default is what
+/// [`open`] gives.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OpenOptions {
+    read_budget: bool,
+}
+
+impl OpenOptions {
+    /// The default options.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Give the reader a read budget: see [`pak::PakReader::with_read_budget`].
+    #[must_use]
+    pub fn with_read_budget(mut self) -> Self {
+        self.read_budget = true;
+        self
+    }
+}
+
+/// [`open`] with `options`.
+///
+/// # Errors
+///
+/// The errors of [`open`] and of applying `options`, such as
+/// [`pak::PakReader::with_read_budget`]'s, and
+/// [`PaksmithError::InvalidArgument`] when the reader reports it didn't
+/// apply one of them. Pak's reader applies every option.
+pub fn open_with(
+    path: &std::path::Path,
+    key: Option<&crate::AesKey>,
+    options: &OpenOptions,
+) -> crate::Result<std::sync::Arc<dyn ContainerReader>> {
+    // Each format's branch returns its reader with the options the reader
+    // reports it has, so one the branch didn't apply is refused here
+    // rather than the archive opened without it.
+    let (reader, applied) = open_pak(path, key, options)?;
+    check_applied(options, &applied)?;
+    Ok(reader)
+}
+
+/// [`open_with`]'s pak branch.
+fn open_pak(
+    path: &std::path::Path,
+    key: Option<&crate::AesKey>,
+    options: &OpenOptions,
+) -> crate::Result<(std::sync::Arc<dyn ContainerReader>, OpenOptions)> {
     let reader = match key {
         Some(k) => pak::PakReader::open_with_key(path, k.clone())?,
         None => pak::PakReader::open(path)?,
     };
-    Ok(std::sync::Arc::new(reader))
+    let OpenOptions { read_budget } = *options;
+    let reader = if read_budget {
+        reader.with_read_budget()?
+    } else {
+        reader
+    };
+    let applied = OpenOptions {
+        read_budget: reader.has_read_budget(),
+    };
+    Ok((std::sync::Arc::new(reader), applied))
+}
+
+/// Refuse a reader whose options differ from those asked for.
+fn check_applied(requested: &OpenOptions, applied: &OpenOptions) -> crate::Result<()> {
+    if requested == applied {
+        return Ok(());
+    }
+    Err(PaksmithError::InvalidArgument {
+        arg: "options",
+        reason: format!("the archive's reader can't apply {requested:?}, only {applied:?}"),
+    })
 }
 
 #[cfg(test)]
@@ -856,6 +930,21 @@ mod tests {
             !NoOverride.claims_integrity(),
             "the un-overridden default must be false (no claim known)"
         );
+    }
+
+    /// `open_with` refuses a reader whose options differ from those asked
+    /// for. Its only branch, pak's, applies every option, so this drives
+    /// the check directly.
+    #[test]
+    fn open_with_refuses_options_its_reader_did_not_apply() {
+        let budget = OpenOptions::new().with_read_budget();
+        let err = check_applied(&budget, &OpenOptions::new()).unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::InvalidArgument { arg: "options", .. }),
+            "got: {err:?}"
+        );
+        check_applied(&budget, &budget.clone()).unwrap();
+        check_applied(&OpenOptions::new(), &OpenOptions::default()).unwrap();
     }
 
     #[test]

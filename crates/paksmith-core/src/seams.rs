@@ -144,13 +144,17 @@ pub enum PakSeam {
     /// Surfaces as [`crate::error::IndexParseFault::AllocationFailed`]
     /// with `context: AllocationContext::ByPathKeyBytes`.
     ByPathKey,
+    /// `PakReader::with_read_budget`'s count of reads per entry (#848).
+    /// Surfaces as [`crate::error::IndexParseFault::AllocationFailed`]
+    /// with `context: AllocationContext::EntryReadCounts`.
+    EntryReadCounts,
 }
 
 impl PakSeam {
     /// Total number of pak-side seam sites. Pinned by the `const _`
-    /// guard below and by the exhaustive `match` in
-    /// [`SeamSite::slot`].
-    pub const COUNT: usize = 19;
+    /// guard below and, in `tests`, by the exhaustive `expected_pak_slot`
+    /// match and the length of its list of every variant.
+    pub const COUNT: usize = 20;
 }
 
 // Compile-time guard: refuses to build when `COUNT` and the largest
@@ -158,7 +162,7 @@ impl PakSeam {
 // the `AssetSeam` guard below): variants are declared in source order
 // with no explicit `= N` assignments and no gaps, so that
 // `last as usize + 1` equals the variant count.
-const _: [(); PakSeam::COUNT] = [(); PakSeam::ByPathKey as usize + 1];
+const _: [(); PakSeam::COUNT] = [(); PakSeam::EntryReadCounts as usize + 1];
 
 /// Asset parser OOM seams (#276). The inner enum of [`SeamSite::Asset`].
 ///
@@ -407,7 +411,8 @@ mod tests {
     /// Pak/index/decompression variants are tested in
     /// `paksmith-core-tests/tests/oom_pak.rs`, except `DedupTracker`,
     /// `ByPathLookup`, `DedupSurvivorFlags` and `ByPathKey`, tested in
-    /// `container/pak/index/mod.rs` so that cargo-mutants credits them;
+    /// `container/pak/index/mod.rs`, and `EntryReadCounts`, tested in
+    /// `container/pak/mod.rs`, so that cargo-mutants credits them;
     /// asset-side variants are tested in
     /// `paksmith-core-tests/tests/oom_asset.rs`, except
     /// `SkinWeightDataBytes`, tested in
@@ -469,6 +474,9 @@ mod tests {
                     "from_entries_surfaces_dedup_survivor_flags_allocation_failed"
                 }
                 PakSeam::ByPathKey => "from_entries_copies_by_path_keys_fallibly_in_order",
+                PakSeam::EntryReadCounts => {
+                    "read_budget_surfaces_entry_read_counts_allocation_failed"
+                }
             }
         }
         const fn asset_integration_test_name(site: AssetSeam) -> &'static str {
@@ -585,6 +593,7 @@ mod tests {
                 PakSeam::ByPathLookup => 16,
                 PakSeam::DedupSurvivorFlags => 17,
                 PakSeam::ByPathKey => 18,
+                PakSeam::EntryReadCounts => 19,
             }
         }
         const fn expected_asset_slot(site: AssetSeam) -> usize {
@@ -637,6 +646,7 @@ mod tests {
             PakSeam::ByPathLookup,
             PakSeam::DedupSurvivorFlags,
             PakSeam::ByPathKey,
+            PakSeam::EntryReadCounts,
         ];
         assert_eq!(pak_all.len(), PakSeam::COUNT);
         for site in pak_all {
