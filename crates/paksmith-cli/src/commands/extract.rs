@@ -35,6 +35,12 @@ pub(crate) struct ExtractArgs {
     /// one only, matching UE's conventional alphabetical mount order
     /// where later mounts override; shadowed copies are skipped, not
     /// collisions.
+    ///
+    /// Each archive is read under a read budget: an entry's first read is
+    /// charged the part of the archive it can touch. A read whose charge
+    /// would take the total past the archive's size, or a read of an entry
+    /// after its second, fails the entry being extracted with a
+    /// `payload_extent_total` or `entry_reads` error.
     pub(crate) pak: Option<PathBuf>,
 
     /// Output directory (refused if too deep or too long for the containment
@@ -233,6 +239,9 @@ fn open_and_collect(
     let mut inputs = paksmith_core::asset::ParseInputs::default();
     let mut readers = Vec::with_capacity(sources.len());
     let mut entry_lists = Vec::with_capacity(sources.len());
+    // Index entries can alias one payload, so an archive is read under its
+    // read budget (#848).
+    let options = paksmith_core::container::OpenOptions::new().with_read_budget();
     for (i, pak) in sources.iter().enumerate() {
         let ctx = crate::commands::key_resolve::resolve_pak_context(pak, aes_key, game, detect)?;
         if i == 0 {
@@ -242,7 +251,7 @@ fn open_and_collect(
                 crate::commands::mappings_resolve::mappings_selector(game),
             )?);
         }
-        let reader = paksmith_core::container::open(pak, ctx.key.as_ref())?;
+        let reader = paksmith_core::container::open_with(pak, ctx.key.as_ref(), &options)?;
         let entries: Vec<String> = reader
             .entries()
             .filter(|e| pattern.is_none_or(|pat| pat.matches(e.path())))

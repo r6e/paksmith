@@ -938,7 +938,7 @@ impl PakEntryHeader {
     /// for a stored entry (its read takes that many), AES-aligned when
     /// encrypted. From v5 the span also reaches `offset +` each compression
     /// block's end, since an inline record's blocks may point anywhere and
-    /// are checked only as each is read. A `version` before v5 stores block
+    /// opening the archive doesn't check them. A `version` before v5 stores block
     /// offsets file-relative, which no read or verify follows, so they are
     /// left out. An end past `u64::MAX` saturates.
     pub(in crate::container::pak) fn payload_extent(
