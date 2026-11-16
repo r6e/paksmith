@@ -81,7 +81,7 @@ A release whose build had to be started again from `main` is signed from `main` 
 
 ### Nightly builds
 
-The [Nightly workflow](https://github.com/r6e/paksmith/actions/workflows/nightly.yml) builds the same three archives from `main` on any night `main` has changed. They are attached to that workflow run as artifacts named `paksmith-nightly-<date>-<commit>-<target>`, not published as releases. Nightlies are unsupported snapshots of `main`.
+The [Nightly workflow](https://github.com/r6e/paksmith/actions/workflows/nightly.yml) builds the same three archives from `main` on any night `main` has changed. They are attached to that workflow run as artifacts named `paksmith-nightly-<date>-<commit>-<target>`, not published as releases. Nightlies are unsupported snapshots of `main`. A nightly's `paksmith --version` ends with its label, as in `paksmith 0.1.0 (nightly-20261115-abc1234)`.
 
 Artifacts need a signed-in GitHub account to download and are kept for 30 days, so there is no nightly to download once `main` has been unchanged for longer than that.
 
