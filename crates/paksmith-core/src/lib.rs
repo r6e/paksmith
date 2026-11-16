@@ -45,6 +45,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod asset;
+pub mod build_info;
 pub mod container;
 pub mod digest;
 pub mod error;
