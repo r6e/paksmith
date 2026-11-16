@@ -110,6 +110,7 @@ use crate::error::{
 // no-ops there); exercised by CI's package-scoped compile guard.
 #[cfg_attr(not(feature = "__test_utils"), allow(unused_imports))]
 use crate::seams::PakSeam;
+use crate::untrusted::clamp_path;
 
 use self::footer::PakFooter;
 use self::index::{
@@ -534,7 +535,7 @@ impl PakReader {
                     })?;
             if payload_end > file_size {
                 warn!(
-                    path = entry.filename(),
+                    path = &*clamp_path(entry.filename()),
                     offset,
                     in_data_size,
                     compressed,
@@ -566,7 +567,7 @@ impl PakReader {
             // already rely on at extract time.
             if uncompressed > MAX_UNCOMPRESSED_ENTRY_BYTES {
                 warn!(
-                    path = entry.filename(),
+                    path = &*clamp_path(entry.filename()),
                     uncompressed,
                     limit = MAX_UNCOMPRESSED_ENTRY_BYTES,
                     "entry uncompressed_size exceeds backstop at open time"
@@ -1108,19 +1109,22 @@ impl PakReader {
         ) {
             crate::container::EntryIntegrity::NotInIndex => {
                 debug!(
-                    path,
+                    path = &*clamp_path(path),
                     "entry has no recorded SHA1 in the index (encoded entry); \
                      skipping verification"
                 );
                 return Ok(VerifyOutcome::SkippedNoHash);
             }
             crate::container::EntryIntegrity::NoClaim => {
-                debug!(path, "entry has no recorded SHA1; skipping verification");
+                debug!(
+                    path = &*clamp_path(path),
+                    "entry has no recorded SHA1; skipping verification"
+                );
                 return Ok(VerifyOutcome::SkippedNoHash);
             }
             crate::container::EntryIntegrity::Stripped => {
                 error!(
-                    path,
+                    path = &*clamp_path(path),
                     expected = "non-zero (archive-wide integrity claimed)",
                     actual = "0000000000000000000000000000000000000000",
                     "entry has zero SHA1 but archive index does — \
@@ -1247,7 +1251,7 @@ impl PakReader {
             let expected = expected_sha1.to_string();
             let actual_hex = actual.to_string();
             error!(
-                path,
+                path = &*clamp_path(path),
                 expected = expected.as_str(),
                 actual = actual_hex.as_str(),
                 "entry hash mismatch — payload may be tampered or corrupted"
@@ -1457,7 +1461,11 @@ impl PakReader {
             | CompressionMethod::Zstd
             | CompressionMethod::Unknown(_)
             | CompressionMethod::UnknownByName(_)) => {
-                warn!(path, ?method, "rejected unsupported compression method");
+                warn!(
+                    path = &*clamp_path(path),
+                    ?method,
+                    "rejected unsupported compression method"
+                );
                 return Err(PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: entry.header().offset(),
@@ -1901,7 +1909,12 @@ impl ContainerReader for PakReader {
         }))
     }
 
-    #[tracing::instrument(level = "debug", name = "entry_read", skip_all, fields(path = path))]
+    #[tracing::instrument(
+        level = "debug",
+        name = "entry_read",
+        skip_all,
+        fields(path = &*clamp_path(path))
+    )]
     fn read_entry_to(&self, path: &str, writer: &mut dyn Write) -> crate::Result<u64> {
         let entry = self
             .index
@@ -1920,7 +1933,12 @@ impl ContainerReader for PakReader {
     /// the trait docstring for why). Reserves the full uncompressed
     /// size via `Vec::try_reserve_exact` upfront, surfacing OOM as a
     /// typed `InvalidIndex` before any I/O begins.
-    #[tracing::instrument(level = "debug", name = "entry_read", skip_all, fields(path = path))]
+    #[tracing::instrument(
+        level = "debug",
+        name = "entry_read",
+        skip_all,
+        fields(path = &*clamp_path(path))
+    )]
     fn read_entry(&self, path: &str) -> crate::Result<Vec<u8>> {
         let entry = self
             .index
@@ -1951,7 +1969,7 @@ impl ContainerReader for PakReader {
         let mut buf: Vec<u8> = Vec::new();
         buf.try_reserve_exact(size_usize).map_err(|source| {
             warn!(
-                path,
+                path = &*clamp_path(path),
                 size = size_usize,
                 error = ?source,
                 "output reservation failed"
@@ -2166,7 +2184,11 @@ fn read_encrypted_index<R: Read + Seek>(
         if is_resource_fault || is_genuine_io {
             e
         } else {
-            debug!(?e, "encrypted index parse failed — likely wrong key");
+            // Display, not Debug: Display clamps the path a fault names.
+            debug!(
+                error = e.to_string().as_str(),
+                "encrypted index parse failed — likely wrong key"
+            );
             PaksmithError::Decryption { path: None }
         }
     };
@@ -2561,7 +2583,7 @@ fn read_compressed_block<R: Read + Seek>(
     );
     reserve_res.map_err(|e| {
         warn!(
-            path,
+            path = &*clamp_path(path),
             block = block_index,
             block_len,
             error = ?e,
@@ -2597,7 +2619,7 @@ fn check_cumulative_size(
         return Ok(());
     }
     warn!(
-        path,
+        path = &*clamp_path(path),
         actual = bytes_written,
         uncompressed_size,
         "cumulative decompressed size mismatch"
@@ -2734,7 +2756,7 @@ fn stream_zlib_to<R: Read + Seek>(
             let n = limited.read(&mut scratch).map_err(|e| {
                 let message = e.to_string();
                 warn!(
-                    path,
+                    path = &*clamp_path(path),
                     block = i,
                     abs_start,
                     error = message.as_str(),
@@ -2766,7 +2788,7 @@ fn stream_zlib_to<R: Read + Seek>(
                 // (failure on the first chunk) from genuine large-entry OOM
                 // (failure after gigabytes accumulated).
                 warn!(
-                    path,
+                    path = &*clamp_path(path),
                     block = i,
                     requested = n,
                     already_committed = block_out.len(),
@@ -2790,7 +2812,7 @@ fn stream_zlib_to<R: Read + Seek>(
         let new_total = bytes_written.saturating_add(written as u64);
         if new_total > uncompressed_size {
             warn!(
-                path,
+                path = &*clamp_path(path),
                 block = i,
                 actual = new_total,
                 uncompressed_size,
@@ -2814,7 +2836,7 @@ fn stream_zlib_to<R: Read + Seek>(
         {
             let expected = entry.header().compression_block_size();
             warn!(
-                path,
+                path = &*clamp_path(path),
                 block = i,
                 written,
                 expected,
@@ -3023,7 +3045,7 @@ fn stream_lz4_to<R: Read + Seek>(
         );
         out_reserve_res.map_err(|e| {
             warn!(
-                path,
+                path = &*clamp_path(path),
                 block = i,
                 requested = alloc_usize,
                 error = ?e,
@@ -3047,7 +3069,7 @@ fn stream_lz4_to<R: Read + Seek>(
             lz4_flex::block::decompress_into(&compressed, &mut block_out).map_err(|e| {
                 let message = e.to_string();
                 warn!(
-                    path,
+                    path = &*clamp_path(path),
                     block = i,
                     abs_start,
                     error = message.as_str(),
@@ -3069,7 +3091,7 @@ fn stream_lz4_to<R: Read + Seek>(
         if !is_final && produced as u64 != block_size {
             let expected = entry.header().compression_block_size();
             warn!(
-                path,
+                path = &*clamp_path(path),
                 block = i,
                 produced,
                 expected,
@@ -5641,6 +5663,20 @@ mod tests {
         );
     }
 
+    /// The debug line for a fault the encrypted open collapses into
+    /// `Decryption` clamps the entry path the fault names.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn collapsed_encrypted_index_fault_log_clamps_the_entry_path() {
+        use crate::untrusted::test_support::{hostile_path, lines_clamped};
+
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let (pak, _) = build_v11_encrypted_index_pak(&["a", &hostile_path("KEY")], &key);
+        assert!(PakReader::from_reader_with_key(Cursor::new(pak), key).is_err());
+        logs_assert(lines_clamped("likely wrong key", "KEY"));
+    }
+
     /// `index_size > MAX_INDEX_BYTES` on the encrypted path must be rejected
     /// before any allocation attempt. Verified via a crafted fake reader that
     /// reports a >2 GiB file_size and a flat (v8b) footer with an oversized
@@ -7425,6 +7461,157 @@ mod tests {
                 ),
                 "got: {err:?}"
             );
+        }
+    }
+
+    /// The open-time log lines clamp the entry path.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn open_logs_clamp_the_entry_path() {
+        use crate::testing::wire::write_pak_entry;
+        use crate::untrusted::test_support::{hostile_path, lines_clamped};
+
+        let path = hostile_path("OPEN");
+        let stored = |c, u| {
+            let mut record = Vec::new();
+            write_pak_entry(&mut record, 0, c, u, 0, &[0; 20], &[], 0, 0);
+            let mut pak = record.clone();
+            pak.push(0);
+            append_legacy_index(&mut pak, 5, &[(path.as_str(), record)]);
+            pak
+        };
+        let over_cap = MAX_UNCOMPRESSED_ENTRY_BYTES + 1;
+        for (pak, message) in [
+            (stored(1 << 20, 1 << 20), "payload extends past file_size"),
+            (stored(1, over_cap), "uncompressed_size exceeds backstop"),
+        ] {
+            assert!(PakReader::from_bytes(pak).is_err(), "{message}");
+            logs_assert(lines_clamped(message, "OPEN"));
+        }
+    }
+
+    /// v10 pak whose one entry, at `path`, is encoded, so its index record
+    /// has no SHA-1. Its stored payload is empty.
+    #[cfg(feature = "__test_utils")]
+    fn encoded_v10_pak(path: &str) -> Vec<u8> {
+        use crate::testing::v10::{EncodeArgs, V10Fixture, build_v10_buffer, encode_entry_bytes};
+        use crate::testing::wire::write_v8b_plus_footer;
+
+        let (dir, file) = path.split_at(path.find('/').unwrap() + 1);
+        let encoded_entries = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0,
+            compressed: 0,
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count: 0,
+            block_size: 0,
+            per_block_sizes: &[],
+        });
+        let (mut pak, index_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            encoded_entries,
+            fdi: vec![(dir.into(), vec![(file.into(), 0)])],
+            ..V10Fixture::default()
+        });
+        write_v8b_plus_footer(&mut pak, 10, 0, index_size, "");
+        pak
+    }
+
+    /// The verify log lines clamp the entry path.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn verify_logs_clamp_the_entry_path() {
+        use crate::untrusted::test_support::{hostile_path, lines_clamped};
+
+        let path = hostile_path("VERIFY");
+        let unhashed = aliased_v5_pak(&[&path], &[7; 16], &[], false);
+        // A legacy footer ends with the index hash; a nonzero one claims
+        // integrity for the whole archive.
+        let mut stripped = unhashed.clone();
+        let footer_hash = stripped.len() - 20;
+        stripped[footer_hash] = 1;
+        // The payload starts after the 53-byte stored record.
+        let mut tampered = aliased_v5_pak(&[&path], &[7; 16], &[], true);
+        tampered[53] ^= 1;
+        for (pak, message) in [
+            (encoded_v10_pak(&path), "no recorded SHA1 in the index"),
+            (unhashed, "no recorded SHA1; skipping"),
+            (stripped, "zero SHA1 but archive index does"),
+            (tampered, "entry hash mismatch"),
+        ] {
+            let _ = PakReader::from_bytes(pak).unwrap().verify_entry(&path);
+            logs_assert(lines_clamped(message, "VERIFY"));
+        }
+    }
+
+    /// The read and decode log lines that a crafted entry or an OOM seam
+    /// reaches clamp the entry path, in their own field and in the
+    /// `entry_read` span of both read entry points. `read_entry`'s
+    /// output-reservation warn has no seam and is not driven.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn read_logs_clamp_the_entry_path() {
+        use crate::testing::bench::zlib_stream;
+        use crate::testing::oom::{SeamSite, arm_at};
+        use crate::testing::wire::build_v8b_pak;
+        use crate::untrusted::test_support::{hostile_path, lines_clamped};
+
+        let path = hostile_path("READ");
+        let pak = |method, streams: Vec<_>, size, block| {
+            build_v8b_pak(method, &path, &streams, size, block)
+        };
+        let zlib = |sizes: &[usize], size, block| {
+            let streams = sizes.iter().map(|&n| zlib_stream(&vec![0; n]));
+            pak("Zlib", streams.collect(), size, block)
+        };
+        let lz4 = |sizes: &[usize], size, block| {
+            let streams = sizes
+                .iter()
+                .map(|&n| lz4_flex::block::compress(&vec![0; n]));
+            pak("LZ4", streams.collect(), size, block)
+        };
+        let oodle = pak("Oodle", vec![vec![0; 4]], 4, 4);
+        let corrupt = pak("Zlib", vec![vec![0xff; 16]], 8, 8);
+        let cases = [
+            (oodle, None, "unsupported compression method"),
+            (
+                zlib(&[8], 8, 8),
+                Some(PakSeam::CompressedReserve),
+                "zlib block reservation failed",
+            ),
+            (corrupt, None, "zlib decompress failed"),
+            (
+                zlib(&[8], 8, 8),
+                Some(PakSeam::ScratchReserve),
+                "zlib scratch reservation failed",
+            ),
+            (zlib(&[300], 100, 100), None, "decompression bomb"),
+            (zlib(&[50, 150], 200, 100), None, "non-final block"),
+            (zlib(&[50], 100, 100), None, "cumulative decompressed size"),
+            (
+                lz4(&[8], 8, 8),
+                Some(PakSeam::Lz4OutputReserve),
+                "lz4 output reservation failed",
+            ),
+            (lz4(&[300], 100, 100), None, "lz4 decompress failed"),
+            (lz4(&[64, 128], 192, 128), None, "non-final lz4 block"),
+        ];
+        for (pak, seam, message) in cases {
+            let reader = PakReader::from_bytes(pak).unwrap();
+            for to_writer in [false, true] {
+                let _guard = seam.map(|seam| arm_at(SeamSite::Pak(seam), 0));
+                let read = if to_writer {
+                    reader.read_entry_to(&path, &mut Vec::new()).map(drop)
+                } else {
+                    reader.read_entry(&path).map(drop)
+                };
+                assert!(read.is_err(), "{message}");
+            }
+            logs_assert(lines_clamped(message, "READ"));
         }
     }
 
