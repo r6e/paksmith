@@ -200,8 +200,9 @@ jobs:
           for crate in "${crates[@]}"; do
             changelog="$(gh api "repos/${GH_REPO}/contents/crates/${crate}/CHANGELOG.md?ref=${BUILT_SHA}" \
               -H "Accept: application/vnd.github.raw")" || fail "could not read ${crate}'s changelog at ${BUILT_SHA}"
-            # A missing heading means the changelog is not this release's.
-            # A heading with nothing under it is a crate that did not change.
+            # The tag is paksmith-cli's release, so a missing heading there
+            # means the changelog is not this release's. Another crate has
+            # no heading, or nothing under it, when it did not change.
             section="$(awk -v version="${TAG#v}" '
               /^## / {
                 on = index($0, "## [" version "]") == 1 || index($0, "## " version " ") == 1
@@ -209,7 +210,10 @@ jobs:
                 next
               }
               on
-              END { exit !found }' <<< "${changelog}")" || fail "${crate}'s changelog has no section for ${TAG#v}"
+              END { exit !found }' <<< "${changelog}")" || {
+              [[ "${crate}" != paksmith-cli ]] || fail "${crate}'s changelog has no section for ${TAG#v}"
+              section=""
+            }
             [[ "${section}" =~ [^[:space:]] ]] || section="No changes in this crate."
             # The version heading, which the notes drop, links this tag's
             # comparison with the previous one. A first release has none.
