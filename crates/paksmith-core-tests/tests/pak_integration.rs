@@ -1462,8 +1462,7 @@ fn build_single_entry_pak(
 
 /// Like [`build_single_entry_pak`] but with explicit control over the
 /// encrypted flag and an `index_offset_override` knob that injects an
-/// arbitrary offset into the index entry's `offset` field — used to test
-/// `PakReader::open_entry_into`'s bounds check against `file_size`.
+/// arbitrary offset into the index entry's `offset` field.
 ///
 /// `index_offset_override = None` writes 0 (the actual in-data record
 /// position, since the synthetic data section starts at file offset 0).
@@ -1559,7 +1558,7 @@ fn build_single_entry_pak_with_flags(
 /// #85 to include `in_data_header_size = wire_size()`), surfacing
 /// a malformed pak as `InvalidIndex` rather than waiting for
 /// `read_entry` to trip the per-entry check later. The pre-#58
-/// entry-time check still exists at `open_entry_into` as a
+/// entry-time check still exists, now `check_entry_offset`, as a
 /// defense-in-depth fallback, but the open-time check fires
 /// FIRST and is what consumers like `paksmith list` (which never
 /// opens entries) now rely on.
@@ -2244,9 +2243,10 @@ fn verify_entry_uncompressed_rejects_payload_past_eof_with_typed_variant() {
     );
 }
 
-/// `stream_uncompressed_to` rejects an entry whose payload extends past EOF.
-/// Constructed by claiming a much larger uncompressed_size than the actual
-/// file's payload region can hold.
+/// A read rejects an entry whose payload extends past EOF, from the index
+/// record in `PakReader::check_read`, with `stream_uncompressed_to`'s own
+/// check as a safety net behind it. Constructed by claiming a much larger
+/// uncompressed_size than the actual file's payload region can hold.
 #[test]
 fn read_uncompressed_rejects_payload_past_eof() {
     let payload = b"only 7!"; // 7 bytes
@@ -2258,8 +2258,8 @@ fn read_uncompressed_rejects_payload_past_eof() {
         0,
         payload,
         // Lie that it's 1MB. The in-data and index agree (build_single_entry_pak
-        // writes both from the same args), so matches_payload passes; the
-        // payload-past-EOF check in stream_uncompressed_to catches it.
+        // writes both from the same args); the read's payload-past-EOF check
+        // of the index record catches it.
         Some(1_000_000),
     );
 
@@ -2282,8 +2282,9 @@ fn read_uncompressed_rejects_payload_past_eof() {
     );
 }
 
-/// Block end past file_size is rejected with InvalidIndex (defensive bounds
-/// check at `stream_zlib_to` block-bounds validation).
+/// Block end past file_size is rejected with InvalidIndex (the read's
+/// block-bounds check of the index record, in `PakReader::check_read`,
+/// with `stream_zlib_to`'s per-block check as a safety net).
 #[test]
 fn read_zlib_rejects_block_past_eof() {
     // Compress some data then claim the block extends way past the file.
@@ -2299,8 +2300,8 @@ fn read_zlib_rejects_block_past_eof() {
     // fires here. Open-time accepts because `compressed_size`
     // (`payload.len()`) is honest — `offset + in_data + compressed`
     // is well within `file_size`. The lie is exclusively in
-    // `block.end` (1MB past file), which the per-block check at
-    // `stream_zlib_to`'s block-bounds validation catches.
+    // `block.end` (1MB past file), which the read's block-bounds check
+    // of the index record catches before decoding anything.
     assert!(
         matches!(
             &err,
@@ -2326,12 +2327,12 @@ fn read_zlib_rejects_block_past_eof() {
 /// to downstream consumers does.
 #[test]
 fn read_zlib_rejects_out_of_order_blocks() {
-    // Both uncompressed payloads must be the same length so the
-    // first-encountered block can satisfy the non-final-block
-    // `uncompressed_size == compression_block_size` constraint
-    // (otherwise paksmith's `NonFinalBlockSizeMismatch` check
-    // fires inside block 0's decompression BEFORE block 1's
-    // OutOfOrder check can run). Two 16-char strings keep the
+    // The read checks every block's bounds from the index record
+    // before decoding any, so OutOfOrder fires whatever block 0
+    // decodes to. Both uncompressed payloads are still the same
+    // length, so the first-encountered block also satisfies the
+    // non-final-block `uncompressed_size == compression_block_size`
+    // constraint the decoder applies. Two 16-char strings keep the
     // arithmetic clean.
     let payload_a = zlib_stream(b"AAAA_block_a_AAA");
     let payload_b = zlib_stream(b"BBBB_block_b_BBB");
