@@ -195,6 +195,7 @@ jobs:
           # paksmith-cli's section on the draft, because the three crates
           # share the tag. The notes below carry all three sections.
           crates=(paksmith-cli paksmith-gui paksmith-core)
+          compare=""
           : > notes.md
           for crate in "${crates[@]}"; do
             changelog="$(gh api "repos/${GH_REPO}/contents/crates/${crate}/CHANGELOG.md?ref=${BUILT_SHA}" \
@@ -210,6 +211,13 @@ jobs:
               on
               END { exit !found }' <<< "${changelog}")" || fail "${crate}'s changelog has no section for ${TAG#v}"
             [[ "${section}" =~ [^[:space:]] ]] || section="No changes in this crate."
+            # The version heading, which the notes drop, links this tag's
+            # comparison with the previous one. A first release has none.
+            link="$(awk -v start="## [${TAG#v}](" '
+              index($0, start) == 1 { print substr($0, length(start) + 1); exit }' <<< "${changelog}")"
+            link="${link%%)*}"
+            [[ -n "${compare}" || "${link}" != "https://github.com/${GH_REPO}/compare/"* || "${link}" =~ [^A-Za-z0-9:/._-] ]] ||
+              compare="${link}"
             printf '## %s\n%s\n\n' "${crate}" "${section}" >> notes.md
           done
           # GitHub refuses a release body over 125,000 characters. Counting
@@ -222,6 +230,7 @@ jobs:
                 "${crate}" "${GH_REPO}" "${TAG}" "${crate}" >> notes.md
             done
           fi
+          [[ -z "${compare}" ]] || printf '\n**Full changelog**: %s\n' "${compare}" >> notes.md
           # `--clobber` replaces assets an earlier attempt left on the draft.
           gh release upload "${TAG}" "${files[@]}" --clobber
           expected="$(printf '%s\n' "${files[@]##*/}" | sort)"
