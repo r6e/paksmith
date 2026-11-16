@@ -216,8 +216,11 @@ jobs:
             link="$(awk -v start="## [${TAG#v}](" '
               index($0, start) == 1 { print substr($0, length(start) + 1); exit }' <<< "${changelog}")"
             link="${link%%)*}"
-            [[ -n "${compare}" || "${link}" != "https://github.com/${GH_REPO}/compare/"* || "${link}" =~ [^A-Za-z0-9:/._-] ]] ||
+            # Only this repository's comparison of two version tags is kept.
+            range="${link#"https://github.com/${GH_REPO}/compare/"}"
+            if [[ -z "${compare}" && "${range}" != "${link}" && "${range}" =~ ^v[0-9.]{1,40}\.\.\.v[0-9.]{1,40}$ ]]; then
               compare="${link}"
+            fi
             printf '## %s\n%s\n\n' "${crate}" "${section}" >> notes.md
           done
           # GitHub refuses a release body over 125,000 characters. Counting
