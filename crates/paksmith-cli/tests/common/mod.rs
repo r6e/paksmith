@@ -107,6 +107,53 @@ pub fn v3_pak_with_entry(pak: &std::path::Path, name: &[u8; 22]) {
     std::fs::write(pak, bytes).unwrap();
 }
 
+/// Wire size of the stored record [`aliased_v5_pak`] writes: offset, both
+/// sizes, a 4-byte compression method, SHA-1, flags and block size.
+pub const STORED_RECORD_BYTES: u64 = 8 + 8 + 8 + 4 + 20 + 1 + 4;
+
+const PAK_MAGIC: u32 = 0x5A6F_12E1;
+
+/// A v5 pak holding `payload` once, stored after its record at offset 0, and
+/// an index naming that record once per entry of `names`. It claims no SHA-1
+/// and no index hash. The CLI's dev-dependencies can't reach core's builders.
+pub fn aliased_v5_pak(names: &[&str], payload: &[u8]) -> Vec<u8> {
+    let size = u64::try_from(payload.len()).unwrap();
+    let mut record = Vec::new();
+    for field in [0, size, size] {
+        record.extend_from_slice(&field.to_le_bytes());
+    }
+    record.extend_from_slice(&0u32.to_le_bytes());
+    record.extend_from_slice(&[0; 20]);
+    record.push(0);
+    record.extend_from_slice(&0u32.to_le_bytes());
+    assert_eq!(u64::try_from(record.len()).unwrap(), STORED_RECORD_BYTES);
+    let mut pak = record.clone();
+    pak.extend_from_slice(payload);
+    let index_offset = pak.len();
+    write_fstring(&mut pak, "../../../");
+    pak.extend_from_slice(&u32::try_from(names.len()).unwrap().to_le_bytes());
+    for name in names {
+        write_fstring(&mut pak, name);
+        pak.extend_from_slice(&record);
+    }
+    let index_size = pak.len() - index_offset;
+    pak.push(0); // the index isn't encrypted
+    pak.extend_from_slice(&PAK_MAGIC.to_le_bytes());
+    pak.extend_from_slice(&5u32.to_le_bytes());
+    for field in [index_offset, index_size] {
+        pak.extend_from_slice(&u64::try_from(field).unwrap().to_le_bytes());
+    }
+    pak.extend_from_slice(&[0; 20]);
+    pak
+}
+
+/// Append `s` as a UTF-8 FString: its length with the NUL, its bytes, a NUL.
+fn write_fstring(buf: &mut Vec<u8>, s: &str) {
+    buf.extend_from_slice(&i32::try_from(s.len() + 1).unwrap().to_le_bytes());
+    buf.extend_from_slice(s.as_bytes());
+    buf.push(0);
+}
+
 /// Shared writer for the `hero` profile seeders: `extra` is appended
 /// verbatim after the `[profiles.hero]` table (pass `""` for none).
 #[allow(
