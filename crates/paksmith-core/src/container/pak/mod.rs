@@ -98,7 +98,7 @@ use tracing::{debug, error, warn};
 use zeroize::Zeroizing;
 
 use crate::container::{
-    ContainerFormat, ContainerReader, EntryFlags, EntryMetadata, PayloadLedger,
+    ContainerFormat, ContainerReader, EntryFlags, EntryMetadata, PayloadLedger, extent_in_file,
 };
 use crate::digest::Sha1Digest;
 use crate::error::{
@@ -548,11 +548,11 @@ impl PakReader {
         // `test.txt`: 446, not the 448-aligned footprint), so this
         // open-time bound UNDER-counts the real on-disk extent by up to
         // 15 bytes. That gap is caught fail-closed at read AND verify
-        // time — the `checked_payload_end` on the AES-aligned length
-        // inside `stream_uncompressed_to` /
-        // `read_decrypted_compressed_payload`, and
-        // `checked_encrypted_verify_extents` in `verify_entry`'s
-        // encrypted arm (#689), reject a truncated tail with
+        // time — the check of the AES-aligned length a read makes in
+        // `PakReader::check_read` before reading (with the same check in
+        // `stream_uncompressed_to` / `read_decrypted_compressed_payload`
+        // as a safety net), and `checked_encrypted_verify_extents` in
+        // `verify_entry`'s encrypted arm (#689), reject a truncated tail with
         // `OffsetPastFileSize` rather than reading past EOF or reporting
         // `Verified` for an unreadable entry; nothing here relies on this
         // bound being exact for the uncompressed class.
@@ -657,10 +657,25 @@ impl PakReader {
     /// [`EntryMetadata::payload_extent`] to a [`PayloadLedger`] for the
     /// archive on its first read, before reading anything of it, and
     /// refuse the read whose charge the ledger refuses. A second read of
-    /// an entry is free, and a third is refused. [`Self::verify`] and
+    /// an entry is free, and a third is refused. A read is first checked
+    /// against the index record, which refuses a missing key, an
+    /// unsupported method, a record past the end of the file, an encrypted
+    /// compressed entry whose compressed size passes the 8 GiB per-entry
+    /// cap, a payload past the end of the file, a pre-v5 zlib entry, a
+    /// block out of bounds, and a compressed entry with no blocks and a
+    /// nonzero uncompressed size. A read those checks
+    /// refuse is refused with that fault before it's charged or counted,
+    /// as an unbudgeted reader refuses it.
+    /// [`Self::verify`] and
     /// [`Self::verify_entry`] don't use the budget. A package read over
     /// this reader ([`crate::asset::Package::read_from_reader`]) ends when
     /// the budget refuses one of its reads, a companion's included.
+    ///
+    /// Giving the budget walks the index, checking once each v10+
+    /// non-encoded record whose header several FDI paths share, and logs
+    /// one warning, naming no path, when the in-file parts of the extents
+    /// of the entries a read can admit sum past the archive's size, so
+    /// reading each of them once would have at least one read refused.
     ///
     /// # Errors
     ///
@@ -682,7 +697,31 @@ impl PakReader {
             ledger: PayloadLedger::new(self.file_size),
             reads,
         }));
+        self.warn_if_extents_pass_file_size();
         Ok(self)
+    }
+
+    /// Log the warning [`Self::with_read_budget`] describes.
+    fn warn_if_extents_pass_file_size(&self) {
+        let version = self.version();
+        let mut extents: u128 = 0;
+        let mut entries: u64 = 0;
+        for entry in self.index.entries() {
+            if !entry.record_verdict(|| self.check_read(entry).is_ok()) {
+                continue;
+            }
+            let extent = entry.payload_extent(version);
+            extents += u128::from(extent_in_file(&extent, self.file_size));
+            entries += 1;
+        }
+        if extents_pass_file_size(extents, self.file_size) {
+            warn!(
+                extents,
+                file_size = self.file_size,
+                entries,
+                "payload extents of the entries a read can admit sum past the archive's size"
+            );
+        }
     }
 
     /// Whether [`Self::with_read_budget`] gave this reader a budget.
@@ -1477,32 +1516,7 @@ impl PakReader {
     ) -> crate::Result<PakEntryHeader> {
         let path = entry.filename();
 
-        // SAFETY: structurally unreachable from a successfully-opened
-        // reader. The open-time per-entry payload-end check in
-        // `PakReader::open` (issues #58 + #85) computes
-        // `payload_end = offset + wire_size() + compressed` and rejects
-        // `payload_end > file_size`.
-        // `wire_size()` is strictly positive for every entry shape
-        // (50 bytes for V8A, 53 for V8B+/v3-v7, more when compression
-        // blocks are present), so `offset >= file_size` implies
-        // `payload_end > file_size` upstream and surfaces as
-        // `OffsetPastFileSizeKind::PayloadEndBounds`, not
-        // `EntryHeaderOffset`. The branch is kept as a typed-error
-        // safety net so a future refactor that breaks the open-time
-        // invariant surfaces here as `EntryHeaderOffset` rather than
-        // as `Io::UnexpectedEof` from the seek below. Issue #92.
-        if entry.header().offset() >= self.file_size {
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::OffsetPastFileSize {
-                    path: path.to_string(),
-                    kind: OffsetPastFileSizeKind::EntryHeaderOffset {
-                        entry_offset: entry.header().offset(),
-                        file_size_max: self.file_size,
-                    },
-                },
-            });
-        }
-
+        check_entry_offset(entry, self.file_size)?;
         let _ = reader.seek(SeekFrom::Start(entry.header().offset()))?;
         // A copy that matches the index record has its wire size, so one
         // that claims more (say a block table the index lacks) is refused
@@ -1535,62 +1549,97 @@ impl PakReader {
     }
 
     /// The entry at `path`, for `read_entry` and `read_entry_to` to read,
-    /// once its read is admitted by the budget, if there is one.
-    fn resolve_for_read(&self, path: &str) -> crate::Result<&PakIndexEntry> {
+    /// with where its payload starts, once [`Self::check_read`] passes it
+    /// and the budget, if there is one, admits its read.
+    fn resolve_for_read(&self, path: &str) -> crate::Result<(&PakIndexEntry, u64)> {
         let (slot, entry) =
             self.index
                 .find_slot(path)
                 .ok_or_else(|| PaksmithError::EntryNotFound {
                     path: path.to_string(),
                 })?;
+        let payload_start = self
+            .check_read(entry)
+            .inspect_err(|err| warn_read_refusal(err, path))?;
         if let Some(budget) = &self.read_budget {
             budget
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .admit(slot, entry, self.version())?;
         }
-        Ok(entry)
+        Ok((entry, payload_start))
     }
 
-    /// Inner streaming primitive shared by `read_entry_to` (trait method,
-    /// looks up the entry by path) and `read_entry` (override, looks up
-    /// the entry by path AND wraps with try_reserve_exact). Takes a
-    /// pre-resolved `&PakIndexEntry` so callers don't pay two HashMap
-    /// lookups for the same path.
-    fn stream_entry_to(&self, entry: &PakIndexEntry, writer: &mut dyn Write) -> crate::Result<u64> {
+    /// Make these checks of a read of `entry` from its index record, in
+    /// the read's order, before it reads anything of the entry, and return
+    /// where its payload starts: a missing key, an unsupported method, the
+    /// record's offset, the 8 GiB cap on an encrypted compressed entry's
+    /// compressed size, the payload's bounds, a pre-v5 zlib entry, each
+    /// block's bounds, and a compressed entry with no blocks and a nonzero
+    /// uncompressed size. A read runs
+    /// it before the budget charges or counts the read, so an entry it
+    /// refuses is neither, and fails with the same fault through a
+    /// budgeted reader or an unbudgeted one. It logs nothing;
+    /// `resolve_for_read` logs the warnings a read logged for its faults.
+    ///
+    /// The payload start comes from the index record's size: the read
+    /// goes on only once its in-data copy matches that record, and
+    /// [`PakEntryHeader::matches_payload`] compares the method and block
+    /// table, the parts of the size a record of one version can vary.
+    fn check_read(&self, entry: &PakIndexEntry) -> crate::Result<u64> {
         let path = entry.filename();
-
-        // Fail-closed: encrypted entry without a key → Decryption immediately.
-        // When a key is present, the in-data FPakEntry header is plaintext (UE
-        // encrypts only the payload, not the in-data record), so we defer the
-        // key to the payload reader below rather than short-circuiting.
-        if entry.header().is_encrypted() && self.key.is_none() {
+        let header = entry.header();
+        // The in-data record is plaintext (UE encrypts only the payload),
+        // so a read needs the key only for the payload.
+        if header.is_encrypted() && self.key.is_none() {
             return Err(PaksmithError::Decryption {
                 path: Some(path.to_string()),
             });
         }
-        match entry.header().compression_method() {
-            CompressionMethod::None | CompressionMethod::Zlib | CompressionMethod::Lz4 => {}
+        let compressed = match header.compression_method() {
+            CompressionMethod::None => false,
+            CompressionMethod::Zlib | CompressionMethod::Lz4 => true,
             method @ (CompressionMethod::Gzip
             | CompressionMethod::Oodle
             | CompressionMethod::Zstd
             | CompressionMethod::Unknown(_)
             | CompressionMethod::UnknownByName(_)) => {
-                warn!(
-                    path = &*clamp_path(path),
-                    ?method,
-                    "rejected unsupported compression method"
-                );
                 return Err(PaksmithError::Decompression {
                     path: path.to_string(),
-                    offset: entry.header().offset(),
+                    offset: header.offset(),
                     fault: DecompressionFault::UnsupportedMethod {
                         method: method.clone(),
                     },
                 });
             }
+        };
+        check_entry_offset(entry, self.file_size)?;
+        let payload_start = checked_payload_start(header.offset(), header.wire_size(), path)?;
+        if compressed {
+            check_compressed_payload(header, payload_start, self.file_size, self.version(), path)?;
+        } else if header.is_encrypted() {
+            let size = header.uncompressed_size();
+            let _ = checked_aligned_payload_len(payload_start, size, self.file_size, path)?;
+        } else {
+            let size = header.uncompressed_size();
+            let _ = checked_payload_end(payload_start, size, self.file_size, path)?;
         }
+        Ok(payload_start)
+    }
 
+    /// Inner streaming primitive shared by `read_entry_to` (trait method,
+    /// looks up the entry by path) and `read_entry` (override, looks up
+    /// the entry by path AND wraps with try_reserve_exact). Takes a
+    /// pre-resolved `&PakIndexEntry`, and its `payload_start` from
+    /// [`Self::check_read`], which has made the checks it lists. It and
+    /// the streamers it calls keep their own checks as safety nets behind
+    /// those.
+    fn stream_entry_to(
+        &self,
+        entry: &PakIndexEntry,
+        payload_start: u64,
+        writer: &mut dyn Write,
+    ) -> crate::Result<u64> {
         // No `uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES` re-check
         // here: issue #58's open-time iteration in `PakReader::open`
         // already enforces the cap for every index entry, and the index
@@ -1598,24 +1647,23 @@ impl PakReader {
         // post-#58. Open-time enforcement is pinned by the
         // `open_rejects_oversized_uncompressed_size` integration test.
         // Issue #92.
+        let path = entry.filename();
         let mut guard = self.locked();
         let mut file = BufReader::new(&mut *guard);
-        let in_data = self.open_entry_into(&mut file, entry)?;
-        // After open_entry_into, `file` is positioned just past the in-data
-        // FPakEntry record. Use the parsed in-data header's wire_size as
-        // the single source of truth for the payload start, so any future
-        // change to the wire format only needs updating in
-        // PakEntryHeader::read_from (which `wire_size` mirrors by
-        // construction).
-        let payload_start =
-            checked_payload_start(entry.header().offset(), in_data.wire_size(), path)?;
+        // Leaves `file` just past the in-data record, at `payload_start`.
+        let _ = self.open_entry_into(&mut file, entry)?;
 
         match entry.header().compression_method() {
             CompressionMethod::None => {
                 // Decrypt key (None for unencrypted entries; Some for encrypted).
-                // `is_encrypted && key.is_none()` was already rejected above.
+                // `check_read` refused an encrypted entry without a key.
                 let key = if entry.header().is_encrypted() {
-                    self.key.as_ref()
+                    let Some(key) = self.key.as_ref() else {
+                        return Err(PaksmithError::Decryption {
+                            path: Some(path.to_string()),
+                        });
+                    };
+                    Some(key)
                 } else {
                     None
                 };
@@ -1626,9 +1674,9 @@ impl PakReader {
                 // compressed payload as one contiguous AES-256-ECB region, so
                 // it must be decrypted BEFORE per-block inflation. Decrypt
                 // into memory and run the unchanged codec streamers over a
-                // rebased view of the plaintext-compressed bytes; the
-                // `is_encrypted && key.is_none()` case was already rejected
-                // above, so a missing key here is unreachable.
+                // rebased view of the plaintext-compressed bytes;
+                // `check_read` refused an encrypted entry without a key, so
+                // a read doesn't reach a missing key here.
                 if entry.header().is_encrypted() {
                     let Some(key) = self.key.as_ref() else {
                         return Err(PaksmithError::Decryption {
@@ -1658,16 +1706,15 @@ impl PakReader {
                     // `read_decrypted_compressed_payload`, so it cannot
                     // actually overflow — but use `checked_add` for a typed
                     // fault anyway, matching this file's defense-in-depth
-                    // arithmetic convention. The `buffer_end` vs
-                    // `self.file_size` ceiling choice is pinned by the
-                    // in-source test
+                    // arithmetic convention. `check_read` applies the same
+                    // ceiling first, so this is a safety net a read doesn't
+                    // reach. The in-source test
                     // `read_encrypted_compressed_block_end_between_buffer_and_file_uses_buffer_ceiling`
-                    // (in-source, not the integration crate, so cargo-mutants —
-                    // which runs only the mutated package's tests — actually
-                    // credits the kill): a forged single-block `end` between the
-                    // two values
-                    // must reject as `EndPastFileSize`, which the wider
-                    // `self.file_size` ceiling would let through.
+                    // pins both: a forged single-block `end` between the
+                    // two values must reject as `EndPastFileSize`, through
+                    // a read and through a direct call of this function,
+                    // which the wider `self.file_size` ceiling would let
+                    // through.
                     let buffer_end = payload_start
                         .checked_add(decrypted.len() as u64)
                         .ok_or_else(|| PaksmithError::InvalidIndex {
@@ -1697,11 +1744,11 @@ impl PakReader {
                     )
                 }
             }
-            // Already rejected at the top of `stream_entry_to`; this
+            // A read's `check_read` already refused these; this
             // arm exists to keep the match exhaustive (per CLAUDE.md
             // "no panics in core") without an opaque `_` catch-all.
-            // If we ever reach here, the early-reject path was bypassed
-            // by a refactor — surface the offending method via the
+            // If a read ever reaches here, a refactor bypassed that
+            // early-reject — surface the offending method via the
             // typed `StreamEntryToDispatchedUnsupportedCompression`
             // variant so operators see exactly which arm tripped.
             m @ (CompressionMethod::Gzip
@@ -1856,6 +1903,38 @@ fn ensure_compressed_size_within_cap(comp: u64, path: &str) -> crate::Result<()>
     Ok(())
 }
 
+/// The checks of an encrypted Zlib or LZ4 entry's payload its read makes
+/// before reading it, shared by `read_decrypted_compressed_payload` and
+/// `check_compressed_payload` so the two can't drift. Returns the
+/// payload's end, which bounds its blocks, and its AES-aligned length,
+/// the bytes the read decrypts.
+fn checked_encrypted_compressed_payload(
+    payload_start: u64,
+    comp: u64,
+    file_size: u64,
+    path: &str,
+) -> crate::Result<(u64, u64)> {
+    // Cap the per-entry allocation at `MAX_UNCOMPRESSED_ENTRY_BYTES`
+    // (8 GiB) BEFORE reading (see the helper's docs for why the inline
+    // index needs this and why it lives in a testable free function).
+    ensure_compressed_size_within_cap(comp, path)?;
+    // Reject a `compressed_size` claim past EOF before the alignment
+    // arithmetic: a fail-fast on the unaligned claim that keeps the
+    // allocation file-proportional. (Overflow-freedom of the `div_ceil`/
+    // `* 16` below does NOT rest on this check — the 8 GiB cap above
+    // already bounds `comp < 2^63`, and the `checked_mul` guards the
+    // multiply regardless; this is the stricter aligned check's weaker
+    // sibling, kept for the tighter unaligned error attribution.)
+    let end = checked_payload_end(payload_start, comp, file_size, path)?;
+    // Align-up + aligned-extent EOF check via the shared helper (also used
+    // by `verify_entry`'s encrypted arm — one home for this arithmetic so
+    // verify and read cannot drift; #689 review). `comp <= min(file_size,
+    // 8 GiB) < 2^63`, so the align-up cannot actually overflow; the
+    // helper's `checked_mul` guards it with a typed fault regardless.
+    let aligned = checked_aligned_payload_len(payload_start, comp, file_size, path)?;
+    Ok((end, aligned))
+}
+
 /// Read and decrypt an encrypted entry's compressed payload (#634).
 ///
 /// UE encrypts the compressed payload as ONE contiguous AES-256-ECB
@@ -1876,30 +1955,12 @@ fn read_decrypted_compressed_payload<R: Read + Seek>(
     let path = entry.filename();
     let comp = entry.header().compressed_size();
 
-    // Cap the per-entry allocation at `MAX_UNCOMPRESSED_ENTRY_BYTES`
-    // (8 GiB) BEFORE reading (see the helper's docs for why the inline
-    // index needs this and why it lives in a testable free function).
-    ensure_compressed_size_within_cap(comp, path)?;
-
-    // Reject a `compressed_size` claim past EOF before the alignment
-    // arithmetic: a fail-fast on the unaligned claim that keeps the
-    // allocation file-proportional. (Overflow-freedom of the `div_ceil`/
-    // `* 16` below does NOT rest on this check — the 8 GiB cap above
-    // already bounds `comp < 2^63`, and the `checked_mul` guards the
-    // multiply regardless; this is the stricter aligned check's weaker
-    // sibling, kept for the tighter unaligned error attribution.)
-    let _ = checked_payload_end(payload_start, comp, file_size, path)?;
-    // Align-up + aligned-extent EOF check via the shared helper (also used
-    // by `verify_entry`'s encrypted arm — one home for this arithmetic so
-    // verify and read cannot drift; #689 review). `comp <= min(file_size,
-    // 8 GiB) < 2^63`, so the align-up cannot actually overflow; the
-    // helper's `checked_mul` guards it with a typed fault regardless.
     // INVARIANT: the cap (`ensure_compressed_size_within_cap`) is on `comp`,
     // but the allocation below is on `aligned`; that stays `<= MAX` only
     // because `MAX_UNCOMPRESSED_ENTRY_BYTES` is itself 16-aligned (2^33), so
     // `comp <= MAX` implies `aligned <= MAX`. Keep that constant a multiple
     // of 16 if it ever changes.
-    let aligned = checked_aligned_payload_len(payload_start, comp, file_size, path)?;
+    let (_, aligned) = checked_encrypted_compressed_payload(payload_start, comp, file_size, path)?;
     let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
         fault: IndexParseFault::U64ExceedsPlatformUsize {
             field: WireField::CompressedSize,
@@ -2031,8 +2092,8 @@ impl ContainerReader for PakReader {
         fields(path = &*clamp_path(path))
     )]
     fn read_entry_to(&self, path: &str, writer: &mut dyn Write) -> crate::Result<u64> {
-        let entry = self.resolve_for_read(path)?;
-        self.stream_entry_to(entry, writer)
+        let (entry, payload_start) = self.resolve_for_read(path)?;
+        self.stream_entry_to(entry, payload_start, writer)
     }
 
     fn claims_integrity(&self) -> bool {
@@ -2051,7 +2112,7 @@ impl ContainerReader for PakReader {
         fields(path = &*clamp_path(path))
     )]
     fn read_entry(&self, path: &str) -> crate::Result<Vec<u8>> {
-        let entry = self.resolve_for_read(path)?;
+        let (entry, payload_start) = self.resolve_for_read(path)?;
 
         let uncompressed_size = entry.header().uncompressed_size();
         // No `uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES` re-check
@@ -2091,7 +2152,7 @@ impl ContainerReader for PakReader {
         })?;
         // Call the inner streamer directly with the entry we already
         // resolved, avoiding a second HashMap find through `read_entry_to`.
-        let _ = self.stream_entry_to(entry, &mut buf)?;
+        let _ = self.stream_entry_to(entry, payload_start, &mut buf)?;
         Ok(buf)
     }
 
@@ -2359,9 +2420,9 @@ fn stream_uncompressed_to<R: Read + Seek>(
     if let Some(key) = key {
         // Encrypted uncompressed entry: on-disk bytes are 16-aligned.
         // Align-up + aligned-extent EOF check via the shared helper (one
-        // home with `read_decrypted_compressed_payload` and
-        // `verify_entry`'s encrypted arm, so the three sites cannot
-        // drift; #689 review). `size <= MAX_UNCOMPRESSED_ENTRY_BYTES`
+        // home with its other callers, so they cannot drift; #689
+        // review). `check_read` makes the same check first, so this is a
+        // safety net a read doesn't reach. `size <= MAX_UNCOMPRESSED_ENTRY_BYTES`
         // (8 GiB) is enforced at open time, so the align-up cannot
         // actually overflow; the helper's `checked_mul` guards it with a
         // typed fault regardless.
@@ -2425,6 +2486,12 @@ fn stream_uncompressed_to<R: Read + Seek>(
     Ok(written)
 }
 
+/// Whether `extents`, a sum of payload extents' in-file parts, passes
+/// `file_size`, which entries that don't overlap never do.
+fn extents_pass_file_size(extents: u128, file_size: u64) -> bool {
+    extents > u128::from(file_size)
+}
+
 /// Refuse a pre-v5 archive's compressed entry, whose block offsets are
 /// file-relative: neither the read path nor `verify` follows them (#637,
 /// see the module doc).
@@ -2434,6 +2501,35 @@ fn require_relative_chunk_offsets(version: PakVersion) -> crate::Result<()> {
     }
     Err(PaksmithError::UnsupportedVersion {
         version: version.wire_version(),
+    })
+}
+
+/// Refuse an entry whose record starts at or past the end of the file,
+/// before a read or verify seeks to it.
+///
+/// Structurally unreachable from a successfully-opened reader: the
+/// open-time payload-end check (issues #58 + #85) rejects
+/// `offset + wire_size() + compressed > file_size`, and `wire_size()` is
+/// at least 50 bytes, so such an entry surfaces there as
+/// `OffsetPastFileSizeKind::PayloadEndBounds`. Kept as a typed safety net
+/// so a refactor that breaks that invariant surfaces as
+/// `EntryHeaderOffset`, not as a later bounds fault from
+/// [`PakReader::check_read`], where a read runs it, or, on verify's path
+/// through `open_entry_into`, as `Io::UnexpectedEof` from reading the
+/// in-data record. Issue #92.
+fn check_entry_offset(entry: &PakIndexEntry, file_size: u64) -> crate::Result<()> {
+    let offset = entry.header().offset();
+    if offset < file_size {
+        return Ok(());
+    }
+    Err(PaksmithError::InvalidIndex {
+        fault: IndexParseFault::OffsetPastFileSize {
+            path: entry.filename().to_string(),
+            kind: OffsetPastFileSizeKind::EntryHeaderOffset {
+                entry_offset: offset,
+                file_size_max: file_size,
+            },
+        },
     })
 }
 
@@ -2493,9 +2589,12 @@ fn checked_payload_end(start: u64, size: u64, file_size: u64, path: &str) -> cra
 /// `_len` suffix is load-bearing).
 ///
 /// One home for the align-then-check arithmetic so the callers cannot
-/// drift (#689 review): `read_decrypted_compressed_payload` and
-/// `stream_uncompressed_to`'s encrypted arm (each sizing its decrypt
-/// buffer), `checked_encrypted_verify_extents` (which picks the
+/// drift (#689 review): `checked_encrypted_compressed_payload` (for
+/// `read_decrypted_compressed_payload`, which sizes its decrypt buffer
+/// from it, and `check_compressed_payload`), `stream_uncompressed_to`'s
+/// encrypted arm (which sizes its decrypt buffer from it),
+/// `PakReader::check_read`'s encrypted stored arm,
+/// `checked_encrypted_verify_extents` (which picks the
 /// read-required size field per compression method — see its docs for
 /// why the field differs), and the encrypted v10+ index-region reads
 /// (`read_region_maybe_decrypt` / `decrypt_region_plaintext`, #635).
@@ -2567,9 +2666,10 @@ fn checked_encrypted_verify_extents(
 /// computed absolute `(abs_start, abs_end)` and updates
 /// `prev_abs_end` so the next call sees this block's end.
 ///
-/// Colocated with all three call sites (`stream_zlib_to` and
-/// `stream_lz4_to` for the extract paths, `verify_entry`'s shared
-/// `Zlib | Lz4` arm for the hash path)
+/// Colocated with its call sites (`check_compressed_payload` for a read's
+/// checks of the index record, `stream_zlib_to` and `stream_lz4_to` for
+/// the extract paths, `verify_entry`'s shared `Zlib | Lz4` arm for the
+/// hash path)
 /// so the three checks (`StartOverlapsHeader`, `EndPastFileSize`,
 /// `OutOfOrder`) live in one place. Without the shared helper a
 /// regression that hardens one path silently leaves the other
@@ -2645,6 +2745,55 @@ fn validate_block_bounds(
     }
     *prev_abs_end = Some(abs_end);
     Ok((abs_start, abs_end))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Blocks [`check_compressed_payload`] has checked on this thread.
+    static BLOCKS_CHECKED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`PakReader::check_read`]'s checks of a Zlib or LZ4 entry's payload, in
+/// the read's order: an encrypted payload's size and extent
+/// (`read_decrypted_compressed_payload`), a pre-v5 zlib entry
+/// (`stream_zlib_to`), every block, against the decrypted payload for an
+/// encrypted entry and the file otherwise (`stream_entry_to`), then an
+/// entry without blocks that claims bytes (`check_cumulative_size`).
+fn check_compressed_payload(
+    header: &PakEntryHeader,
+    payload_start: u64,
+    file_size: u64,
+    version: PakVersion,
+    path: &str,
+) -> crate::Result<()> {
+    let ceiling = if header.is_encrypted() {
+        let compressed = header.compressed_size();
+        checked_encrypted_compressed_payload(payload_start, compressed, file_size, path)?.0
+    } else {
+        file_size
+    };
+    if *header.compression_method() == CompressionMethod::Zlib {
+        require_relative_chunk_offsets(version)?;
+    }
+    let mut prev_abs_end = None;
+    for (i, block) in header.compression_blocks().iter().enumerate() {
+        #[cfg(test)]
+        BLOCKS_CHECKED.with(|checked| checked.update(|n| n + 1));
+        let _ = validate_block_bounds(
+            block,
+            i,
+            header.offset(),
+            payload_start,
+            ceiling,
+            &mut prev_abs_end,
+            path,
+        )?;
+    }
+    let uncompressed = header.uncompressed_size();
+    if header.compression_blocks().is_empty() && uncompressed != 0 {
+        return Err(size_mismatch(0, uncompressed, header.offset(), path));
+    }
+    Ok(())
 }
 
 /// Read one compressed block from `file` into `buf`.
@@ -2724,20 +2873,50 @@ fn check_cumulative_size(
     if bytes_written == uncompressed_size {
         return Ok(());
     }
-    warn!(
-        path = &*clamp_path(path),
-        actual = bytes_written,
+    warn_size_mismatch(path, bytes_written, uncompressed_size);
+    Err(size_mismatch(
+        bytes_written,
         uncompressed_size,
-        "cumulative decompressed size mismatch"
-    );
-    Err(PaksmithError::Decompression {
+        entry_offset,
+        path,
+    ))
+}
+
+/// [`DecompressionFault::SizeUnderrun`] for an entry at `entry_offset`
+/// that decompressed to `actual` bytes of its `expected`.
+fn size_mismatch(actual: u64, expected: u64, entry_offset: u64, path: &str) -> PaksmithError {
+    PaksmithError::Decompression {
         path: path.to_string(),
         offset: entry_offset,
-        fault: DecompressionFault::SizeUnderrun {
-            actual: bytes_written,
-            expected: uncompressed_size,
-        },
-    })
+        fault: DecompressionFault::SizeUnderrun { actual, expected },
+    }
+}
+
+/// Log the warning that goes with [`size_mismatch`].
+fn warn_size_mismatch(path: &str, actual: u64, uncompressed_size: u64) {
+    warn!(
+        path = &*clamp_path(path),
+        actual, uncompressed_size, "cumulative decompressed size mismatch"
+    );
+}
+
+/// Log the warning a read logs for a fault [`PakReader::check_read`]
+/// raised, which `check_read` doesn't log.
+fn warn_read_refusal(err: &PaksmithError, path: &str) {
+    let PaksmithError::Decompression { fault, .. } = err else {
+        return;
+    };
+    match fault {
+        DecompressionFault::UnsupportedMethod { method } => warn!(
+            path = &*clamp_path(path),
+            ?method,
+            "rejected unsupported compression method"
+        ),
+        DecompressionFault::SizeUnderrun { actual, expected } => {
+            warn_size_mismatch(path, *actual, *expected);
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -4007,9 +4186,10 @@ mod tests {
     }
 
     /// Issue #278 (deferred from #235): direct coverage of the
-    /// `OffsetPastFileSizeKind::EntryHeaderOffset` safety-net branch
-    /// at `mod.rs::open_entry_into` (the `entry.header().offset() >=
-    /// self.file_size` check).
+    /// `OffsetPastFileSizeKind::EntryHeaderOffset` safety-net branch in
+    /// `check_entry_offset`, both as a read reaches it from `check_read`
+    /// and as `open_entry_into` makes it again, through a direct call of
+    /// `stream_entry_to` past `check_read`.
     ///
     /// That branch is structurally unreachable from
     /// `PakReader::open` — the open-time `payload_end > file_size`
@@ -4020,9 +4200,9 @@ mod tests {
     /// surfaces as `PayloadEndBounds`, NOT `EntryHeaderOffset`.
     ///
     /// Shrinks `file_size` to the first entry's offset to trip the
-    /// `>=` check. Without the safety-net branch, the same
-    /// post-mutation read would surface as a bare `Io::UnexpectedEof`
-    /// from the seek, indistinguishable from a truncated file.
+    /// check at its boundary. Without the safety-net branch, the read
+    /// would surface as a later bounds fault from `check_read`, and the
+    /// direct call as one from the streamer, not as `EntryHeaderOffset`.
     #[test]
     fn entry_header_offset_branch_fires_when_file_size_shrunk_post_open() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4081,6 +4261,12 @@ mod tests {
                  NOT PayloadEndBounds); got: {other:?}"
             ),
         }
+        let entry = reader.index_entry(&path).unwrap();
+        let start = offset + entry.header().wire_size();
+        let direct = reader
+            .stream_entry_to(entry, start, &mut Vec::new())
+            .unwrap_err();
+        assert_eq!(format!("{direct:?}"), format!("{err:?}"));
     }
 
     /// Issue #45 contract pin: `feed_hasher` and `sha1_of_reader` take
@@ -4348,22 +4534,11 @@ mod tests {
         let reader = PakReader::open(&fixture).expect("open compressed fixture");
         let path = "Content/Compressed.uasset";
         let entry = reader.index_entry(path).expect("compressed entry present");
-        // Derive `payload_start` exactly as the production read path does — from
-        // the *in-data* FPakEntry header (`open_entry_into` + `checked_payload_start`),
-        // not the index header's `wire_size()`. Today `matches_payload` (inside
-        // `open_entry_into`) guarantees the two wire sizes are equal whenever the
-        // header parse succeeds, so this is behavior-identical; mirroring
-        // production keeps the boundary test faithful if a future change ever
-        // decouples the in-data `wire_size` derivation from the index header's
-        // (PR #691).
-        let payload_start = {
-            let mut hdr_file = std::fs::File::open(&fixture).expect("open fixture for header");
-            let in_data = reader
-                .open_entry_into(&mut hdr_file, entry)
-                .expect("read in-data FPakEntry header");
-            checked_payload_start(entry.header().offset(), in_data.wire_size(), path)
-                .expect("payload start within u64 bounds")
-        };
+        // Derive `payload_start` exactly as the production read path does
+        // (PR #691), through `check_read`.
+        let payload_start = reader
+            .check_read(entry)
+            .expect("v8b entry passes check_read");
         let file_size = std::fs::metadata(&fixture).expect("stat fixture").len();
 
         // Pre-v5 (v3, v4): absolute-offset blocks are unimplemented — reject
@@ -6165,8 +6340,8 @@ mod tests {
     /// `build_single_entry_pak_with_flags` / `build_v8b_lz4_pak` ON PURPOSE:
     /// in-source tests can't reach the integration crate, and cargo-mutants
     /// runs only the mutated package's tests, so a mutant on
-    /// the encrypted read path (e.g. the `buffer_end` block-bounds ceiling in
-    /// `stream_entry_to`) is killable only by a paksmith-core test. The footer
+    /// the encrypted read path (e.g. the block-bounds ceiling of the
+    /// decrypted payload) is killable only by a paksmith-core test. The footer
     /// carries one compression-name slot (`method_name`, resolved via the
     /// per-entry 1-based `method_index`; pass 0 for `None`-method entries,
     /// whose records omit the block table) and a PLAINTEXT index (footer
@@ -6253,12 +6428,12 @@ mod tests {
     /// `BlockBoundsViolation { EndPastFileSize }`.
     ///
     /// IN-SOURCE (not `paksmith-core-tests`) on purpose: cargo-mutants runs
-    /// only the mutated package's tests, so the `buffer_end -> self.file_size`
-    /// mutant on
-    /// `stream_entry_to` is killable only from paksmith-core. Verified to kill it — under the
-    /// wider `self.file_size` ceiling the forged block is accepted and the read
-    /// surfaces `Io(UnexpectedEof)` over the short `RebasedReader` instead of
-    /// the typed fault. A single-block entry suffices: the bounds check fires
+    /// only the mutated package's tests. `check_read` applies the same
+    /// ceiling first, which the budgeted reads pin: under the wider
+    /// `file_size` ceiling the forged block passes it, and a read past the
+    /// per-entry limit is refused as `EntryReads` instead. A direct call of
+    /// `stream_entry_to`, past `check_read`, pins its own ceiling. A
+    /// single-block entry suffices: the bounds check fires
     /// before any decrypt output is inflated, so no valid ciphertext is needed
     /// (16 arbitrary bytes decrypt to unused garbage).
     #[cfg(feature = "__test_utils")]
@@ -6292,13 +6467,29 @@ mod tests {
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BlockBoundsViolation {
-                        kind: BlockBoundsKind::EndPastFileSize { .. },
+                        kind: BlockBoundsKind::EndPastFileSize {
+                            block_end,
+                            file_size_max,
+                        },
                         ..
                     }
-                }
+                } if *block_end == forged_end && *file_size_max == buffer_end
             ),
-            "must be EndPastFileSize (proves the buffer_end ceiling, not file_size); got: {err:?}"
+            "must be EndPastFileSize against the decrypted payload's end, not \
+             file_size; got: {err:?}"
         );
+        let entry = reader.index_entry("Content/x.uasset").unwrap();
+        let direct = reader
+            .stream_entry_to(entry, payload_start, &mut Vec::new())
+            .unwrap_err();
+        assert_eq!(format!("{direct:?}"), format!("{err:?}"));
+        // A budgeted reader refuses it before counting the read, so a
+        // read past the per-entry limit still fails on the block.
+        let reader = reader.with_read_budget().unwrap();
+        for _ in 0..=max_reads_per_entry() {
+            let again = reader.read_entry("Content/x.uasset").unwrap_err();
+            assert_eq!(format!("{again:?}"), format!("{err:?}"));
+        }
     }
 
     /// Encrypt `compressed` (zero-padded to the AES footprint), wrap it in
@@ -7286,6 +7477,17 @@ mod tests {
             .sum()
     }
 
+    /// The sum of the parts inside a file of `file_size` bytes of the
+    /// extents `reader.entries()` reports, worked out apart from
+    /// `extent_in_file`, which the code under test uses.
+    fn in_file_total(reader: &PakReader, file_size: u64) -> u64 {
+        reader
+            .entries()
+            .map(|m| m.payload_extent().unwrap())
+            .map(|e| e.end.min(file_size).saturating_sub(e.start))
+            .sum()
+    }
+
     /// v5 flat pak whose `Content/a.bin` and `Content/b.bin` both name the
     /// hashed 256-byte stored record at offset 0. `b`'s index record claims
     /// 400 bytes, so its in-data copy disagrees with it.
@@ -7760,6 +7962,491 @@ mod tests {
         assert!(is_extent_refusal(&err, names[1]), "got: {err:?}");
     }
 
+    /// Flat pak of `version` whose `Content/bad.bin` is `bad`, a record at
+    /// offset 0 over 16 payload bytes, followed by `Content/good.bin`, a
+    /// stored record of 256 bytes of 7.
+    #[cfg(feature = "__test_utils")]
+    fn bad_then_good_pak(version: u32, bad: &[u8]) -> Vec<u8> {
+        bad_then_aliased_pak(version, bad, &["Content/good.bin"])
+    }
+
+    /// [`bad_then_good_pak`] with the good record named once per entry of
+    /// `good_names`.
+    #[cfg(feature = "__test_utils")]
+    fn bad_then_aliased_pak(version: u32, bad: &[u8], good_names: &[&str]) -> Vec<u8> {
+        use crate::testing::wire::write_pak_entry;
+
+        let mut pak = bad.to_vec();
+        pak.extend_from_slice(&[7; 16]);
+        let mut good = Vec::new();
+        write_pak_entry(
+            &mut good,
+            pak.len() as u64,
+            256,
+            256,
+            0,
+            &[0; 20],
+            &[],
+            0,
+            0,
+        );
+        pak.extend_from_slice(&good);
+        pak.extend_from_slice(&[7; 256]);
+        let mut entries = vec![("Content/bad.bin", bad.to_vec())];
+        entries.extend(good_names.iter().map(|name| (*name, good.clone())));
+        append_legacy_index(&mut pak, version, &entries);
+        pak
+    }
+
+    /// Whether a damaged record's read failed with the fault expected of it,
+    /// given the archive's size.
+    #[cfg(feature = "__test_utils")]
+    type IsFault = fn(&PaksmithError, u64) -> bool;
+
+    /// Whether `err` refuses a payload ending at `end` in a file of
+    /// `file_size` bytes.
+    #[cfg(feature = "__test_utils")]
+    fn payload_ends_at(err: &PaksmithError, end: u64, file_size: u64) -> bool {
+        matches!(
+            err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::OffsetPastFileSize {
+                    kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                        payload_end,
+                        file_size_max,
+                    },
+                    ..
+                },
+            } if *payload_end == end && *file_size_max == file_size
+        )
+    }
+
+    /// Records for `bad_then_good_pak`, each damaged so that a read's
+    /// checks of the index record refuse it, as `(version, keyed, record,
+    /// its fault)`.
+    #[cfg(feature = "__test_utils")]
+    fn damaged_records() -> [(u32, bool, Vec<u8>, IsFault); 8] {
+        use crate::testing::wire::write_pak_entry;
+
+        let record = |compressed, uncompressed, method, blocks: &[(u64, u64)], flags| {
+            let mut record = Vec::new();
+            write_pak_entry(
+                &mut record,
+                0,
+                compressed,
+                uncompressed,
+                method,
+                &[0; 20],
+                blocks,
+                0,
+                flags,
+            );
+            record
+        };
+        let past = [(73, 1 << 20)];
+        // A record's sizes don't change its length, so the archive's size.
+        let size_with = |bad: &[u8]| bad_then_good_pak(5, bad).len() as u64;
+        // Stored and one-block records whose payload ends at the file's
+        // end, and past it once aligned to 16 bytes.
+        let stored_to_end = size_with(&record(16, 0, 0, &[], 1)) - 53;
+        let zlib_to_end = size_with(&record(0, 16, 1, &[(73, 89)], 1)) - 73;
+        assert!(stored_to_end % 16 != 0 && zlib_to_end % 16 != 0);
+        let empty_to_end = size_with(&record(0, 16, 1, &[], 0)) - 57;
+        let block_past: IsFault = |err, file_size| {
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BlockBoundsViolation {
+                        block_index: 0,
+                        kind: BlockBoundsKind::EndPastFileSize {
+                            block_end: 0x10_0000,
+                            file_size_max,
+                        },
+                        ..
+                    },
+                } if *file_size_max == file_size
+            )
+        };
+        let payload_past: IsFault = |err, file_size| payload_ends_at(err, 0x10_0035, file_size);
+        let stored_aligned_past: IsFault =
+            |err, size| payload_ends_at(err, 53 + (size - 53).next_multiple_of(16), size);
+        let zlib_aligned_past: IsFault =
+            |err, size| payload_ends_at(err, 73 + (size - 73).next_multiple_of(16), size);
+        let keyless: IsFault = |err, _| matches!(err, PaksmithError::Decryption { path: Some(p) } if p == "Content/bad.bin");
+        let pre_v5: IsFault =
+            |err, _| matches!(err, PaksmithError::UnsupportedVersion { version: 4 });
+        let no_blocks: IsFault = |err, _| {
+            matches!(
+                err,
+                PaksmithError::Decompression {
+                    path,
+                    offset: 0,
+                    fault: DecompressionFault::SizeUnderrun {
+                        actual: 0,
+                        expected: 16,
+                    },
+                } if path == "Content/bad.bin"
+            )
+        };
+        let stored_aligned = record(16, stored_to_end, 0, &[], 1);
+        let zlib_aligned = record(zlib_to_end, 16, 1, &[(73, 89)], 1);
+        [
+            (5, false, record(16, 16, 1, &past, 0), block_past),
+            (5, false, record(16, 1 << 20, 0, &[], 0), payload_past),
+            (5, true, stored_aligned, stored_aligned_past),
+            (5, true, zlib_aligned, zlib_aligned_past),
+            (5, false, record(16, 16, 1, &past, 1), keyless),
+            (5, false, record(16, 16, 0, &[], 1), keyless),
+            (4, false, record(16, 16, 1, &past, 0), pre_v5),
+            (5, false, record(empty_to_end, 16, 1, &[], 0), no_blocks),
+        ]
+    }
+
+    /// A budgeted reader refuses an entry its read's checks of the index
+    /// record refuse before charging or counting it, with the fault an
+    /// unbudgeted reader gives. Each damaged entry either has an extent
+    /// reaching the file's end or past it, which would otherwise take the
+    /// whole budget and refuse its neighbour, or is refused before it's
+    /// read.
+    /// `stream_entry_to`, called past those checks, refuses each with the
+    /// same fault, which pins its own checks as safety nets.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_budget_refuses_a_damaged_entry_without_charging_or_counting_it() {
+        let open = |pak: &[u8], keyed: bool| {
+            let bytes = std::io::Cursor::new(pak.to_vec());
+            let reader = if keyed {
+                PakReader::from_reader_with_key(bytes, AesKey::new(FIXTURE_AES_KEY))
+            } else {
+                PakReader::from_reader(bytes)
+            };
+            reader.unwrap()
+        };
+        for (version, keyed, bad, is_fault) in damaged_records() {
+            let pak = bad_then_good_pak(version, &bad);
+            let file_size = pak.len() as u64;
+            let unbudgeted = open(&pak, keyed);
+            let want = unbudgeted.read_entry("Content/bad.bin").unwrap_err();
+            assert!(is_fault(&want, file_size), "v{version}: {want:?}");
+            let entry = unbudgeted.index_entry("Content/bad.bin").unwrap();
+            let start = entry.header().offset() + entry.header().wire_size();
+            let direct = unbudgeted
+                .stream_entry_to(entry, start, &mut Vec::new())
+                .unwrap_err();
+            assert_eq!(format!("{direct:?}"), format!("{want:?}"));
+            for read in READS {
+                let got = read(&unbudgeted, "Content/bad.bin").unwrap_err();
+                assert_eq!(format!("{got:?}"), format!("{want:?}"));
+                assert_eq!(read(&unbudgeted, "Content/good.bin").unwrap(), [7; 256]);
+                for bad_first in [true, false] {
+                    let reader = open(&pak, keyed).with_read_budget().unwrap();
+                    if !bad_first {
+                        assert_eq!(read(&reader, "Content/good.bin").unwrap(), [7; 256]);
+                    }
+                    for attempt in 0..=max_reads_per_entry() {
+                        let got = read(&reader, "Content/bad.bin").unwrap_err();
+                        assert_eq!(format!("{got:?}"), format!("{want:?}"), "attempt {attempt}");
+                    }
+                    if bad_first {
+                        assert_eq!(read(&reader, "Content/good.bin").unwrap(), [7; 256]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A read refused on a later block's bounds writes nothing to its
+    /// writer, for zlib and LZ4. `stream_entry_to`, called past
+    /// `check_read`, refuses the same block with the same fault after
+    /// writing the block before it, which pins each codec's own
+    /// per-block check as a safety net.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn a_read_refused_on_a_later_block_writes_nothing() {
+        use crate::testing::bench::zlib_stream;
+        use crate::testing::wire::{
+            LZ4_SYNTH_PATH, ZLIB_SYNTH_PATH, build_v8b_lz4_pak, build_v8b_zlib_pak,
+        };
+
+        let halves: Vec<&[u8]> = b"abcdefgh".chunks(4).collect();
+        let zlib: Vec<Vec<u8>> = halves.iter().map(|h| zlib_stream(h)).collect();
+        let lz4: Vec<Vec<u8>> = halves
+            .iter()
+            .map(|h| lz4_flex::block::compress(h))
+            .collect();
+        let codecs = [
+            (build_v8b_zlib_pak(&zlib, 8, 4), ZLIB_SYNTH_PATH),
+            (build_v8b_lz4_pak(&lz4, 8, 4), LZ4_SYNTH_PATH),
+        ];
+        for (pak, path) in codecs {
+            let mut reader = PakReader::from_bytes(pak).unwrap();
+            let entry = reader.index_entry(path).unwrap();
+            let end = entry.header().offset() + entry.header().compression_blocks()[1].end();
+            let start = reader.check_read(entry).unwrap();
+            reader.file_size = end - 1;
+            let mut out = Vec::new();
+            let err = reader.read_entry_to(path, &mut out).unwrap_err();
+            assert!(out.is_empty(), "{path}: {out:?}");
+            assert!(
+                matches!(
+                    &err,
+                    PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::BlockBoundsViolation {
+                            block_index: 1,
+                            kind: BlockBoundsKind::EndPastFileSize {
+                                block_end,
+                                file_size_max,
+                            },
+                            ..
+                        },
+                    } if *block_end == end && *file_size_max == end - 1
+                ),
+                "{path}: {err:?}"
+            );
+            let entry = reader.index_entry(path).unwrap();
+            let direct = reader.stream_entry_to(entry, start, &mut out).unwrap_err();
+            assert_eq!(out, b"abcd", "{path}");
+            assert_eq!(format!("{direct:?}"), format!("{err:?}"));
+        }
+    }
+
+    /// A read logs the warnings it logged before `check_read` raised their
+    /// faults, for an unsupported method and for a compressed entry with no
+    /// blocks and a nonzero uncompressed size.
+    /// `stream_entry_to`, called past `check_read`, refuses the method at
+    /// its dispatch.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn reads_log_the_warnings_of_faults_check_read_raises() {
+        use crate::testing::wire::write_pak_entry;
+        use crate::untrusted::test_support::{lines_carrying, lines_counted};
+
+        let record = |method, blocks: &[(u64, u64)]| {
+            let mut record = Vec::new();
+            write_pak_entry(&mut record, 0, 16, 16, method, &[0; 20], blocks, 0, 0);
+            record
+        };
+        const UNSUPPORTED: &str = "rejected unsupported compression method";
+        const MISMATCH: &str = "cumulative decompressed size mismatch";
+        let oodle = PakReader::from_bytes(bad_then_good_pak(5, &record(4, &[(73, 89)]))).unwrap();
+        let err = oodle.read_entry("Content/bad.bin").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::Decompression {
+                    fault: DecompressionFault::UnsupportedMethod {
+                        method: CompressionMethod::Oodle,
+                    },
+                    ..
+                }
+            ),
+            "got: {err:?}"
+        );
+        let entry = oodle.index_entry("Content/bad.bin").unwrap();
+        let start = entry.header().offset() + entry.header().wire_size();
+        let direct = oodle
+            .stream_entry_to(entry, start, &mut Vec::new())
+            .unwrap_err();
+        assert!(
+            matches!(
+                direct,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression {
+                        method: CompressionMethod::Oodle,
+                    },
+                }
+            ),
+            "got: {direct:?}"
+        );
+        logs_assert(lines_counted(UNSUPPORTED, 1));
+        logs_assert(lines_carrying(UNSUPPORTED, "WARN"));
+        logs_assert(lines_counted(MISMATCH, 0));
+        let empty = PakReader::from_bytes(bad_then_good_pak(5, &record(1, &[]))).unwrap();
+        let _ = empty.read_entry("Content/bad.bin").unwrap_err();
+        logs_assert(lines_counted(MISMATCH, 1));
+        logs_assert(lines_carrying(MISMATCH, "WARN"));
+    }
+
+    /// A budgeted reader refuses an unsupported method before charging or
+    /// counting the read. The Oodle record's block reaches past the file,
+    /// so a charge would take the whole budget and refuse its neighbour,
+    /// and a count would refuse the read past the per-entry limit as
+    /// `EntryReads`.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn read_budget_refuses_an_unsupported_method_without_charging_or_counting_it() {
+        use crate::testing::wire::write_pak_entry;
+
+        let mut oodle = Vec::new();
+        write_pak_entry(&mut oodle, 0, 16, 16, 4, &[0; 20], &[(73, 1 << 20)], 0, 0);
+        let pak = bad_then_good_pak(5, &oodle);
+        for read in READS {
+            let reader = budgeted(&pak);
+            for attempt in 0..=max_reads_per_entry() {
+                let err = read(&reader, "Content/bad.bin").unwrap_err();
+                assert!(
+                    matches!(
+                        err,
+                        PaksmithError::Decompression {
+                            fault: DecompressionFault::UnsupportedMethod {
+                                method: CompressionMethod::Oodle,
+                            },
+                            ..
+                        }
+                    ),
+                    "attempt {attempt}: {err:?}"
+                );
+            }
+            assert_eq!(read(&reader, "Content/good.bin").unwrap(), [7; 256]);
+        }
+    }
+
+    /// The checks of an encrypted compressed payload run in the read's
+    /// order: the unaligned end before the aligned one, whose fault names
+    /// the aligned end. A payload whose aligned end fits passes both.
+    #[test]
+    fn checked_encrypted_compressed_payload_checks_the_unaligned_end_first() {
+        let end_of = |err| match err {
+            PaksmithError::InvalidIndex {
+                fault:
+                    IndexParseFault::OffsetPastFileSize {
+                        kind: OffsetPastFileSizeKind::PayloadEndBounds { payload_end, .. },
+                        ..
+                    },
+            } => payload_end,
+            other => panic!("got: {other:?}"),
+        };
+        let check = |file_size| checked_encrypted_compressed_payload(0, 17, file_size, "a");
+        assert_eq!(end_of(check(16).unwrap_err()), 17);
+        assert_eq!(end_of(check(17).unwrap_err()), 32);
+        assert_eq!(check(32).unwrap(), (17, 32));
+    }
+
+    /// What `with_read_budget` logs when the extents it sums pass the file.
+    #[cfg(feature = "__test_utils")]
+    const EXTENT_SUM_WARNING: &str = "payload extents of the entries a read can admit sum past";
+
+    /// `with_read_budget` warns once, at WARN and naming no path, with the
+    /// sum, the file's size and the entries summed, when three index
+    /// entries naming one stored record take the sum of their extents past
+    /// the archive's size. An entry a read's checks refuse is neither
+    /// summed nor counted, and a reader without a budget doesn't warn.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn read_budget_warns_once_when_extents_pass_the_file() {
+        use crate::testing::wire::write_pak_entry;
+        use crate::untrusted::test_support::{lines_carrying, lines_counted};
+
+        let mut bad = Vec::new();
+        write_pak_entry(&mut bad, 0, 16, 16, 1, &[0; 20], &[(73, 1 << 20)], 0, 0);
+        let names = ["Content/a.bin", "Content/b.bin", "Content/c.bin"];
+        let pak = bad_then_aliased_pak(5, &bad, &names);
+        let file_size = pak.len() as u64;
+        let extents = 3 * (53 + 256);
+        assert!(extents > file_size, "{extents} vs {file_size}");
+        let _unbudgeted = PakReader::from_bytes(pak.clone()).unwrap();
+        let _reader = budgeted(&pak);
+        logs_assert(lines_counted(EXTENT_SUM_WARNING, 1));
+        logs_assert(lines_carrying(EXTENT_SUM_WARNING, "WARN"));
+        assert!(logs_contain(&format!(
+            "extents={extents} file_size={file_size} entries=3"
+        )));
+        logs_assert(|lines| {
+            match lines
+                .iter()
+                .find(|l| l.contains(EXTENT_SUM_WARNING) && l.contains("Content/"))
+            {
+                Some(line) => Err(format!("the warning names a path: {line}")),
+                None => Ok(()),
+            }
+        });
+    }
+
+    /// No warning for an archive whose entries don't overlap, or for one
+    /// whose only overlap is with an entry a read refuses from the index.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn read_budget_warns_only_of_extents_a_read_can_admit() {
+        use crate::testing::wire::write_pak_entry;
+        use crate::untrusted::test_support::lines_counted;
+
+        let ordinary = aliased_v5_pak(&["Content/a.bin"], &[7; 256], &[], false);
+        let _reader = budgeted(&ordinary);
+        let mut bad = Vec::new();
+        write_pak_entry(&mut bad, 0, 16, 16, 1, &[0; 20], &[(73, 1 << 20)], 0, 0);
+        let damaged = bad_then_good_pak(5, &bad);
+        let file_size = damaged.len() as u64;
+        let in_file = in_file_total(&PakReader::from_bytes(damaged.clone()).unwrap(), file_size);
+        assert!(in_file > file_size, "{in_file} vs {file_size}");
+        let _reader = budgeted(&damaged);
+        logs_assert(lines_counted(EXTENT_SUM_WARNING, 0));
+    }
+
+    /// v11 pak whose FDI names one non-encoded zlib record of `blocks`
+    /// empty blocks, at offset 0, from each of `paths` root paths, so the
+    /// paths share its header.
+    #[cfg(feature = "__test_utils")]
+    fn shared_record_v11_pak(blocks: u64, paths: u32) -> Vec<u8> {
+        use crate::testing::v10::{V10Fixture, build_v10_buffer};
+        use crate::testing::wire::{pak_entry_wire_size, write_pak_entry};
+
+        let start = pak_entry_wire_size(blocks);
+        let table: Vec<(u64, u64)> = (0..blocks).map(|_| (start, start)).collect();
+        let mut record = Vec::new();
+        write_pak_entry(&mut record, 0, 0, 0, 1, &[0; 20], &table, 0, 0);
+        let files = (0..paths).map(|i| (format!("p{i}"), -1)).collect();
+        let (mut pak, main_size) = build_v10_buffer(V10Fixture {
+            file_count: paths,
+            non_encoded_records: record,
+            non_encoded_count: 1,
+            fdi: vec![("/".into(), files)],
+            has_path_hash_index: false,
+            ..V10Fixture::default()
+        });
+        pak.extend_from_slice(&[0; 16]); // encryption key GUID
+        pak.push(0); // index not encrypted
+        pak.extend_from_slice(&version::PAK_MAGIC.to_le_bytes());
+        pak.extend_from_slice(&PakVersion::Fnv64BugFix.wire_version().to_le_bytes());
+        pak.extend_from_slice(&0u64.to_le_bytes()); // index offset
+        pak.extend_from_slice(&main_size.to_le_bytes());
+        pak.extend_from_slice(&[0; 20]); // index hash
+        let mut slots = [0; 5 * 32];
+        slots[..4].copy_from_slice(b"Zlib");
+        pak.extend_from_slice(&slots);
+        pak
+    }
+
+    /// `with_read_budget` checks a record several FDI paths share once,
+    /// not once per path, and still sums and counts each path's extent.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn read_budget_checks_a_shared_record_once() {
+        let pak = shared_record_v11_pak(64, 32);
+        let file_size = pak.len() as u64;
+        let reader = PakReader::from_bytes(pak).unwrap();
+        assert_eq!(reader.entries().count(), 32);
+        let extents = in_file_total(&reader, file_size);
+        assert!(extents > file_size, "{extents} vs {file_size}");
+        BLOCKS_CHECKED.with(|checked| checked.set(0));
+        let _reader = reader.with_read_budget().unwrap();
+        assert_eq!(BLOCKS_CHECKED.with(std::cell::Cell::get), 64);
+        assert!(logs_contain(&format!(
+            "extents={extents} file_size={file_size} entries=32"
+        )));
+    }
+
+    /// The sum of extents warns only once it passes the file's size.
+    #[test]
+    fn extents_pass_file_size_only_above_it() {
+        assert!(!extents_pass_file_size(100, 100));
+        assert!(extents_pass_file_size(101, 100));
+        assert!(!extents_pass_file_size(99, 100));
+    }
+
     /// Every `real_*.pak` fixture fits the read budget: the parts of its
     /// entries' extents inside the file sum to at most its size, and a
     /// budgeted reader reads each entry by both reads exactly as an
@@ -7786,11 +8473,7 @@ mod tests {
             let file_size = std::fs::metadata(&path).unwrap().len();
             let baseline = PakReader::open_with_key(&path, key.clone())
                 .unwrap_or_else(|e| panic!("{name}: {e:?}"));
-            let in_file: u64 = baseline
-                .entries()
-                .map(|m| m.payload_extent().unwrap())
-                .map(|e| e.end.min(file_size).saturating_sub(e.start))
-                .sum();
+            let in_file = in_file_total(&baseline, file_size);
             assert!(in_file <= file_size, "{name}: {in_file} > {file_size}");
             let reader = open_with(&path, Some(&key), &options).unwrap();
             for meta in baseline.entries() {
