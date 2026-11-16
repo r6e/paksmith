@@ -469,7 +469,13 @@ does not surface as the fault its bullet names.
   of bounds, and a compressed entry with no blocks and a nonzero
   uncompressed size. An entry it refuses fails with its own fault and
   isn't charged or counted, instead of being charged its extent, which
-  could refuse the reads after it. `verify()` keeps its own ledger.
+  could refuse the reads after it. Opting in sums the in-file parts of
+  the extents of the entries those checks pass, checking once each v10+
+  non-encoded record whose header several FDI paths share, and logs one
+  warning, with that sum, the file's size and the number of entries
+  summed but no path, when the sum passes the file's size: reading each
+  of them once would then have at least one read refused. `verify()`
+  keeps its own ledger.
 - **In-data header copies**
   (`crates/paksmith-core/src/container/pak/mod.rs`).
   A read or verify parses an entry's in-data header copy only to its

@@ -98,7 +98,7 @@ use tracing::{debug, error, warn};
 use zeroize::Zeroizing;
 
 use crate::container::{
-    ContainerFormat, ContainerReader, EntryFlags, EntryMetadata, PayloadLedger,
+    ContainerFormat, ContainerReader, EntryFlags, EntryMetadata, PayloadLedger, extent_in_file,
 };
 use crate::digest::Sha1Digest;
 use crate::error::{
@@ -671,6 +671,12 @@ impl PakReader {
     /// this reader ([`crate::asset::Package::read_from_reader`]) ends when
     /// the budget refuses one of its reads, a companion's included.
     ///
+    /// Giving the budget walks the index, checking once each v10+
+    /// non-encoded record whose header several FDI paths share, and logs
+    /// one warning, naming no path, when the in-file parts of the extents
+    /// of the entries a read can admit sum past the archive's size, so
+    /// reading each of them once would have at least one read refused.
+    ///
     /// # Errors
     ///
     /// [`PaksmithError::InvalidIndex`] with
@@ -691,7 +697,31 @@ impl PakReader {
             ledger: PayloadLedger::new(self.file_size),
             reads,
         }));
+        self.warn_if_extents_pass_file_size();
         Ok(self)
+    }
+
+    /// Log the warning [`Self::with_read_budget`] describes.
+    fn warn_if_extents_pass_file_size(&self) {
+        let version = self.version();
+        let mut extents: u128 = 0;
+        let mut entries: u64 = 0;
+        for entry in self.index.entries() {
+            if !entry.record_verdict(|| self.check_read(entry).is_ok()) {
+                continue;
+            }
+            let extent = entry.payload_extent(version);
+            extents += u128::from(extent_in_file(&extent, self.file_size));
+            entries += 1;
+        }
+        if extents_pass_file_size(extents, self.file_size) {
+            warn!(
+                extents,
+                file_size = self.file_size,
+                entries,
+                "payload extents of the entries a read can admit sum past the archive's size"
+            );
+        }
     }
 
     /// Whether [`Self::with_read_budget`] gave this reader a budget.
@@ -2456,6 +2486,12 @@ fn stream_uncompressed_to<R: Read + Seek>(
     Ok(written)
 }
 
+/// Whether `extents`, a sum of payload extents' in-file parts, passes
+/// `file_size`, which entries that don't overlap never do.
+fn extents_pass_file_size(extents: u128, file_size: u64) -> bool {
+    extents > u128::from(file_size)
+}
+
 /// Refuse a pre-v5 archive's compressed entry, whose block offsets are
 /// file-relative: neither the read path nor `verify` follows them (#637,
 /// see the module doc).
@@ -2711,6 +2747,12 @@ fn validate_block_bounds(
     Ok((abs_start, abs_end))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Blocks [`check_compressed_payload`] has checked on this thread.
+    static BLOCKS_CHECKED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// [`PakReader::check_read`]'s checks of a Zlib or LZ4 entry's payload, in
 /// the read's order: an encrypted payload's size and extent
 /// (`read_decrypted_compressed_payload`), a pre-v5 zlib entry
@@ -2735,6 +2777,8 @@ fn check_compressed_payload(
     }
     let mut prev_abs_end = None;
     for (i, block) in header.compression_blocks().iter().enumerate() {
+        #[cfg(test)]
+        BLOCKS_CHECKED.with(|checked| checked.update(|n| n + 1));
         let _ = validate_block_bounds(
             block,
             i,
@@ -7433,6 +7477,17 @@ mod tests {
             .sum()
     }
 
+    /// The sum of the parts inside a file of `file_size` bytes of the
+    /// extents `reader.entries()` reports, worked out apart from
+    /// `extent_in_file`, which the code under test uses.
+    fn in_file_total(reader: &PakReader, file_size: u64) -> u64 {
+        reader
+            .entries()
+            .map(|m| m.payload_extent().unwrap())
+            .map(|e| e.end.min(file_size).saturating_sub(e.start))
+            .sum()
+    }
+
     /// v5 flat pak whose `Content/a.bin` and `Content/b.bin` both name the
     /// hashed 256-byte stored record at offset 0. `b`'s index record claims
     /// 400 bytes, so its in-data copy disagrees with it.
@@ -7912,6 +7967,13 @@ mod tests {
     /// stored record of 256 bytes of 7.
     #[cfg(feature = "__test_utils")]
     fn bad_then_good_pak(version: u32, bad: &[u8]) -> Vec<u8> {
+        bad_then_aliased_pak(version, bad, &["Content/good.bin"])
+    }
+
+    /// [`bad_then_good_pak`] with the good record named once per entry of
+    /// `good_names`.
+    #[cfg(feature = "__test_utils")]
+    fn bad_then_aliased_pak(version: u32, bad: &[u8], good_names: &[&str]) -> Vec<u8> {
         use crate::testing::wire::write_pak_entry;
 
         let mut pak = bad.to_vec();
@@ -7930,10 +7992,8 @@ mod tests {
         );
         pak.extend_from_slice(&good);
         pak.extend_from_slice(&[7; 256]);
-        let entries = [
-            ("Content/bad.bin", bad.to_vec()),
-            ("Content/good.bin", good),
-        ];
+        let mut entries = vec![("Content/bad.bin", bad.to_vec())];
+        entries.extend(good_names.iter().map(|name| (*name, good.clone())));
         append_legacy_index(&mut pak, version, &entries);
         pak
     }
@@ -8263,6 +8323,130 @@ mod tests {
         assert_eq!(check(32).unwrap(), (17, 32));
     }
 
+    /// What `with_read_budget` logs when the extents it sums pass the file.
+    #[cfg(feature = "__test_utils")]
+    const EXTENT_SUM_WARNING: &str = "payload extents of the entries a read can admit sum past";
+
+    /// `with_read_budget` warns once, at WARN and naming no path, with the
+    /// sum, the file's size and the entries summed, when three index
+    /// entries naming one stored record take the sum of their extents past
+    /// the archive's size. An entry a read's checks refuse is neither
+    /// summed nor counted, and a reader without a budget doesn't warn.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn read_budget_warns_once_when_extents_pass_the_file() {
+        use crate::testing::wire::write_pak_entry;
+        use crate::untrusted::test_support::{lines_carrying, lines_counted};
+
+        let mut bad = Vec::new();
+        write_pak_entry(&mut bad, 0, 16, 16, 1, &[0; 20], &[(73, 1 << 20)], 0, 0);
+        let names = ["Content/a.bin", "Content/b.bin", "Content/c.bin"];
+        let pak = bad_then_aliased_pak(5, &bad, &names);
+        let file_size = pak.len() as u64;
+        let extents = 3 * (53 + 256);
+        assert!(extents > file_size, "{extents} vs {file_size}");
+        let _unbudgeted = PakReader::from_bytes(pak.clone()).unwrap();
+        let _reader = budgeted(&pak);
+        logs_assert(lines_counted(EXTENT_SUM_WARNING, 1));
+        logs_assert(lines_carrying(EXTENT_SUM_WARNING, "WARN"));
+        assert!(logs_contain(&format!(
+            "extents={extents} file_size={file_size} entries=3"
+        )));
+        logs_assert(|lines| {
+            match lines
+                .iter()
+                .find(|l| l.contains(EXTENT_SUM_WARNING) && l.contains("Content/"))
+            {
+                Some(line) => Err(format!("the warning names a path: {line}")),
+                None => Ok(()),
+            }
+        });
+    }
+
+    /// No warning for an archive whose entries don't overlap, or for one
+    /// whose only overlap is with an entry a read refuses from the index.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn read_budget_warns_only_of_extents_a_read_can_admit() {
+        use crate::testing::wire::write_pak_entry;
+        use crate::untrusted::test_support::lines_counted;
+
+        let ordinary = aliased_v5_pak(&["Content/a.bin"], &[7; 256], &[], false);
+        let _reader = budgeted(&ordinary);
+        let mut bad = Vec::new();
+        write_pak_entry(&mut bad, 0, 16, 16, 1, &[0; 20], &[(73, 1 << 20)], 0, 0);
+        let damaged = bad_then_good_pak(5, &bad);
+        let file_size = damaged.len() as u64;
+        let in_file = in_file_total(&PakReader::from_bytes(damaged.clone()).unwrap(), file_size);
+        assert!(in_file > file_size, "{in_file} vs {file_size}");
+        let _reader = budgeted(&damaged);
+        logs_assert(lines_counted(EXTENT_SUM_WARNING, 0));
+    }
+
+    /// v11 pak whose FDI names one non-encoded zlib record of `blocks`
+    /// empty blocks, at offset 0, from each of `paths` root paths, so the
+    /// paths share its header.
+    #[cfg(feature = "__test_utils")]
+    fn shared_record_v11_pak(blocks: u64, paths: u32) -> Vec<u8> {
+        use crate::testing::v10::{V10Fixture, build_v10_buffer};
+        use crate::testing::wire::{pak_entry_wire_size, write_pak_entry};
+
+        let start = pak_entry_wire_size(blocks);
+        let table: Vec<(u64, u64)> = (0..blocks).map(|_| (start, start)).collect();
+        let mut record = Vec::new();
+        write_pak_entry(&mut record, 0, 0, 0, 1, &[0; 20], &table, 0, 0);
+        let files = (0..paths).map(|i| (format!("p{i}"), -1)).collect();
+        let (mut pak, main_size) = build_v10_buffer(V10Fixture {
+            file_count: paths,
+            non_encoded_records: record,
+            non_encoded_count: 1,
+            fdi: vec![("/".into(), files)],
+            has_path_hash_index: false,
+            ..V10Fixture::default()
+        });
+        pak.extend_from_slice(&[0; 16]); // encryption key GUID
+        pak.push(0); // index not encrypted
+        pak.extend_from_slice(&version::PAK_MAGIC.to_le_bytes());
+        pak.extend_from_slice(&PakVersion::Fnv64BugFix.wire_version().to_le_bytes());
+        pak.extend_from_slice(&0u64.to_le_bytes()); // index offset
+        pak.extend_from_slice(&main_size.to_le_bytes());
+        pak.extend_from_slice(&[0; 20]); // index hash
+        let mut slots = [0; 5 * 32];
+        slots[..4].copy_from_slice(b"Zlib");
+        pak.extend_from_slice(&slots);
+        pak
+    }
+
+    /// `with_read_budget` checks a record several FDI paths share once,
+    /// not once per path, and still sums and counts each path's extent.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    #[tracing_test::traced_test]
+    fn read_budget_checks_a_shared_record_once() {
+        let pak = shared_record_v11_pak(64, 32);
+        let file_size = pak.len() as u64;
+        let reader = PakReader::from_bytes(pak).unwrap();
+        assert_eq!(reader.entries().count(), 32);
+        let extents = in_file_total(&reader, file_size);
+        assert!(extents > file_size, "{extents} vs {file_size}");
+        BLOCKS_CHECKED.with(|checked| checked.set(0));
+        let _reader = reader.with_read_budget().unwrap();
+        assert_eq!(BLOCKS_CHECKED.with(std::cell::Cell::get), 64);
+        assert!(logs_contain(&format!(
+            "extents={extents} file_size={file_size} entries=32"
+        )));
+    }
+
+    /// The sum of extents warns only once it passes the file's size.
+    #[test]
+    fn extents_pass_file_size_only_above_it() {
+        assert!(!extents_pass_file_size(100, 100));
+        assert!(extents_pass_file_size(101, 100));
+        assert!(!extents_pass_file_size(99, 100));
+    }
+
     /// Every `real_*.pak` fixture fits the read budget: the parts of its
     /// entries' extents inside the file sum to at most its size, and a
     /// budgeted reader reads each entry by both reads exactly as an
@@ -8289,11 +8473,7 @@ mod tests {
             let file_size = std::fs::metadata(&path).unwrap().len();
             let baseline = PakReader::open_with_key(&path, key.clone())
                 .unwrap_or_else(|e| panic!("{name}: {e:?}"));
-            let in_file: u64 = baseline
-                .entries()
-                .map(|m| m.payload_extent().unwrap())
-                .map(|e| e.end.min(file_size).saturating_sub(e.start))
-                .sum();
+            let in_file = in_file_total(&baseline, file_size);
             assert!(in_file <= file_size, "{name}: {in_file} > {file_size}");
             let reader = open_with(&path, Some(&key), &options).unwrap();
             for meta in baseline.entries() {

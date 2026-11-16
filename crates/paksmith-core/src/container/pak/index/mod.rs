@@ -53,7 +53,7 @@ pub(crate) use entry_header::EntryCommon;
 
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tracing::warn;
 
@@ -174,6 +174,22 @@ impl PakIndexEntry {
             HeaderSlot::Shared(shared) => shared.payload_extent.clone(),
         }
     }
+
+    /// `check`'s verdict on this entry's record. A header the FDI paths
+    /// naming one v10+ non-encoded record share keeps the verdict of its
+    /// first call, whatever check a later call passes, so a walk over
+    /// every path checks that record once (#848); any other header runs
+    /// `check` on each call. Every call must therefore pass the same
+    /// check, which must depend only on the record and on what is fixed
+    /// for the reader that owns the index, as its key, version and file
+    /// size are. A clone of the entry or of the index shares these
+    /// verdicts, so it must stay with a reader for which they hold.
+    pub(in crate::container::pak) fn record_verdict(&self, check: impl FnOnce() -> bool) -> bool {
+        match &self.header {
+            HeaderSlot::Owned(_) => check(),
+            HeaderSlot::Shared(shared) => *shared.record_verdict.get_or_init(check),
+        }
+    }
 }
 
 /// Where a [`PakIndexEntry`] keeps its header. The FDI paths that name
@@ -185,10 +201,12 @@ enum HeaderSlot {
     Shared(Arc<SharedHeader>),
 }
 
-/// A header several FDI paths share, with its payload extent.
+/// A header several FDI paths share, with its payload extent and the
+/// verdict [`PakIndexEntry::record_verdict`] keeps.
 struct SharedHeader {
     header: PakEntryHeader,
     payload_extent: std::ops::Range<u64>,
+    record_verdict: OnceLock<bool>,
 }
 
 impl HeaderSlot {
@@ -633,6 +651,7 @@ impl PakIndexEntry {
             HeaderSlot::Owned(header) => Arc::new(SharedHeader {
                 payload_extent: header.payload_extent(PakVersion::PathHashIndex),
                 header,
+                record_verdict: OnceLock::new(),
             }),
             HeaderSlot::Shared(shared) => shared,
         };
