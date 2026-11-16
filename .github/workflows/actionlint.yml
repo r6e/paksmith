@@ -1,9 +1,12 @@
 name: actionlint
 
-# Lints the workflow files, including their `run` scripts through
-# shellcheck, runs shellcheck over the composite actions' bash steps,
-# which actionlint does not read, and checks that the release and
-# nightly workflows name the same build targets.
+# Three checks over the CI configuration:
+# - actionlint on the workflow files, with shellcheck on their `run`
+#   scripts
+# - scripts/lint-composite-actions.sh on the composite actions, which
+#   actionlint does not read
+# - scripts/check-release-targets.sh, that the release and nightly
+#   workflows name the same build targets
 #
 # No `paths` filter: a workflow the filter skips never reports its
 # check, so a filtered workflow could not be made a required check.

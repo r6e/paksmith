@@ -1,30 +1,40 @@
 #!/usr/bin/env bash
 #
-# Runs shellcheck over the bash `run` scripts of the composite actions in
-# .github/actions, which actionlint does not read, and fails on a `run`
-# script that holds a `${{ }}` expression: a composite action passes values
-# to its scripts through `env`.
+# Lints the `run` scripts of the composite actions under .github/actions,
+# which actionlint does not read:
+# - every script fails on a `${{ }}` expression, which GitHub pastes into the
+#   script text before the shell runs it; pass the value through `env`
+# - every bash script goes through shellcheck
 #
-# Not checked: `pwsh` steps.
+# A `pwsh` script gets the expression rule but no linter. Any other shell
+# fails the check. Nothing outside `run` is read (`with`, `env`, `if`).
 #
 # Usage, from the repository root (needs mikefarah's yq v4, and shellcheck):
 #   scripts/lint-composite-actions.sh [ACTION_YML...]
+# Paths replace the search, for trying the check against an edited copy.
 set -euo pipefail
 
+fail() {
+  echo "::error::$1" >&2
+  exit 1
+}
+
 for tool in yq shellcheck; do
-  command -v "${tool}" > /dev/null || {
-    echo "::error::this check needs ${tool}" >&2
-    exit 1
-  }
+  command -v "${tool}" > /dev/null || fail "this check needs ${tool}"
 done
 
 if (($# > 0)); then
   actions=("$@")
 else
-  actions=(.github/actions/*/action.yml)
+  actions=()
+  while IFS= read -r action; do
+    actions+=("${action}")
+  done < <(find .github/actions \( -name action.yml -o -name action.yaml \) | LC_ALL=C sort)
 fi
+((${#actions[@]} > 0)) || fail "no action file was found under .github/actions"
 
 failed=0
+# Records a failure and carries on, so one run lists every bad step.
 report() {
   echo "::error file=$1::$2" >&2
   failed=1
@@ -32,36 +42,36 @@ report() {
 
 checked=0
 for action in "${actions[@]}"; do
-  [[ "$(yq '.runs.using' "${action}")" == composite ]] || {
-    report "${action}" "not a composite action, or could not be read"
+  # `explode` resolves anchors and merge keys, so no step hides behind one.
+  steps="$(yq 'explode(.) | select(.runs.using == "composite") | .runs.steps | select(kind == "seq") | length' "${action}" || true)"
+  [[ "${steps}" =~ ^[0-9]+$ ]] || {
+    report "${action}" "not a composite action with a list of steps, or could not be read"
     continue
   }
-  steps="$(yq '.runs.steps | length' "${action}")"
   for ((i = 0; i < steps; i++)); do
-    [[ "$(yq ".runs.steps[${i}] | has(\"run\")" "${action}")" == true ]] || continue
-    name="$(yq ".runs.steps[${i}].name // \"step ${i}\"" "${action}")"
-    shell="$(yq ".runs.steps[${i}].shell" "${action}")"
-    script="$(yq ".runs.steps[${i}].run" "${action}")"
+    step="explode(.) | .runs.steps[${i}]"
+    [[ "$(yq "${step} | has(\"run\")" "${action}")" == true ]] || continue
+    name="$(yq "${step} | .name // \"step ${i}\"" "${action}")"
+    shell="$(yq "${step} | .shell // \"\"" "${action}")"
+    script="$(yq "${step} | .run" "${action}")"
     # shellcheck disable=SC2016
     if [[ "${script}" == *'${{'* ]]; then
       report "${action}" "'${name}' has a \${{ }} expression in its script; pass the value through env"
     fi
     case "${shell}" in
       bash)
-        # GitHub runs a composite action's bash steps with `-e -o pipefail`.
-        shellcheck --shell=bash - <<< "${script}" ||
-          report "${action}" "shellcheck findings in '${name}', listed above"
+        # `--norc`, as actionlint does: a .shellcheckrc must not relax this.
+        shellcheck --norc --shell=bash - <<< "${script}" ||
+          report "${action}" "shellcheck findings in '${name}', listed above with line numbers relative to its script"
         checked=$((checked + 1))
         ;;
       pwsh) ;;
-      *) report "${action}" "'${name}' uses shell '${shell}', which this check cannot lint" ;;
+      "") report "${action}" "'${name}' has no \`shell\`" ;;
+      *) report "${action}" "'${name}' uses shell '${shell}'; this check lints \`bash\` and allows \`pwsh\`" ;;
     esac
   done
 done
 
 ((failed == 0)) || exit 1
-((checked > 0)) || {
-  echo "::error::no bash step was found to lint" >&2
-  exit 1
-}
+((checked > 0)) || fail "no bash step was found to lint"
 echo "shellcheck passed on ${checked} bash steps of ${#actions[@]} composite actions"
