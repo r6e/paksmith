@@ -112,10 +112,9 @@ After parsing, every `CompressionBlock` carries two `u64` offsets:
 The **relativity** of `start` and `end` depends on the pak version:
 
 - **V3 / V4** (`CompressionEncryption` / `IndexEncryption`): offsets are
-  **file-relative**. Paksmith rejects compressed entries from these
-  versions with `PaksmithError::UnsupportedVersion` rather than
-  attempting normalization (see `stream_zlib_to`'s version guard in
-  `mod.rs`).
+  **file-relative**. A Paksmith read refuses a zlib entry from these
+  versions rather than attempting normalization (see
+  [Paksmith implementation](#paksmith-implementation)).
 - **V5+** (`RelativeChunkOffsets` onward): offsets are
   **entry-record-relative**. `start = 0x40` means "byte 0x40 after the
   entry's in-data record start" — i.e., the block sits inside the entry
@@ -182,11 +181,12 @@ layout-dependent and vary by fixture. Tracked in
 ### V3-V4 file-relative offsets (unsupported)
 
 V3 and V4 archives published block offsets relative to the file start.
-Paksmith's `stream_zlib_to` explicitly rejects these with
-`PaksmithError::UnsupportedVersion` rather than
-attempting normalization. Pre-v5 compressed archives are rare in
-practice (UE 4.3 through UE 4.19 era), and supporting the
-normalization adds surface area for off-by-one bugs. The rejection is
+A Paksmith read refuses a zlib entry from these versions rather than
+attempting normalization (see
+[Paksmith implementation](#paksmith-implementation)). Pre-v5
+compressed archives are rare in practice (UE 4.3 through UE 4.19 era),
+and supporting the normalization adds surface area for off-by-one
+bugs. The rejection is
 intentional and documented in the module-level `//! It does NOT yet
 handle:` list.
 
@@ -293,8 +293,10 @@ See `docs/security/allocation-caps.md` for the broader policy.
   `Lz4DecodeError` rather than `take(budget)`/`DecompressionBomb`
   (see [`lz4.md`](lz4.md)).
 
-**Status:** `complete` for v5-v11. V3-V4 compressed entries are
-rejected at `stream_zlib_to` with `UnsupportedVersion`.
+**Status:** `complete` for v5-v11. `require_relative_chunk_offsets`
+refuses a V3-V4 zlib entry with `UnsupportedVersion`; a read runs it
+in `PakReader::check_read`, and `stream_zlib_to` keeps it as a safety
+net.
 
 **Public surface:**
 - `pub struct CompressionBlock` — `start()`, `end()`, `len()`, `is_empty()`.
