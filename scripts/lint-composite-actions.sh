@@ -37,9 +37,8 @@ else
     fail "could not search .github/actions; run this from the repository root"
   [[ -z "${links}" ]] || fail "symbolic links under .github/actions are not linted; use real files: ${links}"
   # `uses: ./any/path` loads an action from anywhere in the repository.
-  # The optional quote is how git prints a path with unusual characters.
-  tracked="$(git ls-files)" || fail "could not list the repository's files"
-  stray="$(grep -i -E '(^|/)action\.ya?ml"?$' <<< "${tracked}" | grep -v -E '^"?\.github/actions/' | paste -sd ' ' - || true)"
+  stray="$(git ls-files -z -- ':(glob,icase)**/action.yml' ':(glob,icase)**/action.yaml' ':(exclude,glob).github/actions/**' |
+    tr '\0' '\n' | paste -sd ' ' -)" || fail "could not list the repository's files"
   [[ -z "${stray}" ]] || fail "action files outside .github/actions are not linted; move them there: ${stray}"
   actions=()
   while IFS= read -r action; do
