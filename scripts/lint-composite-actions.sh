@@ -53,8 +53,8 @@ for action in "${actions[@]}"; do
   }
   for ((i = 0; i < steps; i++)); do
     step="explode(.) | .runs.steps[${i}]"
-    # Anything but one true or false means a step that is not a map, or a
-    # file with several documents; neither may pass unlinted.
+    # Anything but one true or false means a step yq does not tag as a
+    # map, or a file with several documents; neither may pass unlinted.
     case "$(yq "${step} | select(tag == \"!!map\") | has(\"run\")" "${action}" 2> /dev/null || true)" in
       true) ;;
       false) continue ;;
