@@ -17,7 +17,7 @@ inputs:
     description: Days the artifact is kept.
     required: true
   version-label:
-    description: Label `paksmith --version` prints after the version. Empty for a release.
+    description: Label `paksmith --version` and the GUI's About panel show after the version. Empty for a release.
     required: false
     default: ""
 
@@ -76,6 +76,12 @@ runs:
           echo "::error::paksmith reports '${reported}' for the label '${VERSION_LABEL}'"
           exit 1
         }
+        # The GUI shows its version only in a window, so look for the
+        # label in its binary instead.
+        if [[ -n "${VERSION_LABEL}" ]] && ! grep -aqF -- "${VERSION_LABEL}" "target/release/paksmith-gui${EXE}"; then
+          echo "::error::paksmith-gui does not contain the label '${VERSION_LABEL}'"
+          exit 1
+        fi
     # Ad-hoc codesigning of macOS binaries. paksmith does not pay for
     # Apple Developer Program membership, so Developer ID notarization
     # is not on the roadmap (#168 closed won't-fix) — this is the
