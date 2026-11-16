@@ -86,10 +86,11 @@ There is no complete record of these actions: a personal account has no organiza
 
 For a **suspected-leak** rotation, change the order:
 
-1. Suspend the App's installation (**Repo owner Settings → Applications → Installed GitHub Apps → Configure → Suspend**). This cuts off installation tokens already minted with the leaked key, which otherwise last up to an hour and survive the key's deletion. The App's own credentials cannot lift a suspension made from this page.
-2. Generate the new key (step 2 of the rotation procedure) and delete the leaked one. GitHub will not delete an App's only key.
-3. Review what the old key could have done: pull requests and merges to `main`, branches, tags, and releases, drafts included. Revert anything found before storing the new key.
-4. Store the new key (step 3 of the rotation procedure). Unsuspend the installation once it has been suspended for at least an hour (whether an older token works again after an unsuspend is untested), then verify (step 4). The release workflow fails while the installation is suspended.
+1. Suspend the App's installation (**Repo owner Settings → Applications → Installed GitHub Apps → Configure → Suspend**). This cuts off installation tokens already minted with the leaked key, which otherwise last up to an hour and survive the key's deletion. The App's own credentials cannot lift a suspension made from this page. If the page shows the installation already suspended and offers no way to change that, the key suspended it through the API and can lift it again, so go on to step 3 without delay.
+2. Stop the workflows. A run that has already started keeps its own `GITHUB_TOKEN` through the suspension, so a release or nightly run can still attest and publish what the attacker put on a tag or on `main`. Disable `release-assets.yml` and `nightly.yml` (`gh workflow disable <file>`), then cancel every queued and running run (`gh run list --status queued`, `gh run list --status in_progress`, `gh run cancel <id>`).
+3. Generate the new key (step 2 of the rotation procedure) and delete the leaked one. GitHub will not delete an App's only key.
+4. Review what the old key could have done: pull requests and merges to `main`, branches, tags, releases (drafts included), and what the runs since the leak attested, published or reported. Revert anything found before storing the new key.
+5. Store the new key (step 3 of the rotation procedure). Unsuspend the installation once it has been suspended for at least an hour (whether an older token works again after an unsuspend is untested). A suspension the key made can be lifted only from the App's side: send `DELETE /app/installations/<installation id>/suspended` authenticated as the App with the new key. If the installation was uninstalled, install the App again on `r6e/paksmith` only and check its ruleset bypass (see **Configuration**). Then enable the two workflows again and verify (step 4). The release workflow fails while the installation is suspended.
 
 #### When to rotate
 
