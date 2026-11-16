@@ -39,17 +39,9 @@ jobs:
     # surfaces yellow (not red) — until baseline is established, red
     # would be noise.
     continue-on-error: true
-    # Job-scoped writes:
-    # - `issues: write` — `Alert on cmin failure` step (#204)
-    # - `actions: write` — `Prune older fuzz-corpus cache entries`
-    #   step (#206) needs `DELETE /actions/caches` to bound the
-    #   namespace at N entries per target.
-    # Scoped at job level (not workflow level) so other future jobs
-    # in this workflow stay read-only by default.
-    permissions:
-      contents: read
-      issues: write
-      actions: write
+    # This job builds and runs the repository's code, so it keeps the
+    # workflow's read-only token. The steps that need to write are in
+    # the `housekeeping` job.
     strategy:
       fail-fast: false
       matrix:
@@ -106,12 +98,11 @@ jobs:
       # skips the cmin step (issue #205). Single source of truth so
       # the comparison + the skip message + the docs stay in sync.
       CMIN_GROWTH_THRESHOLD: 10
-      # Cache-prune retention: number of newest `${CORPUS_CACHE_PREFIX}*`
-      # cache entries to keep per target. Today's just-saved entry +
-      # one prior generation for restore fallback (issue #206).
-      CORPUS_CACHE_KEEP: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The fuzz targets must not find the token in .git/config.
+          persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly
@@ -259,6 +250,7 @@ jobs:
             -max_len=1048576 \
             || exit_code=$?
           echo "exit=${exit_code}" >> "$GITHUB_OUTPUT"
+          [ "${exit_code}" -eq 0 ] || echo "${exit_code}" > "${RUNNER_TEMP}/cmin-exit"
       - name: Summarize results
         if: always()
         env:
@@ -288,125 +280,28 @@ jobs:
             echo "- Corpus restored from cache: ${restored}"
             echo "- cmin exit code: ${CMIN_EXIT}"
           } >> "$GITHUB_STEP_SUMMARY"
-      # Surface non-zero cmin exits beyond the workflow summary so a
-      # silent regression (toolchain drift, harness ABI mismatch,
-      # corpus poisoning) can't go unnoticed. Deterministic title
-      # auto-dedups: re-runs comment on the existing issue. All
-      # shell inputs flow through `env:` vars; no user-controlled
-      # fields, no injection surface.
-      - name: Alert on cmin failure
-        # Empty-string guard (`!= ''`) is load-bearing now that
-        # cmin can be skipped (issue #205): a skipped step leaves
-        # `outputs.exit` unset, and the bare `!= '0'` check would
-        # false-positive on every early-crash run.
+      # The housekeeping job reads this artifact's name, never its
+      # contents, to learn that cmin failed for this target.
+      - name: Flag a cmin failure
+        # The empty-string guard matters: a skipped cmin step leaves
+        # `outputs.exit` unset, and `!= '0'` alone would flag it.
         if: always() && steps.cmin.outputs.exit != '0' && steps.cmin.outputs.exit != ''
-        continue-on-error: true
-        env:
-          TARGET: ${{ matrix.target }}
-          CMIN_EXIT: ${{ steps.cmin.outputs.exit }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          title="[fuzz] cmin regression detected (target: ${TARGET})"
-          # YAML's `run: |` block-scalar strips the common leading
-          # indent, so the heredoc body lands at column 0 in bash.
-          # If you re-indent these lines, beware: 4+ leading spaces
-          # would render as a Markdown code block in the GitHub UI.
-          body=$(cat <<EOF
-          The nightly fuzz workflow's \`cargo fuzz cmin\` step exited non-zero for target \`${TARGET}\`.
-
-          - Exit code: \`${CMIN_EXIT}\`
-          - Run: ${RUN_URL}
-          - Target: \`${TARGET}\`
-
-          A non-zero cmin typically indicates a toolchain incompat (nightly drift), harness ABI mismatch, or corpus poisoning.
-
-          If the corpus is suspected poisoned, nuke the cache via:
-          \`\`\`
-          gh api -X DELETE "/repos/${REPO}/actions/caches?key=fuzz-corpus-${TARGET}-<run-id>"
-          \`\`\`
-          EOF
-          )
-          # Search-then-post-filter: `gh issue list --search` does
-          # substring matching, so the jq `.title == "<exact>"` guard
-          # prevents a similarly-named issue from false-matching.
-          # `|| true` swallows SIGPIPE from `head -n 1` closing the
-          # pipe under `pipefail`.
-          existing=$(gh issue list \
-            --state open \
-            --search "in:title \"${title}\"" \
-            --json number,title \
-            --jq ".[] | select(.title == \"${title}\") | .number" \
-            | head -n 1 || true)
-          if [ -n "${existing}" ]; then
-            echo "Commenting on existing issue #${existing}"
-            gh issue comment "${existing}" --body "${body}"
-          else
-            echo "Creating new alert issue"
-            gh issue create \
-              --title "${title}" \
-              --body "${body}" \
-              --label "ci"
-          fi
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-cmin-failed-${{ matrix.target }}
+          path: ${{ runner.temp }}/cmin-exit
+          if-no-files-found: error
+          retention-days: 1
       # Paired with the restore step above; `if: always()` is what
       # preserves the corpus on cargo-fuzz crash exit. To nuke a
       # poisoned corpus, delete the cache entries for the target via
       # `gh api -X DELETE /repos/r6e/paksmith/actions/caches?key=fuzz-corpus-<target>-<run-id>`.
       - name: Save evolved corpus
-        id: save
         if: always()
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: ${{ env.CORPUS_CACHE_KEY }}
-      # Prune older `${CORPUS_CACHE_PREFIX}*` entries down to the
-      # newest `${CORPUS_CACHE_KEEP}`. `?key=<prefix>` is a prefix
-      # filter (not exact-match) per the REST API docs.
-      #
-      # `--paginate` is cheap insurance for >100 entries. The jq
-      # filter emits ALL ids (`.actions_caches[].id`) because
-      # `--paginate --jq` runs jq per-page (cli/cli#10459): a
-      # per-page `[KEEP:]` slice would leak KEEP entries per
-      # additional page. Bash-side `tail -n +$((KEEP + 1))` does
-      # the skip across the merged stream, which is globally sorted
-      # because per-page output is server-sorted and pagination is
-      # sequential.
-      #
-      # Gated on `steps.save.outcome == 'success'` so a transient
-      # save failure doesn't evict an irreplaceable older entry —
-      # without this gate, the next run's restore would land on a
-      # one-generation-staler corpus. `continue-on-error: true` on
-      # the step swallows GH API hiccups; the 7-day natural eviction
-      # is a backstop.
-      - name: Prune older fuzz-corpus cache entries
-        if: always() && steps.save.outcome == 'success'
-        continue-on-error: true
-        env:
-          REPO: ${{ github.repository }}
-          PREFIX: ${{ env.CORPUS_CACHE_PREFIX }}
-          KEEP: ${{ env.CORPUS_CACHE_KEEP }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Pruning ${PREFIX}* cache entries, keeping ${KEEP} newest"
-          ids=$(gh api --paginate \
-            "/repos/${REPO}/actions/caches?key=${PREFIX}&sort=created_at&direction=desc&per_page=100" \
-            --jq '.actions_caches[].id' \
-            | tail -n +$((KEEP + 1)))
-          if [ -z "${ids}" ]; then
-            echo "Nothing to prune"
-            exit 0
-          fi
-          while read -r id; do
-            [ -z "${id}" ] && continue
-            echo "Deleting cache id ${id}"
-            gh api -X DELETE "/repos/${REPO}/actions/caches/${id}" || \
-              echo "Warning: delete of cache ${id} failed (continuing)"
-          done <<< "${ids}"
       # Artifact upload is complementary to the cache, not redundant:
       # `fuzz/artifacts/` (crash inputs) is the irreplaceable part —
       # the cache only persists the corpus, not findings. The corpus
@@ -420,3 +315,98 @@ jobs:
             fuzz/artifacts/
             fuzz/corpus/
           retention-days: 30
+
+  # Holds the write permissions, so it runs nothing from the repository
+  # and nothing the fuzz jobs produced: no checkout, no cache, no
+  # artifact download. It acts only on what GitHub reports about this
+  # run, and checks the shape of every name it reads.
+  housekeeping:
+    name: housekeeping
+    needs: fuzz
+    # Runs after a failed fuzz job, but not after a cancelled run.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # delete cache entries (#206)
+      issues: write # open or comment on the cmin alert (#204)
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # Keeps the newest `KEEP` corpus caches of each target on this
+      # run's ref: the one just saved and one earlier generation for
+      # the restore to fall back on. A target whose cache this run did
+      # not save is left alone, so a failed save cannot evict an older
+      # corpus. The 7-day eviction is the backstop if this step fails.
+      #
+      # `?key=` is a prefix filter. jq runs once per page under
+      # `--paginate` (cli/cli#10459), so it emits every entry and
+      # `tail` drops the newest across the whole, newest-first, list.
+      - name: Prune older fuzz-corpus cache entries
+        continue-on-error: true
+        env:
+          KEEP: 2
+        run: |
+          set -euo pipefail
+          jobs="$(gh api --paginate \
+            "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" \
+            --jq '.jobs[].name')"
+          while read -r job; do
+            [[ "${job}" =~ ^cargo-fuzz\ \((fuzz_[a-z0-9_]+)\)$ ]] || continue
+            target="${BASH_REMATCH[1]}"
+            prefix="fuzz-corpus-${target}-"
+            entries="$(gh api --paginate \
+              "repos/${GH_REPO}/actions/caches?key=${prefix}&ref=${GITHUB_REF}&sort=created_at&direction=desc&per_page=100" \
+              --jq '.actions_caches[] | "\(.id) \(.key)"')"
+            if ! awk -v saved="${prefix}${GITHUB_RUN_ID}" '$2 == saved { found = 1 } END { exit !found }' <<< "${entries}"; then
+              echo "${target}: this run saved no corpus, so nothing is pruned"
+              continue
+            fi
+            while read -r id key; do
+              [[ "${id}" =~ ^[0-9]+$ ]] || continue
+              echo "${target}: deleting ${key} (cache ${id})"
+              gh api -X DELETE "repos/${GH_REPO}/actions/caches/${id}" ||
+                echo "::warning::could not delete cache ${id}"
+            done < <(tail -n +"$((KEEP + 1))" <<< "${entries}")
+          done <<< "${jobs}"
+      # A cmin failure usually means nightly drift, a harness ABI
+      # mismatch or a poisoned corpus, and would otherwise show only in
+      # the run's summary. The title is fixed per target, so later
+      # failures comment on the open issue.
+      - name: Alert on cmin failure
+        continue-on-error: true
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          names="$(gh api --paginate \
+            "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+            --jq '.artifacts[].name')"
+          while read -r name; do
+            [[ "${name}" =~ ^fuzz-cmin-failed-(fuzz_[a-z0-9_]+)$ ]] || continue
+            target="${BASH_REMATCH[1]}"
+            title="[fuzz] cmin regression detected (target: ${target})"
+            body="$(printf '%s\n' \
+              "The nightly fuzz workflow's \`cargo fuzz cmin\` step exited non-zero for target \`${target}\`." \
+              "" \
+              "- Run: ${RUN_URL} (its summary gives the exit code)" \
+              "- Target: \`${target}\`" \
+              "" \
+              "A non-zero cmin typically indicates a toolchain incompat (nightly drift), harness ABI mismatch, or corpus poisoning." \
+              "" \
+              "If the corpus is suspected poisoned, delete its caches:" \
+              '```' \
+              "gh api -X DELETE \"repos/${GH_REPO}/actions/caches?key=fuzz-corpus-${target}-<run-id>\"" \
+              '```')"
+            # `--search` matches substrings, so jq keeps the exact title.
+            existing="$(gh issue list --state open --search "in:title \"${title}\"" \
+              --json number,title --jq "[.[] | select(.title == \"${title}\") | .number][0] // empty")"
+            if [[ -n "${existing}" ]]; then
+              echo "Commenting on existing issue #${existing}"
+              gh issue comment "${existing}" --body "${body}"
+            else
+              echo "Creating new alert issue"
+              gh issue create --title "${title}" --body "${body}" --label ci
+            fi
+          done <<< "${names}"
