@@ -13,9 +13,10 @@
 //!    Paksmith does not consult the PHI for primary lookup (the FDI
 //!    walk + our `by_path` HashMap is the resolution path), but
 //!    issue #131 wired PHI parsing into open-time as a
-//!    cross-validation source: every FDI-walked path computes
-//!    `fnv64_path(seed, path)` and must round-trip to the same
-//!    `encoded_offset` the PHI stores. Mismatches surface as
+//!    cross-validation source: each FDI file record claims the PHI
+//!    entry for `fnv64_path(seed, path)`, which must hold the
+//!    record's `encoded_offset`; only a record at `NO_ENTRY_OFFSET`
+//!    may have no entry. Mismatches surface as
 //!    `IndexParseFault::PhiFdiInconsistency`. Without this check,
 //!    an attacker who rewrites the PHI's main-index hash slot could
 //!    redirect a known asset-name hash to a different offset.
@@ -26,19 +27,19 @@
 //!
 //! `encoded_offset >= 0` indexes into the encoded blob; negative
 //! values (1-based, negated) index into the non-encoded entries
-//! fallback.
+//! fallback, except `NO_ENTRY_OFFSET`, whose file the walk skips.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
-
+use tracing::debug;
 use zeroize::Zeroizing;
 
 use super::compression::CompressionMethod;
 use super::entry_header::{PakEntryHeader, encoded_block_count};
 use super::fstring::read_fstring;
-use super::{PakIndex, PakIndexEntry, fnv64_path};
+use super::{MAX_SAMPLED_PATHS, PakIndex, PakIndexEntry, fnv64_path};
 use crate::container::pak::crypto::{self, AesKey};
 use crate::container::pak::version::PakVersion;
 use crate::error::{
@@ -46,6 +47,10 @@ use crate::error::{
     PhiFdiInconsistencyKind, WireField, check_region_bounds, try_index_string, try_reserve_index,
 };
 use crate::seams::PakSeam;
+use crate::untrusted::clamp_path;
+
+/// The FDI `encoded_offset` that names no entry: the walk skips its file.
+const NO_ENTRY_OFFSET: i32 = i32::MIN;
 
 /// The header an FDI path names: one decoded from the encoded-entries
 /// blob, or a non-encoded record.
@@ -235,9 +240,12 @@ pub fn max_index_bytes() -> u64 {
     MAX_INDEX_BYTES
 }
 
-/// Parse a v10+ Path-Hash Index body into a `(fnv64_hash →
-/// encoded_offset)` lookup map. Wire format (per repak's writer
-/// in `generate_path_hash_index`):
+/// PHI entries by path hash: `Some(encoded_offset)` until an FDI path
+/// claims the entry, then `None`.
+type PhiSlots = HashMap<u64, Option<i32>>;
+
+/// Parse a v10+ Path-Hash Index body into its unclaimed [`PhiSlots`].
+/// Wire format (per repak's writer in `generate_path_hash_index`):
 ///
 /// ```text
 /// count: u32 LE
@@ -263,7 +271,7 @@ pub fn max_index_bytes() -> u64 {
 /// duplicate is structural malformation — surface as
 /// `PhiFdiInconsistencyKind::DuplicateHash` rather than
 /// silently last-write-wins via the HashMap. Issue #131.
-fn parse_phi_body(bytes: &[u8]) -> crate::Result<HashMap<u64, i32>> {
+fn parse_phi_body(bytes: &[u8]) -> crate::Result<PhiSlots> {
     // Issue #131 R1 security finding: an empty PHI body
     // (`phi_size == 0` — bounds-check accepts this since 0 <=
     // file_size) would otherwise drive `read_u32` to bare
@@ -303,7 +311,7 @@ fn parse_phi_body(bytes: &[u8]) -> crate::Result<HashMap<u64, i32>> {
             },
         });
     }
-    let mut map: HashMap<u64, i32> = HashMap::new();
+    let mut map = PhiSlots::new();
     map.try_reserve(count_usize)
         .map_err(|source| PaksmithError::InvalidIndex {
             fault: IndexParseFault::AllocationFailed {
@@ -319,7 +327,7 @@ fn parse_phi_body(bytes: &[u8]) -> crate::Result<HashMap<u64, i32>> {
     for _ in 0..count {
         let hash = cursor.read_u64::<LittleEndian>()?;
         let off = cursor.read_i32::<LittleEndian>()?;
-        if map.insert(hash, off).is_some() {
+        if map.insert(hash, Some(off)).is_some() {
             // Second occurrence of the same hash — surface as
             // structural malformation per the doc comment.
             // `phi_offset` carries the duplicate's offset so the
@@ -573,7 +581,7 @@ impl PakIndex {
         // path's `fnv64(seed, path) → encoded_offset` mapping.
         // `None` when `has_path_hash_index = false` — the cross-
         // check is skipped (PHI absence is legal in v10+).
-        let mut phi_map: Option<HashMap<u64, i32>> = if let Some(phi) = phi_region.as_ref() {
+        let mut phi_map: Option<PhiSlots> = if let Some(phi) = phi_region.as_ref() {
             check_region_bounds(IndexRegionKind::Phi, phi.offset, phi.size, file_size)
                 .map_err(|fault| PaksmithError::InvalidIndex { fault })?;
             if phi.size > MAX_FDI_BYTES {
@@ -650,6 +658,8 @@ impl PakIndex {
         let mut encoded_block_total: u64 = 0;
         let full_path_limit = fdi_size * MAX_FULL_PATH_BYTES_PER_FDI_BYTE;
         let mut full_path_total: u64 = 0;
+        let mut skipped: u64 = 0;
+        let mut skipped_samples: Vec<String> = Vec::new();
         for _ in 0..dir_count {
             let dir_name = read_fstring(&mut fdi)?;
             let dir_file_count = fdi.read_u32::<LittleEndian>()?;
@@ -709,16 +719,17 @@ impl PakIndex {
                 // claims `(fnv64_path(seed, full_path) →
                 // encoded_offset)` mappings; the FDI walk
                 // independently produces `(full_path → encoded_offset)`.
-                // For a well-formed archive the two must agree on
-                // every path. Use `remove` rather than `get` so that
-                // after the walk we can detect Extra entries
-                // (anything left in the map is a PHI entry that
-                // doesn't correspond to any FDI path — the "stuff
+                // Each FDI record, a skipped one too, claims its path's
+                // entry, which must hold the record's offset; only a
+                // skipped file may have none. A second record for the
+                // path finds the entry claimed, and the sweep after the
+                // walk finds the entries no record claimed (the "stuff
                 // PHI with extras" amplification vector).
                 if let Some(map) = phi_map.as_mut() {
                     let expected_hash = fnv64_path(&full_path, path_hash_seed);
-                    match map.remove(&expected_hash) {
-                        None => {
+                    match map.get_mut(&expected_hash).map(Option::take) {
+                        None if encoded_offset == NO_ENTRY_OFFSET => {}
+                        None | Some(None) => {
                             return Err(PaksmithError::InvalidIndex {
                                 fault: IndexParseFault::PhiFdiInconsistency {
                                     path: full_path.clone(),
@@ -729,7 +740,7 @@ impl PakIndex {
                                 },
                             });
                         }
-                        Some(phi_off) if phi_off != encoded_offset => {
+                        Some(Some(phi_off)) if phi_off != encoded_offset => {
                             return Err(PaksmithError::InvalidIndex {
                                 fault: IndexParseFault::PhiFdiInconsistency {
                                     path: full_path.clone(),
@@ -740,10 +751,17 @@ impl PakIndex {
                                 },
                             });
                         }
-                        Some(_) => { /* matched — PHI agrees with FDI */ }
+                        Some(Some(_)) => { /* matched — PHI agrees with FDI */ }
                     }
                 }
 
+                if encoded_offset == NO_ENTRY_OFFSET {
+                    skipped += 1;
+                    if skipped_samples.len() < MAX_SAMPLED_PATHS {
+                        skipped_samples.push(clamp_path(&full_path).into_owned());
+                    }
+                    continue;
+                }
                 let named = if encoded_offset >= 0 {
                     // Decode the bit-packed entry from the encoded blob.
                     //
@@ -805,9 +823,9 @@ impl PakIndex {
                     //
                     // SAFETY: same dead-on-32-bit+ argument as the
                     // positive-offset branch above. Worst-case input is
-                    // `encoded_offset = i32::MIN`, giving
-                    // `-i64::from(i32::MIN) - 1 = i32::MAX = 2_147_483_647`,
-                    // which fits in `usize` on every supported platform.
+                    // `encoded_offset = i32::MIN + 1`, the walk having
+                    // skipped `i32::MIN`, giving `2_147_483_646`, which
+                    // fits in `usize` on every supported platform.
                     // Kept as a typed-error safety net rather than an
                     // unwrap. Issue #92.
                     let idx = usize::try_from(-i64::from(encoded_offset) - 1).map_err(|_| {
@@ -834,13 +852,10 @@ impl PakIndex {
                     })?;
                     Named::Record(record)
                 };
-                // Per-push budget guard: the FDI's `dir_count × dir_file_count`
-                // must agree with the main-index `file_count`. A malformed
-                // FDI claiming more entries than file_count would silently
-                // overflow the `try_reserve_exact` allocation and weaken
-                // the round-1 file_count bound. The fdi_size cap still
-                // bounds total work, but enforcing this here catches the
-                // discrepancy at the wire-format layer.
+                // Per-push budget guard: the walk pushes at most `file_count`
+                // entries, the count reserved above; skipped files don't
+                // count. A malformed FDI listing more would outgrow the
+                // reservation and weaken the file_count bound.
                 if entries.len() >= file_count as usize {
                     return Err(PaksmithError::InvalidIndex {
                         fault: IndexParseFault::Encoded {
@@ -858,21 +873,12 @@ impl PakIndex {
             }
         }
 
-        // Issue #87: symmetric underrun guard. The per-push check
-        // above catches FDI overruns (`entries.len() >= file_count`);
-        // this catches the inverse — a truncated FDI claiming
-        // `file_count = N` but yielding fewer than N entries after
-        // the walk completes (writer crash, bit-flip in a dir_count,
-        // hand-crafted truncated FDI). Without this, the parser
-        // succeeds with a partial set; downstream consumers see a
-        // smaller archive than UE would.
-        //
-        // Side-effect ordering note: in practice `entries.len()` can
-        // only be `< file_count` here — the per-push guard rejects
-        // before any `>` case could land. The `!=` form is defensive:
-        // if a future refactor relaxes the per-push guard, this stays
-        // a correctness backstop rather than silently allowing overrun.
-        if entries.len() != file_count as usize {
+        // Issue #87: symmetric underrun guard, for a truncated FDI
+        // (writer crash, bit-flip in a dir_count, hand-crafted
+        // truncation). `file_count` may count the skipped files or not,
+        // so it lies between the entries pushed, which the per-push
+        // guard bounds, and the file records walked.
+        if entries.len() as u64 + skipped < u64::from(file_count) {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::Encoded {
                     kind: EncodedFault::FdiFileCountShort {
@@ -883,16 +889,17 @@ impl PakIndex {
             });
         }
 
-        // Issue #131 (final cross-check): any PHI entries that
-        // remained in `phi_map` after the FDI walk had no
-        // corresponding FDI path. UE writers populate PHI and FDI
-        // from the same source map, so a leftover is the "stuff
-        // PHI with extras" amplification vector. We surface the
-        // FIRST leftover hash so the operator has a concrete
-        // pointer; subsequent leftovers (if any) would surface
-        // on a re-parse after the fix.
+        // Issue #131 (final cross-check): any PHI entry left
+        // unclaimed after the FDI walk had no corresponding FDI path.
+        // UE writers populate PHI and FDI from the same source map,
+        // so a leftover is the "stuff PHI with extras" amplification
+        // vector. We surface the FIRST leftover hash so the operator
+        // has a concrete pointer; subsequent leftovers (if any) would
+        // surface on a re-parse after the fix.
         if let Some(map) = phi_map.as_ref()
-            && let Some((&extra_hash, &extra_off)) = map.iter().next()
+            && let Some((extra_hash, extra_off)) = map
+                .iter()
+                .find_map(|(&hash, &unclaimed)| unclaimed.map(|off| (hash, off)))
         {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::PhiFdiInconsistency {
@@ -910,7 +917,16 @@ impl PakIndex {
         drop(non_encoded_entries);
         drop(fdi_bytes);
         drop(phi_map);
-        Self::from_entries(mount_point, entries, encoded_regions)
+        let index = Self::from_entries(mount_point, entries, encoded_regions)?;
+        if skipped > 0 {
+            debug!(
+                skipped,
+                samples = ?skipped_samples,
+                "pak FDI skipped {skipped} file(s) whose encoded_offset is i32::MIN; first {} shown",
+                skipped_samples.len()
+            );
+        }
+        Ok(index)
     }
 }
 

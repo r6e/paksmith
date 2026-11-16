@@ -63,9 +63,9 @@ use crate::error::{AllocationContext, check_index_reserve, try_index_string, try
 use crate::seams::PakSeam;
 use crate::untrusted::clamp_path;
 
-/// Cap on how many duplicate filenames we sample for the dedupe warning.
-/// Prevents the warn-log payload from growing with `dup_count`.
-const MAX_SAMPLED_DUPS: usize = 5;
+/// Cap on how many paths an aggregated index log samples, so its payload
+/// doesn't grow with the count it reports.
+const MAX_SAMPLED_PATHS: usize = 5;
 
 /// FNV-1a 64-bit offset basis (canonical constant). Used by
 /// `fnv64_path` (production: PHI/FDI cross-validation in
@@ -100,13 +100,15 @@ const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
 ///    PR #201, `fnv64_path` is consulted at `PakReader::open`
 ///    time to cross-check that the PHI table's `(hash →
 ///    encoded_offset)` mappings agree with the FDI's `(path →
-///    encoded_offset)` walk. A real v10/v11 archive containing a
-///    non-ASCII path will produce a hash that disagrees with the
-///    PHI's UE-computed hash → cross-check fails with
-///    `PhiFdiInconsistency { MissingPhiEntry }`. Real UE archive
-///    content is ASCII-only in practice; non-ASCII paths would
-///    require the fix in #30 (Unicode-aware lowercasing) to open
-///    successfully.
+///    encoded_offset)` walk. In a v10/v11 archive with a PHI, a
+///    non-ASCII path produces a hash that disagrees with the PHI's
+///    UE-computed hash → cross-check fails with
+///    `PhiFdiInconsistency` (`MissingPhiEntry` for a listed file,
+///    `ExtraPhiEntries` for a skipped one the PHI maps); a skipped
+///    file the PHI leaves out passes. Real UE archive content is
+///    ASCII-only in practice; the non-ASCII paths the cross-check
+///    refuses would require the fix in #30 (Unicode-aware
+///    lowercasing) to open.
 ///
 /// Switching to genuine Unicode-aware lowercasing would require pulling
 /// in a Unicode-handling crate (we currently have none); deferred until
@@ -544,7 +546,7 @@ impl PakIndex {
             let mut sampled_dups = Vec::new();
             for entry in entries.iter().rev() {
                 let fresh = seen.insert(entry.filename());
-                if !fresh && sampled_dups.len() < MAX_SAMPLED_DUPS {
+                if !fresh && sampled_dups.len() < MAX_SAMPLED_PATHS {
                     sampled_dups.push(clamp_path(entry.filename()));
                 }
                 survives.push(fresh);
@@ -1137,12 +1139,10 @@ mod tests {
         try_flat_index(entries).unwrap()
     }
 
-    /// Each entry's name and size, in order.
-    fn names_and_sizes(index: &PakIndex) -> Vec<(&str, u64)> {
+    /// Each entry's name and the header `field` it reads, in order.
+    fn names_and(index: &PakIndex, field: fn(&PakEntryHeader) -> u64) -> Vec<(&str, u64)> {
         let entries = index.entries().iter();
-        entries
-            .map(|e| (e.filename(), e.header().uncompressed_size()))
-            .collect()
+        entries.map(|e| (e.filename(), field(e.header()))).collect()
     }
 
     /// A repeated name keeps its last entry, at the last entry's position:
@@ -1150,7 +1150,10 @@ mod tests {
     #[test]
     fn dedup_keeps_each_survivor_at_its_last_position() {
         let index = flat_index(&[("a", 10), ("b", 20), ("a", 30)]);
-        assert_eq!(names_and_sizes(&index), [("b", 20), ("a", 30)]);
+        assert_eq!(
+            names_and(&index, PakEntryHeader::uncompressed_size),
+            [("b", 20), ("a", 30)]
+        );
         for entry in index.entries() {
             assert!(std::ptr::eq(index.find(entry.filename()).unwrap(), entry));
         }
@@ -1169,7 +1172,7 @@ mod tests {
         let first = names.map(|name| (name, 1));
         let second = names.map(|name| (name, 2));
         let index = flat_index(&[first, second].concat());
-        assert_eq!(names_and_sizes(&index), second);
+        assert_eq!(names_and(&index, PakEntryHeader::uncompressed_size), second);
         logs_assert(lines_counted("", 1));
         logs_assert(lines_carrying("duplicate filename(s)", "WARN"));
         assert!(logs_contain("dup_count=7"));
@@ -1349,21 +1352,16 @@ mod tests {
     /// it names the earlier record.
     #[test]
     fn v10_without_phi_keeps_the_last_of_two_joined_paths() {
-        let mut records = Vec::new();
-        write_v10_non_encoded_uncompressed(&mut records, 100, 10);
-        write_v10_non_encoded_uncompressed(&mut records, 200, 10);
-        let (buf, main_size) = build_v10_buffer(V10Fixture {
+        let index = read_spec(V10Fixture {
             file_count: 2,
-            non_encoded_records: records,
-            non_encoded_count: 2,
             fdi: vec![
                 ("/Content/".into(), vec![("x".into(), -2)]),
                 ("Content/".into(), vec![("x".into(), -1)]),
             ],
             has_path_hash_index: false,
-            ..V10Fixture::default()
-        });
-        let index = read_v10(buf, main_size).unwrap();
+            ..records_v10(2, &[])
+        })
+        .unwrap();
         let [entry] = index.entries() else {
             panic!("expected one entry, got {:?}", index.entries())
         };
@@ -3991,17 +3989,35 @@ mod tests {
         )
     }
 
-    /// A v10 index over `records` uncompressed non-encoded records (record
-    /// `i` at offset `100 * (i + 1)`, so none shares the placeholder
-    /// header's offset 0) and one encoded entry at offset 900, whose FDI
-    /// names `files`.
-    fn aliasing_v10(records: u32, files: Vec<(String, i32)>, has_phi: bool) -> PakIndex {
-        let mut non_enc = Vec::new();
+    /// A v10 index spec over `records` uncompressed non-encoded records
+    /// (record `i` at offset `100 * (i + 1)`, so none shares the placeholder
+    /// header's offset 0), whose `/Content/` directory names `files`, with
+    /// a `file_count` counting every file.
+    fn records_v10(records: u32, files: &[(&str, i32)]) -> V10Fixture {
+        let mut non_encoded_records = Vec::new();
         for i in 1..=records {
-            write_v10_non_encoded_uncompressed(&mut non_enc, u64::from(i) * 100, 10);
+            write_v10_non_encoded_uncompressed(&mut non_encoded_records, u64::from(i) * 100, 10);
         }
-        let (buf, main_size) = build_v10_buffer(V10Fixture {
+        let files = files
+            .iter()
+            .map(|&(name, offset)| (name.to_string(), offset));
+        V10Fixture {
             file_count: u32::try_from(files.len()).unwrap(),
+            non_encoded_records,
+            non_encoded_count: records,
+            fdi: vec![("/Content/".into(), files.collect())],
+            ..V10Fixture::default()
+        }
+    }
+
+    fn read_spec(spec: V10Fixture) -> crate::Result<PakIndex> {
+        let (buf, main_size) = build_v10_buffer(spec);
+        read_v10(buf, main_size)
+    }
+
+    /// [`records_v10`] plus one encoded entry at offset 900.
+    fn aliasing_v10(records: u32, files: &[(&str, i32)], has_phi: bool) -> PakIndex {
+        read_spec(V10Fixture {
             encoded_entries: encode_entry_bytes(EncodeArgs {
                 offset: 900,
                 uncompressed: 10,
@@ -4012,13 +4028,10 @@ mod tests {
                 block_size: 0,
                 per_block_sizes: &[],
             }),
-            non_encoded_records: non_enc,
-            non_encoded_count: records,
-            fdi: vec![("/Content/".into(), files)],
             has_path_hash_index: has_phi,
-            ..V10Fixture::default()
-        });
-        read_v10(buf, main_size).unwrap()
+            ..records_v10(records, files)
+        })
+        .unwrap()
     }
 
     /// FDI paths that name one non-encoded record share its header, with
@@ -4026,8 +4039,8 @@ mod tests {
     #[test]
     fn aliasing_non_encoded_paths_share_one_header() {
         for has_phi in [false, true] {
-            let files = vec![("a".into(), -1), ("b".into(), -1), ("c".into(), -1)];
-            let index = aliasing_v10(1, files, has_phi);
+            let files = [("a", -1), ("b", -1), ("c", -1)];
+            let index = aliasing_v10(1, &files, has_phi);
             let phi = index.encoded_regions().and_then(EncodedRegions::phi);
             assert_eq!(phi.is_some(), has_phi);
             let [a, b, c] = index.entries() else {
@@ -4047,8 +4060,8 @@ mod tests {
     /// extent, and a path naming a record alone reports its own.
     #[test]
     fn aliased_paths_report_their_records_payload_extent() {
-        let files = vec![("a".into(), -1), ("b".into(), -1), ("c".into(), -2)];
-        let index = aliasing_v10(2, files, false);
+        let files = [("a", -1), ("b", -1), ("c", -2)];
+        let index = aliasing_v10(2, &files, false);
         let [a, b, c] = index.entries() else {
             panic!("expected 3 entries, got {:?}", index.entries())
         };
@@ -4067,13 +4080,8 @@ mod tests {
     /// records, and an encoded path, share nothing with the aliases.
     #[test]
     fn unaliased_paths_keep_their_own_headers() {
-        let files = vec![
-            ("a".into(), -1),
-            ("b".into(), -2),
-            ("c".into(), 0),
-            ("d".into(), -2),
-        ];
-        let index = aliasing_v10(2, files, false);
+        let files = [("a", -1), ("b", -2), ("c", 0), ("d", -2)];
+        let index = aliasing_v10(2, &files, false);
         let [a, b, c, d] = index.entries() else {
             panic!("expected 4 entries, got {:?}", index.entries())
         };
@@ -4112,6 +4120,356 @@ mod tests {
             ),
             "got: {err:?}"
         );
+    }
+
+    /// Files `a` and `b` around `gone`, whose offset is `i32::MIN`.
+    const AROUND_GONE: [(&str, i32); 3] = [("a", -1), ("gone", i32::MIN), ("b", -2)];
+
+    /// `index` lists `a` and `b` over their own records, and not `gone`.
+    fn assert_skipped_gone(index: &PakIndex) {
+        assert_eq!(
+            names_and(index, PakEntryHeader::offset),
+            [("Content/a", 100), ("Content/b", 200)],
+            "listed entries"
+        );
+        assert!(index.find("Content/gone").is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "listed entries")]
+    fn assert_skipped_gone_rejects_a_listed_gone() {
+        let files = [("a", -1), ("gone", -1), ("b", -2)];
+        assert_skipped_gone(&read_spec(records_v10(2, &files)).unwrap());
+    }
+
+    /// `err` is the PHI cross-check's `kind` fault for `path`, carrying the
+    /// FDI's and the PHI's offsets.
+    fn assert_phi_fault(
+        err: &PaksmithError,
+        kind: PhiFdiInconsistencyKind,
+        path: &str,
+        offsets: (i32, i32),
+    ) {
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::PhiFdiInconsistency {
+                        kind: k,
+                        path: p,
+                        fdi_offset,
+                        phi_offset,
+                        ..
+                    },
+                } if *k == kind && p == path && (*fdi_offset, *phi_offset) == offsets
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected error")]
+    fn assert_phi_fault_rejects_another_kind() {
+        let err = PaksmithError::InvalidIndex {
+            fault: IndexParseFault::PhiFdiInconsistency {
+                path: "Content/a".into(),
+                kind: PhiFdiInconsistencyKind::OffsetMismatch,
+                expected_hash: 0,
+                fdi_offset: -1,
+                phi_offset: i32::MIN,
+            },
+        };
+        let kind = PhiFdiInconsistencyKind::MissingPhiEntry;
+        assert_phi_fault(&err, kind, "Content/a", (-1, i32::MIN));
+    }
+
+    /// The walk skips a file whose offset is `i32::MIN` and lists the rest.
+    #[test]
+    fn read_v10_plus_skips_a_file_at_i32_min() {
+        let spec = V10Fixture {
+            has_path_hash_index: false,
+            ..records_v10(2, &AROUND_GONE)
+        };
+        assert_skipped_gone(&read_spec(spec).unwrap());
+    }
+
+    /// A PHI may map a skipped file's path to `i32::MIN`.
+    #[test]
+    fn read_v10_plus_skips_a_file_the_phi_maps_to_i32_min() {
+        assert_skipped_gone(&read_spec(records_v10(2, &AROUND_GONE)).unwrap());
+    }
+
+    /// A PHI may leave a skipped file's path out.
+    #[test]
+    fn read_v10_plus_skips_a_file_the_phi_leaves_out() {
+        let spec = V10Fixture {
+            phi_omit_path: Some("Content/gone".into()),
+            ..records_v10(2, &AROUND_GONE)
+        };
+        assert_skipped_gone(&read_spec(spec).unwrap());
+    }
+
+    /// A PHI entry naming a record for a skipped file is refused.
+    #[test]
+    fn read_v10_plus_refuses_a_phi_record_for_a_skipped_file() {
+        let spec = V10Fixture {
+            phi_swap_offset_for: Some(("Content/gone".into(), -1)),
+            ..records_v10(2, &AROUND_GONE)
+        };
+        let err = read_spec(spec).unwrap_err();
+        let kind = PhiFdiInconsistencyKind::OffsetMismatch;
+        assert_phi_fault(&err, kind, "Content/gone", (i32::MIN, -1));
+    }
+
+    /// An `i32::MIN` PHI entry for a file naming a record is refused.
+    #[test]
+    fn read_v10_plus_refuses_a_phi_skip_for_a_listed_file() {
+        let spec = V10Fixture {
+            phi_swap_offset_for: Some(("Content/a".into(), i32::MIN)),
+            ..records_v10(2, &AROUND_GONE)
+        };
+        let err = read_spec(spec).unwrap_err();
+        let kind = PhiFdiInconsistencyKind::OffsetMismatch;
+        assert_phi_fault(&err, kind, "Content/a", (-1, i32::MIN));
+    }
+
+    /// A PHI entry serves one FDI record, a skipped one too: with one entry
+    /// for a path named twice, holding the first record's offset, the
+    /// second record is refused in either order.
+    #[test]
+    fn read_v10_plus_refuses_a_second_record_for_a_taken_phi_entry() {
+        let one_entry = |files: &[(&str, i32)], offset| V10Fixture {
+            phi_omit_path: Some("Content/a".into()),
+            phi_extra_entry: Some(("Content/a".into(), offset)),
+            ..records_v10(2, files)
+        };
+        let kind = PhiFdiInconsistencyKind::MissingPhiEntry;
+        let err = read_spec(one_entry(&[("a", -1), ("a", i32::MIN)], -1)).unwrap_err();
+        assert_phi_fault(&err, kind, "Content/a", (i32::MIN, 0));
+        let err = read_spec(one_entry(&[("a", i32::MIN), ("a", -1)], i32::MIN)).unwrap_err();
+        assert_phi_fault(&err, kind, "Content/a", (-1, 0));
+    }
+
+    /// A PHI entry no FDI path names is refused, at `i32::MIN` too.
+    #[test]
+    fn read_v10_plus_refuses_an_extra_phi_entry_at_i32_min() {
+        let spec = V10Fixture {
+            phi_extra_entry: Some(("Content/ghost".into(), i32::MIN)),
+            ..records_v10(2, &AROUND_GONE)
+        };
+        let err = read_spec(spec).unwrap_err();
+        let ghost = fnv64_path("Content/ghost", PathHashSeed::new(0));
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::PhiFdiInconsistency {
+                        kind: PhiFdiInconsistencyKind::ExtraPhiEntries,
+                        expected_hash,
+                        phi_offset: i32::MIN,
+                        ..
+                    },
+                } if *expected_hash == ghost
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// `file_count` may count the skipped files or not: an index of two
+    /// listed files and three skipped parses at any count from 2 to 5. At 1
+    /// the second listed file is one too many, and at 6 the walk falls short.
+    #[test]
+    fn read_v10_plus_file_count_may_count_skipped_files() {
+        let files = [
+            ("a", -1),
+            ("g1", i32::MIN),
+            ("b", -2),
+            ("g2", i32::MIN),
+            ("g3", i32::MIN),
+        ];
+        let read = |file_count| {
+            read_spec(V10Fixture {
+                file_count,
+                ..records_v10(2, &files)
+            })
+        };
+        for file_count in 2..=5 {
+            let index = read(file_count).unwrap();
+            assert_eq!(index.entries().len(), 2, "file_count {file_count}");
+        }
+        let err = read(1).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::Encoded {
+                        kind: EncodedFault::FdiFileCountExceeded { claimed: 1 },
+                    },
+                }
+            ),
+            "{err:?}"
+        );
+        let err = read(6).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::Encoded {
+                        kind: EncodedFault::FdiFileCountShort {
+                            claimed: 6,
+                            actual: 2,
+                        },
+                    },
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// An index whose FDI holds skipped files alone parses with no entries.
+    #[test]
+    fn read_v10_plus_parses_an_fdi_of_skipped_files() {
+        let files = [("g1", i32::MIN), ("g2", i32::MIN)];
+        for file_count in [0, 2] {
+            let index = read_spec(V10Fixture {
+                file_count,
+                ..records_v10(2, &files)
+            })
+            .unwrap();
+            assert!(index.entries().is_empty(), "file_count {file_count}");
+        }
+    }
+
+    /// Other negative offsets past the records still refuse the archive:
+    /// `i32::MIN + 1` selects record 2,147,483,646 of 2.
+    #[test]
+    fn read_v10_plus_refuses_other_offsets_past_the_records() {
+        for (offset, index) in [(i32::MIN + 1, 2_147_483_646), (-3, 2)] {
+            let files = [("gone", i32::MIN), ("bad", offset)];
+            let err = read_spec(records_v10(2, &files)).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::Encoded {
+                            kind: EncodedFault::NonEncodedIndexOob {
+                                path,
+                                index: i,
+                                count: 2,
+                            },
+                        },
+                    } if path == "Content/bad" && *i == index
+                ),
+                "offset {offset}: {err:?}"
+            );
+        }
+    }
+
+    /// A skip never drops a listed file: without a PHI, a path named by a
+    /// record and by an `i32::MIN` file, in either order, lists the record.
+    #[test]
+    fn read_v10_plus_skip_keeps_a_same_path_record() {
+        for files in [[("a", -2), ("a", i32::MIN)], [("a", i32::MIN), ("a", -2)]] {
+            let spec = V10Fixture {
+                has_path_hash_index: false,
+                ..records_v10(2, &files)
+            };
+            let index = read_spec(spec).unwrap();
+            assert_eq!(
+                names_and(&index, PakEntryHeader::offset),
+                [("Content/a", 200)],
+                "{files:?}"
+            );
+        }
+    }
+
+    /// The paths naming one record around a skipped file share its header.
+    #[test]
+    fn aliasing_paths_around_a_skip_share_one_header() {
+        for has_phi in [false, true] {
+            let files = [("a", -1), ("b", i32::MIN), ("c", -1)];
+            let index = aliasing_v10(1, &files, has_phi);
+            let [a, c] = index.entries() else {
+                panic!("expected 2 entries, got {:?}", index.entries())
+            };
+            assert_eq!((a.filename(), c.filename()), ("Content/a", "Content/c"));
+            assert!(std::ptr::eq(a.header(), c.header()), "phi {has_phi}");
+            assert!(
+                a.header_is_shared() && c.header_is_shared(),
+                "phi {has_phi}"
+            );
+        }
+    }
+
+    /// The token the walk's skip log carries.
+    const SKIP_LOG: &str = "whose encoded_offset is i32::MIN";
+
+    /// One debug line counts the skipped files and samples the first five
+    /// paths in FDI order, each clamped and escaped.
+    #[tracing_test::traced_test]
+    #[test]
+    fn read_v10_plus_logs_the_skipped_files_once() {
+        use crate::untrusted::MAX_UNTRUSTED_PATH_CHARS;
+        use crate::untrusted::test_support::{
+            lines_carrying, lines_counted, lines_free_of_raw_controls,
+        };
+
+        let long = format!("{}TAIL", "p".repeat(MAX_UNTRUSTED_PATH_CHARS));
+        let files = [
+            ("a", -1),
+            ("g0\u{1b}[2J", i32::MIN),
+            (&long, i32::MIN),
+            ("g2", i32::MIN),
+            ("g3", i32::MIN),
+            ("g4", i32::MIN),
+            ("g5", i32::MIN),
+        ];
+        assert_eq!(
+            read_spec(records_v10(2, &files)).unwrap().entries().len(),
+            1
+        );
+        logs_assert(lines_counted(SKIP_LOG, 1));
+        logs_assert(lines_carrying(SKIP_LOG, "DEBUG"));
+        logs_assert(lines_carrying(SKIP_LOG, "skipped=6"));
+        logs_assert(lines_carrying(SKIP_LOG, "first 5 shown"));
+        logs_assert(lines_free_of_raw_controls(SKIP_LOG));
+        let kept = MAX_UNTRUSTED_PATH_CHARS - "Content/".len();
+        let cut = format!("Content/{}…", "p".repeat(kept));
+        let samples = format!(
+            r#"samples=["Content/g0\u{{1b}}[2J", "{cut}", "Content/g2", "Content/g3", "Content/g4"]"#
+        );
+        logs_assert(lines_carrying(SKIP_LOG, &samples));
+        assert!(!logs_contain("TAIL"));
+    }
+
+    /// Nothing is logged for an index without skips, or for one whose
+    /// `from_entries` fails; the index read that follows them logs its line.
+    #[tracing_test::traced_test]
+    #[test]
+    fn read_v10_plus_logs_skips_only_after_the_index_parses() {
+        use crate::seams::SeamSite;
+        use crate::testing::oom::arm_at;
+        use crate::untrusted::test_support::lines_counted;
+
+        let _ = read_spec(records_v10(2, &[("a", -1), ("b", -2)])).unwrap();
+        let guard = arm_at(SeamSite::Pak(PakSeam::DedupTracker), 0);
+        let err = read_spec(records_v10(2, &AROUND_GONE)).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::DedupTracker,
+                        ..
+                    },
+                }
+            ),
+            "{err:?}"
+        );
+        drop(guard);
+        logs_assert(lines_counted(SKIP_LOG, 0));
+        assert_skipped_gone(&read_spec(records_v10(2, &AROUND_GONE)).unwrap());
+        logs_assert(lines_counted(SKIP_LOG, 1));
     }
 
     /// An uncompressed encoded record of `block_count` one-byte blocks:
@@ -4330,25 +4688,30 @@ mod tests {
         }
     }
 
-    /// A v10 buffer, with no PHI, whose FDI holds `dirs`, each naming one
-    /// non-encoded record from each of its file names. Returns it with its
-    /// main index size.
-    fn dirs_v10(dirs: &[(&str, &[String])]) -> (Vec<u8>, u64) {
+    /// A v10 buffer, with no PHI, over one non-encoded record, whose FDI is
+    /// `fdi`. Returns it with its main index size.
+    fn fdi_v10(fdi: Vec<(String, Vec<(String, i32)>)>) -> (Vec<u8>, u64) {
         let mut record = Vec::new();
         write_v10_non_encoded_uncompressed(&mut record, 0, 10);
-        let files: usize = dirs.iter().map(|(_, names)| names.len()).sum();
-        let fdi = dirs.iter().map(|(dir, names)| {
-            let files = names.iter().map(|name| (name.clone(), -1)).collect();
-            (dir.to_string(), files)
-        });
+        let files: usize = fdi.iter().map(|(_, files)| files.len()).sum();
         build_v10_buffer(V10Fixture {
             file_count: u32::try_from(files).unwrap(),
             non_encoded_records: record,
             non_encoded_count: 1,
-            fdi: fdi.collect(),
+            fdi,
             has_path_hash_index: false,
             ..V10Fixture::default()
         })
+    }
+
+    /// [`fdi_v10`] whose `dirs` each name the record from each of their
+    /// file names.
+    fn dirs_v10(dirs: &[(&str, &[String])]) -> (Vec<u8>, u64) {
+        let fdi = dirs.iter().map(|(dir, names)| {
+            let files = names.iter().map(|name| (name.clone(), -1)).collect();
+            (dir.to_string(), files)
+        });
+        fdi_v10(fdi.collect())
     }
 
     /// [`dirs_v10`] with one directory.
@@ -4469,6 +4832,27 @@ mod tests {
             ),
             "{err:?}"
         );
+    }
+
+    /// The paths of skipped files are charged too: under the 190-byte name,
+    /// 203 files at `i32::MIN` and then one naming the record charge what
+    /// 204 paths naming it do, and the last is refused. One file fewer is
+    /// admitted.
+    #[test]
+    fn read_v10_plus_charges_the_paths_it_skips() {
+        let dir = format!("{}/", "d".repeat(189));
+        let read = |count| {
+            let mut files: Vec<_> = two_char_names(count)
+                .into_iter()
+                .map(|name| (name, i32::MIN))
+                .collect();
+            files.last_mut().unwrap().1 = -1;
+            let (buf, main_size) = fdi_v10(vec![(dir.clone(), files)]);
+            read_v10(buf, main_size)
+        };
+        assert_eq!(read(203).unwrap().entries().len(), 1);
+        let err = read(204).unwrap_err();
+        assert_total_exceeded(&err, FULL_PATH_TOTAL, 39_168, 39_152, &format!("{dir}cb"));
     }
 
     /// The count is bounded by the index bytes after it, which 52 records

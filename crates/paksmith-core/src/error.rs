@@ -953,8 +953,8 @@ pub enum IndexParseFault {
         /// [`PhiFdiInconsistencyKind::DuplicateHash`]).
         fdi_offset: i32,
         /// PHI's stored `encoded_offset`. `0` for
-        /// [`PhiFdiInconsistencyKind::MissingPhiEntry`] (no PHI entry
-        /// to read an offset from); the PHI's value for
+        /// [`PhiFdiInconsistencyKind::MissingPhiEntry`] (no unclaimed
+        /// PHI entry to read an offset from); the PHI's value for
         /// [`PhiFdiInconsistencyKind::OffsetMismatch`] /
         /// [`PhiFdiInconsistencyKind::ExtraPhiEntries`]; the second
         /// occurrence's offset for
@@ -998,7 +998,8 @@ pub enum EncodedFault {
         blob_size: usize,
     },
     /// A v10+ FDI's negative encoded_offset (1-based index into the
-    /// non-encoded-entries fallback) is out of range.
+    /// non-encoded-entries fallback) is out of range. `i32::MIN` is not:
+    /// the walk skips its file.
     NonEncodedIndexOob {
         /// Path of the entry whose negative offset was out of range.
         /// Populated inline at the FDI-walk site.
@@ -1051,7 +1052,8 @@ pub enum EncodedFault {
         path: Option<String>,
     },
     /// The full-directory-index walk produced more entries than the
-    /// main-index `file_count` claimed. Caught by the per-push
+    /// main-index `file_count` claimed; the files it skips at
+    /// `encoded_offset` `i32::MIN` produce none. Caught by the per-push
     /// budget guard added in PR #29. Was
     /// `IndexParseFault::FdiFileCountOverflow`; renamed to
     /// `Exceeded` during the #60 nesting to align with
@@ -1075,7 +1077,8 @@ pub enum EncodedFault {
         claimed: u32,
     },
     /// The full-directory-index walk produced FEWER entries than the
-    /// main-index `file_count` claimed. Symmetric counterpart to
+    /// main-index `file_count` claimed, even counting the files it
+    /// skips at `encoded_offset` `i32::MIN`. Symmetric counterpart to
     /// [`Self::FdiFileCountExceeded`] for truncated FDIs (writer
     /// crash, bit-flip in a `dir_count`, hand-crafted truncated
     /// archive). Without this check, downstream consumers see a
@@ -1092,10 +1095,9 @@ pub enum EncodedFault {
         /// [`Self::FdiFileCountExceeded::claimed`] for the naming
         /// rationale.
         claimed: u32,
-        /// The actual count produced by walking the FDI. Always
-        /// strictly less than `claimed` (equality is the valid case
-        /// and short-circuits the error; the per-push guard ensures
-        /// the `>` case is caught earlier as
+        /// The entries the FDI walk produced, skipped files not
+        /// included. Always strictly less than `claimed` (the per-push
+        /// guard catches a walk producing more as
         /// [`Self::FdiFileCountExceeded`]). `u64` so a future
         /// `entries.len() > u32::MAX` can't truncate to match
         /// `claimed` (#136).
@@ -1951,11 +1953,11 @@ pub enum RegionPastFileSizeKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PhiFdiInconsistencyKind {
-    /// FDI references a path whose FNV-64 hash is not present in
-    /// the PHI table. UE writers always populate the PHI from the
-    /// same source as the FDI, so a missing entry is a tampered-
-    /// or corrupted-PHI signal. `phi_offset` is carried as `0`
-    /// (no PHI entry to read).
+    /// An FDI file record found no unclaimed PHI entry for its path's
+    /// FNV-64 hash: the PHI has none, or another record already
+    /// claimed it. A record whose `encoded_offset` is `i32::MIN` and
+    /// whose hash has no PHI entry at all is accepted instead.
+    /// `phi_offset` is carried as `0` (no unclaimed entry to read).
     MissingPhiEntry,
     /// PHI's stored offset for the path's hash disagrees with the
     /// FDI's offset for that path. This is the canonical "redirect
