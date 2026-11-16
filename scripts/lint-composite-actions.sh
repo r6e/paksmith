@@ -43,7 +43,7 @@ report() {
 checked=0
 for action in "${actions[@]}"; do
   # `explode` resolves anchors and merge keys, so no step hides behind one.
-  steps="$(yq 'explode(.) | select(.runs.using == "composite") | .runs.steps | select(kind == "seq") | length' "${action}" || true)"
+  steps="$(yq 'explode(.) | select(.runs.using == "composite") | .runs.steps | select(tag == "!!seq") | length' "${action}" || true)"
   [[ "${steps}" =~ ^[0-9]+$ ]] || {
     report "${action}" "not a composite action with a list of steps, or could not be read"
     continue
