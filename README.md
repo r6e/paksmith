@@ -85,7 +85,7 @@ The [Nightly workflow](https://github.com/r6e/paksmith/actions/workflows/nightly
 
 Artifacts need a signed-in GitHub account to download and are kept for 30 days, so there is no nightly to download once `main` has been unchanged for longer than that.
 
-**In a browser:** open the [list of nightly runs](https://github.com/r6e/paksmith/actions/workflows/nightly.yml?query=branch%3Amain+is%3Asuccess) and pick the newest scheduled or manually started run that has an Artifacts section. Ignore a run that belongs to a pull request: it was not built from `main`. A run without the section found `main` unchanged and built nothing. Download the artifact for your platform.
+**In a browser:** open the [list of scheduled nightly runs](https://github.com/r6e/paksmith/actions/workflows/nightly.yml?query=branch%3Amain+is%3Asuccess+event%3Aschedule) and pick the newest run that has an Artifacts section. A run without the section found `main` unchanged and built nothing. Download the artifact for your platform. A nightly a maintainer started by hand is in the [list of manual runs](https://github.com/r6e/paksmith/actions/workflows/nightly.yml?query=branch%3Amain+is%3Asuccess+event%3Aworkflow_dispatch) instead. Both lists leave out runs that belong to a pull request, which were not built from `main`.
 
 **With the [GitHub CLI](https://cli.github.com/):** this downloads the newest nightly for one target into a directory named after the artifact; delete that directory to download the same nightly again. Set `target` to `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` or `x86_64-pc-windows-msvc`. It needs a POSIX shell (Git Bash on Windows).
 
