@@ -72,6 +72,7 @@ A GitHub App installed only on `r6e/paksmith`. `.github/workflows/release.yml` u
 - **Unreviewed code on `main`.** The token cannot push to, rewrite or delete `main`, but the "Default Branch" ruleset requires no approving review, so the token can open a pull request and merge it once the required checks pass. Without the Workflows permission it cannot change a workflow file, but it can change the scripts, actions and build code the checks run. Code on `main` ships in the nightlies and the next release and runs with the permissions of `main`'s workflows. It reads this key only through a workflow file that names the `release` environment; whether the token can merge a pull request that changes one is untested.
 - **Any other branch.** The token can create, force-push and delete every branch but `main`, including the head branch of an open pull request.
 - **A forged or destroyed release.** The token can create a `v*` tag, and the tagged commit's own copy of `release-assets.yml` then builds and publishes it. Its archives can carry valid build-provenance attestations: an attestation records which workflow built an archive, not that the tag was authorized. The token can also publish a release itself, on a `v*` tag or any other new tag, with any files attached. The README's `gh attestation verify` command rejects a file of such a release unless it is a byte-for-byte copy of an archive the workflows built and attested. GitHub attests every immutable release, so `gh release verify` accepts the release either way. The token can delete a release, and delete or publish a draft early. The "All Tags" ruleset keeps it from moving or deleting any existing tag. Releases are immutable, so a forged or deleted release uses up its version number for good.
+- **The App's installation.** The key itself can suspend or uninstall the App's installation through the API, which stops the release workflow.
 
 There is no complete record of these actions: a personal account has no organization audit log. The repository's Activity view shows branch changes, and the pull request, tag and release pages show what still exists, but a deleted release or draft leaves no page behind.
 
@@ -87,7 +88,7 @@ For a **suspected-leak** rotation, change the order:
 
 1. Suspend the App's installation (**Repo owner Settings → Applications → Installed GitHub Apps → Configure → Suspend**). This cuts off installation tokens already minted with the leaked key, which otherwise last up to an hour and survive the key's deletion. The App's own credentials cannot lift a suspension made from this page.
 2. Generate the new key (step 2 of the rotation procedure) and delete the leaked one. GitHub will not delete an App's only key.
-3. Review what the old key could have done: pull requests and merges to `main`, branches, tags, and releases, drafts included.
+3. Review what the old key could have done: pull requests and merges to `main`, branches, tags, and releases, drafts included. Revert anything found before storing the new key.
 4. Store the new key (step 3 of the rotation procedure). Unsuspend the installation once it has been suspended for at least an hour (whether an older token works again after an unsuspend is untested), then verify (step 4). The release workflow fails while the installation is suspended.
 
 #### When to rotate
