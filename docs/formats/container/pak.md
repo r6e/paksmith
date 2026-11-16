@@ -456,12 +456,20 @@ does not surface as the fault its bullet names.
   charge an entry's payload extent to a `PayloadLedger` for the file on
   its first read, before reading anything of it, so each name of one
   region pays its own charge. A second read of the entry is free, and a
-  read past `MAX_READS_PER_ENTRY` (2) is refused. `verify()` keeps its
-  own ledger. Surfaces as the ledger's faults above, or for that read as
+  read past `MAX_READS_PER_ENTRY` (2) is refused. Surfaces as the
+  ledger's faults above, or for that read as
   `IndexParseFault::BoundsExceeded { field: WireField::EntryReads, value: 3, limit: 2, unit: BoundsUnit::Items, path: Some(..) }`.
   A package read over the reader ends when the budget refuses one of its
   reads, a `.ubulk` or `.uptnl` read during the parse included, where
-  the asset layer's bulk-read budgets degrade one export.
+  the asset layer's bulk-read budgets degrade one export. A read of any
+  reader first checks the index record and refuses a missing key, an
+  unsupported method, a record past the end of the file, an encrypted
+  compressed entry whose compressed size passes the 8 GiB per-entry cap,
+  a payload past the end of the file, a pre-v5 zlib entry, a block out
+  of bounds, and a compressed entry with no blocks and a nonzero
+  uncompressed size. An entry it refuses fails with its own fault and
+  isn't charged or counted, instead of being charged its extent, which
+  could refuse the reads after it. `verify()` keeps its own ledger.
 - **In-data header copies**
   (`crates/paksmith-core/src/container/pak/mod.rs`).
   A read or verify parses an entry's in-data header copy only to its
