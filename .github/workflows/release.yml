@@ -31,6 +31,13 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # The App's private key is a secret of this environment, which only
+    # `main` may use, so a workflow run on any other ref cannot read it.
+    # `deployment: false` keeps each push from being recorded as a
+    # deployment.
+    environment:
+      name: release
+      deployment: false
     steps:
       # Mints a 1h installation token via the `paksmith-release-please`
       # App (installed on this repo only). The App token unblocks PR

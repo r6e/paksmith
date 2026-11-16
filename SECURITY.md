@@ -60,7 +60,7 @@ A GitHub App installed only on `r6e/paksmith`. `.github/workflows/release.yml` u
 
 **Repository permissions**: Contents read+write (release-branch commits, the release tag, the draft release), Pull requests read+write (release PRs), Metadata read (default).
 
-**Repo configuration**: `vars.APP_CLIENT_ID` (App Client ID, non-secret), `secrets.APP_PRIVATE_KEY` (App private key, PEM-encoded).
+**Repo configuration**: `vars.APP_CLIENT_ID` (App Client ID, a non-secret repository variable) and `secrets.APP_PRIVATE_KEY` (App private key, PEM-encoded). The key is a secret of the `release` environment, whose branch policy admits only `main`, so only a job that names that environment in a workflow run on `main` can read it. It must not also exist as a repository secret, which a workflow run on any ref could read.
 
 **Blast radius if compromised**: an attacker with `APP_PRIVATE_KEY` can mint tokens scoped to **Contents + Pull Requests + Metadata on `r6e/paksmith` only** — no other repos, no org-wide resources, no Issues/Actions/Secrets/Packages access. Realistic worst case: forged commits to release branches, forged release PRs, and a forged release. Contents write lets the holder tag any commit, which `release-assets.yml` then builds and publishes, or attach assets to a draft. Releases are immutable, so a forged release's version can never be reused. A forged release's archives carry valid provenance attestations: an attestation records which workflow built an archive, not that the tag was authorized. All of it is visible in the audit log.
 
@@ -68,7 +68,7 @@ A GitHub App installed only on `r6e/paksmith`. `.github/workflows/release.yml` u
 
 1. Go to **GitHub Settings → Developer settings → GitHub Apps → `paksmith-release-please` → General → Private keys**.
 2. Click **Generate a private key** — downloads a new `.pem` file.
-3. Update the repo secret `APP_PRIVATE_KEY` (**Repo Settings → Secrets and variables → Actions → APP_PRIVATE_KEY → Update**) with the full contents of the new `.pem` (including the `-----BEGIN/END RSA PRIVATE KEY-----` lines).
+3. Update the `release` environment's secret `APP_PRIVATE_KEY` (**Repo Settings → Environments → release → Environment secrets → APP_PRIVATE_KEY → Update**) with the full contents of the new `.pem` (including the `-----BEGIN/END RSA PRIVATE KEY-----` lines).
 4. Trigger a release-workflow run (merge a release-please PR, or `gh workflow run release.yml`) and verify the `Mint installation token (paksmith-release-please App)` step succeeds with the new key.
 5. Return to the App's **Private keys** page and **Delete** the old key entry.
 
