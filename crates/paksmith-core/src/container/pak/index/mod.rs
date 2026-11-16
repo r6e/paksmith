@@ -61,6 +61,7 @@ use crate::container::pak::crypto::AesKey;
 use crate::container::pak::version::PakVersion;
 use crate::error::{AllocationContext, check_index_reserve, try_index_string, try_reserve_index};
 use crate::seams::PakSeam;
+use crate::untrusted::clamp_path;
 
 /// Cap on how many duplicate filenames we sample for the dedupe warning.
 /// Prevents the warn-log payload from growing with `dup_count`.
@@ -540,11 +541,11 @@ impl PakIndex {
                 AllocationContext::DedupSurvivorFlags,
                 PakSeam::DedupSurvivorFlags,
             )?;
-            let mut sampled_dups: Vec<&str> = Vec::new();
+            let mut sampled_dups = Vec::new();
             for entry in entries.iter().rev() {
                 let fresh = seen.insert(entry.filename());
                 if !fresh && sampled_dups.len() < MAX_SAMPLED_DUPS {
-                    sampled_dups.push(entry.filename());
+                    sampled_dups.push(clamp_path(entry.filename()));
                 }
                 survives.push(fresh);
             }
@@ -1191,6 +1192,20 @@ mod tests {
         assert!(logs_contain("dup_count=2"));
         assert!(logs_contain("first 2 shown"));
         assert!(logs_contain(r#"samples=["a", "a"]"#));
+    }
+
+    /// The warn's sampled names are clamped like any untrusted path: one past
+    /// the bound is cut to it and an ellipsis.
+    #[tracing_test::traced_test]
+    #[test]
+    fn dedup_warn_clamps_its_sampled_names() {
+        use crate::untrusted::MAX_UNTRUSTED_PATH_CHARS;
+
+        let long = "a".repeat(MAX_UNTRUSTED_PATH_CHARS + 1);
+        let _ = flat_index(&[(&long, 1), (&long, 1)]);
+        let clamped = format!("{}…", &long[..MAX_UNTRUSTED_PATH_CHARS]);
+        assert!(logs_contain(&format!(r#"samples=["{clamped}"]"#)));
+        assert!(!logs_contain(&long));
     }
 
     /// `from_entries` reserves its dedup set for every entry before it
