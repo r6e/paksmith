@@ -1081,3 +1081,119 @@ fn extract_refuses_a_hazard_entry_name() {
         "nothing may be created under the output directory"
     );
 }
+
+/// Extract a [`common::aliased_v5_pak`] over `names` and a patterned 1 KiB
+/// payload with `--jobs jobs`, assert the run exits 1 and every file it wrote
+/// holds the payload, and return its JSON summary and the message a refused
+/// read of an entry gets.
+///
+/// Each name's first read charges the record and payload. A name costs the
+/// file only a record and its FString, so for these names one charge fits
+/// the file and two pass it: the budget admits one read and refuses each
+/// other, since a refused charge isn't kept.
+fn extract_aliases(names: &[&str], jobs: &str) -> (serde_json::Value, impl Fn(&str) -> String) {
+    let payload: Vec<u8> = (0..1024u16)
+        .map(|i| u8::try_from(i % 251).unwrap())
+        .collect();
+    let bytes = common::aliased_v5_pak(names, &payload);
+    let file_size = u64::try_from(bytes.len()).unwrap();
+    let extent = common::STORED_RECORD_BYTES + u64::try_from(payload.len()).unwrap();
+    assert!(
+        extent <= file_size && 2 * extent > file_size,
+        "{extent} vs {file_size}"
+    );
+    let work = tempdir().unwrap();
+    let cfg = tempdir().unwrap();
+    let pak = work.path().join("aliased.pak");
+    fs::write(&pak, bytes).unwrap();
+    let run = common::paksmith_json(cfg.path())
+        .arg("extract")
+        .arg(&pak)
+        .args(["--jobs", jobs, "-o"])
+        .arg(work.path().join("out"))
+        .output()
+        .unwrap();
+    assert_eq!(run.status.code(), Some(1), "{run:?}");
+    let summary: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+    for output in summary["outputs"].as_array().unwrap() {
+        let written = fs::read(output["output"].as_str().unwrap()).unwrap();
+        assert!(written == payload, "{output}");
+    }
+    let refusal = move |entry: &str| {
+        format!(
+            "invalid pak index: entry `{entry}` payload_extent_total {} exceeds maximum {file_size} bytes",
+            2 * extent
+        )
+    };
+    (summary, refusal)
+}
+
+/// Extract reads each archive under its read budget (#848): of eight names
+/// for one payload, one is written and seven fail, whichever rayon reads
+/// first.
+#[test]
+fn extract_reads_an_aliasing_pak_under_the_read_budget() {
+    let names: Vec<String> = (0..8).map(|i| format!("Content/{i}.bin")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    for jobs in ["1", "4"] {
+        let (summary, refusal) = extract_aliases(&names, jobs);
+        assert_eq!(summary["counts"]["raw_copied"], 1, "{summary}");
+        assert_eq!(summary["counts"]["failed"], 7, "{summary}");
+        for failure in summary["failures"].as_array().unwrap() {
+            let entry = failure["entry"].as_str().unwrap();
+            assert_eq!(failure["error"], refusal(entry), "--jobs {jobs}");
+        }
+    }
+}
+
+/// An asset's `.uexp` read is charged too: the `.uasset` read is admitted,
+/// and the `.uexp`, naming the same bytes, is refused and fails the asset.
+#[test]
+fn extract_fails_an_asset_whose_companion_read_is_refused() {
+    let (summary, refusal) = extract_aliases(&["Content/A.uasset", "Content/A.uexp"], "1");
+    assert_eq!(summary["counts"]["skipped_companion"], 1, "{summary}");
+    assert_eq!(summary["counts"]["failed"], 1, "{summary}");
+    let failure = &summary["failures"][0];
+    assert_eq!(failure["entry"], "Content/A.uasset");
+    assert_eq!(failure["error"], refusal("Content/A.uexp"));
+}
+
+/// An entry whose block runs past the file fails with its own bounds fault
+/// before the budget charges it, so the healthy entry after it, which the
+/// whole file's charge would otherwise refuse, still extracts.
+#[test]
+fn extract_a_healthy_entry_next_to_one_whose_block_runs_past_the_file() {
+    let healthy: Vec<u8> = (0..512u16)
+        .map(|i| u8::try_from(i % 251).unwrap())
+        .collect();
+    let work = tempdir().unwrap();
+    let cfg = tempdir().unwrap();
+    let pak = work.path().join("damaged.pak");
+    let bytes = common::block_past_the_file_pak(&healthy);
+    let fault = format!(
+        "invalid pak index: entry `Content/a.bin` block 0 end exceeds file_size: observed={} limit={}",
+        1 << 20,
+        bytes.len()
+    );
+    fs::write(&pak, bytes).unwrap();
+    for jobs in ["1", "4"] {
+        let run = common::paksmith_json(cfg.path())
+            .arg("extract")
+            .arg(&pak)
+            .args(["--jobs", jobs, "-o"])
+            .arg(work.path().join(format!("out{jobs}")))
+            .output()
+            .unwrap();
+        assert_eq!(run.status.code(), Some(1), "{run:?}");
+        let summary: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+        assert_eq!(summary["counts"]["raw_copied"], 1, "{summary}");
+        assert_eq!(summary["counts"]["failed"], 1, "{summary}");
+        let output = &summary["outputs"][0];
+        assert_eq!(output["entry"], "Content/b.bin", "{summary}");
+        let written = fs::read(output["output"].as_str().unwrap()).unwrap();
+        assert!(written == healthy, "--jobs {jobs}");
+        let failure = &summary["failures"][0];
+        assert_eq!(failure["entry"], "Content/a.bin", "{summary}");
+        assert_eq!(failure["error"], fault, "--jobs {jobs}");
+    }
+}
