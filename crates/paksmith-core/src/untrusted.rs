@@ -44,22 +44,34 @@ fn clamp_to(s: &str, max_chars: usize) -> Cow<'_, str> {
 /// Fixtures for tests that check a name reaches output bounded.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use super::MAX_UNTRUSTED_CHARS;
+    use super::{MAX_UNTRUSTED_CHARS, MAX_UNTRUSTED_PATH_CHARS};
 
     /// A name that runs past the bound: `{tag}KEPT` and an ESC sequence
     /// fill the first [`MAX_UNTRUSTED_CHARS`] chars, then `{tag}CUT`
     /// starts exactly at the bound. `tag` is at most 8 chars.
     pub(crate) fn hostile_name(tag: &str) -> String {
-        let mut name = format!("{tag}KEPT\u{1b}[2J");
-        name.push_str(&"x".repeat(MAX_UNTRUSTED_CHARS - name.chars().count()));
-        name.push_str(tag);
-        name.push_str("CUT");
-        name
+        past_bound(format!("{tag}KEPT\u{1b}[2J"), tag, MAX_UNTRUSTED_CHARS)
+    }
+
+    /// A path that runs past the path bound: `Content/{tag}KEPT` and
+    /// padding fill the first [`MAX_UNTRUSTED_PATH_CHARS`] chars, then
+    /// `{tag}CUT` starts exactly at the bound. The `Content/` directory
+    /// lets a v10+ full directory index split it into directory and file.
+    pub(crate) fn hostile_path(tag: &str) -> String {
+        past_bound(format!("Content/{tag}KEPT"), tag, MAX_UNTRUSTED_PATH_CHARS)
+    }
+
+    /// `head` padded with `x` to `bound` chars, then `{tag}CUT`.
+    fn past_bound(mut head: String, tag: &str, bound: usize) -> String {
+        head.push_str(&"x".repeat(bound - head.chars().count()));
+        head.push_str(tag);
+        head.push_str("CUT");
+        head
     }
 
     /// A `logs_assert` check: at least one line carries `message`, and
-    /// each such line holds the [`hostile_name`] for `tag` clamped —
-    /// `{tag}KEPT` present, `{tag}CUT` absent.
+    /// each such line holds the [`hostile_name`] or [`hostile_path`] for
+    /// `tag` clamped — `{tag}KEPT` present, `{tag}CUT` absent.
     pub(crate) fn lines_clamped<'a>(
         message: &'a str,
         tag: &'a str,
@@ -250,6 +262,16 @@ mod tests {
         let (cut, _) = name.char_indices().nth(MAX_UNTRUSTED_CHARS).unwrap();
         assert!(name[..cut].starts_with("TAGKEPT\u{1b}[2J"), "{name:?}");
         assert_eq!(&name[cut..], "TAGCUT");
+    }
+
+    #[test]
+    fn hostile_path_cuts_exactly_at_the_bound() {
+        use super::test_support::hostile_path;
+
+        let path = hostile_path("TAG");
+        let (cut, _) = path.char_indices().nth(MAX_UNTRUSTED_PATH_CHARS).unwrap();
+        assert!(path[..cut].starts_with("Content/TAGKEPTx"), "{path:.40}");
+        assert_eq!(&path[cut..], "TAGCUT");
     }
 
     #[test]
