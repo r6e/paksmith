@@ -188,11 +188,13 @@ pub enum PaksmithError {
     },
 
     /// The pak index is malformed, allocation-bombed, or otherwise
-    /// rejects parsing. The structured `fault` carries category-specific
-    /// detail so consumers can match exhaustively rather than substring-
-    /// scanning a `String` reason; the [`Display`] impl on
-    /// [`IndexParseFault`] reproduces the same operator-visible shape
-    /// the prior `reason: String` form had.
+    /// rejects parsing, or a budgeted reader
+    /// ([`PakReader::with_read_budget`](crate::container::pak::PakReader::with_read_budget))
+    /// refuses a read or can't reserve its read counts. The structured
+    /// `fault` carries category-specific detail so consumers can match
+    /// exhaustively rather than substring-scanning a `String` reason; the
+    /// [`Display`] impl on [`IndexParseFault`] reproduces the same
+    /// operator-visible shape the prior `reason: String` form had.
     ///
     /// [`Display`]: std::fmt::Display
     #[error("invalid pak index: {fault}")]
@@ -699,18 +701,18 @@ impl fmt::Display for DecompressionFault {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IndexParseFault {
-    /// A header-claimed count or size, or a running total of them,
-    /// exceeds a structural cap.
+    /// A header-claimed count or size, a running total of them, or a
+    /// budgeted pak reader's reads of one entry, exceeds a structural cap.
     /// E.g. `block_count > MAX_BLOCKS_PER_ENTRY`,
     /// `file_count > fdi_size / 9`,
     /// `entry_count > index_size / entry_min_record_bytes(version)`,
     /// `encoded_entries_size > index_size`,
     /// `fdi_size > MAX_FDI_BYTES`, the FDI walk's running totals of
     /// encoded blocks `> encoded_entries_size / 4` and of full-path bytes
-    /// `> 16 * fdi_size`, or a
+    /// `> 16 * fdi_size`, a
     /// [`PayloadLedger`](crate::container::PayloadLedger)'s charged total
     /// plus the in-file part of the extent it refuses `>` the archive's
-    /// size.
+    /// size, or a budgeted pak reader's reads of one entry `> 2`.
     ///
     /// Construction invariant (caller-enforced): `value > limit`.
     BoundsExceeded {
@@ -1461,6 +1463,9 @@ pub enum WireField {
     /// [`PayloadLedger`](crate::container::PayloadLedger) has charged,
     /// including the entry that took the total past its budget.
     PayloadExtentTotal,
+    /// Per-entry: reads of an entry a pak reader's read budget has
+    /// admitted, including the one it refuses.
+    EntryReads,
     /// Per-entry: byte size of an FPakEntry record. An in-data copy whose
     /// parse needs bytes past its index record's size is a
     /// [`IndexParseFault::FieldMismatch`] on it.
@@ -1495,6 +1500,7 @@ impl fmt::Display for WireField {
             Self::V10EncodedBlockTotal => "encoded_block_total",
             Self::FdiFullPathTotal => "full_path_total",
             Self::PayloadExtentTotal => "payload_extent_total",
+            Self::EntryReads => "entry_reads",
             Self::RecordSize => "record_size",
             Self::IndexSize => "index_size",
         };
@@ -1621,6 +1627,8 @@ pub enum AllocationContext {
     DedupSurvivorFlags,
     /// One surviving filename copied as its `by_path` lookup key.
     ByPathKeyBytes,
+    /// A pak reader's read budget's count of reads, one per entry.
+    EntryReadCounts,
 }
 
 impl AllocationContext {
@@ -1648,6 +1656,7 @@ impl AllocationContext {
             | Self::FlatIndexEntries
             | Self::DedupTracker
             | Self::DedupSurvivorFlags
+            | Self::EntryReadCounts
             | Self::ByPathLookup
             | Self::V10NonEncodedEntries
             | Self::V10PhiEntries
@@ -1685,6 +1694,7 @@ impl fmt::Display for AllocationContext {
             Self::EncryptedIndexBytes => "encrypted index",
             Self::DedupSurvivorFlags => "dedup survivor flags for entries",
             Self::ByPathKeyBytes => "by-path lookup key",
+            Self::EntryReadCounts => "read counts for entries",
         };
         f.write_str(s)
     }
@@ -5718,8 +5728,9 @@ pub enum MappingsParseFault {
 ///
 /// `seam`: names the [`crate::seams::PakSeam`] variant paired with
 /// this reservation. Mandatory (no `Option`) — every helper-routed
-/// index-side allocation is structurally bound to one of the 10
-/// helper-routed [`crate::seams::PakSeam`] variants. Armed from
+/// allocation is structurally bound to one of the 11 helper-routed
+/// [`crate::seams::PakSeam`] variants (the index parser's, plus a read
+/// budget's read counts). Armed from
 /// integration tests via `crate::testing::oom::arm_at`; the seam
 /// check is `__test_utils`-gated and production builds discard the
 /// dispatch.
@@ -5754,7 +5765,7 @@ pub enum MappingsParseFault {
 /// helper, and neither do `FdiFullPath` and `ByPathKey` (through
 /// [`try_index_string`]) or `DedupTracker`, `ByPathLookup`,
 /// `FstringUtf16` and `FstringUtf8` (through [`check_index_reserve`]
-/// directly), so the remaining 10 helper-routed variants do pair 1:1
+/// directly), so the remaining 11 helper-routed variants do pair 1:1
 /// with their contexts — but the structural binding lives in
 /// [`crate::seams::PakSeam`]'s per-variant doc-comments rather than
 /// a `const fn` accessor. Future cleanup path: split `PakSeam` into
@@ -8181,6 +8192,7 @@ mod tests {
             (WireField::V10EncodedBlockTotal, "encoded_block_total"),
             (WireField::FdiFullPathTotal, "full_path_total"),
             (WireField::PayloadExtentTotal, "payload_extent_total"),
+            (WireField::EntryReads, "entry_reads"),
             (WireField::RecordSize, "record_size"),
             (WireField::IndexSize, "index_size"),
         ];
@@ -8252,6 +8264,10 @@ mod tests {
                 "dedup survivor flags for entries",
             ),
             (AllocationContext::ByPathKeyBytes, "by-path lookup key"),
+            (
+                AllocationContext::EntryReadCounts,
+                "read counts for entries",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -8299,6 +8315,7 @@ mod tests {
             (AllocationContext::EncryptedIndexBytes, BoundsUnit::Bytes),
             (AllocationContext::DedupSurvivorFlags, BoundsUnit::Items),
             (AllocationContext::ByPathKeyBytes, BoundsUnit::Bytes),
+            (AllocationContext::EntryReadCounts, BoundsUnit::Items),
         ];
         for (context, expected) in cases {
             assert_eq!(
