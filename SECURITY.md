@@ -26,7 +26,7 @@ Only the latest release on `main` is actively supported with security fixes.
 ## Security Practices
 
 - `unsafe` code is denied workspace-wide via lint configuration.
-- All dependencies are subject to `cargo audit`, run automatically on every push/PR via the `Security Audit` job in `.github/workflows/ci.yml`.
+- The root workspace's dependencies are subject to `cargo audit`, which the `Security Audit` workflow (`.github/workflows/audit.yml`) runs daily and on every push that changes a `Cargo.toml` or `Cargo.lock`. The `fuzz/` workspace's advisories are checked by `cargo deny` in `.github/workflows/deny.yml`.
 - Fuzzing targets for binary parsers will be added as the format handling matures.
 - AES keys are never logged. Tracing spans for decryption operations omit key material.
 - Network requests use HTTPS exclusively. Registry endpoints validate TLS certificates.

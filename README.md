@@ -119,6 +119,24 @@ Or via Finder: right-click the binary → **Open** → confirm in the dialog.
 
 Background: notarization is permanently off the roadmap ([#168](https://github.com/r6e/paksmith/issues/168)).
 
+### Windows first-run note
+
+The `x86_64-pc-windows-msvc` binaries in releases and nightlies are **not code-signed**. Windows tags a file downloaded with a browser as coming from the internet (the Mark of the Web), and Explorer passes the tag to the files it extracts. SmartScreen may then block a binary started from Explorer with *"Windows protected your PC."* Running `paksmith` from an open terminal does not normally prompt.
+
+Windows has no `shasum`. In PowerShell, print the archive's SHA-256 and compare it with the one in `SHA256SUMS-x86_64-pc-windows-msvc.txt`; letter case does not matter. A nightly's archive has its own name:
+
+```powershell
+Get-FileHash .\paksmith-vX.Y.Z-x86_64-pc-windows-msvc.zip
+```
+
+If they differ, download the archive again. If they match, clear the tag from the archive before extracting it, so neither binary inherits it:
+
+```powershell
+Unblock-File .\paksmith-vX.Y.Z-x86_64-pc-windows-msvc.zip
+```
+
+Or in the SmartScreen dialog: **More info** → **Run anyway**.
+
 ## Running
 
 The commands below run paksmith from a source checkout (`cargo run -p paksmith-cli`). If you installed a pre-built binary, substitute `paksmith` for `cargo run -p paksmith-cli --`.
