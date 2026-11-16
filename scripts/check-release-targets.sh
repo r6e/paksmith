@@ -41,10 +41,17 @@ nightly_matrix="$(matrix "${nightly}")"
   fail "the build matrices differ: ${release} has ${release_matrix}, ${nightly} has ${nightly_matrix}"
 
 built="$(jq -r '.[].target' <<< "${release_matrix}")"
-# The publish job's loop lists one `<target>:<archive extension>` word a line.
-published="$(yq '.jobs.publish.steps[].run' "${release}" |
-  sed -nE 's/^ *([a-z0-9_-]+):(tar\.gz|zip)( \\|; do)$/\1/p' | LC_ALL=C sort)"
+# The publish job's one `for entry in ...; do` loop, whose words must all be
+# bare `<target>:<archive extension>`.
+loop="$(yq '.jobs.publish.steps[].run' "${release}" | awk '/^ *for entry in / { on = 1 } on { print } /; do$/ { on = 0 }')"
+[[ "$(grep -c 'for entry in ' <<< "${loop}")" == 1 ]] ||
+  fail "${release}'s publish job needs exactly one \`for entry in\` loop"
+entries="$(sed -E 's/^ *for entry in //; s/; do$//; s/\\$//' <<< "${loop}" | tr -s ' \n' '\n' | sed '/^$/d')"
+unread="$(grep -vE '^[a-z0-9_-]+:(tar\.gz|zip)$' <<< "${entries}" || true)"
+[[ -z "${unread}" ]] ||
+  fail "${release}'s publish loop has entries that are not a bare \`<target>:<tar.gz|zip>\`: ${unread//$'\n'/ }"
+published="$(cut -d: -f1 <<< "${entries}" | LC_ALL=C sort)"
 [[ "${published}" == "${built}" ]] ||
-  fail "${release}'s publish job lists '${published//$'\n'/ }' as \`<target>:<extension>\` lines, but its build matrix has '${built//$'\n'/ }'"
+  fail "${release}'s publish loop lists '${published//$'\n'/ }', but its build matrix has '${built//$'\n'/ }'"
 
 echo "The release and nightly workflows agree on: ${built//$'\n'/ }"
