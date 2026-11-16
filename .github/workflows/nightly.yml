@@ -90,7 +90,8 @@ jobs:
       matrix:
         include:
           # Keep in step with release-assets.yml's build matrix, which
-          # explains the runner choices.
+          # explains the runner choices;
+          # scripts/check-release-targets.sh fails CI when they differ.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
