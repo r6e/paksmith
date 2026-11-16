@@ -141,6 +141,52 @@ pub fn write_legacy_footer(
     buf.extend_from_slice(index_hash);
 }
 
+/// Append a flat index naming each `(name, record)`, a record being a
+/// [`write_pak_entry`] copy, then a legacy footer of `version` over it.
+#[cfg(test)]
+pub(crate) fn append_legacy_index<S: AsRef<str>>(
+    pak: &mut Vec<u8>,
+    version: u32,
+    entries: &[(S, Vec<u8>)],
+) {
+    let index_offset = pak.len() as u64;
+    write_fstring(pak, "../../../");
+    pak.write_u32::<LittleEndian>(u32::try_from(entries.len()).unwrap())
+        .unwrap();
+    for (name, record) in entries {
+        write_fstring(pak, name.as_ref());
+        pak.extend_from_slice(record);
+    }
+    let index_size = pak.len() as u64 - index_offset;
+    write_legacy_footer(pak, version, index_offset, index_size, &[0; 20]);
+}
+
+/// v5 flat pak with one record at offset 0 holding `payload`, stored,
+/// or zlib over `blocks` when there are any, and an index naming it
+/// once per entry of `names`. Its SHA-1 is the payload's when
+/// `hashed`, else zero, an unclaimed hash under the zero index hash.
+#[cfg(test)]
+pub(crate) fn aliased_v5_pak(
+    names: &[&str],
+    payload: &[u8],
+    blocks: &[(u64, u64)],
+    hashed: bool,
+) -> Vec<u8> {
+    use sha1::{Digest, Sha1};
+
+    let size = payload.len() as u64;
+    let sha1: [u8; 20] = Sha1::digest(payload).into();
+    let sha1 = if hashed { sha1 } else { [0; 20] };
+    let method = u32::from(!blocks.is_empty());
+    let mut record = Vec::new();
+    write_pak_entry(&mut record, 0, size, size, method, &sha1, blocks, 0, 0);
+    let mut pak = record.clone();
+    pak.extend_from_slice(payload);
+    let entries: Vec<_> = names.iter().map(|name| (*name, record.clone())).collect();
+    append_legacy_index(&mut pak, 5, &entries);
+    pak
+}
+
 /// Build a synthetic v8b pak with one LZ4-compressed entry, at
 /// [`LZ4_SYNTH_PATH`], carrying a REAL entry hash. The repak-written v11
 /// fixture uses the v10+ encoded index, which has no per-entry SHA1

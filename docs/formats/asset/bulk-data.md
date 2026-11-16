@@ -629,8 +629,8 @@ readers, which resolve streamed LODs while the package is parsed, charge
 each record against a per-source bulk-read ledger; a record that would
 take the decode's charges against its source past the source's length
 fails with `BulkDataParseReadsExceedSource`, and the mesh degrades to its
-generic property bag. A companion load that runs out of memory fails the
-package read instead. A later `resolve_bulk_for_export` call charges its
+generic property bag. A companion load that runs out of memory, or that
+the archive's read budget refuses, fails the package read instead. A later `resolve_bulk_for_export` call charges its
 export's records against a ledger of its own the same way, and fails
 with `BulkDataExportReadsExceedSource` instead.
 

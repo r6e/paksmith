@@ -575,10 +575,9 @@ impl PayloadLedger {
     /// [`OverflowSite::PayloadExtentTotal`] when it would take the total
     /// past `u64::MAX`. A refused charge is not kept.
     pub fn charge(&mut self, path: &str, extent: Range<u64>) -> crate::Result<()> {
-        let end = extent.end.min(self.file_size);
         let total = self
             .charged
-            .checked_add(end.saturating_sub(extent.start))
+            .checked_add(extent_in_file(&extent, self.file_size))
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
                     path: Some(path.to_string()),
@@ -599,6 +598,12 @@ impl PayloadLedger {
         self.charged = total;
         Ok(())
     }
+}
+
+/// The bytes of `extent` inside a file of `file_size` bytes, what a
+/// [`PayloadLedger`] charges for it: bytes past the end can't be read.
+pub(crate) fn extent_in_file(extent: &Range<u64>, file_size: u64) -> u64 {
+    extent.end.min(file_size).saturating_sub(extent.start)
 }
 
 /// Trait for reading archive containers regardless of format.

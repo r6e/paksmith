@@ -61,7 +61,8 @@ resolver, a UE5 data-resource entry with a non-zero cooked index, or any
 bulk-resolver error
 such as a missing companion or a source the decode has charged past its
 length) degrades the export to a generic property bag, except an
-allocation failure, which ends the package read. Typed dispatch is
+allocation failure or a companion read the archive's read budget
+refuses, which ends the package read. Typed dispatch is
 versioned-only: a `UStaticMesh` export
 in an unversioned-properties (`PKG_UnversionedProperties` + `.usmap`)
 package parses to `Asset::Generic`. The glTF
@@ -347,8 +348,9 @@ leaving the rest of the record unread, including `FNaniteResources`,
 resolver, a UE5 data-resource entry with a non-zero cooked index, or any
 bulk-resolver error such as a missing
 companion or a source the decode has charged past its length) degrades the
-export to a generic property bag, except an allocation failure, which
-ends the package read. Typed
+export to a generic property bag, except an allocation failure or a
+companion read the archive's read budget refuses, which ends the
+package read. Typed
 dispatch is versioned-only: a `UStaticMesh` export in an
 unversioned-properties (`PKG_UnversionedProperties` + `.usmap`) package
 parses to `Asset::Generic`.

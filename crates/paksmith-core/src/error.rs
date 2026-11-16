@@ -460,10 +460,10 @@ impl std::fmt::Display for InvalidFooterFault {
 pub enum DecompressionFault {
     /// The entry's compression method isn't supported by paksmith.
     /// Currently fires for Gzip, Oodle, Zstd, Unknown(_), and
-    /// UnknownByName(_); None, Zlib, and LZ4 are wired up. Both
-    /// `read_entry` (and its `stream_entry_to` worker) and
-    /// `verify_entry` reject the unsupported methods uniformly rather
-    /// than silently returning ciphertext / unhashed bytes.
+    /// UnknownByName(_); None, Zlib, and LZ4 are wired up. A read
+    /// (`read_entry` or `read_entry_to`) rejects these methods in
+    /// `PakReader::check_read`, after an encrypted entry's key check,
+    /// rather than returning bytes it can't decode.
     UnsupportedMethod {
         /// The unsupported method's typed value, as parsed from the
         /// entry header (or resolved through the v8+ FName slot).
@@ -845,9 +845,10 @@ pub enum IndexParseFault {
         /// unexpectedly.
         region: IndexRegionKind,
     },
-    /// `stream_entry_to`'s top-of-function early-reject for
-    /// unsupported compression methods was bypassed, and the dispatch
-    /// fell through to a method arm with no streaming implementation.
+    /// A read's early-reject of unsupported compression methods
+    /// (`PakReader::check_read`, before the read's I/O) was bypassed, and
+    /// `stream_entry_to`'s dispatch fell through to a method arm with no
+    /// streaming implementation.
     StreamEntryToDispatchedUnsupportedCompression {
         /// The [`CompressionMethod`] that reached the unsupported
         /// arm. Carries the full typed value so operators see whether
@@ -2260,8 +2261,8 @@ impl std::fmt::Display for IndexParseFault {
                 write!(
                     f,
                     "stream_entry_to dispatch reached an unsupported \
-                     CompressionMethod arm — early-reject at top of \
-                     function was bypassed (method: {method:?})"
+                     CompressionMethod arm — the read's early-reject in \
+                     check_read was bypassed (method: {method:?})"
                 )
             }
             Self::EncodedEntryZeroBlocks => write!(
@@ -7865,10 +7866,10 @@ mod tests {
     }
 
     /// `StreamEntryToDispatchedUnsupportedCompression` Display
-    /// renders the bypassed-early-reject diagnostic plus the
-    /// offending [`CompressionMethod`] variant, so operator log
-    /// greps see both the function-scope anchor and the specific
-    /// arm that tripped.
+    /// renders the bypassed-early-reject diagnostic, naming
+    /// `check_read` as the early-reject, plus the offending
+    /// [`CompressionMethod`] variant, so operator log greps see both
+    /// where the reject lives and the specific arm that tripped.
     #[test]
     fn index_parse_fault_display_stream_entry_to_dispatched_unsupported_compression() {
         let s = fault_display(
@@ -7879,8 +7880,8 @@ mod tests {
         assert!(
             s.starts_with(
                 "stream_entry_to dispatch reached an unsupported \
-                 CompressionMethod arm — early-reject at top of \
-                 function was bypassed"
+                 CompressionMethod arm — the read's early-reject in \
+                 check_read was bypassed"
             ),
             "got: {s}"
         );
