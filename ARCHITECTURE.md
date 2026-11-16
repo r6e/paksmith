@@ -91,6 +91,8 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
   exact reservation, doubling up to a caller's ceiling.
 - `hex.rs` — crate-private `parse_hex_bytes`, `strip_0x_prefix`, `decode_pair`
   and `to_hex_lower`. Each caller picks its prefix rule, length and error type.
+- `build_info.rs` — `version_text`, for the CLI and the GUI: a frontend's
+  version followed by the nightly build label, when the build has one.
 - `staged_replace.rs` — `StagedReplace`: replaces a file through an
   exclusively created sibling temp and a rename, carrying the destination's
   Unix access bits, or giving it `0o600` through `create_owner_only`.
