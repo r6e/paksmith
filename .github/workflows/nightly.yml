@@ -51,6 +51,9 @@ jobs:
           # this file and is listed under the same workflow and branch
           # name, so only this repository's own scheduled and manual
           # runs count.
+          #
+          # jq reads `$ENV.SHA` itself, so the shell must not expand it.
+          # shellcheck disable=SC2016
           built="$(gh api \
             "repos/${REPO}/actions/workflows/nightly.yml/runs?branch=main&head_sha=${SHA}&status=success&per_page=100" \
             --jq '[.workflow_runs[] | select(
