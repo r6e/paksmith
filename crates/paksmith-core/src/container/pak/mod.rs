@@ -658,7 +658,9 @@ impl PakReader {
     /// archive on its first read, before reading anything of it, and
     /// refuse the read whose charge the ledger refuses. A second read of
     /// an entry is free, and a third is refused. [`Self::verify`] and
-    /// [`Self::verify_entry`] don't use the budget.
+    /// [`Self::verify_entry`] don't use the budget. A package read over
+    /// this reader ([`crate::asset::Package::read_from_reader`]) ends when
+    /// the budget refuses one of its reads, a companion's included.
     ///
     /// # Errors
     ///
@@ -3554,6 +3556,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    #[cfg(feature = "__test_utils")]
+    use crate::testing::wire::{aliased_v5_pak, append_legacy_index};
 
     /// The container-generic `entries()` surface must carry the per-entry
     /// details #662 added — record offset, compression-method name, and
@@ -7250,58 +7254,6 @@ mod tests {
         for version in [PakVersion::RelativeChunkOffsets, PakVersion::PathHashIndex] {
             assert_eq!(extent_at(version, (31, 200), &blocks, 0), 1000..6040);
         }
-    }
-
-    /// Append a flat index naming each `(name, record)`, a record being a
-    /// `write_pak_entry` copy, then a legacy footer of `version` over it.
-    #[cfg(feature = "__test_utils")]
-    fn append_legacy_index<S: AsRef<str>>(
-        pak: &mut Vec<u8>,
-        version: u32,
-        entries: &[(S, Vec<u8>)],
-    ) {
-        use byteorder::{LittleEndian, WriteBytesExt};
-
-        use crate::testing::wire::{write_fstring, write_legacy_footer};
-
-        let index_offset = pak.len() as u64;
-        write_fstring(pak, "../../../");
-        pak.write_u32::<LittleEndian>(u32::try_from(entries.len()).unwrap())
-            .unwrap();
-        for (name, record) in entries {
-            write_fstring(pak, name.as_ref());
-            pak.extend_from_slice(record);
-        }
-        let index_size = pak.len() as u64 - index_offset;
-        write_legacy_footer(pak, version, index_offset, index_size, &[0; 20]);
-    }
-
-    /// v5 flat pak with one record at offset 0 holding `payload`, stored,
-    /// or zlib over `blocks` when there are any, and an index naming it
-    /// once per entry of `names`. Its SHA-1 is the payload's when
-    /// `hashed`, else zero, an unclaimed hash under the zero index hash.
-    #[cfg(feature = "__test_utils")]
-    fn aliased_v5_pak(
-        names: &[&str],
-        payload: &[u8],
-        blocks: &[(u64, u64)],
-        hashed: bool,
-    ) -> Vec<u8> {
-        use sha1::{Digest, Sha1};
-
-        use crate::testing::wire::write_pak_entry;
-
-        let size = payload.len() as u64;
-        let sha1: [u8; 20] = Sha1::digest(payload).into();
-        let sha1 = if hashed { sha1 } else { [0; 20] };
-        let method = u32::from(!blocks.is_empty());
-        let mut record = Vec::new();
-        write_pak_entry(&mut record, 0, size, size, method, &sha1, blocks, 0, 0);
-        let mut pak = record.clone();
-        pak.extend_from_slice(payload);
-        let entries: Vec<_> = names.iter().map(|name| (*name, record.clone())).collect();
-        append_legacy_index(&mut pak, 5, &entries);
-        pak
     }
 
     /// One hashed zlib entry whose only block runs to 1 MiB, past the
