@@ -8,6 +8,7 @@
 #
 # A `pwsh` script gets the expression rule but no linter. Any other shell
 # fails the check. Nothing outside `run` is read (`with`, `env`, `if`).
+# A symbolic link under .github/actions fails the check.
 #
 # Usage, from the repository root (needs mikefarah's yq v4, and shellcheck):
 #   scripts/lint-composite-actions.sh [ACTION_YML...]
@@ -31,12 +32,14 @@ if (($# > 0)); then
 else
   # find does not follow a link, and following one could lead outside the
   # repository, so a link here fails the check rather than hide an action.
-  links="$(find .github/actions -type l | LC_ALL=C sort | tr '\n' ' ')"
-  [[ -z "${links}" ]] || fail "symbolic links under .github/actions are not linted; use real files: ${links% }"
+  links="$(find .github/actions -type l | LC_ALL=C sort | paste -sd ' ' -)" ||
+    fail "could not search .github/actions; run this from the repository root"
+  [[ -z "${links}" ]] || fail "symbolic links under .github/actions are not linted; use real files: ${links}"
   actions=()
   while IFS= read -r action; do
     actions+=("${action}")
-  done < <(find .github/actions \( -name action.yml -o -name action.yaml \) | LC_ALL=C sort)
+  # `-iname`: the macOS and Windows runners find Action.yml as well.
+  done < <(find .github/actions \( -iname action.yml -o -iname action.yaml \) | LC_ALL=C sort)
 fi
 ((${#actions[@]} > 0)) || fail "no action file was found under .github/actions"
 
