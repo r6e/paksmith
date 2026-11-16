@@ -29,11 +29,14 @@ done
 if (($# > 0)); then
   actions=("$@")
 else
+  # find does not follow a link, and following one could lead outside the
+  # repository, so a link here fails the check rather than hide an action.
+  links="$(find .github/actions -type l | LC_ALL=C sort | tr '\n' ' ')"
+  [[ -z "${links}" ]] || fail "symbolic links under .github/actions are not linted; use real files: ${links% }"
   actions=()
   while IFS= read -r action; do
     actions+=("${action}")
-  # `-L`: an action directory may be a symlink, and GitHub follows it.
-  done < <(find -L .github/actions \( -name action.yml -o -name action.yaml \) | LC_ALL=C sort)
+  done < <(find .github/actions \( -name action.yml -o -name action.yaml \) | LC_ALL=C sort)
 fi
 ((${#actions[@]} > 0)) || fail "no action file was found under .github/actions"
 
@@ -74,10 +77,11 @@ for action in "${actions[@]}"; do
     case "${shell}" in
       bash)
         # `--norc`, as actionlint does: a .shellcheckrc must not relax this.
-        # The two exclusions are also actionlint's: shellcheck cannot see a
-        # variable the step's `env` sets (SC2154), or a file the runner
-        # provides for `source` (SC1091).
-        shellcheck --norc --shell=bash --exclude=SC1091,SC2154 - <<< "${script}" ||
+        # The exclusions are ones actionlint also makes, for what a script
+        # alone does not show: a variable the step's `env` sets (SC2153,
+        # SC2154) and a file the runner provides for `source` (SC1091). The
+        # cost is that a misspelled variable name passes.
+        shellcheck --norc --shell=bash --exclude=SC1091,SC2153,SC2154 - <<< "${script}" ||
           report "${action}" "shellcheck findings in '${name}', listed above with line numbers relative to its script"
         checked=$((checked + 1))
         ;;
