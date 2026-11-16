@@ -32,7 +32,8 @@ else
   actions=()
   while IFS= read -r action; do
     actions+=("${action}")
-  done < <(find .github/actions \( -name action.yml -o -name action.yaml \) | LC_ALL=C sort)
+  # `-L`: an action directory may be a symlink, and GitHub follows it.
+  done < <(find -L .github/actions \( -name action.yml -o -name action.yaml \) | LC_ALL=C sort)
 fi
 ((${#actions[@]} > 0)) || fail "no action file was found under .github/actions"
 
@@ -73,7 +74,10 @@ for action in "${actions[@]}"; do
     case "${shell}" in
       bash)
         # `--norc`, as actionlint does: a .shellcheckrc must not relax this.
-        shellcheck --norc --shell=bash - <<< "${script}" ||
+        # The two exclusions are also actionlint's: shellcheck cannot see a
+        # variable the step's `env` sets (SC2154), or a file the runner
+        # provides for `source` (SC1091).
+        shellcheck --norc --shell=bash --exclude=SC1091,SC2154 - <<< "${script}" ||
           report "${action}" "shellcheck findings in '${name}', listed above with line numbers relative to its script"
         checked=$((checked + 1))
         ;;
