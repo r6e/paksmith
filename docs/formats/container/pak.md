@@ -159,12 +159,13 @@ unrecognized name, never the LZ4 codec. How this differs from repak is in
 Known divergences.
 
 That rule is not total, and the remaining cases are fail-closed:
-a slot with no NUL in its 32 bytes, and a slot whose name (the bytes
-before the first NUL) is not valid UTF-8, both make paksmith reject the ARCHIVE
-with `InvalidFooter` rather than yield a name. repak takes neither
-exit — it strips NULs, decodes the rest byte-for-byte as Latin-1, and
+a slot with no NUL in its 32 bytes, a slot with a byte other than NUL
+after its first NUL, and a slot whose name (the bytes before the first
+NUL) is not valid UTF-8 all make paksmith reject the ARCHIVE with
+`InvalidFooter` rather than yield a name. repak takes none of these
+exits — it strips NULs, decodes the rest byte-for-byte as Latin-1, and
 lets an unmatched name resolve to no method — so it opens files
-paksmith refuses. Both are in Known divergences.
+paksmith refuses. All three are in Known divergences.
 
 An entry pointing at an empty slot, an out-of-range index, or an
 unrecognized name resolves to an *unknown method*, never to
@@ -556,43 +557,53 @@ policy.
     code units, and
     refuses the archive once its paths' bytes pass 16 times the FDI's
     size (Implementation hardening).
-  - **Compression-slot name.** Paksmith ends the name at the first NUL
-    and ignores the rest of the slot, then matches codec names
-    case-insensitively. repak removes every NUL in the slot and joins the
-    remaining bytes (`(ch != 0).then_some(ch as char)`), and its
+  - **Compression-slot name.** Paksmith ends the name at the first NUL,
+    refuses a slot with a byte other than NUL after it
+    (*Compression-slot rejection*), and matches codec names
+    case-insensitively. repak removes every NUL in the slot and joins
+    the remaining bytes (`(ch != 0).then_some(ch as char)`), and its
     `Compression` parse is case-sensitive. CUE4Parse strips only the
     slot's trailing NULs and matches the rest with `Enum.TryParse`,
     ignoring case; a name that does not parse is `Unknown` to it[^3].
-    So `LZ4\0turbo` is LZ4 to paksmith, `LZ4turbo` (no method, raw
-    output) to repak and `Unknown` to CUE4Parse; `\0Zlib` is an empty
-    slot to paksmith, Zlib to repak and `Unknown` to CUE4Parse; and
-    `lz4` is LZ4 to paksmith and CUE4Parse but no method to repak. UE
-    zero-fills the slot after the name and writes canonical case, so
-    cooked archives are unaffected by these three. `Enum.TryParse` also
-    accepts a number, as the `CompressionMethod` value it spells, and
-    the name `None`[^3], so a slot reading `1` is Zlib to CUE4Parse and
-    one reading `None` is no compression; paksmith reads `1` and `None`
-    as unrecognized names. For an entry selecting a `None` slot,
-    CUE4Parse reads no block table from an inline record and no
-    `compressed_size` from an encoded one[^4]. It also sizes such an
-    encoded record's in-data copy at 53 bytes, where repak and paksmith
-    add `4 + 16 × blocks`[^4][^5].
-  - **Compression-slot rejection (no NUL / non-UTF-8).** Two exits from
-    `read_compression_method_table`, both fail-closed where repak is
-    total. A slot with no NUL in its 32 bytes is
-    `InvalidFooter` ("compression slot N not NUL-terminated
+    So `lz4` is LZ4 to paksmith and CUE4Parse but no method to repak.
+    The UnrealPak-written fixtures that name a codec spell it `Zlib`.
+    `Enum.TryParse` also accepts a number, as the `CompressionMethod`
+    value it spells, and the name `None`[^3], so a slot reading `1` is
+    Zlib to CUE4Parse and one reading `None` is no compression;
+    paksmith reads `1` and `None` as unrecognized names. For an entry
+    selecting a `None` slot, CUE4Parse reads no block table from an
+    inline record and no `compressed_size` from an encoded one[^4]. It
+    also sizes such an encoded record's in-data copy at 53 bytes, where
+    repak and paksmith add `4 + 16 × blocks`[^4][^5].
+  - **Compression-slot rejection (no NUL / bytes after the NUL /
+    non-UTF-8).** Three exits from `read_compression_method_table`, all
+    fail-closed where repak is total. A slot with no NUL in its 32 bytes
+    is `InvalidFooter` ("compression slot N not NUL-terminated
     within 32 bytes", hardening from issue #132, which closed a hole
-    where such a slot resolved to a 32-character name); a slot whose name
-    before the first NUL is not valid UTF-8 is `InvalidFooter` too,
-    refusing the whole archive rather than reading the slot as empty
-    (which would fail only the entries that reference it). repak does neither: it decodes the
-    non-NUL bytes as Latin-1 (`ch as char`, which cannot fail) and an
-    unmatched name simply resolves to no method. So a pak with a
-    32-character codec FName, 0xFF padding with no NUL, or a CP-1252 name opens in
-    repak and is REJECTED by paksmith — a whole-archive refusal, not a
-    per-entry difference. CUE4Parse takes all 32 bytes of a slot with no
-    NUL as its name, and logs a name `Enum.TryParse` does not match and
+    where such a slot resolved to a 32-character name). A slot with a
+    byte other than NUL after its first NUL, a space included, is
+    `InvalidFooter` ("compression slot N has non-NUL byte 0xHH at slot
+    offset K after its name"). Every slot of the UnrealPak-written
+    fixtures (`real_v8b_encrypted_*.pak` and `real_v11_encrypted_*.pak`,
+    Verification → Fixtures) is NUL after its name, a corpus
+    observation, and repak's writer starts each slot as 32 NULs and
+    copies the name into its start[^6]. A slot whose name before the
+    first NUL is not valid UTF-8 is `InvalidFooter` too, refusing the
+    whole archive rather than reading the slot as empty (which would
+    fail only the entries that reference it). repak does none of these:
+    it removes every NUL, joins the remaining bytes into the name and
+    decodes them as Latin-1 (`ch as char`, which cannot fail), and an
+    unmatched name simply resolves to no method[^6]. So `LZ4\0turbo` is
+    `LZ4turbo` (no method, raw output) to repak, `\0Zlib` is Zlib to
+    repak, and a pak with a 32-character codec FName, 0xFF padding with
+    no NUL, or a CP-1252 name opens in repak; paksmith REJECTS all of
+    them — a whole-archive refusal, not a per-entry difference.
+    CUE4Parse refuses neither a slot with bytes after an earlier NUL nor
+    one with no NUL: it strips only a slot's trailing NULs, so the bytes
+    after an earlier NUL stay in its name and a slot with no NUL keeps
+    all 32 bytes, and it logs a name `Enum.TryParse` does not match and
     reads it as `Unknown` rather than refusing the footer[^3].
+    `LZ4\0turbo` and `\0Zlib` are both `Unknown` to it.
   - **Compression index resolution.** repak[^5] and paksmith resolve
     index `N` by position, to slot `N - 1`, empty slots included.
     CUE4Parse lists no-method followed by the named slots, skipping
@@ -745,8 +756,12 @@ fixtures generated by `paksmith-fixture-gen` and cross-validated against
     archive's version.
 [^6]: `trumank/repak/repak/src/footer.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` —
     L26-L29 (`Footer::read`: the GUID from V7, then the flag from V4 via
-    `read_bool`, both ahead of the magic) and L90-L92 (the writer emits
-    the flag from V4); at the same revision, `repak/src/lib.rs` L68-L92
+    `read_bool`, both ahead of the magic), L43-L55 (each compression
+    slot's 32 bytes with every NUL dropped and the rest taken as
+    `ch as char`, a name `Compression::from_str` rejects becoming no
+    method), L90-L92 (the writer emits the flag from V4) and L107-L115
+    (the writer starts each slot as `[0; 32]` and copies the name's
+    bytes into its start); at the same revision, `repak/src/lib.rs` L68-L92
     (`Version::size`: one byte more from V4, 16 more from V7) and
     `repak/src/ext.rs` L35-L41 (`read_bool`: `1` or `0`, anything else
     an error) and L91-L97 (`write_bool` emits only `1` or `0`).
