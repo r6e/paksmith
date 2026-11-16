@@ -96,7 +96,8 @@ jobs:
           # Debian stable / RHEL 8-9 / older Ubuntu LTS.
           #
           # Keep in step with nightly.yml's build matrix and with the
-          # target list in the publish job below.
+          # target list in the publish job below;
+          # scripts/check-release-targets.sh fails CI when they differ.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: macos-latest

@@ -1,0 +1,54 @@
+name: actionlint
+
+# Lints the workflow files, including their `run` scripts through
+# shellcheck, and checks that the release and nightly workflows name
+# the same build targets. It does not read the composite actions under
+# .github/actions/.
+#
+# No `paths` filter: a workflow the filter skips never reports its
+# check, so a filtered workflow could not be made a required check.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Pinned by version and by the SHA-256 of the linux_amd64 tarball.
+    # Bump both together; Dependabot does not track them.
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download and verify actionlint
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL "${url}" -o "${RUNNER_TEMP}/actionlint.tar.gz"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/actionlint.tar.gz" -C "${RUNNER_TEMP}" actionlint
+      - name: Lint the workflows
+        run: |
+          set -euo pipefail
+          # actionlint skips the `run` scripts without a word when it
+          # finds no shellcheck, so its absence must fail here. The
+          # runner image supplies it, and its version is not pinned.
+          shellcheck --version
+          "${RUNNER_TEMP}/actionlint" -color
+      - name: Check the release targets agree
+        run: scripts/check-release-targets.sh
