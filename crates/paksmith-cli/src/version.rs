@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 
-use paksmith_core::build::version_text;
+use paksmith_core::build_info::version_text;
 
 /// The crate version, followed by the build label when there is one.
 pub(crate) static VERSION: LazyLock<String> =

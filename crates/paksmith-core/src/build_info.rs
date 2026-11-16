@@ -1,4 +1,5 @@
-//! The version text a frontend shows for itself.
+//! The version text a frontend shows for itself. It lives here because
+//! the CLI and the GUI share code only through this crate.
 
 /// Set at compile time by the packaging action for a nightly build, so
 /// a nightly binary can be told from a release.

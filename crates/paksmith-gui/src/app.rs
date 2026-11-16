@@ -2720,7 +2720,7 @@ pub fn accent_button(
 fn about_title() -> String {
     format!(
         "Paksmith  v{}",
-        paksmith_core::build::version_text(env!("CARGO_PKG_VERSION"))
+        paksmith_core::build_info::version_text(env!("CARGO_PKG_VERSION"))
     )
 }
 
@@ -5484,16 +5484,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn about_title_names_this_build() {
+        assert!(about_title().starts_with(concat!("Paksmith  v", env!("CARGO_PKG_VERSION"))));
+    }
+
     // ── Kill 3: `delete !` on About toggle ───────────────────────────────────
     //
     // `Message::About` does `app.about_visible = !app.about_visible`.
     // The `delete !` mutant turns this into a no-op (always stays false).
     // Dispatching twice verifies the toggle: false→true→false.
-
-    #[test]
-    fn about_title_names_this_build() {
-        assert!(about_title().starts_with(concat!("Paksmith  v", env!("CARGO_PKG_VERSION"))));
-    }
 
     #[test]
     fn about_toggles_on_each_dispatch() {
