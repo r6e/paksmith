@@ -168,7 +168,8 @@ pub enum Asset {
 /// unresolvable record (no resolver, a missing companion, a non-zero data-resource
 /// cooked index, or LZO / BitWindow compression) degrades the export to a generic
 /// property bag; an allocation
-/// failure ends the package read instead. A present per-LOD
+/// failure, or a companion read the archive's read budget refuses, ends the
+/// package read instead. A present per-LOD
 /// `FDistanceFieldVolumeData` (`bValid == true`, UE4 path) is validated-skipped,
 /// so a distance-field-bearing mesh still returns its geometry. The
 /// `UStaticMesh.Deserialize` tail *after* the render
@@ -922,19 +923,32 @@ pub fn max_decode_warnings() -> u64 {
 /// asset parser's own reservations and buffer growth, FString reads among
 /// them; a `.ubulk`/`.uptnl` load or inflate, which reports the pak
 /// reader's fault; a [`crate::container::ContainerReader`] that reports
-/// one as `io::ErrorKind::OutOfMemory`), or a refused
-/// [`AssetContext::charge_derived`]. Caps that refuse before allocating,
-/// and the bulk-read budgets, degrade.
+/// one as `io::ErrorKind::OutOfMemory`), a refused
+/// [`AssetContext::charge_derived`], or a read the archive's read budget
+/// refuses ([`crate::container::pak::PakReader::with_read_budget`]). Other
+/// caps that refuse before allocating, and the bulk-read budgets, degrade.
 pub(crate) fn ends_package_read(err: &crate::PaksmithError) -> bool {
     use crate::PaksmithError as E;
-    use crate::error::{AssetParseFault as A, DecompressionFault as D, IndexParseFault as I};
+    use crate::error::{
+        AssetParseFault as A, DecompressionFault as D, IndexParseFault as I, OverflowSite,
+        WireField,
+    };
     match err {
         E::AssetParse {
             fault: A::AllocationFailed { .. } | A::DerivedStringBudgetExceeded { .. },
             ..
         }
         | E::InvalidIndex {
-            fault: I::AllocationFailed { .. },
+            fault:
+                I::AllocationFailed { .. }
+                | I::BoundsExceeded {
+                    field: WireField::PayloadExtentTotal | WireField::EntryReads,
+                    ..
+                }
+                | I::U64ArithmeticOverflow {
+                    operation: OverflowSite::PayloadExtentTotal,
+                    ..
+                },
         }
         | E::Decompression {
             fault:
@@ -1205,7 +1219,7 @@ mod ends_package_read_tests {
     use crate::error::{
         AllocationContext, AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit,
         CollectionKind, CompanionFileKind, DecompressionFault, FStringFault, IndexParseFault,
-        MappingsAllocationContext, MappingsParseFault, WireField,
+        MappingsAllocationContext, MappingsParseFault, OverflowSite, WireField,
     };
 
     fn asset_parse(fault: AssetParseFault) -> PaksmithError {
@@ -1227,9 +1241,29 @@ mod ends_package_read_tests {
         }
     }
 
+    fn bounds_exceeded(field: WireField) -> PaksmithError {
+        index(IndexParseFault::BoundsExceeded {
+            field,
+            value: 2,
+            limit: 1,
+            unit: BoundsUnit::Bytes,
+            path: Some("a.ubulk".into()),
+        })
+    }
+
+    fn overflow(operation: OverflowSite) -> PaksmithError {
+        index(IndexParseFault::U64ArithmeticOverflow {
+            path: Some("a.ubulk".into()),
+            operation,
+        })
+    }
+
     #[test]
-    fn ends_package_read_matches_out_of_memory_and_the_name_budget() {
+    fn ends_package_read_matches_out_of_memory_and_the_budgets() {
         let ends = [
+            bounds_exceeded(WireField::PayloadExtentTotal),
+            overflow(OverflowSite::PayloadExtentTotal),
+            bounds_exceeded(WireField::EntryReads),
             asset_parse(AssetParseFault::AllocationFailed {
                 context: AssetAllocationContext::CollectionElements,
                 requested: 1,
@@ -1309,13 +1343,8 @@ mod ends_package_read_tests {
             index(IndexParseFault::FStringMalformed {
                 kind: FStringFault::LengthIsZero,
             }),
-            index(IndexParseFault::BoundsExceeded {
-                field: WireField::UncompressedSize,
-                value: 2,
-                limit: 1,
-                unit: BoundsUnit::Bytes,
-                path: None,
-            }),
+            bounds_exceeded(WireField::UncompressedSize),
+            overflow(OverflowSite::PayloadEnd),
             decompression(DecompressionFault::SizeUnderrun {
                 actual: 1,
                 expected: 2,

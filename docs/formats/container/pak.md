@@ -459,6 +459,9 @@ does not surface as the fault its bullet names.
   read past `MAX_READS_PER_ENTRY` (2) is refused. `verify()` keeps its
   own ledger. Surfaces as the ledger's faults above, or for that read as
   `IndexParseFault::BoundsExceeded { field: WireField::EntryReads, value: 3, limit: 2, unit: BoundsUnit::Items, path: Some(..) }`.
+  A package read over the reader ends when the budget refuses one of its
+  reads, a `.ubulk` or `.uptnl` read during the parse included, where
+  the asset layer's bulk-read budgets degrade one export.
 - **In-data header copies**
   (`crates/paksmith-core/src/container/pak/mod.rs`).
   A read or verify parses an entry's in-data header copy only to its
