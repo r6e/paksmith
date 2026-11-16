@@ -60,20 +60,20 @@ A GitHub App installed only on `r6e/paksmith`. `.github/workflows/release.yml` u
 
 **Repository permissions**: Contents read+write (release-branch commits, the release tag, the draft release), Pull requests read+write (release PRs), Metadata read (default).
 
-**Repo configuration**: `vars.APP_CLIENT_ID` (App Client ID, a non-secret repository variable) and `secrets.RELEASE_APP_PRIVATE_KEY` (App private key, PEM-encoded), a secret of the `release` environment.
+**Configuration**: `vars.APP_CLIENT_ID` (App Client ID; a non-secret repository variable) and `secrets.RELEASE_APP_PRIVATE_KEY` (App private key, PEM-encoded; a secret of the `release` environment).
 
-- The `release` environment must have **Deployment branches and tags** set to selected branches, with `main` as the only entry. A job reads the key only by naming that environment in a workflow run on `main`. It needs no reviewers or wait timer.
-- The environment's name must match `environment.name` in `release.yml`. A job that names an environment that does not exist creates it with no branch policy, so after the environment is deleted or renamed, restore the policy before adding the key.
-- The key must not be stored as a repository secret under any name: a workflow run on any ref could read it there. `gh api repos/r6e/paksmith/actions/secrets` lists the repository secrets and must show none holding the key.
+- The `release` environment must have **Deployment branches and tags** set to selected branches, with `main` as the only entry. A job reads the key only by naming that environment in a workflow run on `main`. Any workflow on `main` can do that, so the key is guarded as well as `main` is. The environment needs no reviewers or wait timer.
+- If the `release` environment is deleted or renamed, the next run of `release.yml` recreates it with no branch policy; set the policy again before adding the key.
+- The key must not be stored as a repository secret under any name: a workflow run on any ref could read it there. `gh api repos/r6e/paksmith/actions/secrets` lists the repository secrets by name; none may hold the key.
 
-**Blast radius if compromised**: an attacker with the App's private key can mint tokens scoped to **Contents + Pull Requests + Metadata on `r6e/paksmith` only** — no other repos, no org-wide resources, no Issues/Actions/Secrets/Packages access. Realistic worst case: forged commits to release branches and to `main`, forged release PRs, and a forged release. The App is exempt from the ruleset on `main` and is a bypass actor of the one on `v*` tags, so neither holds against its token. Contents write lets the holder tag any commit, which `release-assets.yml` then builds and publishes, or attach assets to a draft. Releases are immutable, so a forged release's version can never be reused. A forged release's archives carry valid provenance attestations: an attestation records which workflow built an archive, not that the tag was authorized. All of it is visible in the audit log.
+**Blast radius if compromised**: an attacker with the App's private key can mint tokens scoped to **Contents + Pull Requests + Metadata on `r6e/paksmith` only** — no other repos, no org-wide resources, no Issues/Actions/Secrets/Packages access. Realistic worst case: forged commits to release branches and to `main`, including rewriting or deleting it, forged release PRs, and a forged release. The App is a bypass actor on both the `main` and the `v*` tag rulesets, so neither holds against its token. Contents write lets the holder tag any commit, which `release-assets.yml` then builds and publishes, or attach assets to a draft. Releases are immutable, so a forged release's version can never be reused. A forged release's archives carry valid provenance attestations: an attestation records which workflow built an archive, not that the tag was authorized. All of it is visible in the audit log.
 
 #### Rotation procedure
 
 1. Go to **GitHub Settings → Developer settings → GitHub Apps → `paksmith-release-please` → General → Private keys**.
 2. Click **Generate a private key** — downloads a new `.pem` file.
 3. Update the `release` environment's secret `RELEASE_APP_PRIVATE_KEY` (**Repo Settings → Environments → release → Environment secrets → RELEASE_APP_PRIVATE_KEY → Update**) with the full contents of the new `.pem` (including the `-----BEGIN/END RSA PRIVATE KEY-----` lines).
-4. Trigger a release-workflow run (merge a release-please PR, or `gh workflow run release.yml`) and verify the `Mint installation token (paksmith-release-please App)` step succeeds with the new key. Then confirm that `gh api repos/r6e/paksmith/actions/secrets` does not list `RELEASE_APP_PRIVATE_KEY`: a repository secret of that name would satisfy the step too.
+4. Trigger a release-workflow run (merge a release-please PR, or `gh workflow run release.yml`) and verify the `Mint installation token (paksmith-release-please App)` step succeeds with the new key. Then confirm no repository secret holds the key (see **Configuration**).
 5. Return to the App's **Private keys** page and **Delete** the old key entry.
 
 For a **suspected-leak** rotation, swap the order: delete the old key BEFORE installing the new one. This accepts a brief release-workflow outage but closes the attacker's window during the install-verify cycle.
