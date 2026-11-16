@@ -31,10 +31,11 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # The App's private key is a secret of this environment, which only
-    # `main` may use, so a workflow run on any other ref cannot read it.
-    # `deployment: false` keeps each push from being recorded as a
-    # deployment.
+    # The App's private key is a secret of this environment, whose
+    # branch policy admits only `main`, so a workflow run on any other
+    # ref cannot read it. The secret's name differs from that of the
+    # repository secret it replaced, so that one is never read instead.
+    # SECURITY.md#paksmith-release-please gives the settings this needs.
     environment:
       name: release
       deployment: false
@@ -50,7 +51,7 @@ jobs:
         id: app-token
         with:
           client-id: ${{ vars.APP_CLIENT_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           config-file: release-please-config.json
