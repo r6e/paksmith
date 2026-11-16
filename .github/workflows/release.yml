@@ -8,7 +8,8 @@ name: Release
 # release-please-config.json sets `draft` because a published release
 # accepts no more assets, and `force-tag-creation` because a draft
 # alone has no tag. All three crates share one tag, so only the
-# paksmith-cli entry creates a release.
+# paksmith-cli entry creates a release, and its draft carries that
+# crate's changelog section alone until release-assets.yml replaces it.
 #
 # If a run fails, re-run it: release-please picks up from the merged
 # release PR.

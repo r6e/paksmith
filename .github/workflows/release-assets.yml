@@ -1,7 +1,8 @@
 name: Release assets
 
 # Builds the archives for a release tag, attests their provenance,
-# attaches them to that tag's draft GitHub Release, and publishes it.
+# attaches them to that tag's draft GitHub Release, writes its notes
+# from the three crates' changelogs, and publishes it.
 # release.yml describes how the tag and the draft come to exist.
 #
 # Recovery, while the release is still a draft:
@@ -186,10 +187,31 @@ jobs:
           tagged="$(gh api "repos/${GH_REPO}/commits/refs/tags/${TAG}" --jq .sha)"
           [[ "${tagged}" == "${BUILT_SHA}" ]] ||
             fail "${TAG} names ${tagged}, but the assets were built from ${BUILT_SHA}"
+          # release-please writes one changelog per crate and puts only
+          # paksmith-cli's section on the draft, because the three crates
+          # share the tag. The notes below carry all three sections.
+          : > notes.md
+          for crate in paksmith-cli paksmith-gui paksmith-core; do
+            changelog="$(gh api "repos/${GH_REPO}/contents/crates/${crate}/CHANGELOG.md?ref=${BUILT_SHA}" \
+              -H "Accept: application/vnd.github.raw")" || fail "could not read ${crate}'s changelog at ${BUILT_SHA}"
+            section="$(awk -v version="${TAG#v}" '
+              /^## / { on = index($0, "## [" version "]") == 1 || index($0, "## " version " ") == 1; next }
+              on' <<< "${changelog}")"
+            [[ "${section}" =~ [^[:space:]] ]] || fail "${crate}'s changelog has no section for ${TAG#v}"
+            printf '## %s\n%s\n\n' "${crate}" "${section}" >> notes.md
+          done
+          # GitHub refuses a release body over 125,000 characters.
+          if (($(wc -m < notes.md) > 120000)); then
+            printf 'The changes in this release are listed in each crate'"'"'s changelog:\n\n' > notes.md
+            for crate in paksmith-cli paksmith-gui paksmith-core; do
+              printf -- '- [%s](https://github.com/%s/blob/%s/crates/%s/CHANGELOG.md)\n' \
+                "${crate}" "${GH_REPO}" "${TAG}" "${crate}" >> notes.md
+            done
+          fi
           # `--clobber` replaces assets an earlier attempt left on the draft.
           gh release upload "${TAG}" "${files[@]}" --clobber
           expected="$(printf '%s\n' "${files[@]##*/}" | sort)"
           attached="$(gh release view "${TAG}" --json assets --jq '.assets[].name' | sort)"
           [[ "${attached}" == "${expected}" ]] ||
             fail "release ${TAG} must carry only the built assets, but carries: ${attached//$'\n'/ }"
-          gh release edit "${TAG}" --draft=false
+          gh release edit "${TAG}" --notes-file notes.md --draft=false
