@@ -56,7 +56,7 @@ paksmith uses installation-scoped GitHub Apps for workflows that need permission
 
 ### r6e-release-please
 
-A GitHub App installed only on `r6e/paksmith`. `.github/workflows/release.yml` uses [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token) to mint a 1-hour installation token that authenticates the `googleapis/release-please-action` step. The release tag that step creates starts `.github/workflows/release-assets.yml`, which builds the tagged commit and publishes the release. This pattern is in place because the default `GITHUB_TOKEN` cannot create pull requests here (the org-wide "Allow GitHub Actions to create and approve pull requests" setting is intentionally off), and an App token is more durable than a PAT and is GitHub's endorsed pattern for 2024+. Background: PR #173.
+A GitHub App installed only on `r6e/paksmith`. `.github/workflows/release.yml` uses [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token) to mint a 1-hour installation token that authenticates the `googleapis/release-please-action` step. The release tag that step creates starts `.github/workflows/release-assets.yml`, which builds the tagged commit and publishes the release. This pattern is in place because the default `GITHUB_TOKEN` cannot create pull requests here (the repository's "Allow GitHub Actions to create and approve pull requests" setting is intentionally off), and an App token is more durable than a PAT and is GitHub's endorsed pattern for 2024+. Background: PR #173.
 
 **Repository permissions**: Contents read+write (release-branch commits, the release tag, the draft release), Pull requests read+write (release PRs), Metadata read (default).
 
@@ -65,8 +65,15 @@ A GitHub App installed only on `r6e/paksmith`. `.github/workflows/release.yml` u
 - The `release` environment must have **Deployment branches and tags** set to selected branches, with `main` as the only entry. A job reads the key only by naming that environment in a workflow run on `main`. Any workflow on `main` can do that, so the key is guarded as well as `main` is. The environment needs no reviewers or wait timer.
 - If the `release` environment is deleted, the next run of `release.yml` recreates it with no branch policy; set the policy again before adding the key.
 - The key must not be stored as a repository secret under any name: a workflow run on any ref could read it there. `gh api repos/r6e/paksmith/actions/secrets` lists the repository secrets by name; none may hold the key.
+- The App must be a bypass actor on the `v*` tag ruleset, which lets it create release tags, and on no other ruleset. `gh api repos/r6e/paksmith/rulesets/<id>` shows a ruleset's bypass actors; the App is integration 3727550. The blast radius below assumes this state, so update it in the same change as any ruleset edit.
 
-**Blast radius if compromised**: an attacker with the App's private key can mint tokens scoped to **Contents + Pull Requests + Metadata on `r6e/paksmith` only** — no other repos, no org-wide resources, no Issues/Actions/Secrets/Packages access. Realistic worst case: forged commits to release branches, forged release PRs, and a forged release. The App is a bypass actor on the `v*` tag ruleset, so that ruleset does not hold against its token. It is not one on the `main` ruleset: its token cannot push to, rewrite or delete `main`, but that ruleset requires no approving review, so the token can open a pull request and merge it once the required checks pass. Contents write lets the holder tag any commit, which `release-assets.yml` then builds and publishes, or attach assets to a draft. Releases are immutable, so a forged release's version can never be reused. A forged release's archives carry valid provenance attestations: an attestation records which workflow built an archive, not that the tag was authorized. All of it is visible in the audit log.
+**Blast radius if compromised**: an attacker with the App's private key can mint tokens scoped to **Contents + Pull Requests + Metadata on `r6e/paksmith` only**: no other repository, and no direct Issues, Actions, Secrets or Packages access. The worst cases:
+
+- **Unreviewed code on `main`.** The token cannot push to, rewrite or delete `main`, but the `main` ruleset requires no approving review, so the token can open a pull request and merge it once the required checks pass. That pull request can change what those checks run. Code on `main` ships in the nightlies and the next release, runs with the permissions of `main`'s workflows, and can read this key.
+- **Any other branch.** The token can create, force-push and delete every branch but `main`, including the head branch of an open pull request.
+- **A forged release.** The token can tag a commit as a release, and the tagged commit's own copy of `release-assets.yml` then builds and publishes it. Its archives can carry valid provenance attestations: an attestation records which workflow built an archive, not that the tag was authorized. It can also publish a release itself with any files attached, which carries no attestation. It cannot move or delete an existing tag. Releases are immutable, so a forged release uses up its version number for good.
+
+The repository's Activity view and its pull request and release pages show these actions; a personal account has no organization audit log.
 
 #### Rotation procedure
 
@@ -76,10 +83,10 @@ A GitHub App installed only on `r6e/paksmith`. `.github/workflows/release.yml` u
 4. Trigger a release-workflow run (merge a release-please PR, or `gh workflow run release.yml`) and verify the `Mint installation token (r6e-release-please App)` step succeeds with the new key. Then confirm no repository secret holds the key (see **Configuration**).
 5. Return to the App's **Private keys** page and **Delete** the old key entry.
 
-For a **suspected-leak** rotation, swap the order: delete the old key BEFORE installing the new one. This accepts a brief release-workflow outage but closes the attacker's window during the install-verify cycle.
+For a **suspected-leak** rotation, swap the order: delete the old key first, then follow steps 2 to 4. This accepts a brief release-workflow outage but closes the attacker's window while the new key is stored and verified.
 
 #### When to rotate
 
 - **Immediately** if the private key is suspected leaked (committed to a repo, pasted in a chat, exfiltrated from a backup, etc.).
-- **Defensively** if a contributor with access to either the App settings or the repository's settings leaves the project.
+- **Defensively** if a contributor with access to the App settings or the repository's settings (which include the `release` environment and the rulesets) leaves the project.
 - **Annually** as a baseline cadence. Aligns with NIST SP 800-57's 1–2-year ceiling for long-lived asymmetric service-account keys; set a calendar reminder. Rotation takes ~5 minutes following the procedure above.
