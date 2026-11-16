@@ -8,9 +8,10 @@
 #
 # A `pwsh` script gets the expression rule but no linter. Any other shell
 # fails the check. Nothing outside `run` is read (`with`, `env`, `if`).
-# A symbolic link under .github/actions fails the check.
+# A symbolic link under .github/actions fails the check, and so does a
+# tracked action file anywhere else, where this check would not read it.
 #
-# Usage, from the repository root (needs mikefarah's yq v4, and shellcheck):
+# Usage, from the repository root (needs git, mikefarah's yq v4, and shellcheck):
 #   scripts/lint-composite-actions.sh [ACTION_YML...]
 # Paths replace the search, for trying the check against an edited copy.
 set -euo pipefail
@@ -35,6 +36,11 @@ else
   links="$(find .github/actions -type l | LC_ALL=C sort | paste -sd ' ' -)" ||
     fail "could not search .github/actions; run this from the repository root"
   [[ -z "${links}" ]] || fail "symbolic links under .github/actions are not linted; use real files: ${links}"
+  # `uses: ./any/path` loads an action from anywhere in the repository.
+  # The optional quote is how git prints a path with unusual characters.
+  tracked="$(git ls-files)" || fail "could not list the repository's files"
+  stray="$(grep -i -E '(^|/)action\.ya?ml"?$' <<< "${tracked}" | grep -v -E '^"?\.github/actions/' | paste -sd ' ' - || true)"
+  [[ -z "${stray}" ]] || fail "action files outside .github/actions are not linted; move them there: ${stray}"
   actions=()
   while IFS= read -r action; do
     actions+=("${action}")
