@@ -16,6 +16,10 @@ inputs:
   retention-days:
     description: Days the artifact is kept.
     required: true
+  version-label:
+    description: Label `paksmith --version` prints after the version. Empty for a release.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -55,7 +59,23 @@ runs:
     # crates/paksmith-core/Cargo.toml.
     - name: Build release binaries
       shell: bash
+      env:
+        PAKSMITH_BUILD_LABEL: ${{ inputs.version-label }}
       run: cargo build --release --locked -p paksmith-cli -p paksmith-gui
+    # Nothing else runs the built binary, so a label that failed to
+    # reach the compiler would otherwise ship unnoticed.
+    - name: Check the reported version
+      shell: bash
+      env:
+        VERSION_LABEL: ${{ inputs.version-label }}
+        EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
+      run: |
+        reported="$("target/release/paksmith${EXE}" --version)"
+        suffix="${VERSION_LABEL:+ (${VERSION_LABEL})}"
+        [[ "${reported}" =~ ^paksmith\ [^\ ]+"${suffix}"$ ]] || {
+          echo "::error::paksmith reports '${reported}' for the label '${VERSION_LABEL}'"
+          exit 1
+        }
     # Ad-hoc codesigning of macOS binaries. paksmith does not pay for
     # Apple Developer Program membership, so Developer ID notarization
     # is not on the roadmap (#168 closed won't-fix) — this is the

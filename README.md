@@ -71,9 +71,17 @@ Verify the download against the published checksum file before running. The chec
 shasum -a 256 -c SHA256SUMS-<target>.txt
 ```
 
+Each archive also has a signed [build provenance attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations) recording which workflow run built it. It does not show that the release itself was authorized. With the [GitHub CLI](https://cli.github.com/), check that the release workflow built the archive from its tag:
+
+```sh
+gh attestation verify <archive> -R r6e/paksmith --signer-workflow r6e/paksmith/.github/workflows/release-assets.yml --source-ref refs/tags/vX.Y.Z
+```
+
+A release whose build had to be started again from `main` is signed from `main` instead of its tag. If the check fails, repeat it with `--source-ref refs/heads/main`, which shows only that the release workflow on `main` built the archive for some release tag.
+
 ### Nightly builds
 
-The [Nightly workflow](https://github.com/r6e/paksmith/actions/workflows/nightly.yml) builds the same three archives from `main` on any night `main` has changed. They are attached to that workflow run as artifacts named `paksmith-nightly-<date>-<commit>-<target>`, not published as releases. Nightlies are unsupported snapshots of `main`.
+The [Nightly workflow](https://github.com/r6e/paksmith/actions/workflows/nightly.yml) builds the same three archives from `main` on any night `main` has changed. They are attached to that workflow run as artifacts named `paksmith-nightly-<date>-<commit>-<target>`, not published as releases. Nightlies are unsupported snapshots of `main`. A nightly's `paksmith --version` ends with its label, as in `paksmith 0.1.0 (nightly-20261115-abc1234)`.
 
 Artifacts need a signed-in GitHub account to download and are kept for 30 days, so there is no nightly to download once `main` has been unchanged for longer than that.
 
@@ -91,7 +99,11 @@ done
 gh run download "$run" -R r6e/paksmith -n "${name:?no nightly found}" -D "$name"
 ```
 
-Either way you get the archive and its `SHA256SUMS-<target>.txt` (the browser download wraps them in a zip). Verify and extract them as for a release.
+Either way you get the archive and its `SHA256SUMS-<target>.txt` (the browser download wraps them in a zip). Verify and extract them as for a release. A nightly's attestation names the nightly workflow and `main`; pass the archive itself, not the browser's zip:
+
+```sh
+gh attestation verify <archive> -R r6e/paksmith --signer-workflow r6e/paksmith/.github/workflows/nightly.yml --source-ref refs/heads/main
+```
 
 ### macOS first-run note
 

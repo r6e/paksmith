@@ -7,6 +7,7 @@ mod output;
 mod path_util;
 mod profile_paks;
 mod search;
+mod version;
 
 use std::io::{self, Write as _};
 use std::process::ExitCode;
@@ -18,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser)]
 #[command(
     name = "paksmith",
-    version,
+    version = version::VERSION.as_str(),
     about = "Explore and extract Unreal Engine game assets"
 )]
 struct Cli {
