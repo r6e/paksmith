@@ -21,7 +21,8 @@
 //!   allocation failure at any layer instead **propagates** — that is an
 //!   out-of-memory condition the caller must see, not a corrupt export
 //!   (libraries fail fast). So does a
-//!   `DerivedStringBudgetExceeded`, which is package-wide.
+//!   `DerivedStringBudgetExceeded`, which is package-wide, and a
+//!   companion read the archive's read budget refuses.
 //! - **Versioned generic**: tagged-property iteration falls back to
 //!   [`PropertyBag::Opaque`](crate::asset::property::PropertyBag) on any
 //!   parse error other than an allocation failure or
@@ -1039,7 +1040,10 @@ impl Package {
     /// decompress) or the asset layer (parse). Companion semantics as in
     /// [`Self::read_from_pak`]: a missing `.uexp` is silently treated as
     /// a monolithic asset; missing `.ubulk` / `.uptnl` surface only if
-    /// bulk-data resolution actually needs them.
+    /// bulk-data resolution actually needs them. A read that a
+    /// [`PakReader::with_read_budget`](crate::container::pak::PakReader::with_read_budget)
+    /// reader's budget refuses, a companion's during the parse included,
+    /// ends the package read with that fault.
     ///
     /// See [`Self::read_from_reader_with`] to also supply a profile's
     /// engine-version hint (#656).
@@ -1469,14 +1473,14 @@ fn read_payloads(
                     }
                     continue;
                 }
-                // Out of memory or the package-wide name budget: propagate
-                // (libraries fail fast). Caps such as
-                // `DataTableRowCountExceeded` fire before allocating, so a
-                // malicious oversized-count export still degrades below.
+                // A fault `ends_package_read` matches: propagate (libraries
+                // fail fast). Caps such as `DataTableRowCountExceeded` fire
+                // before allocating, so a malicious oversized-count export
+                // still degrades below.
                 Err(err) if ends_package_read(&err) => return Err(err),
-                // Anything else (malformed data, an unsupported variant,
-                // an unresolvable companion): fall through to the generic
-                // parse below.
+                // Anything else `ends_package_read` doesn't match
+                // (malformed data, an unsupported variant, a missing
+                // companion): fall through to the generic parse below.
                 Err(err) => {
                     decode_warn!(
                         ctx,
@@ -2311,15 +2315,30 @@ mod tests {
         );
     }
 
+    /// A `.ubulk` loader failing with a fault `ends_package_read` matches,
+    /// an allocation failure or a refusal by the archive's read budget,
+    /// fails the package read with that fault.
     #[test]
-    fn a_companion_allocation_failure_fails_the_package_read() {
+    fn a_companion_fault_that_ends_the_package_read_fails_it() {
         use crate::error::refused_reservation as refused;
-        use crate::error::{AllocationContext, DecompressionFault, IndexParseFault};
+        use crate::error::{
+            AllocationContext, BoundsUnit, DecompressionFault, IndexParseFault, OverflowSite,
+            WireField,
+        };
 
         let inflate = |fault| PaksmithError::Decompression {
             path: "m.ubulk".into(),
             offset: 0,
             fault,
+        };
+        let exceeded = |field, value, limit, unit| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded {
+                field,
+                value,
+                limit,
+                unit,
+                path: Some("m.ubulk".into()),
+            },
         };
         let failures = [
             PaksmithError::InvalidIndex {
@@ -2347,9 +2366,16 @@ mod tests {
                 source: refused(),
             }),
             PaksmithError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory)),
+            exceeded(WireField::PayloadExtentTotal, 2, 1, BoundsUnit::Bytes),
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::U64ArithmeticOverflow {
+                    path: Some("m.ubulk".into()),
+                    operation: OverflowSite::PayloadExtentTotal,
+                },
+            },
+            exceeded(WireField::EntryReads, 3, 2, BoundsUnit::Items),
         ];
         let bytes = streamed_meshes(64, [0, 0]);
-
         for failure in failures {
             let expected = failure.to_string();
             let err = Package::read_from_inner(
@@ -2361,9 +2387,44 @@ mod tests {
                 missing_companion_loader(CompanionFileKind::Uptnl, "m.uasset".into()),
             )
             .unwrap_err();
-
             assert_eq!(err.to_string(), expected);
         }
+    }
+
+    /// A package read over a budgeted pak reader ends with the reader's
+    /// refusal of a mesh's parse-time `.ubulk` read. The `.ubulk` names
+    /// the `.uasset`'s record, so its charge takes the total past the
+    /// archive's size; an unbudgeted reader reads the package.
+    #[test]
+    fn a_budgeted_readers_companion_refusal_fails_the_package_read() {
+        use crate::container::pak::PakReader;
+        use crate::error::{IndexParseFault, WireField};
+        use crate::testing::wire::aliased_v5_pak;
+
+        let meshes = streamed_meshes(64, [0, 0]);
+        let pak = aliased_v5_pak(&["m.uasset", "m.ubulk"], &meshes, &[], false);
+        let unbudgeted = Arc::new(PakReader::from_bytes(pak.clone()).unwrap());
+        let _read = Package::read_from_reader(&unbudgeted, "m.uasset", None).unwrap();
+        let budgeted = Arc::new(
+            PakReader::from_bytes(pak)
+                .unwrap()
+                .with_read_budget()
+                .unwrap(),
+        );
+        let err = Package::read_from_reader(&budgeted, "m.uasset", None).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::PayloadExtentTotal,
+                        path: Some(p),
+                        ..
+                    },
+                } if p == "m.ubulk"
+            ),
+            "got: {err:?}"
+        );
     }
 
     #[test]

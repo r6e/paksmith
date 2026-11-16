@@ -363,7 +363,8 @@ land on the next LOD.
   resolver-less parse (header-only) or an unresolvable payload is an
   `UnsupportedFeature`/typed error (→ `Generic`) — never an empty-geometry
   typed mesh (though `lod.rs` places its guard earlier, before the
-  bulk-header read). An allocation failure instead ends the package read.
+  bulk-header read). An allocation failure, or a companion read the
+  archive's read budget refuses, instead ends the package read.
 
 Mixed inline/bulk meshes **parse with full geometry on every renderable
 LOD**; only audiovisual-stripped, `bIsLODCookedOut`, or empty-bulk
