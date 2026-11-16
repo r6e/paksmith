@@ -1,9 +1,8 @@
 name: Nightly
 
-# On nights `main` has moved since the last nightly, builds the three
-# release archives from it, attaches them to the workflow run as
-# artifacts, and attests their provenance. Nothing is published as a
-# GitHub Release.
+# On nights `main` has moved since the last nightly, builds the release
+# archives from it, attaches them to the workflow run as artifacts, and
+# attests their provenance. Nothing is published as a GitHub Release.
 #
 # A scheduled or manual run on `main` builds only when no earlier such
 # run succeeded for its commit, so a successful run is the record that
@@ -90,7 +89,8 @@ jobs:
       matrix:
         include:
           # Keep in step with release-assets.yml's build matrix, which
-          # explains the runner choices.
+          # explains the runner choices;
+          # scripts/check-release-targets.sh fails CI when they differ.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
