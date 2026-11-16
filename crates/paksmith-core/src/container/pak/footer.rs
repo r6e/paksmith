@@ -376,9 +376,11 @@ impl PakFooter {
 /// [`CompressionMethod::from_name`] (which preserves the raw name for
 /// later operator-visible diagnostics if it's unrecognized).
 ///
-/// A name (the bytes before the first NUL) that is not valid UTF-8 is
-/// `InvalidFooter`: a malformed compression-name slot is structurally a
-/// corrupt footer.
+/// Three slot faults are `InvalidFooter`, checked in this order: a slot
+/// with no NUL in its 32 bytes (#132), a slot with a byte other than NUL
+/// after its first NUL, and a name (the bytes before the first NUL) that
+/// is not valid UTF-8. A malformed compression-name slot is structurally
+/// a corrupt footer.
 fn read_compression_method_table<R: Read>(
     reader: &mut R,
     slot_count: usize,
@@ -401,6 +403,18 @@ fn read_compression_method_table<R: Read>(
                     ),
                 },
             })?;
+        // UnrealPak-written fixtures and repak's writer leave the slot NUL
+        // after the name. Checked before the empty-slot return, so a slot
+        // reading `\0Zlib` is refused rather than read as empty.
+        if let Some((offset, &byte)) = buf.iter().enumerate().skip(end).find(|&(_, &b)| b != 0) {
+            return Err(PaksmithError::InvalidFooter {
+                fault: InvalidFooterFault::OtherUnpromoted {
+                    reason: format!(
+                        "compression slot {slot_index} has non-NUL byte 0x{byte:02X} at slot offset {offset} after its name"
+                    ),
+                },
+            });
+        }
         if end == 0 {
             // Empty slot — UE writers leave unused FName positions zeroed.
             out.push(None);
@@ -483,11 +497,7 @@ mod tests {
         buf.write_u64::<LittleEndian>(index_size).unwrap();
         buf.extend_from_slice(&[0u8; 20]);
         // 4 × 32-byte slots.
-        let mut slot_bytes = [0u8; 32];
-        if let Some(name) = populated_slot_0 {
-            slot_bytes[..name.len()].copy_from_slice(name.as_bytes());
-        }
-        buf.extend_from_slice(&slot_bytes);
+        buf.extend_from_slice(&slot_named(populated_slot_0.unwrap_or("").as_bytes()));
         buf.extend_from_slice(&[0u8; 32 * 3]);
         buf
     }
@@ -569,6 +579,90 @@ mod tests {
         buf.push(flag);
         buf.extend_from_slice(&build_legacy_footer(version, index_offset, index_size, 0));
         buf
+    }
+
+    /// Every footer layout with a compression-slot table, as its version,
+    /// its slot count and its bytes with every slot empty.
+    fn slotted_footers() -> [(PakVersion, usize, Vec<u8>); 5] {
+        [
+            (
+                PakVersion::V8A,
+                COMPRESSION_SLOTS_V8A,
+                build_v8a_footer(0, 0, 100, None),
+            ),
+            (
+                PakVersion::V8B,
+                COMPRESSION_SLOTS_V8B_PLUS,
+                build_v8b_plus_footer(8, 0, 0, 100),
+            ),
+            (
+                PakVersion::FrozenIndex,
+                COMPRESSION_SLOTS_V8B_PLUS,
+                build_v9_footer(0, 0, 100, false),
+            ),
+            (
+                PakVersion::PathHashIndex,
+                COMPRESSION_SLOTS_V8B_PLUS,
+                build_v8b_plus_footer(10, 0, 0, 100),
+            ),
+            (
+                PakVersion::Fnv64BugFix,
+                COMPRESSION_SLOTS_V8B_PLUS,
+                build_v8b_plus_footer(11, 0, 0, 100),
+            ),
+        ]
+    }
+
+    /// `name` NUL-padded to a whole slot.
+    fn slot_named(name: &[u8]) -> [u8; COMPRESSION_SLOT_BYTES] {
+        let mut slot = [0u8; COMPRESSION_SLOT_BYTES];
+        slot[..name.len()].copy_from_slice(name);
+        slot
+    }
+
+    /// `footer` with slot `index` of its `count`-slot table, which ends
+    /// the footer, replaced by `slot`.
+    fn with_slot(
+        mut footer: Vec<u8>,
+        count: usize,
+        index: usize,
+        slot: [u8; COMPRESSION_SLOT_BYTES],
+    ) -> Vec<u8> {
+        let start = footer.len() - (count - index) * COMPRESSION_SLOT_BYTES;
+        footer[start..start + COMPRESSION_SLOT_BYTES].copy_from_slice(&slot);
+        footer
+    }
+
+    /// For every slotted footer, its first and last slot holding `slot` are
+    /// refused with `reason(index)`.
+    fn assert_every_slot_refused(
+        slot: [u8; COMPRESSION_SLOT_BYTES],
+        reason: impl Fn(usize) -> String,
+    ) {
+        for (version, count, footer) in slotted_footers() {
+            for index in [0, count - 1] {
+                let data = with_slot(footer.clone(), count, index, slot);
+                assert_eq!(
+                    other_unpromoted_reason(
+                        PakFooter::read_from(&mut Cursor::new(data)),
+                        &format!("{version:?} slot {index}, {}", slot.escape_ascii()),
+                    ),
+                    reason(index)
+                );
+            }
+        }
+    }
+
+    /// A slot holding `name` with `byte` at slot offset `offset` is refused,
+    /// naming the slot, the offset and the byte.
+    fn assert_slot_tail_refused(name: &[u8], offset: usize, byte: u8) {
+        let mut slot = slot_named(name);
+        slot[offset] = byte;
+        assert_every_slot_refused(slot, |index| {
+            format!(
+                "compression slot {index} has non-NUL byte 0x{byte:02X} at slot offset {offset} after its name"
+            )
+        });
     }
 
     /// V11 footers (`PathHashIndex` v11 = `Fnv64BugFix`) share the
@@ -686,42 +780,64 @@ mod tests {
     }
 
     /// A slot with no NUL in its 32 bytes is `InvalidFooter` (#132),
-    /// checked at the first and last slot.
+    /// checked at the first and last slot of every slotted footer.
     #[test]
     fn reject_unterminated_compression_slot() {
-        // V8A has 4 slots; check both ends of the loop range.
-        for slot_index in [0usize, 3] {
-            let mut data = build_v8a_footer(0, 0, 100, None);
-            // Slot 0 offset is at: payload(100) + uuid(16) +
-            // encrypted(1) + magic(4) + version(4) + offset(8) +
-            // size(8) + hash(20) = 161. Each slot is 32 bytes.
-            let slot_start = 161 + slot_index * 32;
-            for i in 0..32 {
-                data[slot_start + i] = b'A';
-            }
-            let mut cursor = Cursor::new(data);
-            let err = PakFooter::read_from(&mut cursor).unwrap_err();
-            match err {
-                PaksmithError::InvalidFooter {
-                    fault: InvalidFooterFault::OtherUnpromoted { reason },
-                } => {
-                    assert!(
-                        reason.contains(&format!("compression slot {slot_index}"))
-                            && reason.contains("not NUL-terminated"),
-                        "expected typed reason for slot {slot_index}; got: {reason}"
-                    );
-                }
-                other => panic!(
-                    "expected InvalidFooter::OtherUnpromoted for slot {slot_index}, got {other:?}"
-                ),
+        assert_every_slot_refused([b'A'; COMPRESSION_SLOT_BYTES], |index| {
+            format!("compression slot {index} not NUL-terminated within 32 bytes")
+        });
+    }
+
+    /// A byte other than NUL right after the first NUL refuses the footer,
+    /// as it does after a name ending in a space, and when the byte is a
+    /// space.
+    #[test]
+    fn reject_a_compression_slot_with_a_byte_after_its_nul() {
+        assert_slot_tail_refused(b"Zlib", 5, b'X');
+        assert_slot_tail_refused(b"LZ4 ", 5, b't');
+        assert_slot_tail_refused(b"Zlib", 5, b' ');
+    }
+
+    /// The tail runs to the slot's last byte.
+    #[test]
+    fn reject_a_compression_slot_with_a_byte_at_its_last_position() {
+        assert_slot_tail_refused(b"Zlib", COMPRESSION_SLOT_BYTES - 1, 0x01);
+    }
+
+    /// A slot whose first byte is NUL has an empty name, and is refused
+    /// rather than read as empty when a byte follows it.
+    #[test]
+    fn reject_an_empty_compression_slot_with_a_tail() {
+        assert_slot_tail_refused(b"", 1, b'Z');
+        assert_slot_tail_refused(b"", COMPRESSION_SLOT_BYTES - 1, b'Z');
+    }
+
+    /// A name NUL-padded to the end of its slot parses, at the first and
+    /// last slot of every slotted footer. The other slots are all-NUL and
+    /// asserted `None`.
+    #[test]
+    fn accept_a_nul_padded_compression_slot_after_a_name() {
+        for (version, count, footer) in slotted_footers() {
+            for index in [0, count - 1] {
+                let data = with_slot(footer.clone(), count, index, slot_named(b"Zlib"));
+                let parsed = PakFooter::read_from(&mut Cursor::new(data)).unwrap();
+                assert_eq!(parsed.version(), version);
+                let mut expected = vec![None; count];
+                expected[index] = Some(CompressionMethod::Zlib);
+                assert_eq!(
+                    parsed.compression_methods(),
+                    expected,
+                    "{version:?} slot {index}"
+                );
             }
         }
     }
 
-    /// A space is part of a slot's name, as in repak (#753).
+    /// A space is part of a slot's name, as in repak (#753), so a name
+    /// ending in a space and then NUL padding is an unrecognized name.
     #[test]
     fn parse_compression_slot_keeps_embedded_space() {
-        for name in ["LZ4 turbo", " Zlib"] {
+        for name in ["LZ4 turbo", " Zlib", "LZ4 "] {
             let data = build_v8a_footer(0, 0, 100, Some(name));
             let footer = PakFooter::read_from(&mut Cursor::new(data)).unwrap();
             assert_eq!(
