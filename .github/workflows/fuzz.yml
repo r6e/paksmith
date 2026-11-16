@@ -29,6 +29,7 @@ permissions:
 
 jobs:
   fuzz:
+    # The housekeeping job finds this run's targets by this name.
     name: cargo-fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
     # 10 min budget per target + ~5 min for toolchain + build + corpus
@@ -280,15 +281,16 @@ jobs:
             echo "- Corpus restored from cache: ${restored}"
             echo "- cmin exit code: ${CMIN_EXIT}"
           } >> "$GITHUB_STEP_SUMMARY"
-      # The housekeeping job reads this artifact's name, never its
-      # contents, to learn that cmin failed for this target.
+      # The housekeeping job looks for this artifact's name, and never
+      # reads its contents, to learn that cmin failed for this target
+      # in this attempt.
       - name: Flag a cmin failure
         # The empty-string guard matters: a skipped cmin step leaves
         # `outputs.exit` unset, and `!= '0'` alone would flag it.
         if: always() && steps.cmin.outputs.exit != '0' && steps.cmin.outputs.exit != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: fuzz-cmin-failed-${{ matrix.target }}
+          name: fuzz-cmin-failed-${{ matrix.target }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/cmin-exit
           if-no-files-found: error
           retention-days: 1
@@ -319,11 +321,13 @@ jobs:
   # Holds the write permissions, so it runs nothing from the repository
   # and nothing the fuzz jobs produced: no checkout, no cache, no
   # artifact download. It acts only on what GitHub reports about this
-  # run, and checks the shape of every name it reads.
+  # run. The fuzz jobs can still choose cache keys and artifact names,
+  # so a name counts only if it is exactly the one expected for a
+  # target of this run.
   housekeeping:
     name: housekeeping
     needs: fuzz
-    # Runs after a failed fuzz job, but not after a cancelled run.
+    # Runs whatever the fuzz jobs' results, unless the run is cancelled.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -334,31 +338,51 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      # The targets come from the workflow file's matrix by way of the
+      # job names, which code running in a fuzz job cannot change.
+      - name: List this run's fuzz targets
+        id: targets
+        run: |
+          set -euo pipefail
+          jobs="$(gh api --paginate \
+            "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" \
+            --jq '.jobs[].name')"
+          targets=()
+          while read -r job; do
+            [[ "${job}" =~ ^cargo-fuzz\ \((fuzz_[a-z0-9_]+)\)$ ]] || continue
+            targets+=("${BASH_REMATCH[1]}")
+          done <<< "${jobs}"
+          ((${#targets[@]} > 0)) || {
+            echo "::error::no job of this run is named 'cargo-fuzz (<target>)'"
+            exit 1
+          }
+          echo "list=${targets[*]}" >> "${GITHUB_OUTPUT}"
       # Keeps the newest `KEEP` corpus caches of each target on this
       # run's ref: the one just saved and one earlier generation for
       # the restore to fall back on. A target whose cache this run did
       # not save is left alone, so a failed save cannot evict an older
       # corpus. The 7-day eviction is the backstop if this step fails.
       #
-      # `?key=` is a prefix filter. jq runs once per page under
-      # `--paginate` (cli/cli#10459), so it emits every entry and
-      # `tail` drops the newest across the whole, newest-first, list.
+      # `key` is a prefix filter, so jq keeps only keys of the exact
+      # form. jq runs once per page under `--paginate` (cli/cli#10459),
+      # so it emits every entry and `tail` skips the newest `KEEP`
+      # across the whole, newest-first, list.
       - name: Prune older fuzz-corpus cache entries
         continue-on-error: true
         env:
+          TARGETS: ${{ steps.targets.outputs.list }}
           KEEP: 2
         run: |
           set -euo pipefail
-          jobs="$(gh api --paginate \
-            "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" \
-            --jq '.jobs[].name')"
-          while read -r job; do
-            [[ "${job}" =~ ^cargo-fuzz\ \((fuzz_[a-z0-9_]+)\)$ ]] || continue
-            target="${BASH_REMATCH[1]}"
+          for target in ${TARGETS}; do
             prefix="fuzz-corpus-${target}-"
-            entries="$(gh api --paginate \
-              "repos/${GH_REPO}/actions/caches?key=${prefix}&ref=${GITHUB_REF}&sort=created_at&direction=desc&per_page=100" \
-              --jq '.actions_caches[] | "\(.id) \(.key)"')"
+            if ! entries="$(gh api --paginate -X GET "repos/${GH_REPO}/actions/caches" \
+              -f key="${prefix}" -f ref="${GITHUB_REF}" \
+              -f sort=created_at -f direction=desc -F per_page=100 \
+              --jq ".actions_caches[] | select(.key | test(\"\\\\A${prefix}[0-9]+\\\\z\")) | \"\\(.id) \\(.key)\"")"; then
+              echo "::warning::${target}: could not list the corpus caches"
+              continue
+            fi
             if ! awk -v saved="${prefix}${GITHUB_RUN_ID}" '$2 == saved { found = 1 } END { exit !found }' <<< "${entries}"; then
               echo "${target}: this run saved no corpus, so nothing is pruned"
               continue
@@ -369,29 +393,29 @@ jobs:
               gh api -X DELETE "repos/${GH_REPO}/actions/caches/${id}" ||
                 echo "::warning::could not delete cache ${id}"
             done < <(tail -n +"$((KEEP + 1))" <<< "${entries}")
-          done <<< "${jobs}"
-      # A cmin failure usually means nightly drift, a harness ABI
-      # mismatch or a poisoned corpus, and would otherwise show only in
-      # the run's summary. The title is fixed per target, so later
-      # failures comment on the open issue.
+          done
+      # Raises the cmin alert, which would otherwise show only in the
+      # run's summary. The title is fixed per target, so later failures
+      # comment on the open issue. A failure here fails the job: this
+      # is the only notice of a cmin regression.
       - name: Alert on cmin failure
-        continue-on-error: true
+        if: ${{ !cancelled() && steps.targets.outcome == 'success' }}
         env:
+          TARGETS: ${{ steps.targets.outputs.list }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          names="$(gh api --paginate \
+          artifacts="$(gh api --paginate \
             "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
             --jq '.artifacts[].name')"
-          while read -r name; do
-            [[ "${name}" =~ ^fuzz-cmin-failed-(fuzz_[a-z0-9_]+)$ ]] || continue
-            target="${BASH_REMATCH[1]}"
+          failed=0
+          for target in ${TARGETS}; do
+            grep -q -x -F "fuzz-cmin-failed-${target}-${GITHUB_RUN_ATTEMPT}" <<< "${artifacts}" || continue
             title="[fuzz] cmin regression detected (target: ${target})"
             body="$(printf '%s\n' \
               "The nightly fuzz workflow's \`cargo fuzz cmin\` step exited non-zero for target \`${target}\`." \
               "" \
-              "- Run: ${RUN_URL} (its summary gives the exit code)" \
-              "- Target: \`${target}\`" \
+              "Run: ${RUN_URL} (its summary gives the exit code)" \
               "" \
               "A non-zero cmin typically indicates a toolchain incompat (nightly drift), harness ABI mismatch, or corpus poisoning." \
               "" \
@@ -400,13 +424,23 @@ jobs:
               "gh api -X DELETE \"repos/${GH_REPO}/actions/caches?key=fuzz-corpus-${target}-<run-id>\"" \
               '```')"
             # `--search` matches substrings, so jq keeps the exact title.
-            existing="$(gh issue list --state open --search "in:title \"${title}\"" \
-              --json number,title --jq "[.[] | select(.title == \"${title}\") | .number][0] // empty")"
+            # Only an issue this workflow opened counts as the existing one.
+            if ! existing="$(gh issue list --state open --author app/github-actions \
+              --search "in:title \"${title}\"" --json number,title \
+              --jq "[.[] | select(.title == \"${title}\") | .number][0] // empty")"; then
+              echo "::warning::${target}: could not search for an open alert"
+              failed=1
+              continue
+            fi
             if [[ -n "${existing}" ]]; then
               echo "Commenting on existing issue #${existing}"
-              gh issue comment "${existing}" --body "${body}"
+              gh issue comment "${existing}" --body "${body}" || failed=1
             else
               echo "Creating new alert issue"
-              gh issue create --title "${title}" --body "${body}" --label ci
+              gh issue create --title "${title}" --body "${body}" --label ci || failed=1
             fi
-          done <<< "${names}"
+          done
+          ((failed == 0)) || {
+            echo "::error::at least one cmin alert could not be raised"
+            exit 1
+          }
