@@ -357,51 +357,15 @@ jobs:
             exit 1
           }
           echo "list=${targets[*]}" >> "${GITHUB_OUTPUT}"
-      # Keeps the newest `KEEP` corpus caches of each target on this
-      # run's ref: the one just saved and one earlier generation for
-      # the restore to fall back on. A target whose cache this run did
-      # not save is left alone, so a failed save cannot evict an older
-      # corpus. The 7-day eviction is the backstop if this step fails.
-      #
-      # `key` is a prefix filter, so jq keeps only keys of the exact
-      # form. jq runs once per page under `--paginate` (cli/cli#10459),
-      # so it emits every entry and `tail` skips the newest `KEEP`
-      # across the whole, newest-first, list.
-      - name: Prune older fuzz-corpus cache entries
-        continue-on-error: true
-        env:
-          TARGETS: ${{ steps.targets.outputs.list }}
-          KEEP: 2
-        run: |
-          set -euo pipefail
-          for target in ${TARGETS}; do
-            prefix="fuzz-corpus-${target}-"
-            if ! entries="$(gh api --paginate -X GET "repos/${GH_REPO}/actions/caches" \
-              -f key="${prefix}" -f ref="${GITHUB_REF}" \
-              -f sort=created_at -f direction=desc -F per_page=100 \
-              --jq '.actions_caches[] | select(.key | test("\\A'"${prefix}"'[0-9]+\\z")) | "\(.id) \(.key)"')"; then
-              echo "::warning::${target}: could not list the corpus caches"
-              continue
-            fi
-            if ! awk -v saved="${prefix}${GITHUB_RUN_ID}" '$2 == saved { found = 1 } END { exit !found }' <<< "${entries}"; then
-              echo "${target}: this run saved no corpus, so nothing is pruned"
-              continue
-            fi
-            while read -r id key; do
-              [[ "${id}" =~ ^[0-9]+$ ]] || continue
-              echo "${target}: deleting ${key} (cache ${id})"
-              gh api -X DELETE "repos/${GH_REPO}/actions/caches/${id}" ||
-                echo "::warning::could not delete cache ${id}"
-            done < <(tail -n +"$((KEEP + 1))" <<< "${entries}")
-          done
       # Raises the cmin alert, which would otherwise show only in the
       # run's summary. The title is fixed per target, so later failures
       # comment on the open issue. A failure here fails the job: this
-      # is the only notice of a cmin regression. Recover with "Re-run
-      # all jobs": a re-run of this job alone looks for a marker from
-      # its own attempt and finds none.
+      # is the only notice of a cmin regression. A marker from any
+      # attempt of the run counts, so a re-run after a failed alert
+      # raises it again; the cost is a repeated comment when the earlier
+      # attempt's alert did go out. A target whose marker step failed is
+      # alerted too: that step runs only when cmin failed.
       - name: Alert on cmin failure
-        if: ${{ !cancelled() && steps.targets.outcome == 'success' }}
         env:
           TARGETS: ${{ steps.targets.outputs.list }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -410,9 +374,13 @@ jobs:
           artifacts="$(gh api --paginate \
             "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
             --jq '.artifacts[].name')"
+          unmarked="$(gh api --paginate \
+            "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" \
+            --jq '.jobs[] | select(any(.steps[]?; .name == "Flag a cmin failure" and .conclusion == "failure")) | .name')"
           failed=0
           for target in ${TARGETS}; do
-            grep -q -x -F "fuzz-cmin-failed-${target}-${GITHUB_RUN_ATTEMPT}" <<< "${artifacts}" || continue
+            grep -q -x -E "fuzz-cmin-failed-${target}-[0-9]+" <<< "${artifacts}" ||
+              grep -q -x -F "cargo-fuzz (${target})" <<< "${unmarked}" || continue
             title="[fuzz] cmin regression detected (target: ${target})"
             body="$(printf '%s\n' \
               "The nightly fuzz workflow's \`cargo fuzz cmin\` step exited non-zero for target \`${target}\`." \
@@ -446,3 +414,43 @@ jobs:
             echo "::error::at least one cmin alert could not be raised"
             exit 1
           }
+      # Keeps the newest `KEEP` corpus caches of each target on this
+      # run's ref: the one just saved and one earlier generation for
+      # the restore to fall back on. A target whose cache this run did
+      # not save is left alone, so a failed save cannot evict an older
+      # corpus. The 7-day eviction is the backstop if this step fails.
+      # It runs after the alert, and whether or not the alert failed, so
+      # a slow prune cannot use up the time the alert needs.
+      #
+      # `key` is a prefix filter, so jq keeps only keys of the exact
+      # form. jq runs once per page under `--paginate` (cli/cli#10459),
+      # so it emits every entry and `tail` skips the newest `KEEP`
+      # across the whole, newest-first, list.
+      - name: Prune older fuzz-corpus cache entries
+        if: ${{ !cancelled() && steps.targets.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          TARGETS: ${{ steps.targets.outputs.list }}
+          KEEP: 2
+        run: |
+          set -euo pipefail
+          for target in ${TARGETS}; do
+            prefix="fuzz-corpus-${target}-"
+            if ! entries="$(gh api --paginate -X GET "repos/${GH_REPO}/actions/caches" \
+              -f key="${prefix}" -f ref="${GITHUB_REF}" \
+              -f sort=created_at -f direction=desc -F per_page=100 \
+              --jq '.actions_caches[] | select(.key | test("\\A'"${prefix}"'[0-9]+\\z")) | "\(.id) \(.key)"')"; then
+              echo "::warning::${target}: could not list the corpus caches"
+              continue
+            fi
+            if ! awk -v saved="${prefix}${GITHUB_RUN_ID}" '$2 == saved { found = 1 } END { exit !found }' <<< "${entries}"; then
+              echo "${target}: this run saved no corpus, so nothing is pruned"
+              continue
+            fi
+            while read -r id key; do
+              [[ "${id}" =~ ^[0-9]+$ ]] || continue
+              echo "${target}: deleting ${key} (cache ${id})"
+              gh api -X DELETE "repos/${GH_REPO}/actions/caches/${id}" ||
+                echo "::warning::could not delete cache ${id}"
+            done < <(tail -n +"$((KEEP + 1))" <<< "${entries}")
+          done
