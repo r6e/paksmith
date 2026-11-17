@@ -258,13 +258,14 @@ jobs:
             link="$(awk -v start="## [${TAG#v}](" '
               index($0, start) == 1 { print substr($0, length(start) + 1); exit }' <<< "${changelog}")"
             link="${link%%)*}"
-            # Only this repository's comparison of another version tag with
-            # this one is kept, and only the first. release-please writes
+            # Only paksmith-cli's link is read, since the tag is its release,
+            # and it is kept only if it is this repository's comparison of
+            # another version tag with this one. release-please writes
             # the link whether or not its earlier tag exists, and for the
             # first release that tag was never made. Any other failed
             # lookup stops the publish, because without the earlier tag the
             # other crates' sections are not checked against it.
-            if [[ -z "${base}" && "${link}" =~ ^"https://github.com/${GH_REPO}/compare/"(${version_tag})\.\.\.(${version_tag})$ &&
+            if [[ "${crate}" == paksmith-cli && "${link}" =~ ^"https://github.com/${GH_REPO}/compare/"(${version_tag})\.\.\.(${version_tag})$ &&
               "${BASH_REMATCH[1]}" != "${TAG}" && "${BASH_REMATCH[2]}" == "${TAG}" ]]; then
               base="${BASH_REMATCH[1]}"
               if gh api "repos/${GH_REPO}/git/ref/tags/${base}" > /dev/null 2> "${gh_error}"; then
