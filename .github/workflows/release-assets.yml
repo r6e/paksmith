@@ -217,9 +217,11 @@ jobs:
           }
           compare=""
           base=""
-          # Used unquoted below, so that bash reads it as a pattern. Its
-          # one group makes the two tags matches 1 and 3.
-          version_tag='v[0-9]{1,9}(\.[0-9]{1,9}){2}'
+          # Used unquoted below, so that bash reads it as a pattern.
+          version_tag='v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}'
+          # What gh reported for a failed read, kept apart from what it
+          # read. "(HTTP 404)" there means the tag or file does not exist.
+          gh_error="$(mktemp)"
           : > notes.md
           for crate in "${crates[@]}"; do
             changelog="$(changelog_at "${crate}" "${BUILT_SHA}")" || fail "could not read ${crate}'s changelog at ${BUILT_SHA}"
@@ -237,12 +239,12 @@ jobs:
               # Any other failed read stops the publish: guessing would print
               # an earlier release's changes as this one's.
               if [[ -n "${compare}" ]]; then
-                if earlier="$(changelog_at "${crate}" "${base}" 2>&1)"; then
+                if earlier="$(changelog_at "${crate}" "${base}" 2> "${gh_error}")"; then
                   if section_of <<< "${earlier}" > /dev/null; then
                     echo "::warning::${crate}'s section for ${TAG#v} was already in its changelog at ${base}, so the notes link to it instead"
                     section="This crate's ${TAG#v} was part of an earlier release: see [this crate's changelog]($(changelog_url "${crate}"))."
                   fi
-                elif [[ "${earlier}" != *"(HTTP 404)"* ]]; then
+                elif ! grep -q -F "(HTTP 404)" "${gh_error}"; then
                   fail "could not read ${crate}'s changelog at ${base}"
                 fi
               fi
@@ -259,14 +261,18 @@ jobs:
             # Only this repository's comparison of another version tag with
             # this one is kept, and only the first. release-please writes
             # the link whether or not its earlier tag exists, and for the
-            # first release that tag was never made.
+            # first release that tag was never made. Any other failed
+            # lookup stops the publish, because without the earlier tag the
+            # other crates' sections are not checked against it.
             if [[ -z "${base}" && "${link}" =~ ^"https://github.com/${GH_REPO}/compare/"(${version_tag})\.\.\.(${version_tag})$ &&
-              "${BASH_REMATCH[1]}" != "${TAG}" && "${BASH_REMATCH[3]}" == "${TAG}" ]]; then
+              "${BASH_REMATCH[1]}" != "${TAG}" && "${BASH_REMATCH[2]}" == "${TAG}" ]]; then
               base="${BASH_REMATCH[1]}"
-              if gh api "repos/${GH_REPO}/git/ref/tags/${base}" > /dev/null 2>&1; then
+              if gh api "repos/${GH_REPO}/git/ref/tags/${base}" > /dev/null 2> "${gh_error}"; then
                 compare="${link}"
+              elif grep -q -F "(HTTP 404)" "${gh_error}"; then
+                echo "::notice::tag ${base} does not exist, so the notes carry no comparison link"
               else
-                echo "::notice::tag ${base} could not be read, so the notes carry no comparison link"
+                fail "could not look up tag ${base}"
               fi
             fi
             printf '## %s\n%s\n\n' "${crate}" "${section}" >> notes.md
