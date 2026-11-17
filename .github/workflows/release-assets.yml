@@ -12,12 +12,11 @@ name: Release assets
 #   this workflow from main with the tag. A tag push runs the tagged
 #   commit's copy of this file, re-runs included, and a dispatch runs
 #   main's. The local actions come from the tagged commit either way,
-#   so a fault in one of them needs a new tag. So does a crate's
-#   changelog that is missing, or paksmith-cli's having no section for
-#   the version, because the notes are read from the tagged commit. A
-#   dispatched run's
-#   attestations name main and its head commit as their source, not
-#   the tag and its commit.
+#   so a fault in one of them needs a new tag. So does a missing
+#   changelog, or a paksmith-cli changelog with no section for the
+#   version, because the notes are read from the tagged commit. A
+#   dispatched run's attestations name main and its head commit as
+#   their source, not the tag and its commit.
 # - The tag exists without a draft: re-run release.yml, which accepts
 #   the existing tag and creates the draft, then dispatch this workflow.
 on:
@@ -197,6 +196,9 @@ jobs:
           # share the tag, whose version is paksmith-cli's. The notes below
           # carry all three sections.
           crates=(paksmith-cli paksmith-gui paksmith-core)
+          changelog_url() {
+            echo "https://github.com/${GH_REPO}/blob/${TAG}/crates/$1/CHANGELOG.md"
+          }
           compare=""
           : > notes.md
           for crate in "${crates[@]}"; do
@@ -217,7 +219,7 @@ jobs:
               END { exit !found }' <<< "${changelog}")" || {
               [[ "${crate}" != paksmith-cli ]] || fail "${crate}'s changelog has no section for ${TAG#v}"
               echo "::warning::${crate}'s changelog has no section for ${TAG#v}, so the notes link to it instead"
-              section="No section for ${TAG#v}: see [this crate's changelog](https://github.com/${GH_REPO}/blob/${TAG}/crates/${crate}/CHANGELOG.md)."
+              section="No section for ${TAG#v}: see [this crate's changelog]($(changelog_url "${crate}"))."
             }
             [[ "${section}" =~ [^[:space:]] ]] || section="No changes in this crate."
             # The version heading, which the notes drop, links this tag's
@@ -237,8 +239,7 @@ jobs:
             echo "::warning::the notes are too long for a release body, so the release links to the changelogs instead"
             printf "The changes in this release are listed in each crate's changelog:\n\n" > notes.md
             for crate in "${crates[@]}"; do
-              printf -- '- [%s](https://github.com/%s/blob/%s/crates/%s/CHANGELOG.md)\n' \
-                "${crate}" "${GH_REPO}" "${TAG}" "${crate}" >> notes.md
+              printf -- '- [%s](%s)\n' "${crate}" "$(changelog_url "${crate}")" >> notes.md
             done
           fi
           [[ -z "${compare}" ]] || printf '\n**Full changelog**: %s\n' "${compare}" >> notes.md
