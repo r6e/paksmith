@@ -284,8 +284,8 @@ jobs:
       # The housekeeping job looks for this artifact's name, and never
       # reads its contents, to learn that cmin failed for this target.
       # The name carries the attempt so that a re-run can upload again.
-      # It also looks for this step by name, to alert when the upload
-      # failed: rename both together.
+      # The housekeeping job also matches this step's name, to alert
+      # when the upload failed: rename the step there too.
       - name: Flag a cmin failure
         # The empty-string guard matters: a skipped cmin step leaves
         # `outputs.exit` unset, and `!= '0'` alone would flag it.
@@ -333,9 +333,10 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # The only job that can enable or dispatch a workflow, so it must
-    # run no repository code. SECURITY.md's suspected-leak steps say
-    # what an older copy, without this job, allows.
+    # This is the only job that can enable or dispatch a workflow, so
+    # it must run no repository code. SECURITY.md's suspected-leak
+    # steps say what an older copy of this workflow, without this job,
+    # allows.
     permissions:
       actions: write # delete cache entries (#206)
       issues: write # open or comment on the cmin alert (#204)
