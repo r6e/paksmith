@@ -284,6 +284,8 @@ jobs:
       # The housekeeping job looks for this artifact's name, and never
       # reads its contents, to learn that cmin failed for this target.
       # The name carries the attempt so that a re-run can upload again.
+      # It also looks for this step by name, to alert when the upload
+      # failed: rename both together.
       - name: Flag a cmin failure
         # The empty-string guard matters: a skipped cmin step leaves
         # `outputs.exit` unset, and `!= '0'` alone would flag it.
