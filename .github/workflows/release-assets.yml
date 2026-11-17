@@ -199,6 +199,10 @@ jobs:
           changelog_url() {
             echo "https://github.com/${GH_REPO}/blob/${TAG}/crates/$1/CHANGELOG.md"
           }
+          # Prints a crate's changelog at a ref.
+          changelog_at() {
+            gh api "repos/${GH_REPO}/contents/crates/$1/CHANGELOG.md?ref=$2" -H "Accept: application/vnd.github.raw"
+          }
           # Prints the changelog section for this tag's version, and fails
           # when the changelog on stdin has no heading for it.
           section_of() {
@@ -213,12 +217,12 @@ jobs:
           }
           compare=""
           base=""
-          # Used unquoted below, so that bash reads it as a pattern.
-          version_tag='v[0-9]{1,9}(\.[0-9]{1,9}){0,3}'
+          # Used unquoted below, so that bash reads it as a pattern. Its
+          # one group makes the two tags matches 1 and 3.
+          version_tag='v[0-9]{1,9}(\.[0-9]{1,9}){2}'
           : > notes.md
           for crate in "${crates[@]}"; do
-            changelog="$(gh api "repos/${GH_REPO}/contents/crates/${crate}/CHANGELOG.md?ref=${BUILT_SHA}" \
-              -H "Accept: application/vnd.github.raw")" || fail "could not read ${crate}'s changelog at ${BUILT_SHA}"
+            changelog="$(changelog_at "${crate}" "${BUILT_SHA}")" || fail "could not read ${crate}'s changelog at ${BUILT_SHA}"
             # The tag is paksmith-cli's release, so a missing heading there
             # means the changelog is not this release's. Another crate may
             # have none: it did not change, or its own version differs, so
@@ -229,9 +233,7 @@ jobs:
               # A crate whose version ran ahead of paksmith-cli's had this
               # section in an earlier release. paksmith-cli comes first, so
               # the previous tag is known by the time another crate is read.
-              if [[ -n "${compare}" ]] &&
-                gh api "repos/${GH_REPO}/contents/crates/${crate}/CHANGELOG.md?ref=${base}" \
-                  -H "Accept: application/vnd.github.raw" 2> /dev/null | section_of > /dev/null; then
+              if [[ -n "${compare}" ]] && changelog_at "${crate}" "${base}" 2> /dev/null | section_of > /dev/null; then
                 echo "::warning::${crate}'s section for ${TAG#v} was already in its changelog at ${base}, so the notes link to it instead"
                 section="This crate's ${TAG#v} was part of an earlier release: see [this crate's changelog]($(changelog_url "${crate}"))."
               fi
@@ -245,13 +247,13 @@ jobs:
             link="$(awk -v start="## [${TAG#v}](" '
               index($0, start) == 1 { print substr($0, length(start) + 1); exit }' <<< "${changelog}")"
             link="${link%%)*}"
-            # Only this repository's comparison of two version tags is
-            # kept, and only the first. release-please writes the link
-            # whether or not its earlier tag exists, and for the first
-            # release that tag was never made.
-            if [[ -z "${base}" && "${link}" =~ ^"https://github.com/${GH_REPO}/compare/"${version_tag}\.\.\.${version_tag}$ ]]; then
-              base="${link##*/}"
-              base="${base%%...*}"
+            # Only this repository's comparison of another version tag with
+            # this one is kept, and only the first. release-please writes
+            # the link whether or not its earlier tag exists, and for the
+            # first release that tag was never made.
+            if [[ -z "${base}" && "${link}" =~ ^"https://github.com/${GH_REPO}/compare/"(${version_tag})\.\.\.(${version_tag})$ &&
+              "${BASH_REMATCH[1]}" != "${TAG}" && "${BASH_REMATCH[3]}" == "${TAG}" ]]; then
+              base="${BASH_REMATCH[1]}"
               if gh api "repos/${GH_REPO}/git/ref/tags/${base}" > /dev/null 2>&1; then
                 compare="${link}"
               else
