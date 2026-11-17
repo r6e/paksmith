@@ -282,8 +282,8 @@ jobs:
             echo "- cmin exit code: ${CMIN_EXIT}"
           } >> "$GITHUB_STEP_SUMMARY"
       # The housekeeping job looks for this artifact's name, and never
-      # reads its contents, to learn that cmin failed for this target
-      # in this attempt.
+      # reads its contents, to learn that cmin failed for this target.
+      # The name carries the attempt so that a re-run can upload again.
       - name: Flag a cmin failure
         # The empty-string guard matters: a skipped cmin step leaves
         # `outputs.exit` unset, and `!= '0'` alone would flag it.
@@ -362,9 +362,10 @@ jobs:
       # comment on the open issue. A failure here fails the job: this
       # is the only notice of a cmin regression. A marker from any
       # attempt of the run counts, so a re-run after a failed alert
-      # raises it again; the cost is a repeated comment when the earlier
-      # attempt's alert did go out. A target whose marker step failed is
-      # alerted too: that step runs only when cmin failed.
+      # raises it again. The cost is a repeated comment when the earlier
+      # attempt's alert did go out, even if cmin passed in the re-run.
+      # A target whose marker step failed in this attempt is alerted
+      # too: that step runs only when cmin failed.
       - name: Alert on cmin failure
         env:
           TARGETS: ${{ steps.targets.outputs.list }}
@@ -374,13 +375,13 @@ jobs:
           artifacts="$(gh api --paginate \
             "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
             --jq '.artifacts[].name')"
-          unmarked="$(gh api --paginate \
+          marker_step_failed="$(gh api --paginate \
             "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" \
             --jq '.jobs[] | select(any(.steps[]?; .name == "Flag a cmin failure" and .conclusion == "failure")) | .name')"
           failed=0
           for target in ${TARGETS}; do
             grep -q -x -E "fuzz-cmin-failed-${target}-[0-9]+" <<< "${artifacts}" ||
-              grep -q -x -F "cargo-fuzz (${target})" <<< "${unmarked}" || continue
+              grep -q -x -F "cargo-fuzz (${target})" <<< "${marker_step_failed}" || continue
             title="[fuzz] cmin regression detected (target: ${target})"
             body="$(printf '%s\n' \
               "The nightly fuzz workflow's \`cargo fuzz cmin\` step exited non-zero for target \`${target}\`." \
