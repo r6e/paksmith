@@ -695,7 +695,13 @@ policy.
   `archive_claims_integrity()` is private), and
   `ContainerReader::entry_integrity(&meta)` classifies one entry's
   stored claim against it, yielding
-  `EntryIntegrity::{NotInIndex, NoClaim, Stripped, Claim}`. Each
+  `EntryIntegrity::{NotInIndex, NoClaim, Stripped, Claim}`.
+  `IntegritySurvey` counts those states over an archive's entries, per
+  path, so paths that share one record count once each. Its
+  `mixes_hash_presence()` holds when some entry carries a claim and some
+  other is `NotInIndex` or `NoClaim`. It is information only: no read or
+  verify fails on it. `verify()` returns one as
+  `VerifyStats::integrity()`. Each
   `EntryMetadata` from `entries()` carries a `payload_extent()`, the span
   a read or verify of the entry may touch: from the record's offset
   through its header copy and payload (`compressed_size`, or
