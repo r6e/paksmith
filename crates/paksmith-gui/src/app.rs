@@ -2807,6 +2807,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         let export_menu = app.export_menu.as_ref();
         let tabs = &app.tabs;
         let entries = &archive.entries;
+        let integrity = &archive.integrity;
         let audio_device_available = app.audio.is_some();
 
         pane_grid(&app.panes, move |_pane, kind, _maximized| {
@@ -2819,7 +2820,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     export_menu,
                     tree_scroll,
                 ),
-                PaneKind::Detail => content::view(tabs, entries, accent, audio_device_available),
+                PaneKind::Detail => {
+                    content::view(tabs, entries, integrity, accent, audio_device_available)
+                }
             };
             pane_grid::Content::new(content)
         })
@@ -4086,6 +4089,7 @@ mod tests {
             );
         }
         let entry_count = paths.len();
+        let integrity = entries.values().map(|m| m.integrity).collect();
         let reader = shared_test_reader();
         let archive = LoadedArchive {
             path: PathBuf::from("test.pak"),
@@ -4094,6 +4098,7 @@ mod tests {
             tree,
             tree_scroll: crate::state::row_window::ScrollPos::default(),
             entries,
+            integrity,
             reader,
             parse_inputs: paksmith_core::asset::ParseInputs::default(),
         };

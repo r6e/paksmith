@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use paksmith_core::AesKey;
 use paksmith_core::PaksmithError;
 use paksmith_core::asset::ParseInputs;
+use paksmith_core::container::IntegritySurvey;
 use paksmith_core::profile::resolve::PakOpenContext;
 
 use crate::state::archive::{EntryMeta, LoadedArchive, OpenError};
@@ -149,6 +150,7 @@ fn build_loaded(
     // first because that move consumes `e`.
     let mut entries = std::collections::BTreeMap::new();
     let mut paths: Vec<String> = Vec::with_capacity(size_hint);
+    let mut integrity = IntegritySurvey::default();
     for e in raw_entries {
         let meta = EntryMeta {
             uncompressed_size: e.uncompressed_size(),
@@ -170,6 +172,7 @@ fn build_loaded(
             // and it matters once two archives are open at once.
             integrity: reader.entry_integrity(&e),
         };
+        integrity.record(meta.integrity);
         let path_str = e.into_path();
         let _ = entries.insert(path_str.clone(), meta);
         paths.push(path_str);
@@ -185,6 +188,7 @@ fn build_loaded(
         tree,
         tree_scroll: crate::state::row_window::ScrollPos::default(),
         entries,
+        integrity,
         reader,
         parse_inputs,
     })
@@ -250,6 +254,7 @@ mod tests {
         for (name, loaded) in [(V9_COMPRESSED, &v9c), (V9_MULTI, &v9m)] {
             let reader = &loaded.reader;
             let mut seen = 0usize;
+            let mut survey = IntegritySurvey::default();
             for e in reader.entries() {
                 let m = loaded
                     .entries
@@ -270,9 +275,11 @@ mod tests {
                     reader.entry_integrity(&e),
                     "{name}: integrity must be the entry's own"
                 );
+                survey.record(m.integrity);
                 seen += 1;
             }
             assert!(seen > 0, "{name}: fixture must yield entries");
+            assert_eq!(loaded.integrity, survey, "{name}: the per-entry fold");
         }
 
         let compressed = v9c
@@ -323,6 +330,23 @@ mod tests {
                  non-encoded entries are full Inline records that do)"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn run_surveys_the_entries_hash_presence() {
+        let v11 = run(fixture("real_v11_multi.pak"), None).await.unwrap();
+        assert_eq!(v11.integrity.not_in_index(), 3);
+        assert_eq!(v11.integrity.total(), 3);
+        assert!(!v11.integrity.mixes_hash_presence());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hash_presence.pak");
+        let pak = paksmith_core::testing::v10::hash_presence_v11_pak(true);
+        std::fs::write(&path, pak).unwrap();
+        let loaded = run(path, None).await.unwrap();
+        assert_eq!(loaded.integrity.claim(), 1);
+        assert_eq!(loaded.integrity.not_in_index(), 1);
+        assert!(loaded.integrity.mixes_hash_presence());
     }
 
     #[tokio::test]

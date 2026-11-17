@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use paksmith_core::container::{ContainerReader, EntryIntegrity};
+use paksmith_core::container::{ContainerReader, EntryIntegrity, IntegritySurvey};
 
 use crate::state::tree::Tree;
 
@@ -87,6 +87,9 @@ pub struct LoadedArchive {
     /// selected file. Directories have no entry here (they are synthetic nodes
     /// in the tree, not real archive entries).
     pub entries: BTreeMap<String, EntryMeta>,
+    /// The fold of every entry's [`EntryMeta::integrity`]. The SHA-1 row
+    /// reads it.
+    pub integrity: IntegritySurvey,
     /// The open container reader (type-erased — #654: the GUI never
     /// names a concrete reader type), retained so asset tabs can read +
     /// parse entries on demand. `Arc` so the async asset-load task can
@@ -121,6 +124,7 @@ impl std::fmt::Debug for LoadedArchive {
             .field("tree", &self.tree)
             .field("tree_scroll", &self.tree_scroll)
             .field("entries", &self.entries)
+            .field("integrity", &self.integrity)
             .field("reader", &"<ContainerReader>")
             .field("parse_inputs", &self.parse_inputs)
             .finish()
@@ -230,6 +234,10 @@ mod tests {
         assert!(
             debug_str.contains("parse_inputs: ParseInputs"),
             "Debug must show the parse inputs; got: {debug_str}"
+        );
+        assert!(
+            debug_str.contains("integrity: IntegritySurvey"),
+            "Debug must show the survey; got: {debug_str}"
         );
     }
 }
