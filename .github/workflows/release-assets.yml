@@ -199,7 +199,20 @@ jobs:
           changelog_url() {
             echo "https://github.com/${GH_REPO}/blob/${TAG}/crates/$1/CHANGELOG.md"
           }
+          # Prints the changelog section for this tag's version, and fails
+          # when the changelog on stdin has no heading for it.
+          section_of() {
+            awk -v version="${TAG#v}" '
+              /^## / {
+                on = index($0, "## [" version "]") == 1 || index($0, "## " version " ") == 1
+                found = found || on
+                next
+              }
+              on
+              END { exit !found }'
+          }
           compare=""
+          base=""
           # Used unquoted below, so that bash reads it as a pattern.
           version_tag='v[0-9]{1,9}(\.[0-9]{1,9}){0,3}'
           : > notes.md
@@ -211,40 +224,42 @@ jobs:
             # have none: it did not change, or its own version differs, so
             # the notes link to its changelog and claim nothing. A heading
             # with nothing under it is a crate that did not change.
-            section="$(awk -v version="${TAG#v}" '
-              /^## / {
-                on = index($0, "## [" version "]") == 1 || index($0, "## " version " ") == 1
-                found = found || on
-                next
-              }
-              on
-              END { exit !found }' <<< "${changelog}")" || {
+            if section="$(section_of <<< "${changelog}")"; then
+              [[ "${section}" =~ [^[:space:]] ]] || section="No changes in this crate."
+              # A crate whose version ran ahead of paksmith-cli's had this
+              # section in an earlier release. paksmith-cli comes first, so
+              # the previous tag is known by the time another crate is read.
+              if [[ -n "${compare}" ]] &&
+                gh api "repos/${GH_REPO}/contents/crates/${crate}/CHANGELOG.md?ref=${base}" \
+                  -H "Accept: application/vnd.github.raw" 2> /dev/null | section_of > /dev/null; then
+                echo "::warning::${crate}'s section for ${TAG#v} was already in its changelog at ${base}, so the notes link to it instead"
+                section="This crate's ${TAG#v} was part of an earlier release: see [this crate's changelog]($(changelog_url "${crate}"))."
+              fi
+            else
               [[ "${crate}" != paksmith-cli ]] || fail "${crate}'s changelog has no section for ${TAG#v}"
               echo "::warning::${crate}'s changelog has no section for ${TAG#v}, so the notes link to it instead"
               section="No section for ${TAG#v}: see [this crate's changelog]($(changelog_url "${crate}"))."
-            }
-            [[ "${section}" =~ [^[:space:]] ]] || section="No changes in this crate."
+            fi
             # The version heading, which the notes drop, links this tag's
             # comparison with the previous one, when there is one.
             link="$(awk -v start="## [${TAG#v}](" '
               index($0, start) == 1 { print substr($0, length(start) + 1); exit }' <<< "${changelog}")"
             link="${link%%)*}"
-            # Only this repository's comparison of two version tags is kept.
-            if [[ -z "${compare}" && "${link}" =~ ^"https://github.com/${GH_REPO}/compare/"${version_tag}\.\.\.${version_tag}$ ]]; then
-              compare="${link}"
+            # Only this repository's comparison of two version tags is
+            # kept, and only the first. release-please writes the link
+            # whether or not its earlier tag exists, and for the first
+            # release that tag was never made.
+            if [[ -z "${base}" && "${link}" =~ ^"https://github.com/${GH_REPO}/compare/"${version_tag}\.\.\.${version_tag}$ ]]; then
+              base="${link##*/}"
+              base="${base%%...*}"
+              if gh api "repos/${GH_REPO}/git/ref/tags/${base}" > /dev/null 2>&1; then
+                compare="${link}"
+              else
+                echo "::notice::tag ${base} could not be read, so the notes carry no comparison link"
+              fi
             fi
             printf '## %s\n%s\n\n' "${crate}" "${section}" >> notes.md
           done
-          # release-please writes the link whether or not its earlier tag
-          # exists, and for the first release that tag was never made.
-          if [[ -n "${compare}" ]]; then
-            base="${compare##*/}"
-            base="${base%%...*}"
-            gh api "repos/${GH_REPO}/git/ref/tags/${base}" > /dev/null 2>&1 || {
-              echo "::notice::tag ${base} could not be read, so the notes carry no comparison link"
-              compare=""
-            }
-          fi
           # GitHub refuses a release body over 125,000 characters. Counting
           # bytes instead can only overcount them.
           if (($(wc -c < notes.md) > 120000)); then
