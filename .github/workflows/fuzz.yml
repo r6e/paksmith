@@ -331,6 +331,9 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # SECURITY.md's suspected-leak steps leave this workflow enabled
+    # because this job runs no repository code: keep it that way, or
+    # change those steps.
     permissions:
       actions: write # delete cache entries (#206)
       issues: write # open or comment on the cmin alert (#204)
