@@ -233,6 +233,16 @@ jobs:
             fi
             printf '## %s\n%s\n\n' "${crate}" "${section}" >> notes.md
           done
+          # release-please writes the link whether or not the earlier tag
+          # exists, and before the first release it does not.
+          if [[ -n "${compare}" ]]; then
+            base="${compare##*/}"
+            base="${base%%...*}"
+            gh api "repos/${GH_REPO}/git/ref/tags/${base}" > /dev/null 2>&1 || {
+              echo "::notice::tag ${base} could not be read, so the notes carry no comparison link"
+              compare=""
+            }
+          fi
           # GitHub refuses a release body over 125,000 characters. Counting
           # bytes instead can only overcount them.
           if (($(wc -c < notes.md) > 120000)); then
