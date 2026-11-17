@@ -222,6 +222,14 @@ jobs:
           # What gh reported for a failed read, kept apart from what it
           # read. "(HTTP 404)" there means the tag or file does not exist.
           gh_error="$(mktemp)"
+          not_found() {
+            grep -q -F "(HTTP 404)" "${gh_error}"
+          }
+          # The prefix keeps gh's text from being read as a workflow command.
+          gh_failed() {
+            echo "gh reported: $(head -n 1 "${gh_error}")"
+            fail "$1"
+          }
           : > notes.md
           for crate in "${crates[@]}"; do
             changelog="$(changelog_at "${crate}" "${BUILT_SHA}")" || fail "could not read ${crate}'s changelog at ${BUILT_SHA}"
@@ -244,8 +252,8 @@ jobs:
                     echo "::warning::${crate}'s section for ${TAG#v} was already in its changelog at ${base}, so the notes link to it instead"
                     section="This crate's ${TAG#v} was part of an earlier release: see [this crate's changelog]($(changelog_url "${crate}"))."
                   fi
-                elif ! grep -q -F "(HTTP 404)" "${gh_error}"; then
-                  fail "could not read ${crate}'s changelog at ${base}"
+                elif ! not_found; then
+                  gh_failed "could not read ${crate}'s changelog at ${base}"
                 fi
               fi
             else
@@ -270,10 +278,10 @@ jobs:
               base="${BASH_REMATCH[1]}"
               if gh api "repos/${GH_REPO}/git/ref/tags/${base}" > /dev/null 2> "${gh_error}"; then
                 compare="${link}"
-              elif grep -q -F "(HTTP 404)" "${gh_error}"; then
+              elif not_found; then
                 echo "::notice::tag ${base} does not exist, so the notes carry no comparison link"
               else
-                fail "could not look up tag ${base}"
+                gh_failed "could not look up tag ${base}"
               fi
             fi
             printf '## %s\n%s\n\n' "${crate}" "${section}" >> notes.md
