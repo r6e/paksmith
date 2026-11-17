@@ -285,7 +285,7 @@ impl IntegritySurvey {
     }
 
     /// [`Self::not_in_index`] plus [`Self::no_claim`]: the entries a
-    /// verify skips as `SkippedNoHash`. A [`EntryIntegrity::Stripped`]
+    /// verify skips as `SkippedNoHash`. An [`EntryIntegrity::Stripped`]
     /// entry's verify is `IntegrityStripped` instead.
     pub fn skipped_no_hash(&self) -> usize {
         self.not_in_index.saturating_add(self.no_claim)
