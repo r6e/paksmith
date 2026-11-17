@@ -8625,9 +8625,8 @@ mod tests {
         use crate::testing::v10::hash_presence_v11_pak;
 
         let mut pak = hash_presence_v11_pak(true);
-        // The footer ends with the index hash, then five 32-byte slots.
-        let hash_end = pak.len() - 5 * 32;
-        pak[hash_end - 20..hash_end].fill(0xAB);
+        let hash = crate::test_patch::footer_index_hash_range(&pak);
+        pak[hash].fill(0xAB);
         let reader = PakReader::from_bytes(pak).unwrap();
         assert!(reader.claims_integrity());
         let survey: IntegritySurvey = reader
