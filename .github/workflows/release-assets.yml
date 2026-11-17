@@ -233,9 +233,18 @@ jobs:
               # A crate whose version ran ahead of paksmith-cli's had this
               # section in an earlier release. paksmith-cli comes first, so
               # the previous tag is known by the time another crate is read.
-              if [[ -n "${compare}" ]] && changelog_at "${crate}" "${base}" 2> /dev/null | section_of > /dev/null; then
-                echo "::warning::${crate}'s section for ${TAG#v} was already in its changelog at ${base}, so the notes link to it instead"
-                section="This crate's ${TAG#v} was part of an earlier release: see [this crate's changelog]($(changelog_url "${crate}"))."
+              # A crate that had no changelog at that tag is new since then.
+              # Any other failed read stops the publish: guessing would print
+              # an earlier release's changes as this one's.
+              if [[ -n "${compare}" ]]; then
+                if earlier="$(changelog_at "${crate}" "${base}" 2>&1)"; then
+                  if section_of <<< "${earlier}" > /dev/null; then
+                    echo "::warning::${crate}'s section for ${TAG#v} was already in its changelog at ${base}, so the notes link to it instead"
+                    section="This crate's ${TAG#v} was part of an earlier release: see [this crate's changelog]($(changelog_url "${crate}"))."
+                  fi
+                elif [[ "${earlier}" != *"(HTTP 404)"* ]]; then
+                  fail "could not read ${crate}'s changelog at ${base}"
+                fi
               fi
             else
               [[ "${crate}" != paksmith-cli ]] || fail "${crate}'s changelog has no section for ${TAG#v}"
