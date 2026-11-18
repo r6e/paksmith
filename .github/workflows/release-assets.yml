@@ -1,7 +1,8 @@
 name: Release assets
 
 # Builds the archives for a release tag, attests their provenance,
-# attaches them to that tag's draft GitHub Release, and publishes it.
+# attaches them to that tag's draft GitHub Release, writes its notes
+# from the three crates' changelogs, and publishes it.
 # release.yml describes how the tag and the draft come to exist.
 #
 # Recovery, while the release is still a draft:
@@ -11,9 +12,11 @@ name: Release assets
 #   this workflow from main with the tag. A tag push runs the tagged
 #   commit's copy of this file, re-runs included, and a dispatch runs
 #   main's. The local actions come from the tagged commit either way,
-#   so a fault in one of them needs a new tag. A dispatched run's
-#   attestations name main and its head commit as their source, not
-#   the tag and its commit.
+#   so a fault in one of them needs a new tag. So does a missing
+#   changelog, or a paksmith-cli changelog with no section for the
+#   version, because the notes are read from the tagged commit. A
+#   dispatched run's attestations name main and its head commit as
+#   their source, not the tag and its commit.
 # - The tag exists without a draft: re-run release.yml, which accepts
 #   the existing tag and creates the draft, then dispatch this workflow.
 on:
@@ -137,8 +140,9 @@ jobs:
         with:
           subject-path: assets/*/paksmith-*
 
-  # Runs no repository code: it only moves the built files onto the
-  # release, so the write token never meets a build script.
+  # Runs no repository code: it moves the built files onto the release
+  # and copies changelog text into its notes, so the write token never
+  # meets a build script.
   publish:
     name: publish
     # Waits for `attest`, so a failed attestation blocks the release.
@@ -154,7 +158,8 @@ jobs:
       # Publishing cannot be undone, so it happens only for a draft
       # whose tag still names the built commit, and only when the draft
       # carries exactly the expected files, each from its own target's
-      # artifact.
+      # artifact. The notes are built before anything is uploaded, and
+      # applied by the edit that publishes.
       - name: Attach the assets and publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -186,10 +191,115 @@ jobs:
           tagged="$(gh api "repos/${GH_REPO}/commits/refs/tags/${TAG}" --jq .sha)"
           [[ "${tagged}" == "${BUILT_SHA}" ]] ||
             fail "${TAG} names ${tagged}, but the assets were built from ${BUILT_SHA}"
+          # release-please writes one changelog per crate and puts only
+          # paksmith-cli's section on the draft, because the three crates
+          # share the tag, whose version is paksmith-cli's. The notes below
+          # carry all three sections.
+          crates=(paksmith-cli paksmith-gui paksmith-core)
+          changelog_url() {
+            echo "https://github.com/${GH_REPO}/blob/${TAG}/crates/$1/CHANGELOG.md"
+          }
+          # Prints a crate's changelog at a ref.
+          changelog_at() {
+            gh api "repos/${GH_REPO}/contents/crates/$1/CHANGELOG.md?ref=$2" -H "Accept: application/vnd.github.raw"
+          }
+          # Prints the changelog section for this tag's version, and fails
+          # when the changelog on stdin has no heading for it.
+          section_of() {
+            awk -v version="${TAG#v}" '
+              /^## / {
+                on = index($0, "## [" version "]") == 1 || index($0, "## " version " ") == 1
+                found = found || on
+                next
+              }
+              on
+              END { exit !found }'
+          }
+          compare=""
+          base=""
+          # Used unquoted below, so that bash reads it as a pattern.
+          version_tag='v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}'
+          # What gh reported for a failed read, kept apart from what it
+          # read. "(HTTP 404)" there means the tag or file does not exist.
+          gh_error="$(mktemp)"
+          not_found() {
+            grep -q -F "(HTTP 404)" "${gh_error}"
+          }
+          # The prefix keeps gh's text from being read as a workflow command.
+          gh_failed() {
+            echo "gh reported: $(head -n 1 "${gh_error}")"
+            fail "$1"
+          }
+          : > notes.md
+          for crate in "${crates[@]}"; do
+            changelog="$(changelog_at "${crate}" "${BUILT_SHA}")" || fail "could not read ${crate}'s changelog at ${BUILT_SHA}"
+            # The tag is paksmith-cli's release, so a missing heading there
+            # means the changelog is not this release's. Another crate may
+            # have none: it did not change, or its own version differs, so
+            # the notes link to its changelog and claim nothing. A heading
+            # with nothing under it is a crate that did not change.
+            if section="$(section_of <<< "${changelog}")"; then
+              [[ "${section}" =~ [^[:space:]] ]] || section="No changes in this crate."
+              # A crate whose version ran ahead of paksmith-cli's had this
+              # section in an earlier release. paksmith-cli comes first, so
+              # the previous tag is known by the time another crate is read.
+              # A crate that had no changelog at that tag is new since then.
+              # Any other failed read stops the publish: guessing would print
+              # an earlier release's changes as this one's.
+              if [[ -n "${compare}" ]]; then
+                if earlier="$(changelog_at "${crate}" "${base}" 2> "${gh_error}")"; then
+                  if section_of <<< "${earlier}" > /dev/null; then
+                    echo "::warning::${crate}'s section for ${TAG#v} was already in its changelog at ${base}, so the notes link to it instead"
+                    section="This crate's ${TAG#v} was part of an earlier release: see [this crate's changelog]($(changelog_url "${crate}"))."
+                  fi
+                elif ! not_found; then
+                  gh_failed "could not read ${crate}'s changelog at ${base}"
+                fi
+              fi
+            else
+              [[ "${crate}" != paksmith-cli ]] || fail "${crate}'s changelog has no section for ${TAG#v}"
+              echo "::warning::${crate}'s changelog has no section for ${TAG#v}, so the notes link to it instead"
+              section="No section for ${TAG#v}: see [this crate's changelog]($(changelog_url "${crate}"))."
+            fi
+            # The version heading, which the notes drop, links this tag's
+            # comparison with the previous one, when there is one.
+            link="$(awk -v start="## [${TAG#v}](" '
+              index($0, start) == 1 { print substr($0, length(start) + 1); exit }' <<< "${changelog}")"
+            link="${link%%)*}"
+            # Only paksmith-cli's link is read, since the tag is its release,
+            # and it is kept only if it is this repository's comparison of
+            # another version tag with this one. release-please writes
+            # the link whether or not its earlier tag exists, and for the
+            # first release that tag was never made. Any other failed
+            # lookup stops the publish, because without the earlier tag the
+            # other crates' sections are not checked against it.
+            if [[ "${crate}" == paksmith-cli && "${link}" =~ ^"https://github.com/${GH_REPO}/compare/"(${version_tag})\.\.\.(${version_tag})$ &&
+              "${BASH_REMATCH[1]}" != "${TAG}" && "${BASH_REMATCH[2]}" == "${TAG}" ]]; then
+              base="${BASH_REMATCH[1]}"
+              if gh api "repos/${GH_REPO}/git/ref/tags/${base}" > /dev/null 2> "${gh_error}"; then
+                compare="${link}"
+              elif not_found; then
+                echo "::notice::tag ${base} does not exist, so the notes carry no comparison link"
+              else
+                gh_failed "could not look up tag ${base}"
+              fi
+            fi
+            printf '## %s\n%s\n\n' "${crate}" "${section}" >> notes.md
+          done
+          # GitHub refuses a release body over 125,000 characters. Counting
+          # bytes instead can only overcount them.
+          if (($(wc -c < notes.md) > 120000)); then
+            echo "::warning::the notes are too long for a release body, so the release links to the changelogs instead"
+            printf "The changes in this release are listed in each crate's changelog:\n\n" > notes.md
+            for crate in "${crates[@]}"; do
+              printf -- '- [%s](%s)\n' "${crate}" "$(changelog_url "${crate}")" >> notes.md
+            done
+          fi
+          [[ -z "${compare}" ]] || printf '\n**Full changelog**: %s\n' "${compare}" >> notes.md
           # `--clobber` replaces assets an earlier attempt left on the draft.
           gh release upload "${TAG}" "${files[@]}" --clobber
           expected="$(printf '%s\n' "${files[@]##*/}" | sort)"
           attached="$(gh release view "${TAG}" --json assets --jq '.assets[].name' | sort)"
           [[ "${attached}" == "${expected}" ]] ||
             fail "release ${TAG} must carry only the built assets, but carries: ${attached//$'\n'/ }"
-          gh release edit "${TAG}" --draft=false
+          gh release edit "${TAG}" --notes-file notes.md --draft=false

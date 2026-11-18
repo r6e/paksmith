@@ -206,7 +206,8 @@ mod send_sync_assertions {
     use crate::container::pak::version::PakVersion;
     use crate::container::pak::{AesKey, PakReader, RegionVerifyState, VerifyOutcome, VerifyStats};
     use crate::container::{
-        ContainerFormat, EntryFlags, EntryIntegrity, EntryMetadata, OpenOptions, PayloadLedger,
+        ContainerFormat, EntryFlags, EntryIntegrity, EntryMetadata, IntegritySurvey, OpenOptions,
+        PayloadLedger,
     };
     use crate::error::{
         AssetParseFault, CompanionFileKind, DecompressionFault, IndexParseFault,
@@ -250,6 +251,8 @@ mod send_sync_assertions {
         // `EntryIntegrity` is returned by `ContainerReader::entry_integrity`
         // (#662) and likewise not stored on anything already pinned.
         assert_send_sync::<EntryIntegrity>();
+        // Folded from `EntryIntegrity` values by the caller.
+        assert_send_sync::<IntegritySurvey>();
         // `PakReader::verify_*` return types — also NOT stored on
         // `PakReader`. Lockpinned explicitly.
         assert_send_sync::<VerifyOutcome>();

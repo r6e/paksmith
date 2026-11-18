@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length};
+use paksmith_core::container::IntegritySurvey;
 
 use crate::app::{Message, accent_button};
 use crate::panels::detail::kv_row;
@@ -26,6 +27,7 @@ use crate::widgets::{audio_player, hex_view, property_tree, tab_bar, texture_vie
 ///
 /// * `tabs`    — the current tab collection.
 /// * `entries` — the archive's per-entry metadata map (keyed by full path).
+/// * `integrity` — the archive's survey of those entries' hash states.
 /// * `accent`  — the system accent colour for the active view-mode button.
 /// * `audio_device_available` — whether an audio output device opened; gates the
 ///   audio player's transport controls (disabled + reason when absent).
@@ -34,6 +36,7 @@ use crate::widgets::{audio_player, hex_view, property_tree, tab_bar, texture_vie
 pub fn view<'a>(
     tabs: &'a Tabs,
     entries: &'a BTreeMap<String, EntryMeta>,
+    integrity: &IntegritySurvey,
     accent: iced::Color,
     audio_device_available: bool,
 ) -> Element<'a, Message> {
@@ -60,7 +63,9 @@ pub fn view<'a>(
                 } => {
                     let meta = entries.get(tab.path.as_str());
                     match tab.view {
-                        ViewMode::Info => info_view(tab.path.as_str(), bytes, parsed, meta),
+                        ViewMode::Info => {
+                            info_view(tab.path.as_str(), bytes, parsed, meta, integrity)
+                        }
                         ViewMode::Properties => {
                             properties_view(parsed, &tab.expanded, viewer_scroll(tab))
                         }
@@ -159,6 +164,7 @@ fn info_view(
     _bytes: &[u8],
     parsed: &Result<std::sync::Arc<paksmith_core::asset::Package>, String>,
     meta: Option<&EntryMeta>,
+    integrity: &IntegritySurvey,
 ) -> Element<'static, Message> {
     let mut entry_rows: Vec<Element<'static, Message>> = Vec::new();
 
@@ -167,7 +173,7 @@ fn info_view(
     // decided by the tested `detail::entry_rows` seam (#662) —
     // this view is `#[mutants::skip]` and returns an opaque `Element`,
     // so a swap made HERE would be invisible to the suite.
-    for (label, value) in crate::panels::detail::entry_rows(path, meta) {
+    for (label, value) in crate::panels::detail::entry_rows(path, meta, integrity) {
         entry_rows.push(kv_row(label, value));
     }
 

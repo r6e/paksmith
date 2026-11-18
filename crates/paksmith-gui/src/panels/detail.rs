@@ -19,6 +19,7 @@
 
 use iced::widget::{row, text};
 use iced::{Element, Length};
+use paksmith_core::container::{EntryIntegrity, IntegritySurvey};
 
 use crate::app::Message;
 use crate::state::archive::EntryMeta;
@@ -136,30 +137,40 @@ pub fn compressed_label(
 /// container's wire structures: the enum is generic, `container::open`
 /// gains a second reader in Phase 8, and a row that named pak's shapes
 /// would assert them of an archive built differently.
+///
+/// `survey` is the archive's. When it mixes hash presence, the two
+/// skipped arms also say for how many of the archive's entries the
+/// entry listing records a non-zero hash. No other arm reads it.
 #[must_use]
-pub fn sha1_label(status: &paksmith_core::container::EntryIntegrity) -> String {
-    use paksmith_core::container::EntryIntegrity;
+pub fn sha1_label(status: &EntryIntegrity, survey: &IntegritySurvey) -> String {
     match status {
         // Names what is absent, not the structure it would have sat in
         // (pak reaches this via a v10+ bit-packed record; another
         // container will have its own hash-less form).
-        EntryIntegrity::NotInIndex => "not recorded in the entry listing".to_string(),
-        // ONE observation: this entry's field is zeroed. The row
-        // deliberately says nothing about the archive. Reaching this
-        // arm does depend on `claims_integrity() == false`, but that is
-        // a single bit (pak: the footer hash) which surveys neither the
-        // other entries nor the v10+ region hashes — every wording that
-        // tried to describe it ended up asserting more than it checked.
-        // What distinguishes this from `Stripped` is stated there, on
-        // the arm that has evidence for it. It does
-        // NOT name what the reader consulted to answer that — pak reads
-        // one footer hash, a container with no archive-level claim at
-        // all just inherits the trait default, and both are honestly
-        // described as "claims no integrity" (earlier
-        // wordings variously named pak's footer, surveyed structures
-        // the row never inspected, and presupposed such a structure
-        // exists).
-        EntryIntegrity::NoClaim => "no claim (the entry's hash is zeroed)".to_string(),
+        EntryIntegrity::NotInIndex => {
+            let note = hash_presence_note(survey).map(|n| format!(" ({n})"));
+            format!(
+                "not recorded in the entry listing{}",
+                note.unwrap_or_default()
+            )
+        }
+        // ONE observation about this entry: its field is zeroed.
+        // Reaching this arm depends on `claims_integrity() == false`,
+        // but that is a single bit (pak: the footer hash) which surveys
+        // neither the other entries nor the v10+ region hashes, and every
+        // wording that tried to describe it asserted more than it
+        // checked, so the row names no such bit. What it does add, only
+        // when the archive mixes hash presence, is the survey's count of
+        // entries the entry listing records a non-zero hash for, folded
+        // from every entry's own state. What distinguishes this from
+        // `Stripped` is stated there, on the arm that has evidence for it.
+        EntryIntegrity::NoClaim => {
+            let note = hash_presence_note(survey).map(|n| format!("; {n}"));
+            format!(
+                "no claim (the entry's hash is zeroed{})",
+                note.unwrap_or_default()
+            )
+        }
         // Reports the two observed fields and stops there.
         // A strip is the alarming reading of this shape, and the pane
         // cannot establish that it is the only one — it sees two zeroed
@@ -174,6 +185,19 @@ pub fn sha1_label(status: &paksmith_core::container::EntryIntegrity) -> String {
             format!("{digest} (unverified; covers on-disk bytes)")
         }
     }
+}
+
+/// A skipped entry's count of the archive's entries the entry listing
+/// records a non-zero hash for, present only when `survey` mixes hash
+/// presence. It says nothing of hashes held anywhere but the listing.
+fn hash_presence_note(survey: &IntegritySurvey) -> Option<String> {
+    survey.mixes_hash_presence().then(|| {
+        format!(
+            "the entry listing records a non-zero hash for {} of this archive's {} entries",
+            survey.claim(),
+            survey.total()
+        )
+    })
 }
 
 /// The Info pane's entry rows as `(label, value)` pairs, in display
@@ -191,7 +215,11 @@ pub fn sha1_label(status: &paksmith_core::container::EntryIntegrity) -> String {
 /// bullet (§View panels): path, sizes, compression (method folded in),
 /// offset, SHA-1 status, and the encryption flag LAST.
 #[must_use]
-pub fn entry_rows(path: &str, meta: Option<&EntryMeta>) -> Vec<(&'static str, String)> {
+pub fn entry_rows(
+    path: &str,
+    meta: Option<&EntryMeta>,
+    survey: &IntegritySurvey,
+) -> Vec<(&'static str, String)> {
     let Some(m) = meta else {
         // No EntryMeta — still show the path.
         return vec![(PATH_ROW_LABEL, path.to_owned())];
@@ -211,7 +239,7 @@ pub fn entry_rows(path: &str, meta: Option<&EntryMeta>) -> Vec<(&'static str, St
             ),
         ),
         (OFFSET_ROW_LABEL, record_offset_label(m.offset)),
-        (SHA1_ROW_LABEL, sha1_label(&m.integrity)),
+        (SHA1_ROW_LABEL, sha1_label(&m.integrity, survey)),
         (
             ENCRYPTED_ROW_LABEL,
             if m.is_encrypted { "Yes" } else { "No" }.to_owned(),
@@ -296,8 +324,25 @@ mod tests {
             is_encrypted: true,
             offset: Some(0x1A2B),
             compression_method: Some(std::sync::Arc::from("Zlib")),
-            integrity: paksmith_core::container::EntryIntegrity::NotInIndex,
+            integrity: EntryIntegrity::NotInIndex,
         }
+    }
+
+    /// No entry carries a claim, so the SHA-1 row adds no count.
+    fn uniform_survey() -> IntegritySurvey {
+        [EntryIntegrity::NotInIndex; 5].into_iter().collect()
+    }
+
+    /// Claim 2 and total 7 match no other accessor, so a qualifier that
+    /// prints another one fails.
+    fn hash_presence_survey() -> IntegritySurvey {
+        use EntryIntegrity::{NoClaim, NotInIndex, Stripped};
+        let claim = EntryIntegrity::Claim(paksmith_core::Sha1Digest::from([0xABu8; 20]));
+        [
+            claim, claim, NotInIndex, NotInIndex, NotInIndex, NoClaim, Stripped,
+        ]
+        .into_iter()
+        .collect()
     }
 
     /// The rows the Info pane actually renders: which ones, in what
@@ -315,7 +360,7 @@ mod tests {
     #[test]
     fn entry_rows_pair_each_label_with_its_own_value_in_order() {
         let m = meta_fixture();
-        let rows = entry_rows("Game/a.uasset", Some(&m));
+        let rows = entry_rows("Game/a.uasset", Some(&m), &uniform_survey());
         assert_eq!(
             rows,
             vec![
@@ -342,7 +387,7 @@ mod tests {
     fn encrypted_row_says_yes_only_when_the_entry_is_encrypted() {
         let mut m = meta_fixture();
         m.is_encrypted = false;
-        let rows = entry_rows("a", Some(&m));
+        let rows = entry_rows("a", Some(&m), &uniform_survey());
         let (label, value) = rows.last().expect("rows are never empty");
         assert_eq!(*label, ENCRYPTED_ROW_LABEL);
         assert_eq!(value, "No");
@@ -355,12 +400,21 @@ mod tests {
     // or quoted name composes through the identical path as "Zlib" and
     // could not fail independently of the assertion above.
 
+    /// The SHA-1 row reads the archive's survey; `sha1_label`'s own
+    /// tests pin the text it makes of it.
+    #[test]
+    fn entry_rows_hand_the_archive_survey_to_the_sha1_row() {
+        let (m, survey) = (meta_fixture(), hash_presence_survey());
+        let sha1 = sha1_label(&m.integrity, &survey);
+        assert!(entry_rows("a", Some(&m), &survey).contains(&(SHA1_ROW_LABEL, sha1)));
+    }
+
     /// Without metadata the pane still names the entry — one row, the
     /// path, and no fabricated detail rows.
     #[test]
     fn entry_rows_without_metadata_show_only_the_path() {
         assert_eq!(
-            entry_rows("Game/a.uasset", None),
+            entry_rows("Game/a.uasset", None, &uniform_survey()),
             vec![(PATH_ROW_LABEL, "Game/a.uasset".to_string())]
         );
     }
@@ -397,18 +451,30 @@ mod tests {
 
     #[test]
     fn sha1_label_names_each_state() {
-        use paksmith_core::container::EntryIntegrity;
+        let uniform = uniform_survey();
         assert_eq!(
-            sha1_label(&EntryIntegrity::NotInIndex),
+            sha1_label(&EntryIntegrity::NotInIndex, &uniform),
             "not recorded in the entry listing"
         );
         assert_eq!(
-            sha1_label(&EntryIntegrity::NoClaim),
+            sha1_label(&EntryIntegrity::NoClaim, &uniform),
             "no claim (the entry's hash is zeroed)"
         );
+        // These two arms read no survey, so they're pinned under one
+        // that qualifies the skipped arms.
+        let qualifying = hash_presence_survey();
         assert_eq!(
-            sha1_label(&EntryIntegrity::Stripped),
+            sha1_label(&EntryIntegrity::Stripped, &qualifying),
             "zeroed, though the archive claims integrity"
+        );
+        assert_eq!(
+            sha1_label(
+                &EntryIntegrity::Claim(paksmith_core::Sha1Digest::from([0xABu8; 20])),
+                &qualifying
+            ),
+            // Lowercase hex plus the unverified qualifier: a stored claim
+            // must never read as a checked verification result.
+            format!("{} (unverified; covers on-disk bytes)", "ab".repeat(20))
         );
         // No arm may name a container's wire shape: the enum is
         // generic and Phase 8 adds a second reader.
@@ -417,27 +483,47 @@ mod tests {
             EntryIntegrity::NoClaim,
             EntryIntegrity::Stripped,
         ] {
-            let s = sha1_label(&state);
+            let texts = [&uniform, &qualifying].map(|survey| sha1_label(&state, survey));
             // Bans one container's vocabulary, NOT generic structural
             // nouns: "entry listing" and "index" describe something every
             // container has, and forbidding them once forced the
             // NotInIndex arm into a claim that was false for pak v10+
-            // (the in-data record still carries a hash). "footer" and
-            // "index hash" are pak's own; "strip" is a verdict.
-            for word in ["pak", "footer", "index hash", "strip"] {
+            // (the in-data record still carries a hash). "pak", "footer"
+            // and "index hash" name pak, "mixed" is core's word for the
+            // Stripped shape, and the rest are verdicts.
+            for word in [
+                "pak",
+                "footer",
+                "index hash",
+                "strip",
+                "tamper",
+                "suspicious",
+                "attack",
+                "mixed",
+            ] {
                 assert!(
-                    !s.to_lowercase().contains(word),
-                    "{state:?} names a format-specific fact or a verdict: {s}"
+                    texts.iter().all(|t| !t.to_lowercase().contains(word)),
+                    "{state:?} names a format-specific fact or a verdict: {texts:?}"
                 );
             }
         }
+    }
+
+    /// Both skipped arms say for how many of the archive's entries the
+    /// entry listing records a non-zero hash, when the archive mixes
+    /// hash presence.
+    #[test]
+    fn sha1_label_counts_the_listed_claims_on_a_skipped_entry() {
+        let survey = hash_presence_survey();
         assert_eq!(
-            sha1_label(&EntryIntegrity::Claim(paksmith_core::Sha1Digest::from(
-                [0xABu8; 20]
-            ))),
-            // Lowercase hex plus the unverified qualifier: a stored claim
-            // must never read as a checked verification result.
-            format!("{} (unverified; covers on-disk bytes)", "ab".repeat(20))
+            sha1_label(&EntryIntegrity::NotInIndex, &survey),
+            "not recorded in the entry listing (the entry listing records \
+             a non-zero hash for 2 of this archive's 7 entries)"
+        );
+        assert_eq!(
+            sha1_label(&EntryIntegrity::NoClaim, &survey),
+            "no claim (the entry's hash is zeroed; the entry listing records \
+             a non-zero hash for 2 of this archive's 7 entries)"
         );
     }
 
