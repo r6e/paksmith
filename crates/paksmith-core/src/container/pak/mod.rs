@@ -4105,7 +4105,7 @@ mod tests {
             CompressionMethod::Oodle,
             CompressionMethod::Zstd,
             CompressionMethod::Lz4,
-            CompressionMethod::UnknownByName("Brotli".to_string()),
+            CompressionMethod::UnknownByName("LZMA".to_string()),
         ] {
             assert!(
                 method_name_is_poolable(&m),
@@ -8271,7 +8271,7 @@ mod tests {
     #[test]
     #[tracing_test::traced_test]
     fn reads_log_the_warnings_of_faults_check_read_raises() {
-        use crate::testing::wire::write_pak_entry;
+        use crate::testing::wire::{UNKNOWN_METHOD_ID, write_pak_entry};
         use crate::untrusted::test_support::{lines_carrying, lines_counted};
 
         let record = |method, blocks: &[(u64, u64)]| {
@@ -8281,23 +8281,24 @@ mod tests {
         };
         const UNSUPPORTED: &str = "rejected unsupported compression method";
         const MISMATCH: &str = "cumulative decompressed size mismatch";
-        let oodle = PakReader::from_bytes(bad_then_good_pak(5, &record(4, &[(73, 89)]))).unwrap();
-        let err = oodle.read_entry("Content/bad.bin").unwrap_err();
+        let bad = record(UNKNOWN_METHOD_ID, &[(73, 89)]);
+        let unknown = PakReader::from_bytes(bad_then_good_pak(5, &bad)).unwrap();
+        let err = unknown.read_entry("Content/bad.bin").unwrap_err();
         assert!(
             matches!(
                 err,
                 PaksmithError::Decompression {
                     fault: DecompressionFault::UnsupportedMethod {
-                        method: CompressionMethod::Oodle,
+                        method: CompressionMethod::Unknown(id),
                     },
                     ..
-                }
+                } if id.get() == UNKNOWN_METHOD_ID
             ),
             "got: {err:?}"
         );
-        let entry = oodle.index_entry("Content/bad.bin").unwrap();
+        let entry = unknown.index_entry("Content/bad.bin").unwrap();
         let start = entry.header().offset() + entry.header().wire_size();
-        let direct = oodle
+        let direct = unknown
             .stream_entry_to(entry, start, &mut Vec::new())
             .unwrap_err();
         assert!(
@@ -8305,9 +8306,9 @@ mod tests {
                 direct,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression {
-                        method: CompressionMethod::Oodle,
+                        method: CompressionMethod::Unknown(id),
                     },
-                }
+                } if id.get() == UNKNOWN_METHOD_ID
             ),
             "got: {direct:?}"
         );
@@ -8321,18 +8322,28 @@ mod tests {
     }
 
     /// A budgeted reader refuses an unsupported method before charging or
-    /// counting the read. The Oodle record's block reaches past the file,
+    /// counting the read. The record's block reaches past the file,
     /// so a charge would take the whole budget and refuse its neighbour,
     /// and a count would refuse the read past the per-entry limit as
     /// `EntryReads`.
     #[cfg(feature = "__test_utils")]
     #[test]
     fn read_budget_refuses_an_unsupported_method_without_charging_or_counting_it() {
-        use crate::testing::wire::write_pak_entry;
+        use crate::testing::wire::{UNKNOWN_METHOD_ID, write_pak_entry};
 
-        let mut oodle = Vec::new();
-        write_pak_entry(&mut oodle, 0, 16, 16, 4, &[0; 20], &[(73, 1 << 20)], 0, 0);
-        let pak = bad_then_good_pak(5, &oodle);
+        let mut unknown = Vec::new();
+        write_pak_entry(
+            &mut unknown,
+            0,
+            16,
+            16,
+            UNKNOWN_METHOD_ID,
+            &[0; 20],
+            &[(73, 1 << 20)],
+            0,
+            0,
+        );
+        let pak = bad_then_good_pak(5, &unknown);
         for read in READS {
             let reader = budgeted(&pak);
             for attempt in 0..=max_reads_per_entry() {
@@ -8342,10 +8353,10 @@ mod tests {
                         err,
                         PaksmithError::Decompression {
                             fault: DecompressionFault::UnsupportedMethod {
-                                method: CompressionMethod::Oodle,
+                                method: CompressionMethod::Unknown(id),
                             },
                             ..
-                        }
+                        } if id.get() == UNKNOWN_METHOD_ID
                     ),
                     "attempt {attempt}: {err:?}"
                 );
@@ -8797,10 +8808,10 @@ mod tests {
                 .map(|&n| lz4_flex::block::compress(&vec![0; n]));
             pak("LZ4", streams.collect(), size, block)
         };
-        let oodle = pak("Oodle", vec![vec![0; 4]], 4, 4);
+        let lzma = pak("LZMA", vec![vec![0; 4]], 4, 4);
         let corrupt = pak("Zlib", vec![vec![0xff; 16]], 8, 8);
         let cases = [
-            (oodle, None, "unsupported compression method"),
+            (lzma, None, "unsupported compression method"),
             (
                 zlib(&[8], 8, 8),
                 Some(PakSeam::CompressedReserve),

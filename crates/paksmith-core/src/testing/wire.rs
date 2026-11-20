@@ -341,6 +341,10 @@ pub const LZ4_SYNTH_PATH: &str = "Content/lz4_synth.uasset";
 /// Path of the single entry emitted by [`build_v8b_zlib_pak`].
 pub const ZLIB_SYNTH_PATH: &str = "Content/zlib_synth.uasset";
 
+/// A v3-v7 compression method ID paksmith doesn't recognise: it sits between
+/// the known ids 2 and 4, so `from_u32` resolves it to `Unknown`.
+pub const UNKNOWN_METHOD_ID: u32 = 3;
+
 #[cfg(test)]
 mod tests {
     use super::*;

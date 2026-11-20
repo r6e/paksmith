@@ -70,15 +70,22 @@ fn unhashed_phi_v11(dir: &Path) -> PathBuf {
     write(dir, "phi.pak", &pak)
 }
 
-/// A v5 pak whose one entry, `name`, is a plaintext Oodle record carrying
-/// a non-zero SHA-1, which verify refuses to hash because paksmith doesn't
-/// decode Oodle.
-fn hashed_oodle_pak(name: &str) -> Vec<u8> {
-    const OODLE: u32 = 4;
+/// A v5 pak whose one entry, `name`, is a plaintext record carrying a
+/// non-zero SHA-1 in a compression method paksmith doesn't recognise
+/// (unknown method 3), which verify refuses to hash.
+fn hashed_unknown_method_pak(name: &str) -> Vec<u8> {
+    use paksmith_core::testing::wire::{UNKNOWN_METHOD_ID, pak_entry_wire_size};
+
     const PAYLOAD: [u8; 16] = [7; 16];
     let size = u64::try_from(PAYLOAD.len()).unwrap();
-    let start = paksmith_core::testing::wire::pak_entry_wire_size(1);
-    let record = v5_record_with(0, size, OODLE, &[0xAB; 20], &[(start, start + size)]);
+    let start = pak_entry_wire_size(1);
+    let record = v5_record_with(
+        0,
+        size,
+        UNKNOWN_METHOD_ID,
+        &[0xAB; 20],
+        &[(start, start + size)],
+    );
     let mut pak = record.clone();
     pak.extend_from_slice(&PAYLOAD);
     finish_v5_pak(pak, &[(name, &record)])
@@ -280,7 +287,11 @@ fn a_flipped_payload_byte_exits_1_and_keeps_the_survey() {
 #[test]
 fn a_plaintext_entry_verify_cannot_hash_exits_2() {
     let dir = tempfile::tempdir().unwrap();
-    let pak = write(dir.path(), "oodle.pak", &hashed_oodle_pak("Content/a.bin"));
+    let pak = write(
+        dir.path(),
+        "unknown.pak",
+        &hashed_unknown_method_pak("Content/a.bin"),
+    );
     let archive = only_archive(pak, 2);
     assert_eq!(
         (&archive["ok"], &archive["code"]),
@@ -289,7 +300,7 @@ fn a_plaintext_entry_verify_cannot_hash_exits_2() {
     assert_eq!(archive["integrity"]["claim"], 1);
     let error = archive["error"].as_str().unwrap();
     assert!(
-        error.ends_with("unsupported compression method Oodle"),
+        error.ends_with("unsupported compression method Unknown(3)"),
         "{archive}"
     );
 }
@@ -433,7 +444,11 @@ fn an_unknown_game_fails_the_run_as_it_does_for_list() {
 fn hostile_paths_are_escaped() {
     let name = std::str::from_utf8(HOSTILE_ENTRY).unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let pak = write(dir.path(), "hostile\u{202e}.pak", &hashed_oodle_pak(name));
+    let pak = write(
+        dir.path(),
+        "hostile\u{202e}.pak",
+        &hashed_unknown_method_pak(name),
+    );
     let paths = std::slice::from_ref(&pak);
     let shown = [
         "hostile\u{FFFD}.pak",

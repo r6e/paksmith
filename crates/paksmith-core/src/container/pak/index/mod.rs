@@ -1878,6 +1878,7 @@ mod tests {
     fn compression_method_from_u32() {
         assert_eq!(CompressionMethod::from_u32(0), CompressionMethod::None);
         assert_eq!(CompressionMethod::from_u32(1), CompressionMethod::Zlib);
+        assert_eq!(CompressionMethod::from_u32(2), CompressionMethod::Gzip);
         assert_eq!(CompressionMethod::from_u32(4), CompressionMethod::Oodle);
         assert_eq!(
             CompressionMethod::from_u32(99),
