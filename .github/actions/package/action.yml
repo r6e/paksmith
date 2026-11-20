@@ -41,6 +41,9 @@ runs:
           echo "::error::this runner builds ${host}, not ${TARGET}"
           exit 1
         }
+    # scripts/check-release-targets.sh restates the EXT rule and the three
+    # names below, and fails CI when a line of them changes: change the
+    # script, the publish job's file list and the README with them.
     - name: Name the files
       id: names
       shell: bash
