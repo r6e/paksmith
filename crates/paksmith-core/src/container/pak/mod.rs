@@ -662,7 +662,7 @@ impl PakReader {
     /// against the index record, which refuses a missing key, an
     /// unsupported method, a record past the end of the file, an encrypted
     /// compressed entry whose compressed size passes the 8 GiB per-entry
-    /// cap, a payload past the end of the file, a pre-v5 zlib entry, a
+    /// cap, a payload past the end of the file, a pre-v5 compressed entry, a
     /// block out of bounds, and a compressed entry with no blocks and a
     /// nonzero uncompressed size. A read those checks
     /// refuse is refused with that fault before it's charged or counted,
@@ -1326,8 +1326,9 @@ impl PakReader {
             let _ = file.seek(SeekFrom::Start(payload_start))?;
             sha1_of_reader(&mut file, compressed, &mut buf)?
         } else {
-            match entry.header().compression_method() {
-                CompressionMethod::None => {
+            let method = entry.header().compression_method();
+            match pak_decode_route(method) {
+                PakDecodeRoute::Stored => {
                     // Plaintext uncompressed entry. Bounds-check the payload
                     // end so a truncated archive surfaces as the structured
                     // `OffsetPastFileSize` rather than a bare
@@ -1340,7 +1341,7 @@ impl PakReader {
                     )?;
                     sha1_of_reader(&mut file, entry.header().uncompressed_size(), &mut buf)?
                 }
-                CompressionMethod::Zlib | CompressionMethod::Lz4 => {
+                PakDecodeRoute::Compressed(_) => {
                     require_relative_chunk_offsets(self.version())?;
                     // Plaintext compressed entry: hash the on-disk compressed
                     // bytes block-by-block (encrypted entries are hashed
@@ -1373,11 +1374,7 @@ impl PakReader {
                 // encrypted branch above (which hashes opaque ciphertext),
                 // we refuse to hash raw compressed bytes of a method we
                 // can't interpret rather than risk a misleading result.
-                method @ (CompressionMethod::Gzip
-                | CompressionMethod::Oodle
-                | CompressionMethod::Zstd
-                | CompressionMethod::Unknown(_)
-                | CompressionMethod::UnknownByName(_)) => {
+                PakDecodeRoute::Unsupported => {
                     return Err(PaksmithError::Decompression {
                         path: path.to_string(),
                         offset: entry.header().offset(),
@@ -1591,7 +1588,7 @@ impl PakReader {
     /// the read's order, before it reads anything of the entry, and return
     /// where its payload starts: a missing key, an unsupported method, the
     /// record's offset, the 8 GiB cap on an encrypted compressed entry's
-    /// compressed size, the payload's bounds, a pre-v5 zlib entry, each
+    /// compressed size, the payload's bounds, a pre-v5 compressed entry, each
     /// block's bounds, and a compressed entry with no blocks and a nonzero
     /// uncompressed size. A read runs
     /// it before the budget charges or counts the read, so an entry it
@@ -1613,14 +1610,11 @@ impl PakReader {
                 path: Some(path.to_string()),
             });
         }
-        let compressed = match header.compression_method() {
-            CompressionMethod::None => false,
-            CompressionMethod::Zlib | CompressionMethod::Lz4 => true,
-            method @ (CompressionMethod::Gzip
-            | CompressionMethod::Oodle
-            | CompressionMethod::Zstd
-            | CompressionMethod::Unknown(_)
-            | CompressionMethod::UnknownByName(_)) => {
+        let method = header.compression_method();
+        let compressed = match pak_decode_route(method) {
+            PakDecodeRoute::Stored => false,
+            PakDecodeRoute::Compressed(_) => true,
+            PakDecodeRoute::Unsupported => {
                 return Err(PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: header.offset(),
@@ -1670,8 +1664,9 @@ impl PakReader {
         // Leaves `file` just past the in-data record, at `payload_start`.
         let _ = self.open_entry_into(&mut file, entry)?;
 
-        match entry.header().compression_method() {
-            CompressionMethod::None => {
+        let method = entry.header().compression_method();
+        match pak_decode_route(method) {
+            PakDecodeRoute::Stored => {
                 // Decrypt key (None for unencrypted entries; Some for encrypted).
                 // `check_read` refused an encrypted entry without a key.
                 let key = if entry.header().is_encrypted() {
@@ -1686,7 +1681,7 @@ impl PakReader {
                 };
                 stream_uncompressed_to(&mut file, entry, self.file_size, key, writer)
             }
-            method @ (CompressionMethod::Zlib | CompressionMethod::Lz4) => {
+            PakDecodeRoute::Compressed(codec) => {
                 // Encrypted + compressed (#634): UE encrypts the 16-aligned
                 // compressed payload as one contiguous AES-256-ECB region, so
                 // it must be decrypted BEFORE per-block inflation. Decrypt
@@ -1742,7 +1737,7 @@ impl PakReader {
                         })?;
                     dispatch_compressed(
                         &mut rebased,
-                        method,
+                        codec,
                         entry,
                         buffer_end,
                         payload_start,
@@ -1752,7 +1747,7 @@ impl PakReader {
                 } else {
                     dispatch_compressed(
                         &mut file,
-                        method,
+                        codec,
                         entry,
                         self.file_size,
                         payload_start,
@@ -1761,23 +1756,43 @@ impl PakReader {
                     )
                 }
             }
-            // A read's `check_read` already refused these; this
-            // arm exists to keep the match exhaustive (per CLAUDE.md
-            // "no panics in core") without an opaque `_` catch-all.
-            // If a read ever reaches here, a refactor bypassed that
-            // early-reject — surface the offending method via the
-            // typed `StreamEntryToDispatchedUnsupportedCompression`
-            // variant so operators see exactly which arm tripped.
-            m @ (CompressionMethod::Gzip
-            | CompressionMethod::Oodle
-            | CompressionMethod::Zstd
-            | CompressionMethod::Unknown(_)
-            | CompressionMethod::UnknownByName(_)) => Err(PaksmithError::InvalidIndex {
+            // `check_read` refused these, so a read doesn't reach here.
+            PakDecodeRoute::Unsupported => Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression {
-                    method: m.clone(),
+                    method: method.clone(),
                 },
             }),
         }
+    }
+}
+
+/// How a read and a plaintext verify treat an entry's compression method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PakDecodeRoute {
+    Stored,
+    Compressed(PakCodec),
+    Unsupported,
+}
+
+/// A compression method paksmith decodes, block by block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PakCodec {
+    Zlib,
+    Lz4,
+}
+
+/// Classifies `method` for the read path and verify's plaintext arm, with
+/// no wildcard, so a new [`CompressionMethod`] variant must pick a route.
+fn pak_decode_route(method: &CompressionMethod) -> PakDecodeRoute {
+    match method {
+        CompressionMethod::None => PakDecodeRoute::Stored,
+        CompressionMethod::Zlib => PakDecodeRoute::Compressed(PakCodec::Zlib),
+        CompressionMethod::Lz4 => PakDecodeRoute::Compressed(PakCodec::Lz4),
+        CompressionMethod::Gzip
+        | CompressionMethod::Oodle
+        | CompressionMethod::Zstd
+        | CompressionMethod::Unknown(_)
+        | CompressionMethod::UnknownByName(_) => PakDecodeRoute::Unsupported,
     }
 }
 
@@ -1865,26 +1880,24 @@ fn interned_method_name(
     shared
 }
 
-/// Route a `Zlib | Lz4` entry to its per-block streamer over `reader`.
+/// Route a compressed entry to its codec's per-block streamer over `reader`.
 ///
 /// `reader` is either the pak file (plaintext entries) or a
 /// [`RebasedReader`] over the decrypted payload (encrypted entries,
 /// #634) — the streamers are generic over `R: Read + Seek`, so the same
-/// dispatch serves both. `method` MUST be `Zlib` or `Lz4` (the caller's
-/// match guarantees it); the `else` branch is `Lz4`.
+/// dispatch serves both.
 fn dispatch_compressed<R: Read + Seek>(
     reader: &mut R,
-    method: &CompressionMethod,
+    codec: PakCodec,
     entry: &PakIndexEntry,
     file_size: u64,
     payload_start: u64,
     version: PakVersion,
     writer: &mut dyn Write,
 ) -> crate::Result<u64> {
-    if *method == CompressionMethod::Zlib {
-        stream_zlib_to(reader, entry, file_size, payload_start, version, writer)
-    } else {
-        stream_lz4_to(reader, entry, file_size, payload_start, writer)
+    match codec {
+        PakCodec::Zlib => stream_zlib_to(reader, entry, file_size, payload_start, version, writer),
+        PakCodec::Lz4 => stream_lz4_to(reader, entry, file_size, payload_start, writer),
     }
 }
 
@@ -2776,10 +2789,10 @@ thread_local! {
 
 /// [`PakReader::check_read`]'s checks of a Zlib or LZ4 entry's payload, in
 /// the read's order: an encrypted payload's size and extent
-/// (`read_decrypted_compressed_payload`), a pre-v5 zlib entry
-/// (`stream_zlib_to`), every block, against the decrypted payload for an
-/// encrypted entry and the file otherwise (`stream_entry_to`), then an
-/// entry without blocks that claims bytes (`check_cumulative_size`).
+/// (`read_decrypted_compressed_payload`), a pre-v5 compressed entry, every
+/// block, against the decrypted payload for an encrypted entry and the
+/// file otherwise (`stream_entry_to`), then an entry without blocks that
+/// claims bytes (`check_cumulative_size`).
 fn check_compressed_payload(
     header: &PakEntryHeader,
     payload_start: u64,
@@ -2793,9 +2806,7 @@ fn check_compressed_payload(
     } else {
         file_size
     };
-    if *header.compression_method() == CompressionMethod::Zlib {
-        require_relative_chunk_offsets(version)?;
-    }
+    require_relative_chunk_offsets(version)?;
     let mut prev_abs_end = None;
     for (i, block) in header.compression_blocks().iter().enumerate() {
         #[cfg(test)]
@@ -4120,6 +4131,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pak_decode_route_classifies_every_method() {
+        let unknown_id = std::num::NonZeroU32::new(7).unwrap();
+        for (method, route) in [
+            (CompressionMethod::None, PakDecodeRoute::Stored),
+            (
+                CompressionMethod::Zlib,
+                PakDecodeRoute::Compressed(PakCodec::Zlib),
+            ),
+            (
+                CompressionMethod::Lz4,
+                PakDecodeRoute::Compressed(PakCodec::Lz4),
+            ),
+            (CompressionMethod::Gzip, PakDecodeRoute::Unsupported),
+            (CompressionMethod::Oodle, PakDecodeRoute::Unsupported),
+            (CompressionMethod::Zstd, PakDecodeRoute::Unsupported),
+            (
+                CompressionMethod::Unknown(unknown_id),
+                PakDecodeRoute::Unsupported,
+            ),
+            (
+                CompressionMethod::UnknownByName("LZMA".to_string()),
+                PakDecodeRoute::Unsupported,
+            ),
+        ] {
+            assert_eq!(pak_decode_route(&method), route, "{method:?}");
+        }
+    }
+
     /// A well-formed LZ4 block: a 64 KiB output derived from ~300
     /// compressed bytes. `compressed_len × 255` (76_500) exceeds the
     /// pak-derived `expected_out`, so the cap is transparent — it
@@ -4636,6 +4676,31 @@ mod tests {
             written,
             "bytes written to the sink must equal the returned count"
         );
+    }
+
+    /// `check_compressed_payload` refuses a pre-v5 entry of either codec,
+    /// and passes the same entry at v5.
+    #[test]
+    fn check_compressed_payload_refuses_pre_v5_for_every_codec() {
+        const PATH: &str = "Content/Compressed.uasset";
+        for (name, method) in [
+            ("real_v8b_compressed.pak", CompressionMethod::Zlib),
+            ("real_v8b_lz4.pak", CompressionMethod::Lz4),
+        ] {
+            let reader = PakReader::open(fixture(name)).unwrap();
+            let entry = reader.index_entry(PATH).unwrap();
+            assert_eq!(entry.header().compression_method(), &method);
+            let start = reader.check_read(entry).unwrap();
+            let check = |version| {
+                check_compressed_payload(entry.header(), start, reader.file_size, version, PATH)
+            };
+            assert!(check(PakVersion::RelativeChunkOffsets).is_ok(), "{name}");
+            let err = check(PakVersion::IndexEncryption).unwrap_err();
+            assert!(
+                matches!(err, PaksmithError::UnsupportedVersion { version: 4 }),
+                "{name}: {err:?}"
+            );
+        }
     }
 
     // ---- LZ4 pak-entry decompression (#636) ----
@@ -8319,6 +8384,52 @@ mod tests {
         let _ = empty.read_entry("Content/bad.bin").unwrap_err();
         logs_assert(lines_counted(MISMATCH, 1));
         logs_assert(lines_carrying(MISMATCH, "WARN"));
+    }
+
+    /// Oodle is a method paksmith names but doesn't decode: a read, a
+    /// verify of its plaintext entry, and `stream_entry_to`'s dispatch
+    /// each refuse it.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn plaintext_oodle_entry_is_refused_by_read_verify_and_dispatch() {
+        use crate::testing::wire::build_v8b_pak;
+
+        const PATH: &str = "Content/oodle.bin";
+        let pak = build_v8b_pak("Oodle", PATH, &[vec![7; 16]], 16, 16);
+        let reader = PakReader::from_bytes(pak).unwrap();
+        for err in [
+            reader.read_entry(PATH).unwrap_err(),
+            reader.verify_entry(PATH).unwrap_err(),
+        ] {
+            assert!(
+                matches!(
+                    err,
+                    PaksmithError::Decompression {
+                        fault: DecompressionFault::UnsupportedMethod {
+                            method: CompressionMethod::Oodle,
+                        },
+                        ..
+                    }
+                ),
+                "got: {err:?}"
+            );
+        }
+        let entry = reader.index_entry(PATH).unwrap();
+        let start = entry.header().offset() + entry.header().wire_size();
+        let direct = reader
+            .stream_entry_to(entry, start, &mut Vec::new())
+            .unwrap_err();
+        assert!(
+            matches!(
+                direct,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression {
+                        method: CompressionMethod::Oodle,
+                    },
+                }
+            ),
+            "got: {direct:?}"
+        );
     }
 
     /// A budgeted reader refuses an unsupported method before charging or
