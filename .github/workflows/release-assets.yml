@@ -204,15 +204,20 @@ jobs:
             gh api "repos/${GH_REPO}/contents/crates/$1/CHANGELOG.md?ref=$2" -H "Accept: application/vnd.github.raw"
           }
           # Prints the changelog section for this tag's version, and fails
-          # when the changelog on stdin has no heading for it.
+          # when the changelog on stdin has no heading for it. A section
+          # ends at the next `## ` heading that starts with a version
+          # number of two or more parts, with or without a `[` or a `v`
+          # before it. Any other `## ` line is part of the section,
+          # whatever it heads, and is printed one level down, since the
+          # notes use that level for the crate names.
           section_of() {
             awk -v version="${TAG#v}" '
-              /^## / {
+              /^## \[?v?[0-9]+\.[0-9]+([^0-9A-Za-z]|$)/ {
                 on = index($0, "## [" version "]") == 1 || index($0, "## " version " ") == 1
                 found = found || on
                 next
               }
-              on
+              on { sub(/^## /, "### "); print }
               END { exit !found }'
           }
           compare=""
