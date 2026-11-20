@@ -266,25 +266,57 @@ fn print(reports: &[ArchiveReport], format: ResolvedFormat) -> io::Result<()> {
     out.flush()
 }
 
-/// One line per archive.
+/// One line per archive, and after it a `listing:` line when the archive
+/// mixes hash presence. That line is part of the table, not an advisory
+/// note.
 fn render_table(reports: &[ArchiveReport]) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     for report in reports {
         let path = report.path.display().to_string();
         let _ = writeln!(out, "{}: {}", sanitize_for_display(&path), summary(report));
+        if let Some(survey) = report
+            .integrity
+            .filter(IntegritySurvey::mixes_hash_presence)
+        {
+            let _ = writeln!(
+                out,
+                "  listing: records a non-zero hash for {} of this archive's {} entries",
+                survey.claim(),
+                survey.total()
+            );
+        }
     }
     out
 }
 
-/// What a table line says after the archive's path: whether it verified,
-/// and fully, or why it failed. The JSON document has the counts.
+/// What a table line says after the archive's path: its index regions'
+/// states and the entry listing's counts, from the verify's own survey, or
+/// why it failed.
 fn summary(report: &ArchiveReport) -> String {
-    match &report.verified {
-        Ok(stats) if stats.is_fully_verified() => "ok, fully verified".to_owned(),
-        Ok(_) => "ok, not fully verified".to_owned(),
-        Err(failure) => format!("failed: {}", sanitize_for_display(&failure.error)),
-    }
+    let stats = match &report.verified {
+        Ok(stats) => stats,
+        Err(failure) => return format!("failed: {}", sanitize_for_display(&failure.error)),
+    };
+    let survey = stats.integrity();
+    let label = |state| region_token(state).replace('_', " ");
+    format!(
+        "ok{}; index {}, fdi {}, phi {}; {} of {} entries with a hash in the \
+         listing, {} without ({} with no hash in the index, {} zeroed)",
+        if stats.is_fully_verified() {
+            ", fully verified"
+        } else {
+            ""
+        },
+        label(main_index_state(stats)),
+        label(stats.fdi()),
+        label(stats.phi()),
+        survey.claim(),
+        survey.total(),
+        survey.skipped_no_hash(),
+        survey.not_in_index(),
+        survey.no_claim(),
+    )
 }
 
 #[cfg(test)]
