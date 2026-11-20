@@ -27,8 +27,10 @@ jobs:
       # build the newest cargo-audit from crates.io while holding one.
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-audit@0.22.2
-          # The default fallback hands the job's token to cargo-binstall.
+          # No version: the action's pinned manifest fixes it, with a
+          # checksum, and moves it when Dependabot bumps the action.
+          tool: cargo-audit
+          # The default fallback puts the job's token in this step.
           fallback: none
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
