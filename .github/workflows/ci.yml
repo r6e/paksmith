@@ -64,10 +64,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    permissions:
-      contents: read
-      # dorny/test-reporter posts a check-run with the JUnit results.
-      checks: write
     timeout-minutes: 20
     strategy:
       # See full matrix failures even when one OS fails, so platform-
@@ -77,6 +73,10 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Here and in the jobs below: build scripts and tests must
+          # not find the token in .git/config.
+          persist-credentials: false
       - uses: ./.github/actions/setup-rust
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
@@ -201,19 +201,17 @@ jobs:
         run: cargo nextest run --workspace --all-features --profile ci
       - name: Run doctests
         run: cargo test --workspace --all-features --doc
-      # Publish JUnit results as a check-run with per-test annotations
-      # surfaced inline on the PR's Files-changed tab.
+      # Write the JUnit results to this job's summary page. The reporter
+      # posts a check-run only with `use-actions-summary: 'false'`, which
+      # would need `checks: write` in a job that runs repository code.
       #
       # `if: always()` so failures still get a published report — the
       # whole point is to see the failure detail without scrolling
-      # raw step logs. Reporter name includes ${{ matrix.os }} so the
-      # three OS matrix entries publish three distinct check-runs.
+      # raw step logs.
       - name: Publish test report
         if: always()
         # The reporter is a presentation enhancement; never let it
-        # block the job. PRs from forks get a read-only GITHUB_TOKEN
-        # and the action will silently fail to post the check-run —
-        # that's fine, the test step itself already reports pass/fail.
+        # block the job.
         continue-on-error: true
         uses: dorny/test-reporter@d1b5dff021aa968b288b02285a8bf47471c5928a # v3.2.0
         with:
@@ -237,6 +235,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-rust
       - run: cargo build --workspace --release
 
@@ -248,6 +248,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
           components: clippy, rustfmt
@@ -281,6 +283,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
           components: llvm-tools-preview
@@ -371,6 +375,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: "1.92"
@@ -397,6 +403,8 @@ jobs:
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly
@@ -431,6 +439,8 @@ jobs:
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-rust # stable + macOS proxy workaround
       # cargo-minimal-versions internally invokes nightly via `rustup run
       # nightly cargo` for `-Z minimal-versions` lockfile resolution, then
@@ -467,6 +477,8 @@ jobs:
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly
