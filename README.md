@@ -257,8 +257,18 @@ Like `list`, it takes archives from `--game`/`--detect` when no path is given.
 cargo run -p paksmith-cli -- verify path/to/a.pak path/to/b.pak
 ```
 
-The table has one line per archive: `ok, fully verified`, `ok, not fully
-verified`, or `failed:` and the error. The JSON document is
+The table has a line per archive, with its index regions' states and the
+entry listing's counts, or `failed:` and the error:
+
+```text
+path/to/a.pak: ok, fully verified; index verified, fdi not present, phi not present; 3 of 3 entries with a hash in the listing, 0 without (0 with no hash in the index, 0 zeroed)
+path/to/b.pak: ok; index verified, fdi verified, phi verified; 0 of 3 entries with a hash in the listing, 3 without (3 with no hash in the index, 0 zeroed)
+```
+
+When `mixes_hash_presence` (below) is true, a `listing:` line follows the
+archive's line, such as `  listing: records a non-zero hash for 2 of this
+archive's 3 entries`. It is part of the table on stdout, so `--quiet` doesn't
+drop it. The JSON document is
 `{schema_version, archives: [{archive, ok, code, index?, counts?, integrity?, fully_verified?, error?}]}`:
 
 - `archive` is the archive's path, and `code` its own exit code, as below.

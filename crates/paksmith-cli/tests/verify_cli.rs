@@ -140,10 +140,12 @@ fn the_index_states_tell_the_fdi_from_the_phi() {
 }
 
 #[test]
-fn an_archive_mixing_hash_presence_verifies() {
+fn an_archive_mixing_hash_presence_verifies_with_a_listing_line() {
+    use paksmith_core::testing::v10::hash_presence_v11_pak;
+
     let dir = tempfile::tempdir().unwrap();
-    let pak = paksmith_core::testing::v10::hash_presence_v11_pak(true);
-    let archive = only_archive(write(dir.path(), "a.pak", &pak), 0);
+    let pak = write(dir.path(), "a.pak", &hash_presence_v11_pak(true));
+    let archive = only_archive(pak.clone(), 0);
     assert_eq!(archive["ok"], true);
     assert_eq!(
         archive["index"],
@@ -154,12 +156,47 @@ fn an_archive_mixing_hash_presence_verifies() {
         json!({"verified": 1, "skipped_no_hash": 1})
     );
     assert_eq!(archive["integrity"]["mixes_hash_presence"], true);
+    assert_eq!(
+        verify(std::slice::from_ref(&pak), "table", 0),
+        format!(
+            "{}: ok; index skipped no hash, fdi skipped no hash, phi skipped no hash; \
+             1 of 2 entries with a hash in the listing, 1 without (1 with no hash in the \
+             index, 0 zeroed)\n  listing: records a non-zero hash for 1 of this archive's 2 \
+             entries\n",
+            pak.display()
+        )
+    );
+    let uniform = write(dir.path(), "b.pak", &hash_presence_v11_pak(false));
+    assert!(!verify(&[uniform], "table", 0).contains("listing:"));
 }
 
-/// The table has a line per archive: whether it verified, and fully, or
-/// why it failed.
+/// An archive that opens, mixes hash presence and fails its verify prints
+/// its failure line and then the listing line.
 #[test]
-fn the_table_says_whether_each_archive_verified() {
+fn a_failed_archive_mixing_hash_presence_keeps_its_listing_line() {
+    let mut pak = paksmith_core::testing::v10::hash_presence_v11_pak(true);
+    let payload = b"alpha payload";
+    let at: Vec<usize> = (0..=pak.len() - payload.len())
+        .filter(|&i| pak[i..i + payload.len()] == payload[..])
+        .collect();
+    assert_eq!(at.len(), 1, "entry a's payload");
+    pak[at[0]] ^= 0xFF;
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "a.pak", &pak);
+    let table = verify(std::slice::from_ref(&path), "table", 1);
+    let [failed, listing]: [&str; 2] = table.lines().collect::<Vec<_>>().try_into().unwrap();
+    let failure = format!("{}: failed: SHA1 mismatch: entry `a`", path.display());
+    assert!(failed.starts_with(&failure), "{table}");
+    assert_eq!(
+        listing,
+        "  listing: records a non-zero hash for 1 of this archive's 2 entries"
+    );
+}
+
+/// The table has a line per archive: its index regions' states and the
+/// entry listing's counts, or why it failed.
+#[test]
+fn the_table_says_what_each_archive_verified() {
     let dir = tempfile::tempdir().unwrap();
     let paths = [
         fixture_path("real_v8b_multi.pak"),
@@ -170,8 +207,56 @@ fn the_table_says_whether_each_archive_verified() {
     assert_eq!(
         verify(&paths, "table", 2),
         format!(
-            "{hashed}: ok, fully verified\n{unhashed}: ok, not fully verified\n\
+            "{hashed}: ok, fully verified; index verified, fdi not present, phi not present; \
+             3 of 3 entries with a hash in the listing, 0 without (0 with no hash in the \
+             index, 0 zeroed)\n\
+             {unhashed}: ok; index verified, fdi verified, phi verified; \
+             0 of 3 entries with a hash in the listing, 3 without (3 with no hash in the \
+             index, 0 zeroed)\n\
              {not_pak}: failed: invalid pak footer: file too small (9 bytes) for any pak footer\n"
+        )
+    );
+}
+
+/// `real_v5_multi.pak` with no index hash, and its first entry's hash
+/// zeroed in the listing and in the entry's own record, so that entry is
+/// `no_claim` beside two with a hash.
+fn zeroed_entry_v5(dir: &Path) -> PathBuf {
+    let mut pak = std::fs::read(fixture_path("real_v5_multi.pak")).unwrap();
+    // The first record sits at offset 0, its SHA-1 after the offset, both
+    // sizes and the method.
+    let sha1 = pak[28..48].to_vec();
+    let at: Vec<usize> = (0..=pak.len() - 20)
+        .filter(|&i| pak[i..i + 20] == sha1[..])
+        .collect();
+    assert_eq!(at.len(), 2, "the record and its listing copy");
+    for i in at {
+        pak[i..i + 20].fill(0);
+    }
+    // A v5 footer ends with the index hash.
+    let end = pak.len();
+    pak[end - 20..].fill(0);
+    write(dir, "zeroed.pak", &pak)
+}
+
+/// The table tells the FDI's state from the PHI's, and an entry with no
+/// hash in the index from one whose hash is zeroed, and a zeroed hash
+/// beside hashed entries gets the listing line.
+#[test]
+fn the_table_tells_regions_and_skips_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = [zeroed_entry_v5(dir.path()), unhashed_phi_v11(dir.path())];
+    let [zeroed, phi] = paths.each_ref().map(|p| p.display());
+    assert_eq!(
+        verify(&paths, "table", 0),
+        format!(
+            "{zeroed}: ok; index skipped no hash, fdi not present, phi not present; \
+             2 of 3 entries with a hash in the listing, 1 without (0 with no hash in the \
+             index, 1 zeroed)\n  listing: records a non-zero hash for 2 of this archive's 3 \
+             entries\n\
+             {phi}: ok; index skipped no hash, fdi verified, phi skipped no hash; \
+             0 of 3 entries with a hash in the listing, 3 without (3 with no hash in the \
+             index, 0 zeroed)\n"
         )
     );
 }
