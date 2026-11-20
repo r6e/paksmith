@@ -150,19 +150,39 @@ jobs:
           MAX_RUNS: 30
         run: |
           set -euo pipefail
+          # A cache restore that failed partway can leave files here, and
+          # they are not a corpus. A link at `fuzz/corpus` would send the
+          # `rm`, and every later step, somewhere else.
+          dest="fuzz/corpus/${TARGET}"
+          if [[ -L fuzz/corpus ]]; then
+            echo "::warning::${TARGET}: fuzz/corpus was a symbolic link; removed"
+            rm -f fuzz/corpus
+          fi
+          rm -rf "${dest}"
           runs="$(gh api -X GET "repos/${GH_REPO}/actions/workflows/fuzz.yml/runs" \
             -f event=schedule -f status=completed -F per_page="${MAX_RUNS}" \
             --jq '[.workflow_runs[] | select(.event == "schedule" and .head_repository.full_name == env.GH_REPO) | .id] | sort | reverse | .[]')"
           for run in ${runs}; do
             [[ "${run}" =~ ^[0-9]+$ && "${run}" != "${GITHUB_RUN_ID}" ]] || continue
             dir="${RUNNER_TEMP}/corpus-artifact-${run}"
+            stage="${RUNNER_TEMP}/corpus-stage-${run}"
             gh run download "${run}" --name "fuzz-${TARGET}-${run}" --dir "${dir}" || continue
             [[ -d "${dir}/corpus/${TARGET}" ]] || continue
-            mkdir -p "fuzz/corpus/${TARGET}"
-            find "${dir}/corpus/${TARGET}" -maxdepth 1 -type f \
-              -exec cp -n {} "fuzz/corpus/${TARGET}/" \;
-            count="$(find "fuzz/corpus/${TARGET}" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+            # Copied to a staging directory and moved into place whole,
+            # so that a copy that fails partway restores nothing: the
+            # run would save a partial corpus as the next one's base.
+            # `+` makes `find` report a failed `cp`, where `\;` hides it.
+            mkdir "${stage}"
+            if ! find "${dir}/corpus/${TARGET}" -maxdepth 1 -type f -exec cp -t "${stage}" {} +; then
+              echo "::warning::${TARGET}: could not copy run ${run}'s corpus; trying the run before it"
+              # A full disk is the likely cause, so free what this run took.
+              rm -rf "${dir}" "${stage}" || true
+              continue
+            fi
+            count="$(find "${stage}" -maxdepth 1 -type f | wc -l | tr -d ' ')"
             ((count > 0)) || continue
+            mkdir -p fuzz/corpus
+            mv -T "${stage}" "${dest}"
             echo "run=${run}" >> "${GITHUB_OUTPUT}"
             echo "Restored ${count} corpus files from run ${run}'s artifact."
             exit 0
