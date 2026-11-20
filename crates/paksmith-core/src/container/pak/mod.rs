@@ -2180,6 +2180,10 @@ impl ContainerReader for PakReader {
     fn mount_point(&self) -> &str {
         self.index.mount_point()
     }
+
+    fn verify_archive(&self) -> crate::Result<Option<VerifyStats>> {
+        Ok(Some(self.verify()?))
+    }
 }
 
 /// Read and AES-256-ECB-decrypt a pak index region into a `Zeroizing` buffer.
@@ -3491,9 +3495,11 @@ pub enum RegionVerifyState {
     Verified,
 }
 
-/// Structured report from [`PakReader::verify`]: counts of what was
-/// actually hashed vs skipped, so callers can distinguish "fully verified"
-/// from "verification ran but skipped some entries we couldn't check."
+/// Structured report from [`PakReader::verify`], which
+/// [`ContainerReader::verify_archive`] returns through the trait: counts
+/// of what was actually hashed vs skipped, so callers can distinguish
+/// "fully verified" from "verification ran but skipped some entries we
+/// couldn't check."
 ///
 /// Marked `#[non_exhaustive]` to allow future fields (e.g., a count of
 /// entries with detected I/O errors during partial-archive recovery)
@@ -8649,6 +8655,36 @@ mod tests {
         let stats = reader.verify().unwrap();
         assert_eq!(stats.integrity().no_claim(), 32);
         assert_eq!(stats.entries_skipped_no_hash(), 32);
+    }
+
+    /// Through the trait object, a pak reader returns `verify()`'s report.
+    #[test]
+    fn verify_archive_returns_the_verify_report() {
+        let path = fixture("real_v8b_multi.pak");
+        let stats = PakReader::open(&path).unwrap().verify().unwrap();
+        assert!(stats.entries_verified() > 0, "{stats:?}");
+        let reader = crate::container::open(&path, None).unwrap();
+        assert_eq!(reader.verify_archive().unwrap(), Some(stats));
+    }
+
+    /// A verify that fails is the trait method's error.
+    #[test]
+    fn verify_archive_returns_the_verify_error() {
+        let mut pak = std::fs::read(fixture("real_v8b_multi.pak")).unwrap();
+        let hash_start = crate::test_patch::footer_index_hash_range(&pak).start;
+        pak[hash_start] ^= 0xFF;
+        let reader: Arc<dyn ContainerReader> = Arc::new(PakReader::from_bytes(pak).unwrap());
+        let err = reader.verify_archive().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::HashMismatch {
+                    target: HashTarget::Index,
+                    ..
+                }
+            ),
+            "got: {err:?}"
+        );
     }
 
     /// The open-time log lines clamp the entry path.

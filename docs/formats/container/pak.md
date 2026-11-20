@@ -715,6 +715,9 @@ policy.
   options; `OpenOptions::with_read_budget()` asks for a budgeted reader.
   A reader that reports it didn't apply an option is refused with
   `PaksmithError::InvalidArgument`; pak's reader applies every option.
+- `ContainerReader::verify_archive()` — `verify()`'s report through the
+  trait object, and `None` from a reader that doesn't override it.
+  `container` re-exports `VerifyStats` and `RegionVerifyState`.
 - `pub struct PakFooter` — `version()`, `index_offset()`, `index_size()`,
   `index_hash()`, `is_encrypted()`, `encryption_key_guid()`, `frozen_index()`.
 - `pub enum PakVersion` — `Initial`, `NoTimestamps`, …, `Fnv64BugFix`
