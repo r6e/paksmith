@@ -54,7 +54,6 @@ pub mod localization;
 pub mod profile;
 pub mod staged_replace;
 
-#[allow(dead_code, reason = "the pak reader adopts it in the next commit")]
 mod codec;
 mod fallible_read;
 mod hex;

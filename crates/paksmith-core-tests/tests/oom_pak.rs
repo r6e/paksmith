@@ -9,8 +9,8 @@
 //! injection seams that synthesize a `TryReserveError` at the
 //! `try_reserve*` sites in the pak decompression paths
 //! (`read_compressed_block`, shared by zlib and LZ4;
-//! `stream_zlib_to`'s scratch-growth loop; `stream_lz4_to`'s output
-//! reservation). See `paksmith_core::testing::oom` for the seam API.
+//! `stream_zlib_to`'s scratch-growth loop; `stream_block_codec_to`'s
+//! LZ4 output reservation). See `paksmith_core::testing::oom` for the seam API.
 //!
 //! The Display unit tests for these variants live in
 //! `crates/paksmith-core/src/error.rs::tests` (added in PR #123 R3) and
@@ -139,7 +139,7 @@ fn read_entry_surfaces_compressed_block_reserve_failed_under_oom() {
     );
 }
 
-/// Arm the OOM seam at `stream_lz4_to`'s output-buffer
+/// Arm the OOM seam at `stream_block_codec_to`'s output-buffer
 /// `try_reserve_exact` site (#636) and assert the typed
 /// `Lz4OutputReserveFailed` error surfaces. Uses the repak-written
 /// LZ4 fixture: the compressed-INPUT reservation shares the
