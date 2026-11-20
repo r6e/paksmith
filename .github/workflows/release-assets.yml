@@ -98,9 +98,10 @@ jobs:
           # ubuntu-latest is 24.04 with glibc 2.39 which breaks on
           # Debian stable / RHEL 8-9 / older Ubuntu LTS.
           #
-          # Keep in step with nightly.yml's build matrix and with the
-          # target list in the publish job below;
-          # scripts/check-release-targets.sh fails CI when they differ.
+          # Keep in step with nightly.yml's build matrix, with the target
+          # list in the publish job below and with the README's file
+          # names; scripts/check-release-targets.sh fails CI when they
+          # differ.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
@@ -194,7 +195,9 @@ jobs:
           # release-please writes one changelog per crate and puts only
           # paksmith-cli's section on the draft, because the three crates
           # share the tag, whose version is paksmith-cli's. The notes below
-          # carry all three sections.
+          # carry all three sections. scripts/check-release-targets.sh
+          # reads this line and fails CI when it is not release-please's
+          # packages, the tag's crate first.
           crates=(paksmith-cli paksmith-gui paksmith-core)
           changelog_url() {
             echo "https://github.com/${GH_REPO}/blob/${TAG}/crates/$1/CHANGELOG.md"
