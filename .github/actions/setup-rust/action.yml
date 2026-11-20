@@ -33,6 +33,7 @@ inputs:
     description: |
       Whether to enable `Swatinem/rust-cache`. Set to "false" for jobs
       that don't benefit from caching (e.g. quick check-only jobs).
+      A run on `main` saves the cache; any other run only restores it.
     required: false
     default: "true"
 
@@ -72,6 +73,12 @@ runs:
 
     - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       if: inputs.cache == 'true'
+      with:
+        # Pull requests restore `main`'s caches, which every branch can
+        # read, but saving their own copies pushed the repository past
+        # GitHub's 10 GB limit, and eviction then took `main`'s too.
+        # cache-prune.yml deletes the caches `main` has replaced.
+        save-if: ${{ github.ref == 'refs/heads/main' }}
 
     - name: Verify cargo and bypass rustup proxy flake
       shell: bash

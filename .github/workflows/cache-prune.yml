@@ -1,0 +1,79 @@
+name: Cache prune
+
+# Deletes the Rust build caches on `main` that a newer one has replaced.
+#
+# Swatinem/rust-cache ends a cache key with a hash of the lockfile and
+# the manifests, so every dependency or manifest change on `main` saves
+# a whole new set beside the old one. Two sets do not fit in GitHub's
+# 10 GB, and what it evicts first is whatever was used longest ago,
+# which has been the fuzz corpus.
+#
+# This shortens the time over the limit; it does not prevent it. Both
+# sets exist from the new one's saves until this runs, and GitHub can
+# evict in that time. A set that a new toolchain replaced differs
+# earlier in the key, is not deleted here, and stays until GitHub
+# evicts it for space or expires it after seven days unused.
+#
+# It runs on request, and after each run of a workflow listed under
+# `workflows` that a push to `main` started.
+on:
+  workflow_run:
+    workflows: [CI, Format docs, glTF validation]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  prune:
+    name: Prune replaced Rust caches
+    # `branches` above matches the head branch's name, which a fork's
+    # pull request can also call `main`.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    # No checkout: the job reads nothing from the repository, and takes
+    # nothing from the run that triggered it.
+    steps:
+      # Two caches are the same cache at different times when their
+      # keys differ only in the final hash. The newest of each such
+      # group is kept. Caches under any other key, such as the fuzz
+      # corpus, are not listed.
+      #
+      # `key` is a prefix filter, so jq keeps only keys of the exact
+      # form, and checks the ref the API was asked for. jq runs once per
+      # page under `--paginate` (cli/cli#10459), so it emits every entry
+      # and awk groups the whole, newest-first, list, counting an entry
+      # the pages repeat once.
+      - name: Delete the caches on main that a newer one replaced
+        run: |
+          set -euo pipefail
+          entries="$(gh api --paginate -X GET "repos/${GH_REPO}/actions/caches" \
+            -f key=v0-rust- -f ref=refs/heads/main \
+            -f sort=created_at -f direction=desc -F per_page=100 \
+            --jq '.actions_caches[] | select(.ref == "refs/heads/main" and (.key | test("\\Av0-rust-[A-Za-z0-9_-]+-[0-9a-f]{8}-[0-9a-f]{8}\\z"))) | "\(.id) \(.key)"')"
+          replaced="$(awk 'ids[$1]++ { next } { group = $2; sub(/-[0-9a-f]+$/, "", group) } seen[group]++' <<< "${entries}")"
+          if [[ -z "${replaced}" ]]; then
+            echo "No cache on main has been replaced."
+            exit 0
+          fi
+          failed=0
+          while read -r id key; do
+            [[ "${id}" =~ ^[0-9]+$ ]] || continue
+            echo "deleting ${key} (cache ${id})"
+            gh api --silent -X DELETE "repos/${GH_REPO}/actions/caches/${id}" || {
+              echo "::warning::could not delete cache ${id}"
+              failed=1
+            }
+          done <<< "${replaced}"
+          exit "${failed}"
