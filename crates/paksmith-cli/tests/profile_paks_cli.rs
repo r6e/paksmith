@@ -7,27 +7,12 @@ use assert_cmd::Command;
 use tempfile::tempdir;
 
 mod common;
-use common::fixture_path;
+use common::{add_pak_path_profile, fixture_path};
 
 fn paksmith(config_dir: &std::path::Path) -> Command {
     let mut c = Command::cargo_bin("paksmith").unwrap();
     let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
     c
-}
-
-/// `profile add <id> --pak-path <pattern>` under `cfg`.
-fn add_pak_path_profile(cfg: &std::path::Path, id: &str, pattern: &str) {
-    let _ = paksmith(cfg)
-        // `--format table`: `profile` honours --format since #658 and auto
-        // resolves to JSON off-TTY. Pinned at the two `profile` call sites
-        // rather than in this file's shared helper, which also drives
-        // `list`/`search`/`extract` — commands that already honoured `--format`
-        // and should keep resolving it themselves.
-        .args([
-            "--format", "table", "profile", "add", id, "--name", id, "--pak-path", pattern,
-        ])
-        .assert()
-        .success();
 }
 
 /// An "install dir" holding copies of both plain fixtures under `Paks/`,

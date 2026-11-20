@@ -88,8 +88,9 @@ proc-macro2.workspace = true
 # of the stable public API. Activated by `paksmith-fixture-gen` (a
 # normal dependency), by the dev-dependencies of `paksmith-core-tests`
 # (which owns the integration tests that need these accessors),
-# `paksmith-gui` and `paksmith-bench`, and by the out-of-workspace
-# `fuzz/` crate. Downstream consumers should NOT enable it.
+# `paksmith-cli`, `paksmith-gui` and `paksmith-bench`, and by the
+# out-of-workspace `fuzz/` crate. Downstream consumers should NOT
+# enable it.
 #
 # Previously activated via a dev-dep self-import in this Cargo.toml;
 # that created a `paksmith-core -> paksmith-core` edge in the
