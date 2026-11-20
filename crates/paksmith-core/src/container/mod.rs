@@ -9,6 +9,8 @@
 
 pub mod pak;
 
+pub use pak::{RegionVerifyState, VerifyStats};
+
 use std::io::Write;
 use std::ops::Range;
 
@@ -873,6 +875,28 @@ pub trait ContainerReader: Send + Sync {
     fn entry_integrity(&self, meta: &EntryMetadata) -> EntryIntegrity {
         classify_sha1_claim(meta.sha1(), self.claims_integrity())
     }
+
+    /// Hash-check the archive: [`pak::PakReader::verify`]'s report for a
+    /// pak, and `None` from a reader that can't verify its archive, which
+    /// is what this default returns.
+    ///
+    /// SCOPE: the report is pak-shaped. [`VerifyStats`] names pak's main
+    /// index, FDI and PHI regions, and its entry counts follow pak's
+    /// per-entry SHA-1 policy. That is accepted while pak is the only
+    /// reader. A reader whose format hashes other regions, or uses another
+    /// digest, needs a container-neutral report here, which is a breaking
+    /// change to this method. Outside this crate a reader can't build a
+    /// populated [`VerifyStats`], since its fields are crate-private and
+    /// its `Default` reads as a verify that hashed nothing, so such a
+    /// reader should keep this default and return `None`.
+    ///
+    /// # Errors
+    ///
+    /// The reader's verify errors; for a pak, those of
+    /// [`pak::PakReader::verify`].
+    fn verify_archive(&self) -> crate::Result<Option<VerifyStats>> {
+        Ok(None)
+    }
 }
 
 /// Compile-time assertion that [`ContainerReader`] is dyn-compatible.
@@ -1003,37 +1027,47 @@ fn check_applied(requested: &OpenOptions, applied: &OpenOptions) -> crate::Resul
 mod tests {
     use super::*;
 
+    /// A reader that overrides none of the trait's defaulted methods.
+    struct NoOverride;
+
+    impl ContainerReader for NoOverride {
+        fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + Send + '_> {
+            Box::new(std::iter::empty())
+        }
+        fn read_entry_to(&self, _: &str, _: &mut dyn Write) -> crate::Result<u64> {
+            unreachable!("not exercised by these tests")
+        }
+        fn read_entry(&self, _: &str) -> crate::Result<Vec<u8>> {
+            unreachable!("not exercised by these tests")
+        }
+        fn format(&self) -> ContainerFormat {
+            ContainerFormat::Pak
+        }
+        // The trait fixes the `&self`-bound lifetime; `&'static str`
+        // would not match the required signature.
+        #[allow(clippy::unnecessary_literal_bound)]
+        fn mount_point(&self) -> &str {
+            ""
+        }
+    }
+
     #[test]
     fn claims_integrity_defaults_to_no_claim() {
         // Pins the trait default's `false` body: a reader that does
         // not override the method must report "no integrity claim known" —
         // a `true` default would let zeroed hashes classify as tampering
         // signals on containers that never made a claim.
-        struct NoOverride;
-        impl ContainerReader for NoOverride {
-            fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + Send + '_> {
-                Box::new(std::iter::empty())
-            }
-            fn read_entry_to(&self, _: &str, _: &mut dyn Write) -> crate::Result<u64> {
-                unreachable!("not exercised by this test")
-            }
-            fn read_entry(&self, _: &str) -> crate::Result<Vec<u8>> {
-                unreachable!("not exercised by this test")
-            }
-            fn format(&self) -> ContainerFormat {
-                ContainerFormat::Pak
-            }
-            // The trait fixes the `&self`-bound lifetime; `&'static str`
-            // would not match the required signature.
-            #[allow(clippy::unnecessary_literal_bound)]
-            fn mount_point(&self) -> &str {
-                ""
-            }
-        }
         assert!(
             !NoOverride.claims_integrity(),
             "the un-overridden default must be false (no claim known)"
         );
+    }
+
+    /// A reader that doesn't override `verify_archive` returns no report,
+    /// not an empty one a caller could read as a verify that ran.
+    #[test]
+    fn verify_archive_defaults_to_no_report() {
+        assert_eq!(NoOverride.verify_archive().unwrap(), None);
     }
 
     /// `open_with` refuses a reader whose options differ from those asked

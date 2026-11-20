@@ -10,6 +10,8 @@
               uses every item"
 )]
 
+use paksmith_core::testing::wire::{write_fstring, write_legacy_footer, write_pak_entry};
+
 /// AES-256 key (64 hex chars) for the vendored `real_v8b_encrypted_*.pak`
 /// fixtures. Must match `FIXTURE_AES_KEY` in
 /// `paksmith-fixture-gen/src/encryption.rs`; if the vendored fixtures are
@@ -111,11 +113,9 @@ pub fn v3_pak_with_entry(pak: &std::path::Path, name: &[u8; 22]) {
 /// sizes, a 4-byte compression method, SHA-1, flags and block size.
 pub const STORED_RECORD_BYTES: u64 = 8 + 8 + 8 + 4 + 20 + 1 + 4;
 
-const PAK_MAGIC: u32 = 0x5A6F_12E1;
-
 /// A v5 pak holding `payload` once, stored after its record at offset 0, and
 /// an index naming that record once per entry of `names`. It claims no SHA-1
-/// and no index hash. The CLI's dev-dependencies can't reach core's builders.
+/// and no index hash. Core's own `aliased_v5_pak` is private to core's tests.
 pub fn aliased_v5_pak(names: &[&str], payload: &[u8]) -> Vec<u8> {
     let record = v5_record(0, u64::try_from(payload.len()).unwrap(), &[]);
     assert_eq!(u64::try_from(record.len()).unwrap(), STORED_RECORD_BYTES);
@@ -154,49 +154,38 @@ pub fn block_past_the_file_pak(healthy: &[u8]) -> Vec<u8> {
 /// `blocks` is empty, else zlib over `blocks`, each a `(start, end)` from
 /// `offset`. It claims no SHA-1.
 fn v5_record(offset: u64, size: u64, blocks: &[(u64, u64)]) -> Vec<u8> {
+    let method = u32::from(!blocks.is_empty());
+    v5_record_with(offset, size, method, &[0; 20], blocks)
+}
+
+/// A v5 entry record at `offset` for a `size`-byte payload in compression
+/// method `method` (`0=None`, `1=Zlib`, `4=Oodle`) over `blocks`, carrying
+/// `sha1`.
+pub fn v5_record_with(
+    offset: u64,
+    size: u64,
+    method: u32,
+    sha1: &[u8; 20],
+    blocks: &[(u64, u64)],
+) -> Vec<u8> {
     let mut record = Vec::new();
-    for field in [offset, size, size] {
-        record.extend_from_slice(&field.to_le_bytes());
-    }
-    record.extend_from_slice(&u32::from(!blocks.is_empty()).to_le_bytes());
-    record.extend_from_slice(&[0; 20]);
-    if !blocks.is_empty() {
-        record.extend_from_slice(&u32::try_from(blocks.len()).unwrap().to_le_bytes());
-        for field in blocks.iter().flat_map(|&(start, end)| [start, end]) {
-            record.extend_from_slice(&field.to_le_bytes());
-        }
-    }
-    record.push(0);
-    record.extend_from_slice(&0u32.to_le_bytes());
+    write_pak_entry(&mut record, offset, size, size, method, sha1, blocks, 0, 0);
     record
 }
 
 /// `pak` followed by a flat index naming each `(name, record)` and a v5
-/// footer over it.
-fn finish_v5_pak(mut pak: Vec<u8>, entries: &[(&str, &[u8])]) -> Vec<u8> {
-    let index_offset = pak.len();
+/// footer over it with no index hash.
+pub fn finish_v5_pak(mut pak: Vec<u8>, entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let index_offset = u64::try_from(pak.len()).unwrap();
     write_fstring(&mut pak, "../../../");
     pak.extend_from_slice(&u32::try_from(entries.len()).unwrap().to_le_bytes());
     for (name, record) in entries {
         write_fstring(&mut pak, name);
         pak.extend_from_slice(record);
     }
-    let index_size = pak.len() - index_offset;
-    pak.push(0); // the index isn't encrypted
-    pak.extend_from_slice(&PAK_MAGIC.to_le_bytes());
-    pak.extend_from_slice(&5u32.to_le_bytes());
-    for field in [index_offset, index_size] {
-        pak.extend_from_slice(&u64::try_from(field).unwrap().to_le_bytes());
-    }
-    pak.extend_from_slice(&[0; 20]);
+    let index_size = u64::try_from(pak.len()).unwrap() - index_offset;
+    write_legacy_footer(&mut pak, 5, index_offset, index_size, &[0; 20]);
     pak
-}
-
-/// Append `s` as a UTF-8 FString: its length with the NUL, its bytes, a NUL.
-fn write_fstring(buf: &mut Vec<u8>, s: &str) {
-    buf.extend_from_slice(&i32::try_from(s.len() + 1).unwrap().to_le_bytes());
-    buf.extend_from_slice(s.as_bytes());
-    buf.push(0);
 }
 
 /// Shared writer for the `hero` profile seeders: `extra` is appended
@@ -276,6 +265,15 @@ pub fn paksmith_table(config_dir: &std::path::Path) -> assert_cmd::Command {
     let _ = c.env("PAKSMITH_CONFIG_DIR", config_dir);
     let _ = c.args(["--format", "table"]);
     c
+}
+
+/// `profile add <id> --name <id> --pak-path <pattern>` under `config_dir`,
+/// through [`paksmith_table`].
+pub fn add_pak_path_profile(config_dir: &std::path::Path, id: &str, pattern: &str) {
+    let _ = paksmith_table(config_dir)
+        .args(["profile", "add", id, "--name", id, "--pak-path", pattern])
+        .assert()
+        .success();
 }
 
 /// A `paksmith` invocation pinned to JSON output (#658).

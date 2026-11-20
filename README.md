@@ -171,8 +171,9 @@ original text but never reach the terminal raw. Human-readable output (tables, `
 `paksmith: error:` line) shows control and bidirectional-control characters
 from archive, registry or store text as U+FFFD, and a multi-line error indents
 its continuation lines. Execution failures (exit 2) still end with the plain `paksmith: error:` line
-(argument errors print clap's usage text instead); exit-1 completions keep stderr
-pure JSON, with failure detail in the stdout summary. Independent of `--format`,
+(argument errors print clap's usage text instead); exit-1 completions, and
+`verify`'s exit 2 for an archive it reports in its document, keep stderr pure
+JSON, with failure detail on stdout. Independent of `--format`,
 which governs the stdout payload. The JSON shape is
 a versioned envelope shared with `search`:
 
@@ -246,6 +247,63 @@ small enough to fit the pipe buffer, so the write succeeds and the 1 stands.
 Reaching the masked case takes a reader that closes before the write; `| true`
 usually does, but that is a race rather than a guarantee, so do not rely on
 either shell recipe — rely on `ok`.
+
+### `paksmith verify`
+
+Check the SHA-1 hashes in each archive's index and report what was checked.
+Like `list`, it takes archives from `--game`/`--detect` when no path is given.
+
+```sh
+cargo run -p paksmith-cli -- verify path/to/a.pak path/to/b.pak
+```
+
+The table has a line per archive, with its index regions' states and the
+entry listing's counts, or `failed:` and the error:
+
+```text
+path/to/a.pak: ok, fully verified; index verified, fdi not present, phi not present; 3 of 3 entries with a hash in the listing, 0 without (0 with no hash in the index, 0 zeroed)
+path/to/b.pak: ok; index verified, fdi verified, phi verified; 0 of 3 entries with a hash in the listing, 3 without (3 with no hash in the index, 0 zeroed)
+```
+
+When `mixes_hash_presence` (below) is true, a `listing:` line follows the
+archive's line, such as `  listing: records a non-zero hash for 2 of this
+archive's 3 entries`. It is part of the table on stdout, so `--quiet` doesn't
+drop it. The JSON document is
+`{schema_version, archives: [{archive, ok, code, index?, counts?, integrity?, fully_verified?, error?}]}`:
+
+- `archive` is the archive's path, and `code` its own exit code, as below.
+- `index` (`main`, `fdi` and `phi`, each `verified`, `skipped_no_hash` or
+  `not_present`), `counts` (`verified`, `skipped_no_hash`) and
+  `fully_verified` are present when the archive verified. Treat an
+  unrecognised region state as not verified.
+- `integrity` (`claim`, `not_in_index`, `no_claim`, `stripped`,
+  `mixes_hash_presence`) is present whenever the archive opened.
+- `error` is present whenever `ok` is false.
+
+A v10+ pak's encoded index records carry no entry hash, so those entries count
+in `skipped_no_hash` rather than being checked, and core also logs a warning
+on stderr that some bytes were not hashed; `--quiet` drops it.
+`mixes_hash_presence` is true when some entries carry a non-zero hash in the
+entry listing and others count in `not_in_index` (no hash there) or
+`no_claim` (a zeroed one in an archive whose index isn't hashed); `stripped`
+entries count on neither side. It is information only, and doesn't change the
+exit code.
+
+An archive that fails doesn't stop the rest, whether it fails to open, to
+verify, or under `--game`/`--detect` to have its footer read or its key found.
+The exit code is the highest any archive produced: **0** when it verified,
+**1** when a stored hash didn't match or was zeroed in an archive whose index
+is hashed, and **2** when it couldn't be opened or verified, such as a
+plaintext entry whose listing records a hash, in a compression method paksmith
+doesn't decode. An archive's 1 or 2 comes with the document and no
+`paksmith: error:` line, so a stdout that closes before the document is written
+masks either as **0**; branch on each archive's `code`.
+
+Like `list`, a selector or profile that doesn't resolve fails the run with no
+document, the usual exit 2 and a `paksmith: error:` line, such as a profile
+whose `pak_paths` match nothing, an unknown `--game`, or a profile store that
+won't load. With explicit paths and no `--aes-key`, an unknown `--game` fails
+the run only once an archive's footer can be read.
 
 ### `paksmith inspect`
 

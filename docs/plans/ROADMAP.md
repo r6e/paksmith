@@ -291,6 +291,16 @@ paksmith-core/src/
   (table/JSON, `--format auto`). Exit codes 0 (match or no-match) / 2 (bad
   predicate). Only new dep: `regex`. Phase 4 (Full CLI) is now complete.
 
+Addendum (#848's #755 item): `paksmith verify [<path>...]` hash-checks
+archives through `ContainerReader::verify_archive`, taking archives from
+`--game`/`--detect` like `list`, and failing the run like `list` when the
+selector or profile doesn't resolve. It extends 4a's exit codes: every archive
+is reported in one document, one whose footer can't be read or whose key
+can't be found included, and the run exits with the highest code any archive produced, 1
+only for a hash that didn't match or was zeroed in an archive whose index is
+hashed, and 2 for an archive that couldn't be opened or verified, which a
+closed stdout masks as 0 like the 1 (`SPEC.md`).
+
 **Goal:** Complete the CLI command surface — add `extract` and `search` — making paksmith a fully scriptable tool for batch operations. (`list` and `inspect` already ship; `inspect` dumps the full property tree + typed export data as JSON.)
 
 **Key deliverables:**

@@ -6,6 +6,7 @@ pub(crate) mod list;
 pub(crate) mod mappings_resolve;
 pub(crate) mod profile;
 pub(crate) mod search;
+pub(crate) mod verify;
 
 use std::path::Path;
 
@@ -24,6 +25,20 @@ pub(crate) enum Command {
     Extract(extract::ExtractArgs),
     /// Query archive entries by type, name, regex, and size
     Search(search::SearchArgs),
+    /// Check the hashes in archives' indexes and report what was checked
+    ///
+    /// Every archive is reported, and one that fails doesn't stop the
+    /// rest, whether it fails to open, to verify, or under --game/--detect
+    /// to have its footer read or its key found. A selector or profile
+    /// lookup that fails, such as for a profile store that won't load,
+    /// ends the run with no report. The exit code is the highest any
+    /// archive produced: 0 when it verified, including entries the entry
+    /// listing records no hash for; 1 when a stored hash didn't match, or
+    /// was zeroed in an archive whose index is hashed; 2 when it couldn't
+    /// be opened or verified, such as a plaintext entry whose listing
+    /// records a hash, in a compression method paksmith doesn't decode. A
+    /// stdout closed before the report is written exits 0.
+    Verify(verify::VerifyArgs),
     /// Manage game profiles and AES keys
     Profile {
         #[command(subcommand)]
@@ -49,6 +64,7 @@ impl Command {
             Self::Search(args) => {
                 search::run(args, format, aes_key, game, detect, quiet).map(|()| 0)
             }
+            Self::Verify(args) => verify::run(args, format, aes_key, game, detect, quiet),
             Self::Profile { cmd } => profile::run(cmd, format, quiet),
         }
     }
