@@ -13,6 +13,6 @@ fail-fast = false
 # quarantine and fix" — retries would mask the flake signal.
 
 [profile.ci.junit]
-# JUnit XML at target/nextest/ci/junit.xml, consumed by
-# dorny/test-reporter to publish per-test annotations on the PR.
+# JUnit XML at target/nextest/ci/junit.xml, which dorny/test-reporter
+# renders on the CI test job's summary page.
 path = "junit.xml"
