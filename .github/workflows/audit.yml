@@ -23,7 +23,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Only the lockfile: the action runs `cargo audit` here with a
+      # token that can write checks and issues, and a repository
+      # `.cargo/config.toml` could alias that command to anything.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: /Cargo.lock
+          sparse-checkout-cone-mode: false
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
