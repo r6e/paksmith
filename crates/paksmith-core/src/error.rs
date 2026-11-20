@@ -595,6 +595,30 @@ pub enum DecompressionFault {
         /// Display string of the underlying `lz4_flex` error.
         message: String,
     },
+    /// [`Self::Lz4OutputReserveFailed`] for a block codec without a
+    /// codec-named pair (Zstd, Gzip): the block's output reservation
+    /// failed before decoding.
+    BlockOutputReserveFailed {
+        /// The codec's lowercase name, such as `"zstd"`.
+        codec: &'static str,
+        /// 0-based block index for context.
+        block_index: usize,
+        /// Bytes the reservation requested.
+        requested: usize,
+        /// Underlying `try_reserve_exact` failure reason.
+        source: TryReserveError,
+    },
+    /// [`Self::Lz4DecodeError`] for a block codec without a codec-named
+    /// pair (Zstd, Gzip): the decoder rejected the block, and its error
+    /// is kept as its Display string.
+    BlockDecodeFailed {
+        /// The codec's lowercase name, such as `"zstd"`.
+        codec: &'static str,
+        /// 0-based index of the block that failed.
+        block_index: usize,
+        /// Display string of the decoder's error.
+        message: String,
+    },
 }
 
 impl fmt::Display for DecompressionFault {
@@ -668,6 +692,20 @@ impl fmt::Display for DecompressionFault {
                 block_index,
                 message,
             } => write!(f, "lz4 block {block_index}: {message}"),
+            Self::BlockOutputReserveFailed {
+                codec,
+                block_index,
+                requested,
+                source,
+            } => write!(
+                f,
+                "could not reserve {requested} output bytes for {codec} block {block_index}: {source}"
+            ),
+            Self::BlockDecodeFailed {
+                codec,
+                block_index,
+                message,
+            } => write!(f, "{codec} block {block_index}: {message}"),
         }
     }
 }
@@ -6384,6 +6422,45 @@ mod tests {
             fault.to_string(),
             "lz4 block 1: expected another byte, found none"
         );
+    }
+
+    #[test]
+    fn decompression_fault_display_block_output_reserve_failed() {
+        for (codec, prefix) in [
+            (
+                "zstd",
+                "could not reserve 65536 output bytes for zstd block 3: ",
+            ),
+            (
+                "gzip",
+                "could not reserve 65536 output bytes for gzip block 3: ",
+            ),
+        ] {
+            let source = refused_reservation();
+            let expected = format!("{prefix}{source}");
+            let fault = DecompressionFault::BlockOutputReserveFailed {
+                codec,
+                block_index: 3,
+                requested: 65536,
+                source,
+            };
+            assert_eq!(fault.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn decompression_fault_display_block_decode_failed() {
+        for (codec, expected) in [
+            ("zstd", "zstd block 1: corrupt block"),
+            ("gzip", "gzip block 1: corrupt block"),
+        ] {
+            let fault = DecompressionFault::BlockDecodeFailed {
+                codec,
+                block_index: 1,
+                message: "corrupt block".into(),
+            };
+            assert_eq!(fault.to_string(), expected);
+        }
     }
 
     #[test]

@@ -174,6 +174,40 @@ pub fn zlib_stream(payload: &[u8]) -> Vec<u8> {
     enc.finish().expect("in-memory zlib finish")
 }
 
+/// One zstd frame over `payload` at the default level whose header records
+/// no content size, even for an empty payload: a pak compression block in
+/// the shape repak writes.
+///
+/// # Panics
+/// Never: writing to an in-memory `Vec` cannot fail.
+#[must_use]
+pub fn zstd_stream(payload: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+
+    let mut enc = zstd::stream::Encoder::new(Vec::new(), zstd::DEFAULT_COMPRESSION_LEVEL)
+        .expect("in-memory zstd encoder");
+    enc.include_contentsize(false)
+        .expect("in-memory zstd parameter");
+    enc.write_all(payload).expect("in-memory zstd write");
+    enc.finish().expect("in-memory zstd finish")
+}
+
+/// One gzip member over `payload` at the default level: a pak compression
+/// block.
+///
+/// # Panics
+/// Never: writing to an in-memory `Vec` cannot fail.
+#[must_use]
+pub fn gzip_stream(payload: &[u8]) -> Vec<u8> {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+
+    let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(payload).expect("in-memory gzip write");
+    enc.finish().expect("in-memory gzip finish")
+}
+
 /// One empty non-final stored block (BFINAL 0, BTYPE 00, LEN 0, NLEN !0),
 /// a padding group for [`zlib_padded_stream`].
 pub const EMPTY_STORED_BLOCK: [u8; 5] = [0x00, 0x00, 0x00, 0xFF, 0xFF];
@@ -551,6 +585,35 @@ mod tests {
             [0x78, 0x9C],
             "zlib header for the default level"
         );
+    }
+
+    #[test]
+    fn zstd_stream_decodes_to_its_payload_and_records_no_content_size() {
+        for payload in [Vec::new(), b"paksmith zstd stream ".repeat(8)] {
+            let stream = zstd_stream(&payload);
+            let len = payload.len();
+            assert_eq!(
+                zstd::stream::decode_all(stream.as_slice()).unwrap(),
+                payload
+            );
+            let content_size = zstd::zstd_safe::get_frame_content_size(&stream);
+            assert!(
+                matches!(content_size, Ok(None)),
+                "{len} bytes: {content_size:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gzip_stream_decodes_to_its_payload() {
+        use std::io::Read;
+        let payload = b"paksmith gzip stream ".repeat(8);
+        let stream = gzip_stream(&payload);
+        let mut out = Vec::new();
+        let _ = flate2::read::GzDecoder::new(stream.as_slice())
+            .read_to_end(&mut out)
+            .unwrap();
+        assert_eq!(out, payload);
     }
 
     #[test]
