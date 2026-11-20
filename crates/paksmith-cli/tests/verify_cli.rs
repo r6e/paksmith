@@ -70,25 +70,35 @@ fn unhashed_phi_v11(dir: &Path) -> PathBuf {
     write(dir, "phi.pak", &pak)
 }
 
-/// A v5 pak whose one entry, `name`, is a plaintext record carrying a
-/// non-zero SHA-1 in a compression method paksmith doesn't recognise
-/// (unknown method 3), which verify refuses to hash.
-fn hashed_unknown_method_pak(name: &str) -> Vec<u8> {
-    use paksmith_core::testing::wire::{UNKNOWN_METHOD_ID, pak_entry_wire_size};
+/// The payload of [`plaintext_pak`]'s entry.
+const PAYLOAD: [u8; 16] = [7; 16];
 
-    const PAYLOAD: [u8; 16] = [7; 16];
+/// The SHA-1 of [`PAYLOAD`].
+const PAYLOAD_SHA1: [u8; 20] = [
+    0x7e, 0xe8, 0xb9, 0xb4, 0x43, 0x51, 0x58, 0x08, 0xdc, 0x6e, 0x2f, 0xcd, 0xd2, 0x60, 0x6c, 0xf8,
+    0x67, 0x7a, 0x3b, 0x3d,
+];
+
+/// A v5 pak whose one entry, `name`, is a plaintext record over one block
+/// of [`PAYLOAD`] in the v3-v7 compression method `method`, carrying `sha1`.
+fn plaintext_pak(name: &str, method: u32, sha1: &[u8; 20]) -> Vec<u8> {
+    use paksmith_core::testing::wire::pak_entry_wire_size;
+
     let size = u64::try_from(PAYLOAD.len()).unwrap();
     let start = pak_entry_wire_size(1);
-    let record = v5_record_with(
-        0,
-        size,
-        UNKNOWN_METHOD_ID,
-        &[0xAB; 20],
-        &[(start, start + size)],
-    );
+    let record = v5_record_with(0, size, method, sha1, &[(start, start + size)]);
     let mut pak = record.clone();
     pak.extend_from_slice(&PAYLOAD);
     finish_v5_pak(pak, &[(name, &record)])
+}
+
+/// A [`plaintext_pak`] carrying a non-zero SHA-1 in a compression method
+/// paksmith doesn't recognise (unknown method 3), which verify refuses to
+/// hash.
+fn hashed_unknown_method_pak(name: &str) -> Vec<u8> {
+    use paksmith_core::testing::wire::UNKNOWN_METHOD_ID;
+
+    plaintext_pak(name, UNKNOWN_METHOD_ID, &[0xAB; 20])
 }
 
 #[test]
@@ -303,6 +313,34 @@ fn a_plaintext_entry_verify_cannot_hash_exits_2() {
         error.ends_with("unsupported compression method Unknown(3)"),
         "{archive}"
     );
+}
+
+/// A plaintext Gzip or Oodle entry, which paksmith recognises but doesn't
+/// decode, is hashed: it exits 0 when its hash matches and 1 when it
+/// doesn't.
+#[test]
+fn a_plaintext_entry_in_a_method_paksmith_does_not_decode_is_hashed() {
+    const GZIP: u32 = 2;
+    const OODLE: u32 = 4;
+
+    let dir = tempfile::tempdir().unwrap();
+    for method in [GZIP, OODLE] {
+        let matching = plaintext_pak("Content/a.bin", method, &PAYLOAD_SHA1);
+        let archive = only_archive(write(dir.path(), "matching.pak", &matching), 0);
+        assert_eq!(
+            (&archive["ok"], &archive["code"]),
+            (&json!(true), &json!(0)),
+            "{method}: {archive}"
+        );
+        assert_eq!(
+            archive["counts"],
+            json!({"verified": 1, "skipped_no_hash": 0})
+        );
+        let wrong = plaintext_pak("Content/a.bin", method, &[0xAB; 20]);
+        let archive = only_archive(write(dir.path(), "wrong.pak", &wrong), 1);
+        let error = archive["error"].as_str().unwrap();
+        assert!(error.starts_with("SHA1 mismatch: entry"), "{archive}");
+    }
 }
 
 /// Every archive is reported, in order, and the exit code is the highest

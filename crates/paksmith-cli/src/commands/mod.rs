@@ -36,7 +36,7 @@ pub(crate) enum Command {
     /// listing records no hash for; 1 when a stored hash didn't match, or
     /// was zeroed in an archive whose index is hashed; 2 when it couldn't
     /// be opened or verified, such as a plaintext entry whose listing
-    /// records a hash, in a compression method paksmith doesn't decode. A
+    /// records a hash, in a compression method paksmith doesn't recognise. A
     /// stdout closed before the report is written exits 0.
     Verify(verify::VerifyArgs),
     /// Manage game profiles and AES keys
