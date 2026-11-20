@@ -1,6 +1,8 @@
-//! Block decoders the containers share: one compressed block in, its
-//! output in a caller's buffer, with every output reservation made
-//! through the caller so the caller attributes a failure.
+//! Block decoders the containers share, and the zstd v1-frame gate the
+//! `.usmap` parser applies to its payload. A block decoder takes one
+//! compressed block in and appends its output to a caller's buffer, with
+//! every output reservation made through the caller so the caller
+//! attributes a failure.
 
 use std::collections::TryReserveError;
 
@@ -12,6 +14,12 @@ use std::collections::TryReserveError;
 /// below 255 (offset/token overhead is never zero), so `N × 255` is a
 /// safe over-estimate that never under-sizes a valid decode.
 const MAX_LZ4_BLOCK_EXPANSION_RATIO: u64 = 255;
+
+// zstd frame magics: the v1 frame's, and the range of sixteen that mark a
+// skippable frame.
+const ZSTD_FRAME_MAGIC: u32 = 0xFD2F_B528;
+const ZSTD_SKIPPABLE_MAGIC_FIRST: u32 = 0x184D_2A50;
+const ZSTD_SKIPPABLE_MAGIC_LAST: u32 = 0x184D_2A5F;
 
 /// A block format [`decode_block`] decodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +107,34 @@ fn decode_lz4(
 /// well-formed blocks and only bites the crafted case.
 fn lz4_block_output_cap(budget: u64, compressed_len: u64) -> u64 {
     budget.min(compressed_len.saturating_mul(MAX_LZ4_BLOCK_EXPANSION_RATIO))
+}
+
+/// Whether `stream` is one or more zstd v1 or skippable frames. libzstd is
+/// built with its pre-v1 decoders, and a one-shot decode hands each frame to
+/// whichever decoder its magic names.
+pub(crate) fn is_zstd_v1_stream(mut stream: &[u8]) -> bool {
+    if stream.is_empty() {
+        return false;
+    }
+    while !stream.is_empty() {
+        let Some(magic) = stream.first_chunk::<4>().map(|m| u32::from_le_bytes(*m)) else {
+            return false;
+        };
+        if !matches!(
+            magic,
+            ZSTD_FRAME_MAGIC | ZSTD_SKIPPABLE_MAGIC_FIRST..=ZSTD_SKIPPABLE_MAGIC_LAST
+        ) {
+            return false;
+        }
+        let Some(rest) = zstd::zstd_safe::find_frame_compressed_size(stream)
+            .ok()
+            .and_then(|len| stream.get(len..))
+        else {
+            return false;
+        };
+        stream = rest;
+    }
+    true
 }
 
 #[cfg(test)]

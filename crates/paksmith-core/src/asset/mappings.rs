@@ -26,6 +26,7 @@ use byteorder::{LE, ReadBytesExt};
 use zstd::zstd_safe::DCtx;
 
 use crate::PaksmithError;
+use crate::codec::is_zstd_v1_stream;
 use crate::error::{
     FStringEncoding, FStringFault, MappingsAllocationContext, MappingsParseFault,
     check_mappings_reserve, mappings_alloc_failed,
@@ -59,12 +60,6 @@ const BROTLI_LARGE_WINDOW_MARKER: u8 = 0x11;
 /// an initialized slice, so a stack chunk lets the reserved output grow only
 /// by bytes decoded, instead of zero-filling it to the declared size first.
 const BROTLI_OUTPUT_CHUNK: usize = 8192;
-
-// zstd frame magics: the v1 frame's, and the range of sixteen that mark a
-// skippable frame.
-const ZSTD_FRAME_MAGIC: u32 = 0xFD2F_B528;
-const ZSTD_SKIPPABLE_MAGIC_FIRST: u32 = 0x184D_2A50;
-const ZSTD_SKIPPABLE_MAGIC_LAST: u32 = 0x184D_2A5F;
 
 /// Hard cap on the wire-claimed `compressed_size` of a `.usmap` file.
 /// Community-distributed usmaps are typically <1 MiB; 64 MiB gives huge
@@ -1903,34 +1898,6 @@ fn reserve_map_charged<K: Eq + Hash, V>(
 
 fn zstd_context(created: Option<DCtx<'static>>) -> crate::Result<DCtx<'static>> {
     created.ok_or_else(|| fault(MappingsParseFault::ZstdContextUnavailable))
-}
-
-/// Whether `stream` is one or more zstd v1 or skippable frames. libzstd is
-/// built with its pre-v1 decoders, and a one-shot decode hands each frame to
-/// whichever decoder its magic names.
-fn is_zstd_v1_stream(mut stream: &[u8]) -> bool {
-    if stream.is_empty() {
-        return false;
-    }
-    while !stream.is_empty() {
-        let Some(magic) = stream.first_chunk::<4>().map(|m| u32::from_le_bytes(*m)) else {
-            return false;
-        };
-        if !matches!(
-            magic,
-            ZSTD_FRAME_MAGIC | ZSTD_SKIPPABLE_MAGIC_FIRST..=ZSTD_SKIPPABLE_MAGIC_LAST
-        ) {
-            return false;
-        }
-        let Some(rest) = zstd::zstd_safe::find_frame_compressed_size(stream)
-            .ok()
-            .and_then(|len| stream.get(len..))
-        else {
-            return false;
-        };
-        stream = rest;
-    }
-    true
 }
 
 fn fault(f: MappingsParseFault) -> PaksmithError {
