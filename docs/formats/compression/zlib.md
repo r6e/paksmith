@@ -206,9 +206,14 @@ file-bounds across both the extract and verify paths).
 
 **Public surface:**
 - Zlib and [LZ4](lz4.md) are the `CompressionMethod`s paksmith's
-  `PakReader::read_entry` / `read_entry_to` / `verify_entry` will
-  fully process. Other methods route to
+  `PakReader::read_entry` / `read_entry_to` will fully process. Other
+  methods route to
   `PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method } }`.
+  `verify_entry` decompresses nothing, so it hashes the blocks of a
+  plaintext compressed entry in any method paksmith recognizes (in a
+  v3-v4 archive, whose block offsets are file-relative, it refuses one
+  with `UnsupportedVersion`), and returns that fault only for a
+  plaintext entry in a method it doesn't.
 - The decompression path itself is `pub(in crate::container::pak)`;
   consumers go through `PakReader::read_entry(path)` →
   `Vec<u8>` or `PakReader::read_entry_to(path, writer)` →
