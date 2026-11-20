@@ -727,8 +727,9 @@ policy.
 the full enum):
 - `PaksmithError::UnsupportedVersion { version }` — a version or
   version-specific feature paksmith does not read: for example a version
-  outside 3–11, a frozen V9 index, or a zlib-compressed entry in a V3/V4
-  archive (read, or verified unless it is encrypted).
+  outside 3–11, a frozen V9 index, or a compressed entry in a V3/V4
+  archive (a zlib one read, or a zlib, gzip or Oodle one verified unless
+  it is encrypted).
 - `PaksmithError::InvalidFooter { fault: InvalidFooterFault::* }` —
   `OtherUnpromoted { reason }` (catch-all for magic mismatch and the other
   footer faults not yet promoted to typed variants),

@@ -4,7 +4,6 @@
 [![Security Audit](https://github.com/r6e/paksmith/actions/workflows/audit.yml/badge.svg)](https://github.com/r6e/paksmith/actions/workflows/audit.yml)
 [![cargo-deny](https://github.com/r6e/paksmith/actions/workflows/deny.yml/badge.svg)](https://github.com/r6e/paksmith/actions/workflows/deny.yml)
 [![CodeQL](https://github.com/r6e/paksmith/actions/workflows/codeql.yml/badge.svg)](https://github.com/r6e/paksmith/actions/workflows/codeql.yml)
-[![Clippy SARIF](https://github.com/r6e/paksmith/actions/workflows/clippy-sarif.yml/badge.svg)](https://github.com/r6e/paksmith/actions/workflows/clippy-sarif.yml)
 
 A cross-platform tool for exploring and extracting Unreal Engine game assets. Written in Rust.
 
@@ -295,7 +294,7 @@ The exit code is the highest any archive produced: **0** when it verified,
 **1** when a stored hash didn't match or was zeroed in an archive whose index
 is hashed, and **2** when it couldn't be opened or verified, such as a
 plaintext entry whose listing records a hash, in a compression method paksmith
-doesn't decode. An archive's 1 or 2 comes with the document and no
+doesn't recognise. An archive's 1 or 2 comes with the document and no
 `paksmith: error:` line, so a stdout that closes before the document is written
 masks either as **0**; branch on each archive's `code`.
 

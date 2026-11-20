@@ -1,26 +1,39 @@
 #!/usr/bin/env bash
 #
-# Fails when the three workflow statements of the release build legs
-# disagree: the build matrix of release-assets.yml (runner and target), the
-# build matrix of nightly.yml (runner and target), and the targets in the
-# file list of release-assets.yml's publish job.
+# Fails when the statements of what a release holds disagree:
+# - the build legs: the build matrix of release-assets.yml (runner and
+#   target), the build matrix of nightly.yml (runner and target), and the
+#   file list of release-assets.yml's publish job (target and archive
+#   extension, the extension being the one .github/actions/package gives
+#   the leg's runner);
+# - the README: every archive it names as `paksmith-v<version>-<name>`
+#   (the version being digits or `X.Y.Z`) and every `SHA256SUMS-<name>`,
+#   which must be the release's files, each named at least once; and every
+#   `target=` line that gives a bare target;
+# - the crates the publish job writes release notes from, against the
+#   packages in release-please-config.json.
 #
-# Not checked: the targets the README names, that each archive extension in
-# the publish list is the one .github/actions/package gives that runner, and
-# anything else that decides what runs (other jobs, `if:` conditions, the
-# publish loop's body).
+# Not checked: anything else that decides what runs (other jobs, `if:`
+# conditions, the publish loop's body, the rest of the package action),
+# where in the README a name stands, or a target or archive the README
+# writes in another form.
 #
 # Usage, from the repository root (needs mikefarah's yq v4, and jq):
-#   scripts/check-release-targets.sh [RELEASE_ASSETS_YML NIGHTLY_YML]
+#   scripts/check-release-targets.sh [RELEASE_ASSETS_YML NIGHTLY_YML README CONFIG PACKAGE_ACTION_YML]
 # The paths are for trying the check against an edited copy.
 set -euo pipefail
+# One order for every `sort`, and ASCII ranges in every pattern.
+export LC_ALL=C
 
 release="${1:-.github/workflows/release-assets.yml}"
 nightly="${2:-.github/workflows/nightly.yml}"
+readme="${3:-README.md}"
+config="${4:-release-please-config.json}"
+package="${5:-.github/actions/package/action.yml}"
 
 # To stderr, so a failure inside a command substitution is still shown.
 fail() {
-  echo "::error::$1" >&2
+  echo "::error::${1//[[:cntrl:]]/ }" >&2
   exit 1
 }
 
@@ -28,15 +41,24 @@ for tool in yq jq; do
   command -v "${tool}" > /dev/null || fail "this check needs ${tool}"
 done
 
-# The runner and target of each build leg, in a canonical order. A matrix
-# with any key besides `include` could run legs this does not see.
+# The runner and target of each build leg, in a canonical order. Anything
+# else in the job could build a leg, a runner or a file name this does not
+# see: a second YAML document, a matrix key besides `include`, a `runs-on`
+# or a package `target` that is not the matrix's, or an `os` whose
+# operating system the label does not give.
 matrix() {
-  yq -o=json '.jobs.build.strategy.matrix' "$1" |
-    jq -ce 'select(type == "object" and keys == ["include"]) | .include
+  [[ "$(yq ea '[.] | length' "$1")" == 1 ]] || fail "$1 could not be read as one YAML document"
+  yq -o=json '.jobs.build' "$1" |
+    jq -ce 'select(.["runs-on"] == "${{ matrix.os }}")
+      | select([.steps[] | select(.uses == "./.github/actions/package") | .with.target] == ["${{ matrix.target }}"])
+      | .strategy.matrix
+      | select(type == "object" and keys == ["include"]) | .include
       | select(type == "array" and length > 0) | map({os, target})
-      | select(all(.[]; (.os | type == "string") and (.target | type == "string" and test("^[a-z0-9_-]+$"))))
+      | select(all(.[]; (.os | type == "string" and test("\\A(ubuntu|macos|windows)-[a-z0-9.-]+\\z"))
+          and (.target | type == "string" and test("\\A[a-z0-9_-]+\\z"))))
+      | select((map(.target) | unique | length) == length)
       | sort_by(.target)' ||
-    fail "$1 could not be read, or its build matrix is not a lone \`include\` list of legs with an \`os\` and a \`target\`"
+    fail "$1's build job is not one this check can read: it must run on \`\${{ matrix.os }}\`, pass \`\${{ matrix.target }}\` to ./.github/actions/package once, and have a matrix that is a lone \`include\` list of legs, each with its own \`target\` and an \`os\` label starting ubuntu-, macos- or windows-"
 }
 
 release_matrix="$(matrix "${release}")"
@@ -45,6 +67,24 @@ nightly_matrix="$(matrix "${nightly}")"
   fail "the build matrices differ: ${release} has ${release_matrix}, ${nightly} has ${nightly_matrix}"
 
 built="$(jq -r '.[].target' <<< "${release_matrix}")"
+
+# What each leg uploads, as `<target>:<archive extension>`. The extension
+# rule and the file names are the package action's, restated: its own
+# lines are pinned so that they change together.
+ext_rule="\${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}"
+[[ "$(yq '[.runs.steps[] | select(.id == "names")] | length' "${package}")" == 1 ]] ||
+  fail "${package} could not be read, or has no one step with \`id: names\`, which this check reads the EXT rule and the file names from"
+ext="$(yq '.runs.steps[] | select(.id == "names") | .env.EXT' "${package}")"
+[[ "${ext}" == "${ext_rule}" ]] ||
+  fail "${package} sets EXT to '${ext}'; this check assumes '${ext_rule}', so change ${0##*/} with it wherever it names an extension"
+naming="$(yq '.runs.steps[] | select(.id == "names") | .run' "${package}" | sed -E 's/^ +//')"
+# shellcheck disable=SC2016 # the action's own text, not this script's variables
+for line in 'staging="paksmith-${LABEL}-${TARGET}"' 'echo "archive=${staging}.${EXT}"' 'echo "checksums=SHA256SUMS-${TARGET}.txt"'; do
+  grep -qxF -- "${line}" <<< "${naming}" ||
+    fail "${package}'s \`names\` step has no line '${line}'; this check, the publish job and the README assume it, so change them with it"
+done
+expected="$(jq -r '.[] | "\(.target):\(if .os | startswith("windows") then "zip" else "tar.gz" end)"' <<< "${release_matrix}" | sort)"
+
 # The publish job's one loop: a line starting `for entry in`, through a line
 # ending `; do`, whose words are all a bare `<target>:<archive extension>`.
 scripts="$(yq '.jobs.publish.steps[].run' "${release}")"
@@ -55,8 +95,52 @@ entries="$(sed -E 's/^ *for entry in//; s/; do$//; s/ \\$//' <<< "${loop}" | tr 
 unread="$(grep -vE '^[a-z0-9_-]+:(tar\.gz|zip)$' <<< "${entries}" || true)"
 [[ -z "${unread}" ]] ||
   fail "${release}'s publish loop must start a line with \`for entry in\`, end a line with \`; do\`, and hold only bare \`<target>:<tar.gz|zip>\` words; it has: ${unread//$'\n'/ }"
-published="$(cut -d: -f1 <<< "${entries}" | LC_ALL=C sort)"
-[[ "${published}" == "${built}" ]] ||
-  fail "${release}'s publish loop lists '${published//$'\n'/ }', but its build matrix has '${built//$'\n'/ }'"
+listed="$(sort <<< "${entries}")"
+[[ "${listed}" == "${expected}" ]] ||
+  fail "${release}'s publish loop lists '${listed//$'\n'/ }', but its build matrix's runners produce '${expected//$'\n'/ }'"
 
-echo "The release and nightly workflows agree on: ${built//$'\n'/ }"
+# The README's names for the release files, each compared as a set: a name
+# counts wherever it stands, and a full stop ending a sentence is dropped.
+# A bare target after the version is the directory an archive unpacks to.
+# The README's `target=` lines need only name built targets; a value that
+# is not a bare target, quoted or not, is another form.
+[[ -r "${readme}" ]] || fail "${readme} could not be read"
+readme_names() {
+  grep -aoE "$1[A-Za-z0-9_.-]+" "${readme}" | sed -E "s/^$1//; s/\.+\$//" | sort -u || true
+}
+archives="$(readme_names 'paksmith-v([0-9]+\.[0-9]+\.[0-9]+|X\.Y\.Z)-' | grep -vxF -- "${built}" || true)"
+release_archives="$(sed -E 's/:/./' <<< "${expected}" | sort)"
+[[ "${archives}" == "${release_archives}" ]] ||
+  fail "${readme} names, after \`paksmith-vX.Y.Z-\` or a numeric version, the archives '${archives//$'\n'/ }', but a release holds '${release_archives//$'\n'/ }'"
+summed="$(readme_names 'SHA256SUMS-')"
+release_sums="$(sed -E 's/$/.txt/' <<< "${built}" | sort)"
+[[ "${summed}" == "${release_sums}" ]] ||
+  fail "${readme} names, after \`SHA256SUMS-\`, the files '${summed//$'\n'/ }', but a release holds '${release_sums//$'\n'/ }'"
+unbuilt="$(grep -aE '^[[:space:]]*(export[[:space:]]+)?target=' "${readme}" | tr -d '\r' |
+  sed -E 's/^[^=]*=//; s/[[:space:]]+#.*$//; s/[[:space:]]+$//; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/' |
+  grep -E '^[a-z0-9_]+(-[a-z0-9_]+)+$' | grep -vxF -- "${built}" || true)"
+[[ -z "${unbuilt}" ]] ||
+  fail "${readme} has a \`target=\` line for '${unbuilt//$'\n'/ }', but the workflows build '${built//$'\n'/ }'"
+
+# The crates the release notes are written from: the publish job's one line
+# assigning `crates`, as `crates=(...)` of bare names (`read` or `mapfile`
+# into it would go unseen). The job reads `crates/<name>/CHANGELOG.md`, and
+# reads first the crate the tag is for: the one release-please makes a
+# GitHub release for.
+crate_lines="$(grep -E '(^|[^A-Za-z0-9_])crates(\[[^]]*\])?\+?=' <<< "${scripts}" || true)"
+[[ "${crate_lines}" =~ ^\ *crates=\(([a-z0-9_\ -]+)\)$ ]] ||
+  fail "${release}'s publish job must assign \`crates\` once, as a line \`crates=(...)\` of bare crate names separated by spaces; it has: ${crate_lines//$'\n'/ }"
+noted="$(tr -s ' ' '\n' <<< "${BASH_REMATCH[1]}" | sed '/^$/d')"
+noted_sorted="$(sort <<< "${noted}")"
+packaged="$(jq -re '.packages | select(type == "object" and length > 0) | keys
+    | select(all(.[]; test("\\Acrates/[a-z0-9_-]+\\z"))) | .[] | ltrimstr("crates/")' "${config}" | sort)" ||
+  fail "${config} could not be read, or its packages are not a map keyed \`crates/<name>\`"
+[[ "${noted_sorted}" == "${packaged}" ]] ||
+  fail "${release} writes release notes from '${noted_sorted//$'\n'/ }', but ${config} releases '${packaged//$'\n'/ }'"
+tagged="$(jq -re '[.packages | to_entries[] | select(.value["skip-github-release"] != true) | .key | ltrimstr("crates/")]
+    | select(length == 1) | .[0]' "${config}")" ||
+  fail "${config} must have exactly one package without \`skip-github-release\`, the crate the tag is for"
+[[ "$(head -n 1 <<< "${noted}")" == "${tagged}" ]] ||
+  fail "${release}'s \`crates=(...)\` must start with ${tagged}, the crate the tag is for; it has '${noted//$'\n'/ }'"
+
+echo "The workflows, ${readme} and ${config} agree on the release files (${expected//$'\n'/ }) and the crates (${noted//$'\n'/ })"
