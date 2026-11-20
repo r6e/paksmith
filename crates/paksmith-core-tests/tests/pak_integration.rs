@@ -26,8 +26,8 @@ use paksmith_core::testing::bench::zlib_stream;
 // Issue #140: shared v3+ wire-format synthesizers, lifted out of
 // the per-file copies that used to live below this import block.
 use paksmith_core::testing::wire::{
-    LZ4_SYNTH_PATH, build_v8b_lz4_pak, pak_entry_wire_size, write_fstring, write_legacy_footer,
-    write_pak_entry,
+    LZ4_SYNTH_PATH, UNKNOWN_METHOD_ID, build_v8b_lz4_pak, pak_entry_wire_size, write_fstring,
+    write_legacy_footer, write_pak_entry,
 };
 use sha1::{Digest, Sha1};
 use std::fmt::Write as _;
@@ -985,8 +985,9 @@ fn verify_index_returns_skipped_for_zero_hash() {
     assert_eq!(reader.verify_index().unwrap(), VerifyOutcome::SkippedNoHash);
 }
 
-/// verify_entry on Gzip / Oodle / Unknown compression methods returns
+/// verify_entry on unknown compression method IDs returns
 /// `Decompression` rather than silently hashing arbitrary on-disk bytes.
+/// 99 lies beyond every known id.
 ///
 /// Issue #112: post-promotion to `DecompressionFault` typed sub-enum,
 /// the test now matches `UnsupportedMethod { method }` structurally
@@ -994,14 +995,8 @@ fn verify_index_returns_skipped_for_zero_hash() {
 /// design-note (deferred to #112) is removed since #112 is closed.
 #[test]
 fn verify_entry_rejects_unsupported_compression_methods() {
-    for (method_id, expected_method) in [
-        (2u32, CompressionMethod::Gzip),
-        (4u32, CompressionMethod::Oodle),
-        (
-            99u32,
-            CompressionMethod::Unknown(NonZeroU32::new(99).unwrap()),
-        ),
-    ] {
+    for method_id in [UNKNOWN_METHOD_ID, 99] {
+        let expected_method = CompressionMethod::Unknown(NonZeroU32::new(method_id).unwrap());
         // Use the same single-block layout as the read_entry_rejects_*
         // test, but exercise verify_entry instead of read_entry.
         let payload = b"x";
@@ -1095,13 +1090,13 @@ fn verify_counts_encrypted_zero_hash_as_skipped_no_hash() {
 
 /// Post-#634 policy pin (R2 architect finding): verify of ENCRYPTED
 /// entries is method-agnostic and keyless — it hashes the on-disk
-/// ciphertext without decompressing, so an encrypted Oodle entry (with a
-/// non-zero, deliberately-wrong hash) surfaces `HashMismatch`, NOT the
-/// unsupported-method `Decompression` a PLAINTEXT Oodle entry gets. This
-/// keeps `verify()` gracefully degrading over modern encrypted archives
-/// (Oodle is common in shipped UE builds) instead of fail-fasting, and
-/// documents the deliberate asymmetry: the method gate applies only to
-/// plaintext, since encrypted on-disk bytes are opaque regardless of codec.
+/// ciphertext without decompressing, so an encrypted entry in a method
+/// paksmith doesn't recognise (with a non-zero, deliberately-wrong hash)
+/// surfaces `HashMismatch`, NOT the unsupported-method `Decompression` a
+/// PLAINTEXT one gets. This keeps `verify()` gracefully degrading over
+/// modern encrypted archives instead of fail-fasting, and documents the
+/// deliberate asymmetry: the method gate applies only to plaintext, since
+/// encrypted on-disk bytes are opaque regardless of codec.
 #[test]
 fn verify_entry_encrypted_unsupported_method_hashes_keylessly() {
     let sha1 = [0x11u8; 20]; // non-zero → clears the SkippedNoHash gate
@@ -1109,12 +1104,12 @@ fn verify_entry_encrypted_unsupported_method_hashes_keylessly() {
     // Single block spanning the payload so the entry parses as compressed.
     let blocks: [(u64, u64); 1] = [(0, payload.len() as u64)];
 
-    // Encrypted Oodle (method 4): the wrong stored hash means the keyless
-    // ciphertext hash mismatches → HashMismatch (proving the method-agnostic
-    // hash path ran, NOT the unsupported-method decline).
+    // Encrypted: the wrong stored hash means the keyless ciphertext hash
+    // mismatches → HashMismatch (proving the method-agnostic hash path
+    // ran, NOT the unsupported-method decline).
     let encrypted = build_single_entry_pak_with_flags(
         6,
-        4,
+        UNKNOWN_METHOD_ID,
         sha1,
         &blocks,
         payload.len() as u32,
@@ -1129,13 +1124,13 @@ fn verify_entry_encrypted_unsupported_method_hashes_keylessly() {
         .expect_err("wrong hash must mismatch");
     assert!(
         matches!(err, paksmith_core::PaksmithError::HashMismatch { .. }),
-        "encrypted Oodle entry must hash keylessly and mismatch, got: {err:?}"
+        "encrypted unsupported-method entry must hash keylessly and mismatch, got: {err:?}"
     );
 
-    // Plaintext Oodle: the method gate applies → Decompression (unchanged).
+    // Plaintext: the method gate applies → Decompression (unchanged).
     let plaintext = build_single_entry_pak_with_flags(
         6,
-        4,
+        UNKNOWN_METHOD_ID,
         sha1,
         &blocks,
         payload.len() as u32,
@@ -1150,7 +1145,7 @@ fn verify_entry_encrypted_unsupported_method_hashes_keylessly() {
         .expect_err("plaintext unsupported method must decline");
     assert!(
         matches!(err, paksmith_core::PaksmithError::Decompression { .. }),
-        "plaintext Oodle entry must decline with Decompression, got: {err:?}"
+        "plaintext unsupported-method entry must decline with Decompression, got: {err:?}"
     );
 }
 
@@ -1902,17 +1897,17 @@ fn read_zlib_rejects_pre_v5_compressed_entry() {
 
 /// V8B+ paks index compression methods via a 5-slot FName table in
 /// the footer; entries reference slots by 1-based index. Reading an
-/// entry whose slot resolves to a STILL-unsupported method (`Zstd`,
-/// or `UnknownByName`) must surface a `Decompression` error naming
+/// entry whose slot resolves to a STILL-unsupported method (here
+/// `UnknownByName("LZMA")`) must surface a `Decompression` error naming
 /// the slot's content — pinning the v8+ FName-resolution arms in
 /// `index/entry_header.rs::PakEntryHeader::read_from` against the
 /// footer's compression-methods table.
 /// Issue #31; retargeted from Lz4 to Zstd when #636 made Lz4 a
 /// SUPPORTED method (the LZ4 happy path now lives in the `*_lz4_*`
-/// tests above).
+/// tests above), then to LZMA ahead of #1082's Zstd decoder.
 #[test]
-fn read_entry_rejects_v8b_zstd_named_compression_slot() {
-    // Build a v8B pak with `compression_methods[0] = "Zstd"` and one
+fn read_entry_rejects_v8b_lzma_named_compression_slot() {
+    // Build a v8B pak with `compression_methods[0] = "LZMA"` and one
     // entry referencing slot 1 (1-based). v8B footer layout:
     //   uuid(16) + encrypted(1) + magic(4) + version(4=8) +
     //   index_offset(8) + index_size(8) + index_hash(20) +
@@ -1968,7 +1963,7 @@ fn read_entry_rejects_v8b_zstd_named_compression_slot() {
 
     // Compression slots: 5 × 32 bytes, zero-padded UTF-8.
     let mut slot0 = [0u8; 32];
-    slot0[..4].copy_from_slice(b"Zstd"); // 1-based slot 1 → index 0
+    slot0[..4].copy_from_slice(b"LZMA"); // 1-based slot 1 → index 0
     pak.extend_from_slice(&slot0);
     for _ in 1..5 {
         pak.extend_from_slice(&[0u8; 32]); // empty slots
@@ -1981,27 +1976,26 @@ fn read_entry_rejects_v8b_zstd_named_compression_slot() {
             &err,
             paksmith_core::PaksmithError::Decompression {
                 fault: DecompressionFault::UnsupportedMethod {
-                    method: CompressionMethod::Zstd,
+                    method: CompressionMethod::UnknownByName(name),
                 },
                 ..
-            }
+            } if name == "LZMA"
         ),
-        "expected Decompression{{UnsupportedMethod {{ Zstd }}}}; got {err:?}"
+        "expected Decompression{{UnsupportedMethod {{ UnknownByName(\"LZMA\") }}}}; got {err:?}"
     );
 }
 
-/// Gzip and Oodle and Unknown compression methods are rejected with a typed
-/// Decompression error before any I/O happens. Verify each branch surfaces
-/// with a descriptive reason.
+/// Oodle, which paksmith recognises but doesn't decode, and unknown
+/// compression method IDs are rejected with a typed Decompression error
+/// before any I/O happens. 99 lies beyond every known id. Verify each
+/// surfaces with a descriptive reason.
 #[test]
 fn read_entry_rejects_unsupported_compression_methods() {
+    let unknown = |id| CompressionMethod::Unknown(NonZeroU32::new(id).unwrap());
     for (method_id, expected_method) in [
-        (2u32, CompressionMethod::Gzip),
-        (4u32, CompressionMethod::Oodle),
-        (
-            99u32,
-            CompressionMethod::Unknown(NonZeroU32::new(99).unwrap()),
-        ),
+        (4, CompressionMethod::Oodle),
+        (UNKNOWN_METHOD_ID, unknown(UNKNOWN_METHOD_ID)),
+        (99, unknown(99)),
     ] {
         let payload = b"x".to_vec();
         let header_size = 8 + 8 + 8 + 4 + 20 + 4 + 16 + 1 + 4;
