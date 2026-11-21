@@ -2371,6 +2371,10 @@ mod tests {
                 requested: 1,
                 source: refused(),
             }),
+            inflate(DecompressionFault::BlockContextUnavailable {
+                codec: "zstd",
+                block_index: 0,
+            }),
             PaksmithError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory)),
             exceeded(WireField::PayloadExtentTotal, 2, 1, BoundsUnit::Bytes),
             PaksmithError::InvalidIndex {
