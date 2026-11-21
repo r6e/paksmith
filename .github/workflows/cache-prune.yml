@@ -14,18 +14,20 @@ name: Cache prune
 # earlier in the key, is not deleted here, and stays until GitHub
 # evicts it for space or expires it after seven days unused.
 #
+# The newest cache of a group is not always the current one. A re-run
+# of an old run, or the earlier of two pushes finishing last, saves
+# the old key later; the current cache is then deleted, and the next
+# push to `main` saves it again.
+#
 # It runs on request, and after each run of a workflow listed under
-# `workflows` that a push to `main` started.
+# `workflows` that a push to `main` or a dispatch on it started. Those
+# workflows are the ones that save a Rust cache on `main`.
 on:
   workflow_run:
-    workflows: [CI, Format docs, glTF validation]
+    workflows: [Bench, CI, Format docs, glTF validation]
     types: [completed]
     branches: [main]
   workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
 
 permissions: {}
 
@@ -34,7 +36,17 @@ jobs:
     name: Prune replaced Rust caches
     # `branches` above matches the head branch's name, which a fork's
     # pull request can also call `main`.
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.event == 'push'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.event == 'push' ||
+      github.event.workflow_run.event == 'workflow_dispatch'
+    # On the job, so that a run this `if` skips should take no place
+    # in the queue, where it could displace a prune that is waiting.
+    # GitHub does not document that; if it is wrong, nothing is worse
+    # than with the group on the workflow.
+    concurrency:
+      group: ${{ github.workflow }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
