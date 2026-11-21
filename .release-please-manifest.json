@@ -1,5 +1,3 @@
 {
-  "crates/paksmith-core": "0.1.0",
-  "crates/paksmith-cli": "0.1.0",
-  "crates/paksmith-gui": "0.1.0"
+  ".": "0.1.0"
 }
