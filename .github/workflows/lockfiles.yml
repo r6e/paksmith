@@ -1,9 +1,10 @@
 name: Lockfiles
 
-# Post-merge only, and not a required check: neither Dependabot nor
-# release-please re-locks `fuzz/Cargo.lock`, so a release or a bump to a
-# requirement `paksmith-core` inherits leaves it stale until a normal PR
-# re-locks it (`cargo update --manifest-path fuzz/Cargo.toml -p <crate>`).
+# Post-merge only, and not a required check: Dependabot does not
+# re-lock `fuzz/Cargo.lock`, so a bump to a requirement `paksmith-core`
+# inherits leaves it stale until a normal PR re-locks it
+# (`cargo update --manifest-path fuzz/Cargo.toml -p <crate>`). A release
+# PR rewrites the workspace's version in both lockfiles itself.
 on:
   push:
     branches: [main]
