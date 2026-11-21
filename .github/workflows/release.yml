@@ -7,9 +7,19 @@ name: Release
 #
 # release-please-config.json sets `draft` because a published release
 # accepts no more assets, and `force-tag-creation` because a draft
-# alone has no tag. All three crates share one tag, so only the
-# paksmith-cli entry creates a release, and its draft carries that
-# crate's changelog section alone until release-assets.yml replaces it.
+# alone has no tag. The workspace has one version, one tag and one
+# changelog (`CHANGELOG.md`): the config's `extra-files` name every
+# place the version is written, in `Cargo.toml` and both lockfiles.
+# release-please only warns when one of them matches nothing. The
+# `--locked` in deny.yml fails a release PR that left a `Cargo.lock`
+# entry behind; a stale `fuzz/Cargo.lock` shows only in lockfiles.yml,
+# after the merge. A commit that touches only `exclude-paths`
+# directories starts no release and is in no changelog. Workflows are
+# among them, so a fix to release-assets.yml waits for the next
+# release; `.github/actions` builds the archives and stays counted.
+# `commit-search-depth` must stay above the number of commits
+# since `bootstrap-sha` until the first release, or the oldest drop
+# out of its changelog unannounced; after that tag it can go.
 #
 # If a run fails, re-run it: release-please picks up from the merged
 # release PR.

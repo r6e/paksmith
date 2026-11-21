@@ -1,6 +1,6 @@
 [package]
 name = "paksmith-cli"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ name = "paksmith"
 path = "src/main.rs"
 
 [dependencies]
-paksmith-core = { path = "../paksmith-core", version = "0.1" }
+paksmith-core = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -34,7 +34,7 @@ tokio = { version = "1.45", default-features = false, features = ["rt"] }
 # `__test_utils` for core's pak builders, which tests/common uses. This
 # dev-dependency enables it only when cli's test targets are built; see
 # paksmith-core's Cargo.toml.
-paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
+paksmith-core = { workspace = true, features = ["__test_utils"] }
 assert_cmd = "2"
 predicates = "3"
 insta = { version = "1", features = ["json"] }
