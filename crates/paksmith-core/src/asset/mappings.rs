@@ -1905,9 +1905,10 @@ fn zstd_context(created: Option<DCtx<'static>>) -> crate::Result<DCtx<'static>> 
     created.ok_or_else(|| fault(MappingsParseFault::ZstdContextUnavailable))
 }
 
-/// Whether `stream` is one or more zstd v1 or skippable frames. libzstd is
-/// built with its pre-v1 decoders, and a one-shot decode hands each frame to
-/// whichever decoder its magic names.
+/// Whether `stream` is one or more zstd v1 or skippable frames. Any crate in
+/// the build can turn on zstd's `legacy` feature, which builds libzstd's
+/// pre-v1 decoders, and a one-shot decode hands each frame to whichever
+/// decoder its magic names.
 fn is_zstd_v1_stream(mut stream: &[u8]) -> bool {
     if stream.is_empty() {
         return false;
