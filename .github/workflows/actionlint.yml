@@ -6,8 +6,8 @@ name: actionlint
 # - scripts/lint-composite-actions.sh on the composite actions, which
 #   actionlint does not read
 # - scripts/check-release-targets.sh, that the release and nightly
-#   workflows name the same build targets, and that the README and the
-#   release notes' crate list match what is released
+#   workflows name the same build targets, and that the README
+#   matches what is released
 #
 # No `paths` filter: a workflow the filter skips never reports its
 # check, so a filtered workflow could not be made a required check.
@@ -56,5 +56,5 @@ jobs:
           "${RUNNER_TEMP}/actionlint" -color
       - name: Lint the composite actions
         run: scripts/lint-composite-actions.sh
-      - name: Check the release files, README and crate list agree
+      - name: Check the release files and README agree
         run: scripts/check-release-targets.sh

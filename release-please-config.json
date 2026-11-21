@@ -1,27 +1,55 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "release-type": "rust",
+  "release-type": "simple",
   "include-component-in-tag": false,
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
   "bootstrap-sha": "92fc1dc99a01c9ac0fdfe4ec521277fab71a8808",
+  "commit-search-depth": 1000,
   "draft": true,
   "force-tag-creation": true,
   "packages": {
-    "crates/paksmith-core": { "skip-github-release": true },
-    "crates/paksmith-cli": {},
-    "crates/paksmith-gui": { "skip-github-release": true }
-  },
-  "plugins": [
-    { "type": "cargo-workspace", "merge": false },
-    {
-      "type": "linked-versions",
-      "groupName": "paksmith",
-      "components": [
-        "paksmith-core",
-        "paksmith-cli",
-        "paksmith-gui"
+    ".": {
+      "exclude-paths": [
+        ".config",
+        ".githooks",
+        ".github/ISSUE_TEMPLATE",
+        ".github/workflows",
+        "crates/paksmith-bench",
+        "crates/paksmith-cli/tests",
+        "crates/paksmith-core-tests",
+        "crates/paksmith-core/examples",
+        "crates/paksmith-core/tests",
+        "crates/paksmith-doc-lint",
+        "crates/paksmith-fixture-gen",
+        "docs",
+        "fuzz",
+        "scripts",
+        "tests",
+        "tools"
+      ],
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies['paksmith-core'].version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(!@.source && (@.name.value=='paksmith-core' || @.name.value=='paksmith-cli' || @.name.value=='paksmith-gui'))].version"
+        },
+        {
+          "type": "toml",
+          "path": "fuzz/Cargo.lock",
+          "jsonpath": "$.package[?(!@.source && @.name.value=='paksmith-core')].version"
+        }
       ]
     }
-  ]
+  }
 }
