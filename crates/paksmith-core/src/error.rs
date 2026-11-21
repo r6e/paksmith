@@ -459,11 +459,15 @@ impl std::fmt::Display for InvalidFooterFault {
 #[non_exhaustive]
 pub enum DecompressionFault {
     /// The entry's compression method isn't supported by paksmith.
-    /// Currently fires for Gzip, Oodle, Zstd, Unknown(_), and
+    /// A read currently fires it for Gzip, Oodle, Zstd, Unknown(_), and
     /// UnknownByName(_); None, Zlib, and LZ4 are wired up. A read
     /// (`read_entry` or `read_entry_to`) rejects these methods in
     /// `PakReader::check_read`, after an encrypted entry's key check,
-    /// rather than returning bytes it can't decode.
+    /// rather than returning bytes it can't decode. A verify hashes the
+    /// compressed blocks of every method paksmith recognises (in a v3-v4
+    /// archive, whose block offsets are file-relative, it refuses them
+    /// with `UnsupportedVersion`), so it fires this only for a plaintext
+    /// entry in Unknown(_) or UnknownByName(_).
     UnsupportedMethod {
         /// The unsupported method's typed value, as parsed from the
         /// entry header (or resolved through the v8+ FName slot).

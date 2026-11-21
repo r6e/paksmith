@@ -284,8 +284,8 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 There are two rejection layers:
 
-- **`check_read` (a read's early-reject)** and **`verify_entry`'s
-  plaintext arm** — the user-facing paths. Both return
+- **`check_read` (a read's early-reject)** — the user-facing path,
+  which returns
   `PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }`.
 - **`stream_entry_to`'s match exhaustiveness arm** — a guard a read
   doesn't reach, which fires only when the early-reject in `check_read`
@@ -294,6 +294,12 @@ There are two rejection layers:
   `PaksmithError::InvalidIndex { fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression { method } }`.
   Operators seeing this variant should treat it as a bug, not an
   expected Oodle rejection.
+
+Verifying needs no decoder: an entry's stored SHA-1 covers its on-disk
+compressed blocks, so `verify_entry` checks a plaintext Oodle entry as
+it checks a zlib one, hashing its blocks under the same bounds checks
+and refusing a v3-v4 archive's, whose block offsets are file-relative,
+with `UnsupportedVersion`.
 
 **Status:** `partial`. Detection ships; decompression rejects with
 `PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }`.

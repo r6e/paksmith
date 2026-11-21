@@ -506,17 +506,14 @@ policy.
       than mirrored, which would risk copying paksmith's own bugs), so
       the `real_v10_*` / `real_v11_*` fixtures there are corroborated by
       repak's read-back only, with no independent parse of their index
-      metadata.
+      metadata. The LZ4 pair splits the same way: `real_v8b_lz4.pak` gets
+      the read-back and the wire oracle, `real_v11_lz4.pak` the read-back
+      only.
     - The uasset family (`real_v8b_{uasset,split,ubulk,uptnl,unversioned}.pak`)
       is absent from that file but IS re-opened by repak at generation
       time in `crates/paksmith-fixture-gen/src/uasset.rs`, checking
       entry count and paths (the bulk-companion writer also round-trips
       contents). Weaker than cross-validation, but not self-attestation.
-    - `real_v8b_lz4.pak` and `real_v11_lz4.pak` get NO repak read-back
-      anywhere — `write_fixture` writes and renames without re-opening.
-      paksmith is the only implementation that has parsed those bytes,
-      so cite them for what repak's WRITER emitted, never as
-      independent read-back corroboration.
   - `real_v5_encrypted_index.pak`, `real_v8b_encrypted_*.pak` and
     `real_v11_encrypted_*.pak` — UnrealPak-produced binaries vendored
     from repak's test suite; repak's writer at the rev this workspace locks
@@ -730,8 +727,9 @@ policy.
 the full enum):
 - `PaksmithError::UnsupportedVersion { version }` — a version or
   version-specific feature paksmith does not read: for example a version
-  outside 3–11, a frozen V9 index, or a zlib-compressed entry in a V3/V4
-  archive (read, or verified unless it is encrypted).
+  outside 3–11, a frozen V9 index, or a compressed entry in a V3/V4
+  archive (a zlib one read, or a zlib, gzip or Oodle one verified unless
+  it is encrypted).
 - `PaksmithError::InvalidFooter { fault: InvalidFooterFault::* }` —
   `OtherUnpromoted { reason }` (catch-all for magic mismatch and the other
   footer faults not yet promoted to typed variants),
