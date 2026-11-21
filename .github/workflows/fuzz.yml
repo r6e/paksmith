@@ -394,9 +394,9 @@ jobs:
       #
       # To nuke a poisoned corpus, both stores must go while no fuzz run
       # is unfinished, or the next run restores it from the one that is
-      # left: every cache of the target, and every scheduled run since
-      # it was poisoned, whose artifacts go with it. The commands are in
-      # the alert issue's text, in the housekeeping job below.
+      # left: every cache of the target, and every scheduled run updated
+      # since it was poisoned, whose artifacts go with it. The commands
+      # are in the alert issue's text, in the housekeeping job below.
       - name: Save evolved corpus
         if: always()
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -495,20 +495,20 @@ jobs:
               "" \
               "A non-zero cmin typically indicates a toolchain incompat (nightly drift), harness ABI mismatch, or corpus poisoning." \
               "" \
-              "If the corpus is suspected poisoned, delete every cache of the target and every scheduled fuzz run since it was poisoned, with the workflow disabled and no fuzz run unfinished meanwhile. The next run restores the corpus from whichever is left: the newest cache, or else the newest scheduled run's artifact. Deleting a run removes its artifacts, so download any crash artifact you need first." \
+              "If the corpus is suspected poisoned, delete every cache of the target and every scheduled fuzz run updated since it was poisoned, with the workflow disabled and no fuzz run unfinished meanwhile. The next run restores the corpus from whichever is left: the newest cache, or else the newest scheduled run's artifact. Deleting a run removes its artifacts, so download any crash artifact you need first." \
               "" \
               "Run these in order. The first line keeps every command on this repository, whatever directory the shell is in." \
               "- A run already queued may still start after the disable (untested), and a run saves the corpus as it ends, even when cancelled. Cancel each run the first listing prints, and repeat the listing until it prints nothing." \
               "- Delete each cache the second listing prints; without \`--limit\` it shows only 30." \
-              "- Delete each run of the third listing created since the poisoning, including any you just cancelled." \
+              "- Delete each run of the third listing whose \`updatedAt\` is at or after the poisoning, including any you just cancelled. That takes in a run created before it that was still running, or was re-run, after it." \
               '```' \
               "export GH_REPO=${GH_REPO}" \
               "gh workflow disable fuzz.yml" \
-              "gh run list --workflow fuzz.yml --all --limit 100 --json databaseId,status --jq '.[] | select(.status != \"completed\") | .databaseId'" \
+              "for s in requested queued pending waiting in_progress; do gh run list --workflow fuzz.yml --all --status \"\$s\" --limit 1000 --json databaseId --jq '.[].databaseId'; done" \
               "gh run cancel <run-id>" \
               "gh cache list --key fuzz-corpus-${target}- --limit 1000 --json id --jq '.[].id'" \
               "gh cache delete <cache-id>" \
-              "gh run list --workflow fuzz.yml --all --event schedule --limit 100 --json databaseId,createdAt,conclusion" \
+              "gh run list --workflow fuzz.yml --all --event schedule --limit 100 --json databaseId,updatedAt,conclusion" \
               "gh run delete <run-id>" \
               "gh workflow enable fuzz.yml" \
               "unset GH_REPO" \
