@@ -823,14 +823,26 @@ fn cross_parser_agreement_v11_compressed() {
     assert_cross_parser_agreement("real_v11_compressed.pak");
 }
 
+// Issue #636 LZ4 corpus: same single-entry shape as the zlib fixtures.
+#[test]
+fn cross_parser_agreement_v8b_lz4() {
+    assert_cross_parser_agreement("real_v8b_lz4.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v11_lz4() {
+    assert_cross_parser_agreement("real_v11_lz4.pak");
+}
+
 /// Issue #69 explicit pinning: the new compressed fixtures must
 /// surface `is_compressed = true` to BOTH paksmith and the oracle.
 /// The cross_parser_agreement tests above merely assert
 /// "paksmith and oracle agree"; if a future regression flipped
 /// BOTH parsers to `is_compressed = false`, agreement would hold
 /// vacuously. This test pins the absolute value, catching that
-/// double-failure mode. v10/v11 compressed fixtures (issue #90) are
-/// included for the same anti-vacuous-agreement reason.
+/// double-failure mode. v10/v11 compressed fixtures (issue #90) and the
+/// LZ4 fixtures (#636) are included for the same anti-vacuous-agreement
+/// reason.
 #[test]
 fn issue_69_compressed_fixtures_actually_compressed() {
     for name in [
@@ -839,6 +851,8 @@ fn issue_69_compressed_fixtures_actually_compressed() {
         "real_v9_compressed.pak",
         "real_v10_compressed.pak",
         "real_v11_compressed.pak",
+        "real_v8b_lz4.pak",
+        "real_v11_lz4.pak",
     ] {
         let snapshot = read_with_paksmith(name);
         assert_eq!(
