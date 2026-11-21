@@ -563,7 +563,7 @@ pub enum DecompressionFault {
         message: String,
     },
     /// Per-block decompressed-output buffer reservation failed in
-    /// `stream_lz4_to`, BEFORE decoding. LZ4 raw blocks decode into
+    /// `stream_block_codec_to`, BEFORE decoding. LZ4 raw blocks decode into
     /// a buffer pre-sized to the block's decode budget
     /// (`min(remaining, compression_block_size)` for non-final
     /// blocks, the remaining output for the final block — see

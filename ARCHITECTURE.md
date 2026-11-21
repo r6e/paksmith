@@ -86,6 +86,10 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
 - `digest.rs` — `Sha1Digest` newtype with byte-equality semantics; explicitly
   not constant-time (suitable for local file integrity, not network
   attestation).
+- `codec/` — crate-private block-codec seam: `decode_block` appends one
+  compressed block's output to a caller's buffer, making every output
+  reservation through the caller. LZ4 decodes through it; zlib keeps its
+  own streaming decoder in `container/pak`.
 - `fallible_read.rs` — crate-private `read_to_end_within`: `read_to_end`
   for buffers sized by untrusted input, whose every growth is a fallible
   exact reservation, doubling up to a caller's ceiling.
