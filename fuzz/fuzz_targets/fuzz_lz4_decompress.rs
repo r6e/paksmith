@@ -1,5 +1,5 @@
 // Coverage-guided fuzzing of the pak LZ4 entry decode path
-// (`stream_lz4_to`, #636).
+// (`stream_block_codec_to`, #636).
 //
 // What this catches:
 //   - Panics / aborts in the per-block decode loop: arbitrary bytes
