@@ -82,6 +82,10 @@ tempfile.workspace = true
 tracing-test.workspace = true
 # `tests/no_display_sigil.rs` tokenizes core's source to find `%` sigils.
 proc-macro2.workspace = true
+# The `.usmap` tests decode pre-v1 zstd frames to show that the v1-only
+# guard, not libzstd, refuses them. `legacy` is on in any build that
+# compiles core's tests; dev-dependencies never reach the shipped binaries.
+zstd = { workspace = true, features = ["legacy"] }
 
 [features]
 # Test-only accessors gated behind this feature so they're not part
@@ -106,7 +110,8 @@ proc-macro2.workspace = true
 # The leading `__` is convention only; cargo doesn't enforce it.
 # Reviewers changing that `-p` set, or giving a released crate a
 # dependency that enables this feature, should check that it stays off
-# there.
+# there. CI's zstd-sys feature check in ci.yml mirrors this `-p` set, so
+# change both together.
 __test_utils = []
 
 # Cross-parser fixture generation (uses the trumank/repak git dep) and

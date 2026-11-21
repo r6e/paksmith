@@ -94,7 +94,12 @@ proc-macro2 = { version = "1.0.106", features = ["span-locations"] }
 # 0.14.3 floor: the first zstd with the RUSTSEC-2026-0391 fix. It requires
 # zstd-safe ^8.2.0 (the RUSTSEC-2026-0395..0406 fixes), which requires
 # zstd-sys ^2.1.2 (the RUSTSEC-2026-0410 fix).
-zstd = "0.14.3"
+# `default-features = false` drops `legacy` (libzstd's pre-v1 frame
+# decoders, which paksmith never needs), `arrays` and `zdict_builder`. CI's
+# lint job fails if the shipped binaries' graph turns `legacy` back on. The
+# oracles' older zstd lines still unify it into any build that selects
+# paksmith-fixture-gen or paksmith-bench.
+zstd = { version = "0.14.3", default-features = false }
 brotli = "9"
 # Phase 3d Task 4: DataTable CSV export (RFC 4180 writer). MIT/Unlicense.
 csv = "1.3"

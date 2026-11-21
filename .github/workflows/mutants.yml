@@ -19,6 +19,9 @@ name: Mutation Testing
 # baseline build + test per shard. The `mutants` aggregator is the
 # single stable status; point any future required-check entry at
 # it, never at the per-shard jobs.
+#
+# The jobs take no Rust cache: setup-rust saves one only on `main`,
+# and this workflow never runs there.
 on:
   pull_request:
 
@@ -97,6 +100,8 @@ jobs:
           # Full history needed for `git diff` against the PR base.
           fetch-depth: 0
       - uses: ./.github/actions/setup-rust
+        with:
+          cache: "false"
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-mutants
@@ -149,6 +154,8 @@ jobs:
           # Full history needed for `git diff` against the PR base.
           fetch-depth: 0
       - uses: ./.github/actions/setup-rust
+        with:
+          cache: "false"
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-mutants
