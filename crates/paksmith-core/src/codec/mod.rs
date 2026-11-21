@@ -109,9 +109,10 @@ fn lz4_block_output_cap(budget: u64, compressed_len: u64) -> u64 {
     budget.min(compressed_len.saturating_mul(MAX_LZ4_BLOCK_EXPANSION_RATIO))
 }
 
-/// Whether `stream` is one or more zstd v1 or skippable frames. libzstd is
-/// built with its pre-v1 decoders, and a one-shot decode hands each frame to
-/// whichever decoder its magic names.
+/// Whether `stream` is one or more zstd v1 or skippable frames. Any crate in
+/// the build can turn on zstd's `legacy` feature, which builds libzstd's
+/// pre-v1 decoders, and a one-shot decode hands each frame to whichever
+/// decoder its magic names.
 pub(crate) fn is_zstd_v1_stream(mut stream: &[u8]) -> bool {
     if stream.is_empty() {
         return false;
