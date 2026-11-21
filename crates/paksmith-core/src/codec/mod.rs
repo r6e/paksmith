@@ -138,6 +138,11 @@ mod tests {
     }
 
     #[test]
+    fn lz4_is_labelled_lz4() {
+        assert_eq!(Codec::Lz4.label(), "lz4");
+    }
+
+    #[test]
     fn lz4_reserve_requests_min_budget_and_255x() {
         let plaintext = plaintext();
         let src = lz4_flex::block::compress(&plaintext);
