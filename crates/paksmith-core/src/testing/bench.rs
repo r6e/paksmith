@@ -192,6 +192,21 @@ pub fn zstd_stream(payload: &[u8]) -> Vec<u8> {
     enc.finish().expect("in-memory zstd finish")
 }
 
+/// A pre-v1 zstd frame under `magic` holding `payload` in one raw block:
+/// v0.2 has no frame header byte, v0.4 has one.
+///
+/// # Panics
+/// If `payload` is longer than 255 bytes.
+#[must_use]
+pub fn zstd_legacy_frame(magic: u32, header: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut frame = magic.to_le_bytes().to_vec();
+    frame.extend_from_slice(header);
+    frame.extend_from_slice(&[0x40, 0, u8::try_from(payload.len()).unwrap()]);
+    frame.extend_from_slice(payload);
+    frame.extend_from_slice(&[0xC0, 0, 0]);
+    frame
+}
+
 /// One gzip member over `payload` at the default level: a pak compression
 /// block.
 ///
