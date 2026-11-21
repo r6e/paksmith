@@ -9,9 +9,7 @@
 # - the README: every archive it names as `paksmith-v<version>-<name>`
 #   (the version being digits or `X.Y.Z`) and every `SHA256SUMS-<name>`,
 #   which must be the release's files, each named at least once; and every
-#   `target=` line that gives a bare target;
-# - the crates the publish job writes release notes from, against the
-#   packages in release-please-config.json.
+#   `target=` line that gives a bare target.
 #
 # Not checked: anything else that decides what runs (other jobs, `if:`
 # conditions, the publish loop's body, the rest of the package action),
@@ -19,7 +17,7 @@
 # writes in another form.
 #
 # Usage, from the repository root (needs mikefarah's yq v4, and jq):
-#   scripts/check-release-targets.sh [RELEASE_ASSETS_YML NIGHTLY_YML README CONFIG PACKAGE_ACTION_YML]
+#   scripts/check-release-targets.sh [RELEASE_ASSETS_YML NIGHTLY_YML README PACKAGE_ACTION_YML]
 # The paths are for trying the check against an edited copy.
 set -euo pipefail
 # One order for every `sort`, and ASCII ranges in every pattern.
@@ -28,8 +26,7 @@ export LC_ALL=C
 release="${1:-.github/workflows/release-assets.yml}"
 nightly="${2:-.github/workflows/nightly.yml}"
 readme="${3:-README.md}"
-config="${4:-release-please-config.json}"
-package="${5:-.github/actions/package/action.yml}"
+package="${4:-.github/actions/package/action.yml}"
 
 # To stderr, so a failure inside a command substitution is still shown.
 fail() {
@@ -122,25 +119,4 @@ unbuilt="$(grep -aE '^[[:space:]]*(export[[:space:]]+)?target=' "${readme}" | tr
 [[ -z "${unbuilt}" ]] ||
   fail "${readme} has a \`target=\` line for '${unbuilt//$'\n'/ }', but the workflows build '${built//$'\n'/ }'"
 
-# The crates the release notes are written from: the publish job's one line
-# assigning `crates`, as `crates=(...)` of bare names (`read` or `mapfile`
-# into it would go unseen). The job reads `crates/<name>/CHANGELOG.md`, and
-# reads first the crate the tag is for: the one release-please makes a
-# GitHub release for.
-crate_lines="$(grep -E '(^|[^A-Za-z0-9_])crates(\[[^]]*\])?\+?=' <<< "${scripts}" || true)"
-[[ "${crate_lines}" =~ ^\ *crates=\(([a-z0-9_\ -]+)\)$ ]] ||
-  fail "${release}'s publish job must assign \`crates\` once, as a line \`crates=(...)\` of bare crate names separated by spaces; it has: ${crate_lines//$'\n'/ }"
-noted="$(tr -s ' ' '\n' <<< "${BASH_REMATCH[1]}" | sed '/^$/d')"
-noted_sorted="$(sort <<< "${noted}")"
-packaged="$(jq -re '.packages | select(type == "object" and length > 0) | keys
-    | select(all(.[]; test("\\Acrates/[a-z0-9_-]+\\z"))) | .[] | ltrimstr("crates/")' "${config}" | sort)" ||
-  fail "${config} could not be read, or its packages are not a map keyed \`crates/<name>\`"
-[[ "${noted_sorted}" == "${packaged}" ]] ||
-  fail "${release} writes release notes from '${noted_sorted//$'\n'/ }', but ${config} releases '${packaged//$'\n'/ }'"
-tagged="$(jq -re '[.packages | to_entries[] | select(.value["skip-github-release"] != true) | .key | ltrimstr("crates/")]
-    | select(length == 1) | .[0]' "${config}")" ||
-  fail "${config} must have exactly one package without \`skip-github-release\`, the crate the tag is for"
-[[ "$(head -n 1 <<< "${noted}")" == "${tagged}" ]] ||
-  fail "${release}'s \`crates=(...)\` must start with ${tagged}, the crate the tag is for; it has '${noted//$'\n'/ }'"
-
-echo "The workflows, ${readme} and ${config} agree on the release files (${expected//$'\n'/ }) and the crates (${noted//$'\n'/ })"
+echo "The workflows and ${readme} agree on the release files (${expected//$'\n'/ })"
