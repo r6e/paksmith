@@ -286,7 +286,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
   `PakEntryHeader::{Inline, Encoded}` with the per-block array;
   `encoded_entry_in_data_record_size` for the cursor base offset.
 - `crates/paksmith-core/src/container/pak/mod.rs` — `stream_zlib_to`
-  block loop (the canonical reference implementation); `stream_lz4_to`
+  block loop (the canonical reference implementation); `stream_block_codec_to`
   shares the same outer loop shape for raw LZ4 blocks but NOT the
   bomb-budget mechanism — it decodes into a buffer pre-sized to the
   block's capped expected output, so over-expansion surfaces as
