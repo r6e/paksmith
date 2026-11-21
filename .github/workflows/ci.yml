@@ -269,6 +269,28 @@ jobs:
         run: cargo doc --workspace --no-deps --all-features
         env:
           RUSTDOCFLAGS: "-D warnings"
+      # The shipped binaries' zstd-sys may have no feature but `std`:
+      # `legacy` builds libzstd's pre-v1 decoders, and `pkg-config` and
+      # `rust-backend` replace the bundled libzstd. The tree is the graph
+      # .github/actions/package builds, without dev-dependencies, resolved
+      # for every target rather than only this runner's. The graph can't
+      # show the ZSTD_SYS_USE_PKG_CONFIG env route. With `-i`, cargo tree
+      # exits 0 on a `-p` that names no package, so the tree must name
+      # each binary.
+      - name: Check zstd-sys features in the shipped binaries
+        run: |
+          set -euo pipefail
+          shipped=(paksmith-cli paksmith-gui)
+          tree="$(cargo tree --locked --color never --target all "${shipped[@]/#/--package=}" -e normal,build,features -i zstd-sys)"
+          for pkg in "${shipped[@]}"; do
+            grep -q "${pkg} v" <<<"${tree}" || { echo "::error::${pkg} is missing from the zstd-sys tree"; exit 1; }
+          done
+          features="$(grep -o 'zstd-sys feature "[^"]*"' <<<"${tree}" | sort -u || true)"
+          if [[ "${features}" != 'zstd-sys feature "std"' ]]; then
+            printf '%s\n' "${tree}" "" "zstd-sys features found:" "${features:-(none)}"
+            echo "::error::the shipped binaries must build zstd-sys with only its std feature"
+            exit 1
+          fi
 
   # Coverage runs on Linux only — coverage is a measurement, not a
   # correctness check, and platform-specific differences in test
