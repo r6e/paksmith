@@ -430,6 +430,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly
+          # The cache key holds the nightly's version, so each day saves
+          # a new set that cache-prune.yml cannot group with the last.
+          cache: "false"
       - run: cargo check --workspace --all-features
 
   # `cargo minimal-versions` verifies the crate compiles against the
@@ -501,6 +504,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly
+          # The cache key holds the nightly's version, so each day saves
+          # a new set that cache-prune.yml cannot group with the last.
+          cache: "false"
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-fuzz
