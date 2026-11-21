@@ -954,7 +954,8 @@ pub(crate) fn ends_package_read(err: &crate::PaksmithError) -> bool {
             fault:
                 D::CompressedBlockReserveFailed { .. }
                 | D::ZlibScratchReserveFailed { .. }
-                | D::Lz4OutputReserveFailed { .. },
+                | D::Lz4OutputReserveFailed { .. }
+                | D::BlockOutputReserveFailed { .. },
             ..
         } => true,
         E::Io(e) => e.kind() == std::io::ErrorKind::OutOfMemory,
@@ -1298,6 +1299,12 @@ mod ends_package_read_tests {
                 requested: 1,
                 source: refused(),
             }),
+            decompression(DecompressionFault::BlockOutputReserveFailed {
+                codec: "zstd",
+                block_index: 0,
+                requested: 1,
+                source: refused(),
+            }),
             PaksmithError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory)),
         ];
         for err in &ends {
@@ -1352,6 +1359,11 @@ mod ends_package_read_tests {
             decompression(DecompressionFault::ZlibStreamError {
                 block_index: 0,
                 kind: std::io::ErrorKind::InvalidData,
+                message: "bad".into(),
+            }),
+            decompression(DecompressionFault::BlockDecodeFailed {
+                codec: "zstd",
+                block_index: 0,
                 message: "bad".into(),
             }),
             PaksmithError::Io(std::io::Error::other("disk")),

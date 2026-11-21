@@ -105,9 +105,9 @@ pub fn write_pak_entry(
 /// COMPRESSED entries only (`compression_method != 0`):
 /// `write_pak_entry` omits the block-count u32 and block table
 /// entirely for method-0 records, making those 53 bytes — this
-/// formula does not apply to them. The v8b builders
-/// ([`build_v8b_lz4_pak`], [`build_v8b_zlib_pak`]) pin the compressed
-/// shape against `write_pak_entry`'s actual output at runtime.
+/// formula does not apply to them. The `build_v8b_*_pak` builders pin
+/// the compressed shape against `write_pak_entry`'s actual output at
+/// runtime.
 #[must_use]
 pub const fn pak_entry_wire_size(n: u64) -> u64 {
     57 + 16 * n
@@ -226,7 +226,33 @@ pub fn build_v8b_zlib_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_siz
     )
 }
 
-/// The v8b pak behind [`build_v8b_lz4_pak`] and [`build_v8b_zlib_pak`]:
+/// [`build_v8b_lz4_pak`] for Zstd: one entry at [`ZSTD_SYNTH_PATH`] whose
+/// `streams` are zstd frames, one per compression block.
+#[must_use]
+pub fn build_v8b_zstd_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size: u32) -> Vec<u8> {
+    build_v8b_pak(
+        "Zstd",
+        ZSTD_SYNTH_PATH,
+        streams,
+        uncompressed_size,
+        block_size,
+    )
+}
+
+/// [`build_v8b_lz4_pak`] for gzip: one entry at [`GZIP_SYNTH_PATH`] whose
+/// `streams` are gzip members, one per compression block.
+#[must_use]
+pub fn build_v8b_gzip_pak(streams: &[Vec<u8>], uncompressed_size: u64, block_size: u32) -> Vec<u8> {
+    build_v8b_pak(
+        "Gzip",
+        GZIP_SYNTH_PATH,
+        streams,
+        uncompressed_size,
+        block_size,
+    )
+}
+
+/// The v8b pak behind the `build_v8b_*_pak` builders:
 /// one entry at `path` compressed by `method`, under a
 /// [`write_v8b_plus_footer`] naming `method` in slot 0, so the entry's
 /// 1-based method index 1 resolves to it.
@@ -340,6 +366,12 @@ pub const LZ4_SYNTH_PATH: &str = "Content/lz4_synth.uasset";
 
 /// Path of the single entry emitted by [`build_v8b_zlib_pak`].
 pub const ZLIB_SYNTH_PATH: &str = "Content/zlib_synth.uasset";
+
+/// Path of the single entry emitted by [`build_v8b_zstd_pak`].
+pub const ZSTD_SYNTH_PATH: &str = "Content/zstd_synth.uasset";
+
+/// Path of the single entry emitted by [`build_v8b_gzip_pak`].
+pub const GZIP_SYNTH_PATH: &str = "Content/gzip_synth.uasset";
 
 /// A v3-v7 compression method ID paksmith doesn't recognise: it sits between
 /// the known ids 2 and 4, so `from_u32` resolves it to `Unknown`.
@@ -477,6 +509,44 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(reader.read_entry_to(ZLIB_SYNTH_PATH, &mut out).unwrap(), 5);
         assert_eq!(out, b"abcde");
+    }
+
+    /// `pak` names `slot` in footer slot 0, compared as raw NUL-padded bytes
+    /// since `CompressionMethod::from_name` ignores case, and holds an entry
+    /// at `path` whose method resolves to `method`.
+    fn assert_names_method(
+        pak: Vec<u8>,
+        slot: &str,
+        path: &str,
+        method: &crate::container::pak::index::CompressionMethod,
+    ) {
+        use crate::container::pak::PakReader;
+
+        const SLOT_BYTES: usize = 32;
+        const SLOTS: usize = 5;
+
+        let mut named = [0u8; SLOT_BYTES];
+        named[..slot.len()].copy_from_slice(slot.as_bytes());
+        assert_eq!(pak[pak.len() - SLOTS * SLOT_BYTES..][..SLOT_BYTES], named);
+        let reader = PakReader::from_bytes(pak).unwrap();
+        let entry = reader.index_entry(path).unwrap();
+        assert_eq!(entry.header().compression_method(), method);
+    }
+
+    #[test]
+    fn build_v8b_zstd_pak_names_zstd() {
+        use crate::container::pak::index::CompressionMethod;
+
+        let pak = build_v8b_zstd_pak(&[vec![1, 2, 3]], 3, 3);
+        assert_names_method(pak, "Zstd", ZSTD_SYNTH_PATH, &CompressionMethod::Zstd);
+    }
+
+    #[test]
+    fn build_v8b_gzip_pak_names_gzip() {
+        use crate::container::pak::index::CompressionMethod;
+
+        let pak = build_v8b_gzip_pak(&[vec![1, 2, 3]], 3, 3);
+        assert_names_method(pak, "Gzip", GZIP_SYNTH_PATH, &CompressionMethod::Gzip);
     }
 
     /// Compressed variant pins that the block list is present

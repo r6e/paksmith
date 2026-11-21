@@ -54,6 +54,7 @@ pub mod localization;
 pub mod profile;
 pub mod staged_replace;
 
+mod codec;
 mod fallible_read;
 mod hex;
 mod seams;

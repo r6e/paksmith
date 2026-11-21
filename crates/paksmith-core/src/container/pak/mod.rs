@@ -98,6 +98,7 @@ use sha1::{Digest, Sha1};
 use tracing::{debug, error, warn};
 use zeroize::Zeroizing;
 
+use crate::codec::{self, Codec, CodecError};
 use crate::container::{
     ContainerFormat, ContainerReader, EntryFlags, EntryIntegrity, EntryMetadata, IntegritySurvey,
     PayloadLedger, extent_in_file,
@@ -1786,11 +1787,12 @@ enum PakDecodeRoute {
     Unknown,
 }
 
-/// A compression method paksmith decodes, block by block.
+/// A compression method paksmith decodes, block by block: zlib through its
+/// own streaming decoder, the rest through [`codec::decode_block`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PakCodec {
     Zlib,
-    Lz4,
+    Block(Codec),
 }
 
 /// Classifies `method` for the read path and verify's plaintext arm, with
@@ -1799,7 +1801,7 @@ fn pak_decode_route(method: &CompressionMethod) -> PakDecodeRoute {
     match method {
         CompressionMethod::None => PakDecodeRoute::Stored,
         CompressionMethod::Zlib => PakDecodeRoute::Compressed(PakCodec::Zlib),
-        CompressionMethod::Lz4 => PakDecodeRoute::Compressed(PakCodec::Lz4),
+        CompressionMethod::Lz4 => PakDecodeRoute::Compressed(PakCodec::Block(Codec::Lz4)),
         CompressionMethod::Gzip | CompressionMethod::Oodle | CompressionMethod::Zstd => {
             PakDecodeRoute::Undecodable
         }
@@ -1910,7 +1912,9 @@ fn dispatch_compressed<R: Read + Seek>(
 ) -> crate::Result<u64> {
     match codec {
         PakCodec::Zlib => stream_zlib_to(reader, entry, file_size, payload_start, version, writer),
-        PakCodec::Lz4 => stream_lz4_to(reader, entry, file_size, payload_start, writer),
+        PakCodec::Block(codec) => {
+            stream_block_codec_to(reader, codec, entry, file_size, payload_start, writer)
+        }
     }
 }
 
@@ -2714,7 +2718,7 @@ fn checked_encrypted_verify_extents(
 /// `prev_abs_end` so the next call sees this block's end.
 ///
 /// Colocated with its call sites (`check_compressed_payload` for a read's
-/// checks of the index record, `stream_zlib_to` and `stream_lz4_to` for
+/// checks of the index record, `stream_zlib_to` and `stream_block_codec_to` for
 /// the extract paths, `verify_index_entry`'s plaintext block-walk arm,
 /// the `Compressed` and `Undecodable` routes, for the hash path)
 /// so the three checks (`StartOverlapsHeader`, `EndPastFileSize`,
@@ -2844,7 +2848,7 @@ fn check_compressed_payload(
 /// Read one compressed block from `file` into `buf`.
 ///
 /// Shared input-side scaffold of [`stream_zlib_to`] and
-/// [`stream_lz4_to`]: narrow the block length to `usize`, seek to the
+/// [`stream_block_codec_to`]: narrow the block length to `usize`, seek to the
 /// block's absolute start, fallibly reserve through the
 /// [`PakSeam::CompressedReserve`] OOM seam, and read exactly the
 /// on-disk compressed bytes. `buf` is `clear()`ed, not dropped, so
@@ -2905,7 +2909,7 @@ fn read_compressed_block<R: Read + Seek>(
 }
 
 /// Enforce the end-of-entry size invariant shared by
-/// [`stream_zlib_to`] and [`stream_lz4_to`]: the cumulative
+/// [`stream_zlib_to`] and [`stream_block_codec_to`]: the cumulative
 /// decompressed byte count must equal the index-declared
 /// `uncompressed_size`, else the entry is truncated or corrupt
 /// ([`DecompressionFault::SizeUnderrun`]).
@@ -3198,18 +3202,9 @@ fn stream_zlib_to<R: Read + Seek>(
     Ok(bytes_written)
 }
 
-/// Maximum factor by which one raw LZ4 block can inflate: a block of
-/// N compressed bytes decodes to at most `N × 255` output bytes.
-/// Literals copy 1:1; the only amplifying construct is a match-length
-/// extension byte, and each 0xFF extension byte contributes at most
-/// 255 output bytes (LZ4 Block Format). The true supremum is strictly
-/// below 255 (offset/token overhead is never zero), so `N × 255` is a
-/// safe over-estimate that never under-sizes a valid decode.
-const MAX_LZ4_BLOCK_EXPANSION_RATIO: u64 = 255;
-
-/// Per-block decode budget for one LZ4 block: the size the output
-/// buffer is pre-sized to (before the [`lz4_block_output_cap`]
-/// intersection).
+/// Per-block decode budget for one LZ4 block: the most output
+/// [`codec::decode_block`] may produce, before LZ4 caps its buffer
+/// input-proportionally.
 ///
 /// Non-final blocks are budgeted at `min(remaining, block_size)` —
 /// the post-decode guard requires them to produce EXACTLY
@@ -3234,28 +3229,9 @@ fn lz4_block_budget(remaining: u64, block_size: u64, is_final: bool) -> u64 {
     }
 }
 
-/// Bound the pre-decode output reservation for one LZ4 block.
-///
-/// `expected_out` is the block's decode budget from
-/// [`lz4_block_budget`] — for the final block that is the entry's
-/// full remaining output (bounded upstream by the 8 GiB
-/// `MAX_UNCOMPRESSED_ENTRY_BYTES` open-time cap), which is
-/// entry-scale, not block-scale: pre-allocating it verbatim would
-/// let a tiny crafted final block inside a large-claim entry force a
-/// multi-gigabyte eager allocation (memory-amplification DoS, #636).
-/// Intersecting with `compressed_len` ×
-/// [`MAX_LZ4_BLOCK_EXPANSION_RATIO`] keeps the reservation
-/// input-proportional: a valid block's real output is always
-/// `≤ compressed_len × 255`, so the cap is transparent for
-/// well-formed entries and only bites the crafted case. The resulting
-/// buffer is still the decompression-bomb cap — `decompress_into`
-/// errors if the block tries to inflate past it.
-fn lz4_block_output_cap(expected_out: u64, compressed_len: u64) -> u64 {
-    expected_out.min(compressed_len.saturating_mul(MAX_LZ4_BLOCK_EXPANSION_RATIO))
-}
-
-/// Stream the LZ4-decompressed payload of `entry` from `file` to
-/// `writer`. Returns the number of decompressed bytes written.
+/// Stream the payload of `entry`, compressed as `codec` blocks, from
+/// `file` to `writer`, decompressed. Returns the number of decompressed
+/// bytes written.
 ///
 /// UE pak LZ4 payloads are independent RAW LZ4 blocks (no LZ4-frame
 /// header, no size prefix) — the block form repak writes via
@@ -3270,19 +3246,19 @@ fn lz4_block_output_cap(expected_out: u64, compressed_len: u64) -> u64 {
 /// compressed-input buffer and one decompressed-output buffer,
 /// hoisted and capacity-reused across blocks; the full
 /// `uncompressed_size` never lives in memory at once. Unlike zlib
-/// there is no mid-decode growth loop — the output buffer is
-/// pre-sized to the block's decode budget (`lz4_block_budget`:
+/// there is no mid-decode growth loop: [`codec::decode_block`] decodes
+/// each block within its budget (`lz4_block_budget`:
 /// `min(remaining, compression_block_size)` for non-final blocks,
-/// the remaining output for the final block), capped
-/// input-proportionally by `lz4_block_output_cap` at
-/// `compressed_len × 255`. The capped buffer doubles as the
-/// decompression-bomb cap: `lz4_flex::block::decompress_into` errors
-/// on a block that would expand past it (surfaced as
+/// the remaining output for the final block), into a buffer LZ4 caps
+/// input-proportionally at `compressed_len × 255`. The capped buffer
+/// doubles as the decompression-bomb cap: a block that would expand
+/// past it fails to decode (surfaced as
 /// [`DecompressionFault::Lz4DecodeError`]), so over-expansion can
 /// never allocate beyond the per-block capped budget.
 #[allow(clippy::too_many_lines)] // bounded by per-block error-reporting, mirroring stream_zlib_to
-fn stream_lz4_to<R: Read + Seek>(
+fn stream_block_codec_to<R: Read + Seek>(
     file: &mut R,
+    codec: Codec,
     entry: &PakIndexEntry,
     file_size: u64,
     payload_start: u64,
@@ -3301,6 +3277,7 @@ fn stream_lz4_to<R: Read + Seek>(
     // `validate_block_bounds` (abs_end > file_size), never decoding
     // out-of-bounds bytes.
     let path = entry.filename();
+    let label = codec.label();
 
     let uncompressed_size = entry.header().uncompressed_size();
     let block_size = u64::from(entry.header().compression_block_size());
@@ -3325,7 +3302,7 @@ fn stream_lz4_to<R: Read + Seek>(
         )?;
 
         let block_len = block.len();
-        read_compressed_block(file, &mut compressed, block_len, abs_start, i, "lz4", path)?;
+        read_compressed_block(file, &mut compressed, block_len, abs_start, i, label, path)?;
 
         // Decode budget for THIS block — see `lz4_block_budget` for
         // the non-final/final split and its rationale. A crafted
@@ -3343,77 +3320,76 @@ fn stream_lz4_to<R: Read + Seek>(
         // matching-or-stricter behavior.
         let remaining = uncompressed_size.saturating_sub(bytes_written);
         let is_final = i + 1 == entry.header().compression_blocks().len();
-        let expected_out = lz4_block_budget(remaining, block_size, is_final);
+        let budget = lz4_block_budget(remaining, block_size, is_final);
 
-        // SECURITY (#636): cap the reservation input-proportionally —
-        // see `lz4_block_output_cap` for the derivation and threat
-        // model. The capped buffer remains the decompression-bomb cap.
-        let alloc_bound = lz4_block_output_cap(expected_out, block_len);
-        // 32-bit-only: `value` is the DERIVED allocation bound
-        // (`min(budget, block_len × 255)`), not a raw wire field.
-        // The narrow can only fail for the FINAL block: a non-final
-        // budget is capped by `compression_block_size`, a u32 that
-        // always fits a 32-bit usize, so a failing bound always
-        // derives from the `uncompressed_size` claim — `field` names
-        // that. Unreachable on 64-bit (budget ≤ the 8 GiB entry cap).
-        let alloc_usize =
-            usize::try_from(alloc_bound).map_err(|_| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: WireField::UncompressedSize,
-                    value: alloc_bound,
-                    path: Some(path.to_string()),
-                },
-            })?;
-
-        // Fallible output reservation so OOM surfaces typed, with its
-        // own seam site (#636).
-        block_out.clear();
-        let out_reserve_res = block_out.try_reserve_exact(alloc_usize);
-        crate::seams::seam_check!(
-            out_reserve_res,
-            crate::testing::oom::SeamSite::Pak(PakSeam::Lz4OutputReserve)
-        );
-        out_reserve_res.map_err(|e| {
-            warn!(
-                path = &*clamp_path(path),
-                block = i,
-                requested = alloc_usize,
-                error = ?e,
-                "lz4 output reservation failed"
+        let reserve = |reserved: Result<(), _>, requested| {
+            crate::seams::seam_check!(
+                reserved,
+                crate::testing::oom::SeamSite::Pak(match codec {
+                    Codec::Lz4 => PakSeam::Lz4OutputReserve,
+                })
             );
-            PaksmithError::Decompression {
-                path: path.to_string(),
-                offset: abs_start,
-                fault: DecompressionFault::Lz4OutputReserveFailed {
-                    block_index: i,
-                    requested: alloc_usize,
-                    source: e,
-                },
-            }
-        })?;
-        block_out.resize(alloc_usize, 0);
-
-        // Raw-block decode into the pre-sized buffer. The buffer IS
-        // the bomb cap: over-expansion errors inside the decoder.
-        let produced =
-            lz4_flex::block::decompress_into(&compressed, &mut block_out).map_err(|e| {
-                let message = e.to_string();
+            reserved.map_err(|source| {
                 warn!(
                     path = &*clamp_path(path),
                     block = i,
-                    abs_start,
-                    error = message.as_str(),
-                    "lz4 decompress failed"
+                    requested,
+                    error = ?source,
+                    "{label} output reservation failed"
                 );
                 PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: abs_start,
-                    fault: DecompressionFault::Lz4DecodeError {
-                        block_index: i,
-                        message,
+                    fault: match codec {
+                        Codec::Lz4 => DecompressionFault::Lz4OutputReserveFailed {
+                            block_index: i,
+                            requested,
+                            source,
+                        },
                     },
                 }
-            })?;
+            })
+        };
+        block_out.clear();
+        codec::decode_block(codec, &compressed, &mut block_out, budget, reserve).map_err(|e| {
+            match e {
+                // 32-bit-only: `value` is the DERIVED allocation bound
+                // (`min(budget, block_len × 255)`), not a raw wire field.
+                // The narrow can only fail for the FINAL block: a non-final
+                // budget is capped by `compression_block_size`, a u32 that
+                // always fits a 32-bit usize, so a failing bound always
+                // derives from the `uncompressed_size` claim — `field` names
+                // that. Unreachable on 64-bit (budget ≤ the 8 GiB entry cap).
+                CodecError::BoundExceedsPlatformUsize(bound) => PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::U64ExceedsPlatformUsize {
+                        field: WireField::UncompressedSize,
+                        value: bound,
+                        path: Some(path.to_string()),
+                    },
+                },
+                CodecError::Reserve(e) => e,
+                CodecError::Decode(message) => {
+                    warn!(
+                        path = &*clamp_path(path),
+                        block = i,
+                        abs_start,
+                        error = message.as_str(),
+                        "{label} decompress failed"
+                    );
+                    PaksmithError::Decompression {
+                        path: path.to_string(),
+                        offset: abs_start,
+                        fault: match codec {
+                            Codec::Lz4 => DecompressionFault::Lz4DecodeError {
+                                block_index: i,
+                                message,
+                            },
+                        },
+                    }
+                }
+            }
+        })?;
+        let produced = block_out.len();
 
         // Sanity: every block except possibly the last must produce
         // exactly compression_block_size bytes — same invariant and
@@ -3425,7 +3401,7 @@ fn stream_lz4_to<R: Read + Seek>(
                 block = i,
                 produced,
                 expected,
-                "non-final lz4 block decompressed to wrong size"
+                "non-final {label} block decompressed to wrong size"
             );
             return Err(PaksmithError::Decompression {
                 path: path.to_string(),
@@ -3439,7 +3415,7 @@ fn stream_lz4_to<R: Read + Seek>(
         }
 
         // Block validated — commit exactly the produced bytes.
-        writer.write_all(&block_out[..produced])?;
+        writer.write_all(&block_out)?;
         bytes_written = bytes_written.saturating_add(produced as u64);
     }
 
@@ -4155,7 +4131,7 @@ mod tests {
             ),
             (
                 CompressionMethod::Lz4,
-                PakDecodeRoute::Compressed(PakCodec::Lz4),
+                PakDecodeRoute::Compressed(PakCodec::Block(Codec::Lz4)),
             ),
             (CompressionMethod::Gzip, PakDecodeRoute::Undecodable),
             (CompressionMethod::Oodle, PakDecodeRoute::Undecodable),
@@ -4171,38 +4147,6 @@ mod tests {
         ] {
             assert_eq!(pak_decode_route(&method), route, "{method:?}");
         }
-    }
-
-    /// A well-formed LZ4 block: a 64 KiB output derived from ~300
-    /// compressed bytes. `compressed_len × 255` (76_500) exceeds the
-    /// pak-derived `expected_out`, so the cap is transparent — it
-    /// returns `expected_out` unchanged and never under-sizes a valid
-    /// decode.
-    #[test]
-    fn lz4_block_output_cap_passes_through_valid_block() {
-        assert_eq!(lz4_block_output_cap(65_536, 300), 65_536);
-    }
-
-    /// The security property (#636): a 400-byte compressed block that
-    /// claims a 4 GiB `compression_block_size` must NOT force a 4 GiB
-    /// eager allocation. The cap clamps the reservation to
-    /// input-proportional size (`400 × 255`), so the crafted claim
-    /// cannot amplify.
-    #[test]
-    fn lz4_block_output_cap_bounds_crafted_oversized_claim() {
-        assert_eq!(
-            lz4_block_output_cap(4 * 1024 * 1024 * 1024, 400),
-            400 * MAX_LZ4_BLOCK_EXPANSION_RATIO
-        );
-    }
-
-    /// `compressed_len × 255` must saturate (not overflow/panic) for a
-    /// pathological length, in which case `expected_out` wins the
-    /// `min`. Pins the `saturating_mul` against a `checked`/wrapping
-    /// mutant.
-    #[test]
-    fn lz4_block_output_cap_saturates_without_overflow() {
-        assert_eq!(lz4_block_output_cap(1_000, u64::MAX), 1_000);
     }
 
     /// Non-final blocks are budgeted at `min(remaining, block_size)`
@@ -5024,7 +4968,7 @@ mod tests {
         // `dir` (and the corrupt copy inside it) is removed on drop.
     }
 
-    // The following synthetic-pak tests exercise `stream_lz4_to`'s
+    // The following synthetic-pak tests exercise the LZ4 path's
     // budget and non-final-block size guards with SYNTHETIC v8b paks.
     // They live in-package (not only in `paksmith-core-tests`) because
     // cargo-mutants scopes each mutant's test run to the mutated

@@ -118,7 +118,7 @@ pub enum PakSeam {
     /// v10+ entries vec — parallel to [`Self::FlatIndexEntries`] but
     /// reached via the v10+ index parser.
     V10IndexEntries,
-    /// `stream_lz4_to`'s pre-decode per-block output-buffer
+    /// `stream_block_codec_to`'s pre-decode per-block output-buffer
     /// `try_reserve_exact` (#636). Surfaces as
     /// [`crate::error::DecompressionFault::Lz4OutputReserveFailed`].
     /// The LZ4 path's compressed-INPUT reservation shares

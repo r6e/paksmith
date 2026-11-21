@@ -231,7 +231,8 @@ record whose FINAL block carries the excess decodes
 (lenient, consistent with paksmith's own zlib path) where both
 references reject it.
 
-`stream_lz4_to` in `crates/paksmith-core/src/container/pak/mod.rs`
+`stream_block_codec_to` in `crates/paksmith-core/src/container/pak/mod.rs`,
+through `decode_block` in `crates/paksmith-core/src/codec/mod.rs`
 (issue #636), mirroring `stream_zlib_to`'s discipline:
 
 - Same shared `validate_block_bounds` walk and the same hoisted
