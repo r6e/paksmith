@@ -21,8 +21,23 @@ name: Release
 # since `bootstrap-sha` until the first release, or the oldest drop
 # out of its changelog unannounced; after that tag it can go.
 #
-# If a run fails, re-run it: release-please picks up from the merged
-# release PR.
+# GitHub refuses a release body over 125,000 characters, and
+# release-please creates the tag before the draft, so notes that long
+# would leave a tag with no draft, and a re-run would fail the same
+# way. actionlint.yml fails a release PR whose changelog section is
+# too long (scripts/check-release-notes-size.sh); do not merge one
+# that is red. Shorten the notes instead, in an ordinary pull request,
+# and the next run here rebuilds the release PR:
+# - before the first release, move `bootstrap-sha` forward. The
+#   changelog then starts after that commit; it and the commits before
+#   it are in no release's notes.
+# - after it, set `last-release-sha` for one release and remove it
+#   once that release is out (untested), or release more often.
+# Editing `CHANGELOG.md` on the release PR's branch does not help:
+# release-please sends the notes it keeps with the release PR.
+#
+# If a run fails for any other reason, re-run it: release-please picks
+# up from the merged release PR.
 on:
   push:
     branches: [main]

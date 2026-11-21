@@ -19,6 +19,17 @@ name: Release assets
 #   not the tag and its commit.
 # - The tag exists without a draft: re-run release.yml, which accepts
 #   the existing tag and creates the draft, then dispatch this workflow.
+#   If GitHub refused the draft because the notes were too long, which
+#   scripts/check-release-notes-size.sh is there to stop, a re-run
+#   fails the same way. Create the draft for the tag by hand, titled
+#   with the tag, not marked a pre-release, with a short body. Replace
+#   the merged release PR's `autorelease: pending` label with
+#   `autorelease: tagged` so that release.yml stops trying to release
+#   it. Then re-run the failed jobs of the tag's run, or dispatch this
+#   workflow if its artifacts have expired; the notes then link to the
+#   changelog. Last, shorten that version's section of `CHANGELOG.md`
+#   on main in an ordinary pull request, or the size check fails on
+#   every pull request until the next release (untested).
 on:
   push:
     tags: ["v*"]
@@ -202,7 +213,8 @@ jobs:
           # notes. A heading with nothing under it is a release with
           # nothing to list. A section ends at the next `## ` heading that
           # starts with a version (`## 1.2`, `## [1.2.3]`, `## v1.2`); any
-          # other `## ` line belongs to the section.
+          # other `## ` line belongs to the section. Keep the pattern in
+          # step with scripts/check-release-notes-size.sh.
           section="$(awk -v version="${TAG#v}" '
             /^## \[?v?[0-9]+\.[0-9]+([^0-9A-Za-z]|$)/ {
               on = index($0, "## [" version "]") == 1 || index($0, "## " version " ") == 1
@@ -243,7 +255,10 @@ jobs:
           fi
           printf '%s\n' "${section}" > notes.md
           # GitHub refuses a release body over 125,000 characters. Counting
-          # bytes instead can only overcount them.
+          # bytes instead can only overcount them. Keep the limit in step
+          # with scripts/check-release-notes-size.sh, which fails a release
+          # PR that would need this; it is reached only if such a PR is
+          # merged anyway.
           if (($(wc -c < notes.md) > 120000)); then
             echo "::warning::the notes are too long for a release body, so the release links to the changelog instead"
             printf 'The changes in this release are listed in [the changelog](%s).\n' "https://github.com/${GH_REPO}/blob/${TAG}/CHANGELOG.md" > notes.md
