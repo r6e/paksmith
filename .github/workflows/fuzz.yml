@@ -33,16 +33,20 @@ jobs:
     name: cargo-fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
     # 10 min budget per target + ~5 min for toolchain + build + corpus
-    # prep + artifact upload. 25 min ceiling absorbs slow runners.
+    # prep + artifact upload, + up to ~3 min for the corpus fallback on
+    # a cache miss. 25 min ceiling absorbs slow runners.
     timeout-minutes: 25
     # Crashes are findings, not workflow failures. `continue-on-error`
     # so a discovered crash uploads its artifact and the workflow
     # surfaces yellow (not red) — until baseline is established, red
     # would be noise.
     continue-on-error: true
-    # This job builds and runs the repository's code, so it keeps the
-    # workflow's read-only token. The steps that need to write are in
-    # the `housekeeping` job.
+    # This job builds and runs the repository's code, so its token can
+    # only read. The steps that need to write are in the `housekeeping`
+    # job.
+    permissions:
+      contents: read
+      actions: read # download an earlier run's corpus artifact
     strategy:
       fail-fast: false
       matrix:
@@ -115,8 +119,8 @@ jobs:
           tool: cargo-fuzz
       # Rolling per-run-id key (Actions caches are immutable per
       # key); `restore-keys` prefix grabs the newest prior entry. A
-      # miss degrades cleanly to seed-only. Split from save so save
-      # can run under `if: always()` and survive cargo-fuzz exit-
+      # miss falls back to the artifact step below. Split from save so
+      # save can run under `if: always()` and survive cargo-fuzz exit-
       # non-zero on crash discovery — the monolithic `actions/cache`
       # post-hook would skip it.
       - name: Restore evolved corpus
@@ -127,6 +131,82 @@ jobs:
           key: ${{ env.CORPUS_CACHE_KEY }}
           restore-keys: |
             ${{ env.CORPUS_CACHE_PREFIX }}
+      # GitHub evicts the corpus cache when the repository's caches pass
+      # its size limit. On a miss, this takes the corpus from the
+      # artifact that the newest earlier scheduled run uploaded for this
+      # target. Only a scheduled run counts: it always runs `main`'s
+      # copy of this file, while a dispatched or pull-request run can
+      # use an edited copy and upload an artifact under any name. A
+      # failure here leaves the seed corpus.
+      #
+      # Only the regular files of the target's corpus directory are
+      # copied. The crash inputs an artifact can also hold stay out of
+      # `fuzz/artifacts/`, where they would be reported as this run's.
+      - name: Restore evolved corpus from an earlier run's artifact
+        id: fallback
+        if: steps.restore.outputs.cache-matched-key == ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TARGET: ${{ matrix.target }}
+          # One scheduled run a day; an artifact lasts 30 days.
+          MAX_RUNS: 30
+        run: |
+          set -euo pipefail
+          # A cache restore that failed partway can leave files here, and
+          # they are not a corpus. A link at `fuzz/corpus` would send the
+          # `rm`, and every later step, somewhere else.
+          dest="fuzz/corpus/${TARGET}"
+          if [[ -L fuzz/corpus ]]; then
+            echo "::warning::${TARGET}: fuzz/corpus was a symbolic link; removed"
+            rm -f fuzz/corpus
+          fi
+          rm -rf "${dest}"
+          scratch="${RUNNER_TEMP}/corpus-fallback"
+          dir="${scratch}/artifact"
+          stage="${scratch}/stage"
+          trap 'rm -rf "${scratch}" || true' EXIT
+          # `-k` is for a `gh` that ignores the first signal.
+          runs="$(timeout -k 10 30 gh api -X GET "repos/${GH_REPO}/actions/workflows/fuzz.yml/runs" \
+            -f event=schedule -f status=completed -F per_page="${MAX_RUNS}" \
+            --jq '[.workflow_runs[] | select(.event == "schedule" and .head_repository.full_name == env.GH_REPO) | .id] | sort | reverse | .[]')"
+          for run in ${runs}; do
+            [[ "${run}" =~ ^[0-9]+$ && "${run}" != "${GITHUB_RUN_ID}" ]] || continue
+            # The job has 25 minutes and the fuzzing needs most of them.
+            # An artifact is a few megabytes at most, so a download that
+            # takes 30 seconds has stalled and is cut off, and no new
+            # one starts once this step has run for two minutes.
+            if ((SECONDS >= 120)); then
+              echo "::warning::${TARGET}: no corpus cache, and out of time looking for a usable artifact; fuzzing from the seed corpus"
+              exit 0
+            fi
+            # Emptied for every run, so that what a rejected download
+            # left behind cannot fill the disk for the next one. `gh`
+            # keeps the zip in `TMPDIR`, and leaves it there when it is
+            # cut off, so that goes here too.
+            rm -rf "${scratch}"
+            mkdir "${scratch}"
+            TMPDIR="${scratch}" timeout -k 10 30 gh run download "${run}" --name "fuzz-${TARGET}-${run}" --dir "${dir}" || continue
+            [[ -d "${dir}/corpus/${TARGET}" ]] || continue
+            # Copied to a staging directory and moved into place whole,
+            # so that a copy that fails partway restores nothing: the
+            # run would save a partial corpus as the next one's base.
+            # `+` makes `find` report a failed `cp`, where `\;` hides it.
+            mkdir "${stage}"
+            if ! find "${dir}/corpus/${TARGET}" -maxdepth 1 -type f -exec cp -t "${stage}" {} +; then
+              echo "::warning::${TARGET}: could not copy run ${run}'s corpus; trying the run before it"
+              continue
+            fi
+            count="$(find "${stage}" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+            ((count > 0)) || continue
+            mkdir -p fuzz/corpus
+            mv -T "${stage}" "${dest}"
+            echo "run=${run}" >> "${GITHUB_OUTPUT}"
+            echo "Restored ${count} corpus files from run ${run}'s artifact."
+            exit 0
+          done
+          echo "::warning::${TARGET}: no corpus cache and no usable artifact in the last ${MAX_RUNS} scheduled runs; fuzzing from the seed corpus"
       # Seed corpus: starting from valid fixtures means the fuzzer
       # explores adversarial mutations of real structures immediately,
       # instead of spending the first ~5 min rediscovering "files
@@ -271,17 +351,27 @@ jobs:
           # No decay over time as the corpus matures, unlike a
           # corpus-vs-fixture-count heuristic.
           CACHE_MATCH: ${{ steps.restore.outputs.cache-matched-key || '' }}
+          FALLBACK_RUN: ${{ steps.fallback.outputs.run || '' }}
+          FALLBACK_OUTCOME: ${{ steps.fallback.outcome }}
         shell: bash
         run: |
           artifacts=$(find "fuzz/artifacts/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
           corpus=$(find "fuzz/corpus/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
-          [ -n "${CACHE_MATCH}" ] && restored="yes (${CACHE_MATCH})" || restored="no (cache miss)"
+          if [ -n "${CACHE_MATCH}" ]; then
+            restored="from the cache (${CACHE_MATCH})"
+          elif [ -n "${FALLBACK_RUN}" ]; then
+            restored="from run ${FALLBACK_RUN}'s artifact (cache miss)"
+          elif [ "${FALLBACK_OUTCOME}" = failure ]; then
+            restored="no (cache miss, and the artifact lookup failed)"
+          else
+            restored="no (cache miss, no artifact restored)"
+          fi
           {
             echo "### Fuzz target: ${TARGET}"
             echo "- Crashes/timeouts: ${artifacts}"
             echo "- Corpus size (post-cmin): ${corpus}"
             echo "- Corpus growth this run: ${CORPUS_DELTA} new inputs"
-            echo "- Corpus restored from cache: ${restored}"
+            echo "- Corpus restored: ${restored}"
             echo "- cmin exit code: ${CMIN_EXIT}"
           } >> "$GITHUB_STEP_SUMMARY"
       # The housekeeping job looks for this artifact's name, and never
@@ -300,9 +390,13 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       # Paired with the restore step above; `if: always()` is what
-      # preserves the corpus on cargo-fuzz crash exit. To nuke a
-      # poisoned corpus, delete the cache entries for the target via
-      # `gh api -X DELETE /repos/r6e/paksmith/actions/caches?key=fuzz-corpus-<target>-<run-id>`.
+      # preserves the corpus on cargo-fuzz crash exit.
+      #
+      # To nuke a poisoned corpus, both stores must go while no fuzz run
+      # is unfinished, or the next run restores it from the one that is
+      # left: every cache of the target, and every scheduled run since
+      # it was poisoned, whose artifacts go with it. The commands are in
+      # the alert issue's text, in the housekeeping job below.
       - name: Save evolved corpus
         if: always()
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -314,6 +408,8 @@ jobs:
       # the cache only persists the corpus, not findings. The corpus
       # copy here gives a 30-day offline snapshot for replaying a
       # specific run (vs the cache's rolling-newest semantics).
+      # The fallback restore step reads this artifact by its name and
+      # its `corpus/<target>/` layout: change them together.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -399,9 +495,23 @@ jobs:
               "" \
               "A non-zero cmin typically indicates a toolchain incompat (nightly drift), harness ABI mismatch, or corpus poisoning." \
               "" \
-              "If the corpus is suspected poisoned, delete its caches:" \
+              "If the corpus is suspected poisoned, delete every cache of the target and every scheduled fuzz run since it was poisoned, with the workflow disabled and no fuzz run unfinished meanwhile. The next run restores the corpus from whichever is left: the newest cache, or else the newest scheduled run's artifact. Deleting a run removes its artifacts, so download any crash artifact you need first." \
+              "" \
+              "Run these in order. The first line keeps every command on this repository, whatever directory the shell is in." \
+              "- A run already queued may still start after the disable (untested), and a run saves the corpus as it ends, even when cancelled. Cancel each run the first listing prints, and repeat the listing until it prints nothing." \
+              "- Delete each cache the second listing prints; without \`--limit\` it shows only 30." \
+              "- Delete each run of the third listing created since the poisoning, including any you just cancelled." \
               '```' \
-              "gh api -X DELETE \"repos/${GH_REPO}/actions/caches?key=fuzz-corpus-${target}-<run-id>\"" \
+              "export GH_REPO=${GH_REPO}" \
+              "gh workflow disable fuzz.yml" \
+              "gh run list --workflow fuzz.yml --all --limit 100 --json databaseId,status --jq '.[] | select(.status != \"completed\") | .databaseId'" \
+              "gh run cancel <run-id>" \
+              "gh cache list --key fuzz-corpus-${target}- --limit 1000 --json id --jq '.[].id'" \
+              "gh cache delete <cache-id>" \
+              "gh run list --workflow fuzz.yml --all --event schedule --limit 100 --json databaseId,createdAt,conclusion" \
+              "gh run delete <run-id>" \
+              "gh workflow enable fuzz.yml" \
+              "unset GH_REPO" \
               '```')"
             # `--search` matches substrings, so jq keeps the exact title.
             # Only an issue this workflow opened counts as the existing one.
