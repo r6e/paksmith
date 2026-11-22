@@ -152,13 +152,17 @@ pub enum PakSeam {
     /// codec without its own seam (zstd). Surfaces as
     /// [`crate::error::DecompressionFault::BlockOutputReserveFailed`].
     BlockOutputReserve,
+    /// `stream_block_codec_to`'s reservations for a gzip block's output,
+    /// which grows as the block decodes. Surfaces as
+    /// [`crate::error::DecompressionFault::BlockOutputReserveFailed`].
+    BlockGrowReserve,
 }
 
 impl PakSeam {
     /// Total number of pak-side seam sites. Pinned by the `const _`
     /// guard below and, in `tests`, by the exhaustive `expected_pak_slot`
     /// match and the length of its list of every variant.
-    pub const COUNT: usize = 21;
+    pub const COUNT: usize = 22;
 }
 
 // Compile-time guard: refuses to build when `COUNT` and the largest
@@ -166,7 +170,7 @@ impl PakSeam {
 // the `AssetSeam` guard below): variants are declared in source order
 // with no explicit `= N` assignments and no gaps, so that
 // `last as usize + 1` equals the variant count.
-const _: [(); PakSeam::COUNT] = [(); PakSeam::BlockOutputReserve as usize + 1];
+const _: [(); PakSeam::COUNT] = [(); PakSeam::BlockGrowReserve as usize + 1];
 
 /// Asset parser OOM seams (#276). The inner enum of [`SeamSite::Asset`].
 ///
@@ -415,8 +419,9 @@ mod tests {
     /// Pak/index/decompression variants are tested in
     /// `paksmith-core-tests/tests/oom_pak.rs`, except `DedupTracker`,
     /// `ByPathLookup`, `DedupSurvivorFlags` and `ByPathKey`, tested in
-    /// `container/pak/index/mod.rs`, and `EntryReadCounts` and
-    /// `BlockOutputReserve`, tested in `container/pak/mod.rs`, so that
+    /// `container/pak/index/mod.rs`, and `EntryReadCounts`,
+    /// `BlockOutputReserve` and `BlockGrowReserve`, tested in
+    /// `container/pak/mod.rs`, so that
     /// cargo-mutants credits them;
     /// asset-side variants are tested in
     /// `paksmith-core-tests/tests/oom_asset.rs`, except
@@ -484,6 +489,9 @@ mod tests {
                 }
                 PakSeam::BlockOutputReserve => {
                     "read_entry_surfaces_block_output_reserve_failed_under_oom"
+                }
+                PakSeam::BlockGrowReserve => {
+                    "read_entry_surfaces_block_grow_reserve_failed_under_oom"
                 }
             }
         }
@@ -603,6 +611,7 @@ mod tests {
                 PakSeam::ByPathKey => 18,
                 PakSeam::EntryReadCounts => 19,
                 PakSeam::BlockOutputReserve => 20,
+                PakSeam::BlockGrowReserve => 21,
             }
         }
         const fn expected_asset_slot(site: AssetSeam) -> usize {
@@ -657,6 +666,7 @@ mod tests {
             PakSeam::ByPathKey,
             PakSeam::EntryReadCounts,
             PakSeam::BlockOutputReserve,
+            PakSeam::BlockGrowReserve,
         ];
         assert_eq!(pak_all.len(), PakSeam::COUNT);
         for site in pak_all {

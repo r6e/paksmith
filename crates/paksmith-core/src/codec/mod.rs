@@ -5,9 +5,12 @@
 //! attributes a failure.
 
 use std::collections::TryReserveError;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 
+use flate2::bufread::GzDecoder;
 use zstd::zstd_safe::{self, DCtx};
+
+use crate::fallible_read;
 
 /// Maximum factor by which one raw LZ4 block can inflate: a block of
 /// N compressed bytes decodes to at most `N × 255` output bytes.
@@ -55,6 +58,8 @@ pub(crate) enum Codec {
     Lz4,
     /// One or more zstd v1 or skippable frames.
     Zstd,
+    /// One gzip member, and any bytes after it, which are ignored.
+    Gzip,
 }
 
 impl Codec {
@@ -63,6 +68,7 @@ impl Codec {
         match self {
             Self::Lz4 => "lz4",
             Self::Zstd => "zstd",
+            Self::Gzip => "gzip",
         }
     }
 }
@@ -100,6 +106,7 @@ pub(crate) fn decode_block(
     let decoded = match codec {
         Codec::Lz4 => decode_lz4(src, out, budget, &mut reserve),
         Codec::Zstd => decode_zstd(src, out, budget, &mut reserve),
+        Codec::Gzip => decode_gzip(src, out, budget, &mut reserve),
     };
     if decoded.is_err() {
         out.truncate(start);
@@ -180,6 +187,45 @@ fn decode_zstd(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// gzip decoders [`gzip_decoder`] has built on this thread.
+    pub(crate) static GZIP_DECODERS_BUILT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Decode the gzip member that opens `src` onto `out`, with a decoder of
+/// its own. It reserves only as output arrives and never grows `out`
+/// past `budget + 1` bytes beyond its starting length, and a byte past
+/// `budget` fails the block. flate2 checks the member's CRC-32 and
+/// length trailer and leaves the bytes after it unread.
+fn decode_gzip(
+    src: &[u8],
+    out: &mut Vec<u8>,
+    budget: u64,
+    reserve: &mut impl FnMut(Result<(), TryReserveError>, usize) -> crate::Result<()>,
+) -> Result<(), CodecError> {
+    let limit = budget.saturating_add(1);
+    let ceiling =
+        usize::try_from(limit).map_or(usize::MAX, |limit| out.len().saturating_add(limit));
+    let produced = fallible_read::read_to_end_within(
+        &mut gzip_decoder(src).take(limit),
+        out,
+        ceiling,
+        |reserved, requested| reserve(reserved, requested).map_err(CodecError::Reserve),
+        |e| CodecError::Decode(e.to_string()),
+    )?;
+    if produced as u64 > budget {
+        return Err(CodecError::Decode(PAST_OUTPUT_CAP.to_owned()));
+    }
+    Ok(())
+}
+
+fn gzip_decoder(src: &[u8]) -> GzDecoder<&[u8]> {
+    #[cfg(test)]
+    GZIP_DECODERS_BUILT.with(|built| built.update(|n| n + 1));
+    GzDecoder::new(src)
+}
+
 fn zstd_context(created: Option<DCtx<'static>>) -> Result<DCtx<'static>, CodecError> {
     created.ok_or(CodecError::ContextUnavailable)
 }
@@ -250,6 +296,15 @@ mod tests {
         decode_onto(Codec::Lz4, EARLIER.to_vec(), src, budget)
     }
 
+    /// The message a failed decode carries.
+    #[cfg(feature = "__test_utils")]
+    fn decode_message(decoded: &Result<(), CodecError>) -> Option<&str> {
+        match decoded {
+            Err(CodecError::Decode(message)) => Some(message),
+            _ => None,
+        }
+    }
+
     #[test]
     fn lz4_decode_block_known_answer() {
         let plaintext = plaintext();
@@ -264,6 +319,11 @@ mod tests {
     #[test]
     fn lz4_is_labelled_lz4() {
         assert_eq!(Codec::Lz4.label(), "lz4");
+    }
+
+    #[test]
+    fn gzip_is_labelled_gzip() {
+        assert_eq!(Codec::Gzip.label(), "gzip");
     }
 
     #[test]
@@ -344,14 +404,6 @@ mod tests {
         /// `src` decoded as zstd within `budget` onto [`EARLIER`].
         fn decode_zstd(src: &[u8], budget: u64) -> (Result<(), CodecError>, Vec<u8>, Vec<usize>) {
             decode_onto(Codec::Zstd, EARLIER.to_vec(), src, budget)
-        }
-
-        /// The message a failed decode carries.
-        fn decode_message(decoded: &Result<(), CodecError>) -> Option<&str> {
-            match decoded {
-                Err(CodecError::Decode(message)) => Some(message),
-                _ => None,
-            }
         }
 
         #[test]
@@ -506,6 +558,41 @@ mod tests {
                 max_zstd_block_expansion_ratio(),
                 MAX_ZSTD_BLOCK_EXPANSION_RATIO
             );
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    mod gzip_arm {
+        use super::*;
+        use crate::testing::bench::gzip_stream;
+
+        /// `src` decoded as gzip within `budget` onto [`EARLIER`].
+        fn decode_gzip(src: &[u8], budget: u64) -> (Result<(), CodecError>, Vec<u8>, Vec<usize>) {
+            decode_onto(Codec::Gzip, EARLIER.to_vec(), src, budget)
+        }
+
+        #[test]
+        fn gzip_decode_block_known_answer() {
+            let plaintext = plaintext();
+            let src = gzip_stream(&plaintext);
+            for budget in [plaintext.len() as u64, u64::MAX] {
+                let (decoded, out, _) = decode_gzip(&src, budget);
+                assert!(decoded.is_ok(), "budget {budget}: {decoded:?}");
+                assert_eq!(out, [EARLIER, &plaintext].concat(), "budget {budget}");
+            }
+        }
+
+        #[test]
+        fn gzip_output_past_budget_is_corrupt() {
+            let plaintext = plaintext();
+            let src = gzip_stream(&plaintext);
+            let (decoded, out, _) = decode_gzip(&src, plaintext.len() as u64 - 1);
+            assert_eq!(
+                decode_message(&decoded),
+                Some(PAST_OUTPUT_CAP),
+                "{decoded:?}"
+            );
+            assert_eq!(out, EARLIER);
         }
     }
 }

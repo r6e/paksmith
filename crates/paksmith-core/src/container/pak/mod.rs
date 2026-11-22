@@ -1806,7 +1806,8 @@ fn pak_decode_route(method: &CompressionMethod) -> PakDecodeRoute {
         CompressionMethod::Zlib => PakDecodeRoute::Compressed(PakCodec::Zlib),
         CompressionMethod::Lz4 => PakDecodeRoute::Compressed(PakCodec::Block(Codec::Lz4)),
         CompressionMethod::Zstd => PakDecodeRoute::Compressed(PakCodec::Block(Codec::Zstd)),
-        CompressionMethod::Gzip | CompressionMethod::Oodle => PakDecodeRoute::Undecodable,
+        CompressionMethod::Gzip => PakDecodeRoute::Compressed(PakCodec::Block(Codec::Gzip)),
+        CompressionMethod::Oodle => PakDecodeRoute::Undecodable,
         CompressionMethod::Unknown(_) | CompressionMethod::UnknownByName(_) => {
             PakDecodeRoute::Unknown
         }
@@ -3211,8 +3212,8 @@ fn stream_zlib_to<R: Read + Seek>(
 }
 
 /// Per-block decode budget for one block-codec block: the most output
-/// [`codec::decode_block`] may produce, before the codec caps its buffer
-/// input-proportionally.
+/// [`codec::decode_block`] may produce, before LZ4 and zstd cap their
+/// reservation input-proportionally.
 ///
 /// Non-final blocks are budgeted at `min(remaining, block_size)` —
 /// the post-decode guard requires them to produce EXACTLY
@@ -3249,22 +3250,24 @@ fn block_codec_budget(remaining: u64, block_size: u64, is_final: bool) -> u64 {
 /// last inflates to exactly `compression_block_size`; the last takes
 /// the remainder of `uncompressed_size`. See
 /// `docs/formats/compression/lz4.md`. Issue #636. A Zstd block is one
-/// or more whole zstd frames with nothing after the last.
+/// or more whole zstd frames with nothing after the last, and a Gzip
+/// block is one gzip member, with any bytes after it ignored.
 ///
 /// Buffer discipline mirrors [`stream_zlib_to`] (#373): one
 /// compressed-input buffer and one decompressed-output buffer,
 /// hoisted and capacity-reused across blocks, with each block's output
-/// buffered whole. Unlike zlib there is no mid-decode growth loop:
-/// [`codec::decode_block`] decodes each block within its budget
-/// (`block_codec_budget`: `min(remaining, compression_block_size)` for
-/// non-final blocks, the entry's remaining output, within the 8 GiB
-/// `MAX_UNCOMPRESSED_ENTRY_BYTES` cap, for the final block), into a
-/// buffer capped further at `compressed_len × 255` for LZ4 and
-/// `compressed_len × 32768` for zstd. The capped buffer doubles as the
-/// decompression-bomb cap: a block that would expand past it fails to
-/// decode (surfaced as [`DecompressionFault::Lz4DecodeError`] or
+/// buffered whole. [`codec::decode_block`] decodes each block within
+/// its budget (`block_codec_budget`: `min(remaining,
+/// compression_block_size)` for non-final blocks, the entry's remaining
+/// output, within the 8 GiB `MAX_UNCOMPRESSED_ENTRY_BYTES` cap, for the
+/// final block): LZ4 and zstd into one reservation, capped further at
+/// `compressed_len × 255` and `compressed_len × 32768`, and gzip into a
+/// buffer that grows as the block decodes, to at most a byte past the
+/// budget. Output past the budget fails to decode (surfaced as
+/// [`DecompressionFault::Lz4DecodeError`] or
 /// [`DecompressionFault::BlockDecodeFailed`]), so over-expansion can
-/// never allocate beyond the per-block capped budget.
+/// never grow the buffer past the per-block budget, or a byte past it
+/// for gzip.
 #[allow(clippy::too_many_lines)] // bounded by per-block error-reporting, mirroring stream_zlib_to
 fn stream_block_codec_to<R: Read + Seek>(
     file: &mut R,
@@ -3327,6 +3330,7 @@ fn stream_block_codec_to<R: Read + Seek>(
                 crate::testing::oom::SeamSite::Pak(match codec {
                     Codec::Lz4 => PakSeam::Lz4OutputReserve,
                     Codec::Zstd => PakSeam::BlockOutputReserve,
+                    Codec::Gzip => PakSeam::BlockGrowReserve,
                 })
             );
             reserved.map_err(|source| {
@@ -3346,7 +3350,7 @@ fn stream_block_codec_to<R: Read + Seek>(
                             requested,
                             source,
                         },
-                        Codec::Zstd => DecompressionFault::BlockOutputReserveFailed {
+                        Codec::Zstd | Codec::Gzip => DecompressionFault::BlockOutputReserveFailed {
                             codec: label,
                             block_index: i,
                             requested,
@@ -3391,7 +3395,7 @@ fn stream_block_codec_to<R: Read + Seek>(
                                 block_index: i,
                                 message,
                             },
-                            Codec::Zstd => DecompressionFault::BlockDecodeFailed {
+                            Codec::Zstd | Codec::Gzip => DecompressionFault::BlockDecodeFailed {
                                 codec: label,
                                 block_index: i,
                                 message,
@@ -4160,7 +4164,10 @@ mod tests {
                 CompressionMethod::Lz4,
                 PakDecodeRoute::Compressed(PakCodec::Block(Codec::Lz4)),
             ),
-            (CompressionMethod::Gzip, PakDecodeRoute::Undecodable),
+            (
+                CompressionMethod::Gzip,
+                PakDecodeRoute::Compressed(PakCodec::Block(Codec::Gzip)),
+            ),
             (CompressionMethod::Oodle, PakDecodeRoute::Undecodable),
             (
                 CompressionMethod::Zstd,
@@ -8425,54 +8432,50 @@ mod tests {
         logs_assert(lines_carrying(MISMATCH, "WARN"));
     }
 
-    /// Gzip and Oodle are methods paksmith names but doesn't decode:
-    /// a read and `stream_entry_to`'s dispatch refuse a plaintext entry in
-    /// one, while a verify hashes its blocks, so the stored SHA-1 verifies
-    /// and a flipped payload byte doesn't.
+    /// Oodle is a method paksmith names but doesn't decode: a read and
+    /// `stream_entry_to`'s dispatch refuse a plaintext entry in it, while a
+    /// verify hashes its blocks, so the stored SHA-1 verifies and a flipped
+    /// payload byte doesn't.
     #[cfg(feature = "__test_utils")]
     #[test]
     fn undecodable_plaintext_entries_verify_but_reads_refuse() {
         use crate::testing::wire::build_v8b_pak;
 
         const PATH: &str = "Content/a.bin";
-        for (name, method) in [
-            ("Gzip", CompressionMethod::Gzip),
-            ("Oodle", CompressionMethod::Oodle),
-        ] {
-            let pak = build_v8b_pak(name, PATH, &[vec![7; 16]], 16, 16);
-            let reader = PakReader::from_bytes(pak.clone()).unwrap();
-            let entry = reader.index_entry(PATH).unwrap();
-            assert_eq!(entry.header().compression_method(), &method);
-            assert_eq!(reader.verify_entry(PATH).unwrap(), VerifyOutcome::Verified);
-            assert_eq!(reader.verify().unwrap().entries_verified(), 1, "{name}");
-            let err = reader.read_entry(PATH).unwrap_err();
-            assert!(
-                matches!(
-                    &err,
-                    PaksmithError::Decompression {
-                        fault: DecompressionFault::UnsupportedMethod { method: m },
-                        ..
-                    } if *m == method
-                ),
-                "{name}: {err:?}"
-            );
-            let start = entry.header().offset() + entry.header().wire_size();
-            let direct = reader
-                .stream_entry_to(entry, start, &mut Vec::new())
-                .unwrap_err();
-            assert!(
-                matches!(
-                    &direct,
-                    PaksmithError::InvalidIndex {
-                        fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression {
-                            method: m,
-                        },
-                    } if *m == method
-                ),
-                "{name}: {direct:?}"
-            );
-            assert_flipped_payload_fails_verify(pak, PATH);
-        }
+        let method = CompressionMethod::Oodle;
+        let pak = build_v8b_pak("Oodle", PATH, &[vec![7; 16]], 16, 16);
+        let reader = PakReader::from_bytes(pak.clone()).unwrap();
+        let entry = reader.index_entry(PATH).unwrap();
+        assert_eq!(entry.header().compression_method(), &method);
+        assert_eq!(reader.verify_entry(PATH).unwrap(), VerifyOutcome::Verified);
+        assert_eq!(reader.verify().unwrap().entries_verified(), 1);
+        let err = reader.read_entry(PATH).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::Decompression {
+                    fault: DecompressionFault::UnsupportedMethod { method: m },
+                    ..
+                } if *m == method
+            ),
+            "{err:?}"
+        );
+        let start = entry.header().offset() + entry.header().wire_size();
+        let direct = reader
+            .stream_entry_to(entry, start, &mut Vec::new())
+            .unwrap_err();
+        assert!(
+            matches!(
+                &direct,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression {
+                        method: m,
+                    },
+                } if *m == method
+            ),
+            "{direct:?}"
+        );
+        assert_flipped_payload_fails_verify(pak, PATH);
     }
 
     /// `Content/bad.bin` of [`bad_then_good_pak`]: a plaintext record at
@@ -9172,6 +9175,86 @@ mod tests {
             .verify_entry(path)
             .unwrap_err();
         assert!(matches!(err, PaksmithError::HashMismatch { .. }), "{err:?}");
+    }
+
+    /// Gzip entries: one member per block, the shape repak writes.
+    #[cfg(feature = "__test_utils")]
+    mod gzip_entries {
+        use super::*;
+        use crate::testing::bench::gzip_stream;
+        use crate::testing::oom::{SeamSite, arm_at};
+        use crate::testing::wire::{GZIP_SYNTH_PATH, build_v8b_gzip_pak};
+
+        /// A reader over one Gzip entry of `blocks` members.
+        fn gzip_reader(blocks: &[Vec<u8>], size: u64, block_size: u32) -> PakReader {
+            PakReader::from_bytes(build_v8b_gzip_pak(blocks, size, block_size)).unwrap()
+        }
+
+        /// One decoder per block: each block's member is decoded alone.
+        #[test]
+        fn read_gzip_entry_builds_a_decoder_per_block() {
+            let plaintext = payload(300);
+            let blocks: Vec<_> = plaintext.chunks(128).map(gzip_stream).collect();
+            let reader = gzip_reader(&blocks, 300, 128);
+            let built = || crate::codec::GZIP_DECODERS_BUILT.with(std::cell::Cell::get);
+            let before = built();
+            assert_eq!(reader.read_entry(GZIP_SYNTH_PATH).unwrap(), plaintext);
+            assert_eq!(built() - before, 3);
+        }
+
+        #[test]
+        fn read_entry_surfaces_block_grow_reserve_failed_under_oom() {
+            let plaintext = payload(300);
+            let reader = gzip_reader(&[gzip_stream(&plaintext)], 300, 300);
+            let _guard = arm_at(SeamSite::Pak(PakSeam::BlockGrowReserve), 0);
+            let err = reader.read_entry(GZIP_SYNTH_PATH).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PaksmithError::Decompression {
+                        fault: DecompressionFault::BlockOutputReserveFailed {
+                            codec: "gzip",
+                            block_index: 0,
+                            ..
+                        },
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+        }
+
+        /// A v3-v7 Gzip entry, id 2, at v4, whose block offsets are
+        /// file-relative, is refused before it is decoded, by a read and
+        /// by `stream_entry_to`'s own check. At v5 the same record reaches
+        /// the gzip decoder, which refuses its sixteen 7s.
+        #[test]
+        fn read_v4_gzip_entry_is_unsupported_version() {
+            const BAD: &str = "Content/bad.bin";
+            let reader = bad_record_reader(4, 2, &sevens_sha1(), &[(73, 89)]);
+            let entry = reader.index_entry(BAD).unwrap();
+            let start = entry.header().offset() + entry.header().wire_size();
+            let errs = [
+                reader.read_entry(BAD).unwrap_err(),
+                reader
+                    .stream_entry_to(entry, start, &mut Vec::new())
+                    .unwrap_err(),
+            ];
+            for err in errs {
+                assert!(
+                    matches!(err, PaksmithError::UnsupportedVersion { version: 4 }),
+                    "{err:?}"
+                );
+            }
+            let err = bad_record_reader(5, 2, &sevens_sha1(), &[(73, 89)])
+                .read_entry(BAD)
+                .unwrap_err();
+            assert_eq!(
+                block_decode_failure(&err, "gzip"),
+                Some((0, "invalid gzip header")),
+                "{err:?}"
+            );
+        }
     }
 
     /// Zstd entries: one frame per block, the shape repak writes.

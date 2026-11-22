@@ -596,8 +596,8 @@ pub enum DecompressionFault {
         message: String,
     },
     /// [`Self::Lz4OutputReserveFailed`] for a block codec without a
-    /// codec-named pair (Zstd, Gzip): the block's output reservation
-    /// failed before decoding.
+    /// codec-named pair (Zstd, Gzip): a reservation for the block's
+    /// output failed, before decoding (Zstd) or as it decoded (Gzip).
     BlockOutputReserveFailed {
         /// The codec's lowercase name, such as `"zstd"`.
         codec: &'static str,
@@ -5814,9 +5814,9 @@ pub enum MappingsParseFault {
 ///
 /// The asset-side helper drops its `context` parameter and derives
 /// it from the seam via [`crate::seams::AssetSeam::context`]. The
-/// index-side helper keeps `context` separate because four `PakSeam`
+/// index-side helper keeps `context` separate because five `PakSeam`
 /// variants (`CompressedReserve`, `ScratchReserve`, `Lz4OutputReserve`,
-/// `BlockOutputReserve`) surface as `DecompressionFault`, not
+/// `BlockOutputReserve`, `BlockGrowReserve`) surface as `DecompressionFault`, not
 /// `IndexParseFault`, so a unified
 /// `PakSeam::context() -> AllocationContext` accessor would be a
 /// partial function. Those direct-call variants never reach this
