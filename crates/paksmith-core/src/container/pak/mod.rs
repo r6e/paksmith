@@ -1914,9 +1914,15 @@ fn dispatch_compressed<R: Read + Seek>(
 ) -> crate::Result<u64> {
     match codec {
         PakCodec::Zlib => stream_zlib_to(reader, entry, file_size, payload_start, version, writer),
-        PakCodec::Block(codec) => {
-            stream_block_codec_to(reader, codec, entry, file_size, payload_start, writer)
-        }
+        PakCodec::Block(codec) => stream_block_codec_to(
+            reader,
+            codec,
+            entry,
+            file_size,
+            payload_start,
+            version,
+            writer,
+        ),
     }
 }
 
@@ -3266,21 +3272,12 @@ fn stream_block_codec_to<R: Read + Seek>(
     entry: &PakIndexEntry,
     file_size: u64,
     payload_start: u64,
+    version: PakVersion,
     writer: &mut dyn Write,
 ) -> crate::Result<u64> {
-    // NOTE: unlike `stream_zlib_to`, this takes no `version` and has no
-    // pre-v5 relative-offset guard. `CompressionMethod::Lz4` and `Zstd`
-    // are obtainable ONLY through the v8+ FName compression-slot table
-    // (`CompressionMethod::from_name`); the v3-v7 numeric method IDs
-    // (`from_u32`) never yield either. So any entry reaching here parsed
-    // as v8 or newer, where compression-block offsets are already
-    // relative — the guard `stream_zlib_to` needs (zlib IS reachable
-    // pre-v5 via numeric method 1) would be structurally unreachable
-    // dead code here. Defense in depth: even a hypothetical
-    // absolute-offset entry reaching this loop fails closed at
-    // `validate_block_bounds` (abs_end > file_size), never decoding
-    // out-of-bounds bytes.
     let path = entry.filename();
+
+    require_relative_chunk_offsets(version)?;
     let label = codec.label();
 
     let uncompressed_size = entry.header().uncompressed_size();
@@ -4666,6 +4663,45 @@ mod tests {
             written,
             "bytes written to the sink must equal the returned count"
         );
+    }
+
+    /// `stream_block_codec_to` refuses pre-v5 versions itself, behind
+    /// `check_read`, as `stream_zlib_to` does, and lets v5 through. Driven
+    /// directly on a v8b LZ4 entry, whose blocks are entry-relative, under
+    /// each version.
+    #[test]
+    fn stream_block_codec_to_version_boundary_rejects_pre_v5_only() {
+        let path = "Content/Compressed.uasset";
+        let reader = PakReader::open(fixture("real_v8b_lz4.pak")).unwrap();
+        let entry = reader.index_entry(path).unwrap();
+        let payload_start = reader.check_read(entry).unwrap();
+        let read = |version| {
+            let mut file = std::fs::File::open(fixture("real_v8b_lz4.pak")).unwrap();
+            let mut sink = Vec::new();
+            let streamed = stream_block_codec_to(
+                &mut file,
+                Codec::Lz4,
+                entry,
+                reader.file_size,
+                payload_start,
+                version,
+                &mut sink,
+            );
+            streamed.map(|written| (written, sink.len()))
+        };
+        for v in [
+            PakVersion::CompressionEncryption,
+            PakVersion::IndexEncryption,
+        ] {
+            let err = read(v).unwrap_err();
+            assert!(
+                matches!(err, PaksmithError::UnsupportedVersion { version } if version == v.wire_version()),
+                "{v:?}: {err:?}"
+            );
+        }
+        let size = entry.header().uncompressed_size();
+        let read = read(PakVersion::RelativeChunkOffsets).unwrap();
+        assert_eq!(read, (size, usize::try_from(size).unwrap()));
     }
 
     /// `check_compressed_payload` refuses a pre-v5 entry of either codec,

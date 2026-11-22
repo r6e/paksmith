@@ -237,11 +237,10 @@ through `decode_block` in `crates/paksmith-core/src/codec/mod.rs`
 
 - Same shared `validate_block_bounds` walk and the same hoisted
   two-buffer scheme (one compressed-input + one decompressed-output
-  buffer reused across blocks). Unlike `stream_zlib_to` it takes no
-  `version` and has no pre-v5 relative-offset guard: `LZ4` is
-  reachable only via the v8+ FName slot table, so any entry reaching
-  the decoder already parsed as v8+ (where block offsets are
-  relative) — the guard would be unreachable dead code.
+  buffer reused across blocks). Like `stream_zlib_to`, it takes the
+  version and keeps `require_relative_chunk_offsets` as a safety net
+  behind `PakReader::check_read`; `LZ4` is reachable only through the
+  v8+ FName slot table.
 - Decodes with `lz4_flex::block::decompress_into` into a buffer
   pre-sized to the block's decode budget (`block_codec_budget`:
   `min(remaining, compression_block_size)` for non-final blocks, the

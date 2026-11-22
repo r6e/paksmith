@@ -298,8 +298,8 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 **Status:** `complete` for v5-v11. `require_relative_chunk_offsets`
 refuses a V3-V4 zlib entry with `UnsupportedVersion`; a read runs it
-in `PakReader::check_read`, and `stream_zlib_to` keeps it as a safety
-net.
+in `PakReader::check_read`, and `stream_zlib_to` and
+`stream_block_codec_to` keep it as a safety net.
 
 **Public surface:**
 - `pub struct CompressionBlock` — `start()`, `end()`, `len()`, `is_empty()`.
