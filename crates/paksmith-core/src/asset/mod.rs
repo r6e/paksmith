@@ -955,7 +955,8 @@ pub(crate) fn ends_package_read(err: &crate::PaksmithError) -> bool {
                 D::CompressedBlockReserveFailed { .. }
                 | D::ZlibScratchReserveFailed { .. }
                 | D::Lz4OutputReserveFailed { .. }
-                | D::BlockOutputReserveFailed { .. },
+                | D::BlockOutputReserveFailed { .. }
+                | D::BlockContextUnavailable { .. },
             ..
         } => true,
         E::Io(e) => e.kind() == std::io::ErrorKind::OutOfMemory,
@@ -1304,6 +1305,10 @@ mod ends_package_read_tests {
                 block_index: 0,
                 requested: 1,
                 source: refused(),
+            }),
+            decompression(DecompressionFault::BlockContextUnavailable {
+                codec: "zstd",
+                block_index: 0,
             }),
             PaksmithError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory)),
         ];

@@ -619,6 +619,14 @@ pub enum DecompressionFault {
         /// Display string of the decoder's error.
         message: String,
     },
+    /// The block codec's decoder could not allocate its state before
+    /// decoding the block: libzstd returned no decompression context.
+    BlockContextUnavailable {
+        /// The codec's lowercase name, such as `"zstd"`.
+        codec: &'static str,
+        /// 0-based index of the block it was to decode.
+        block_index: usize,
+    },
 }
 
 impl fmt::Display for DecompressionFault {
@@ -706,6 +714,10 @@ impl fmt::Display for DecompressionFault {
                 block_index,
                 message,
             } => write!(f, "{codec} block {block_index}: {message}"),
+            Self::BlockContextUnavailable { codec, block_index } => write!(
+                f,
+                "{codec} could not create a decompression context for block {block_index}"
+            ),
         }
     }
 }
@@ -6461,6 +6473,18 @@ mod tests {
             };
             assert_eq!(fault.to_string(), expected);
         }
+    }
+
+    #[test]
+    fn decompression_fault_display_block_context_unavailable() {
+        let fault = DecompressionFault::BlockContextUnavailable {
+            codec: "zstd",
+            block_index: 2,
+        };
+        assert_eq!(
+            fault.to_string(),
+            "zstd could not create a decompression context for block 2"
+        );
     }
 
     #[test]
