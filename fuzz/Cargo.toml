@@ -109,3 +109,10 @@ path = "fuzz_targets/fuzz_lz4_decompress.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_zstd_decompress"
+path = "fuzz_targets/fuzz_zstd_decompress.rs"
+test = false
+doc = false
+bench = false
