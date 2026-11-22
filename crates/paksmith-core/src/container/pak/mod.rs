@@ -3202,8 +3202,8 @@ fn stream_zlib_to<R: Read + Seek>(
     Ok(bytes_written)
 }
 
-/// Per-block decode budget for one LZ4 block: the most output
-/// [`codec::decode_block`] may produce, before LZ4 caps its buffer
+/// Per-block decode budget for one block-codec block: the most output
+/// [`codec::decode_block`] may produce, before the codec caps its buffer
 /// input-proportionally.
 ///
 /// Non-final blocks are budgeted at `min(remaining, block_size)` —
@@ -3221,7 +3221,7 @@ fn stream_zlib_to<R: Read + Seek>(
 /// v3-v9 reader has no normalization and rejects it — issue #685),
 /// and the v3-v9 inline index applies no parse-time
 /// `block_count × block_size` bound that would reject it first.
-fn lz4_block_budget(remaining: u64, block_size: u64, is_final: bool) -> u64 {
+fn block_codec_budget(remaining: u64, block_size: u64, is_final: bool) -> u64 {
     if is_final {
         remaining
     } else {
@@ -3247,7 +3247,7 @@ fn lz4_block_budget(remaining: u64, block_size: u64, is_final: bool) -> u64 {
 /// hoisted and capacity-reused across blocks; the full
 /// `uncompressed_size` never lives in memory at once. Unlike zlib
 /// there is no mid-decode growth loop: [`codec::decode_block`] decodes
-/// each block within its budget (`lz4_block_budget`:
+/// each block within its budget (`block_codec_budget`:
 /// `min(remaining, compression_block_size)` for non-final blocks,
 /// the remaining output for the final block), into a buffer LZ4 caps
 /// input-proportionally at `compressed_len × 255`. The capped buffer
@@ -3304,7 +3304,7 @@ fn stream_block_codec_to<R: Read + Seek>(
         let block_len = block.len();
         read_compressed_block(file, &mut compressed, block_len, abs_start, i, label, path)?;
 
-        // Decode budget for THIS block — see `lz4_block_budget` for
+        // Decode budget for THIS block — see `block_codec_budget` for
         // the non-final/final split and its rationale. A crafted
         // entry with excess blocks yields budget 0 for the extras
         // (remaining is exhausted): a content-carrying extra dies
@@ -3320,7 +3320,7 @@ fn stream_block_codec_to<R: Read + Seek>(
         // matching-or-stricter behavior.
         let remaining = uncompressed_size.saturating_sub(bytes_written);
         let is_final = i + 1 == entry.header().compression_blocks().len();
-        let budget = lz4_block_budget(remaining, block_size, is_final);
+        let budget = block_codec_budget(remaining, block_size, is_final);
 
         let reserve = |reserved: Result<(), _>, requested| {
             crate::seams::seam_check!(
@@ -4150,19 +4150,19 @@ mod tests {
     }
 
     /// Non-final blocks are budgeted at `min(remaining, block_size)`
-    /// — the memory-discipline half of `lz4_block_budget` (#636 R8):
+    /// — the memory-discipline half of `block_codec_budget` (#636 R8):
     /// block 0 of a large entry must NOT be budgeted at the whole
     /// remaining output.
     #[test]
-    fn lz4_block_budget_bounds_non_final_by_block_size() {
-        assert_eq!(lz4_block_budget(8_000_000, 65_536, false), 65_536);
+    fn block_codec_budget_bounds_non_final_by_block_size() {
+        assert_eq!(block_codec_budget(8_000_000, 65_536, false), 65_536);
     }
 
     /// A non-final block past the declared total (excess-block shape)
     /// is budgeted at the exhausted remainder, not `block_size`.
     #[test]
-    fn lz4_block_budget_non_final_exhausted_remainder_wins() {
-        assert_eq!(lz4_block_budget(100, 65_536, false), 100);
+    fn block_codec_budget_non_final_exhausted_remainder_wins() {
+        assert_eq!(block_codec_budget(100, 65_536, false), 100);
     }
 
     /// The FINAL block is budgeted at `remaining` even when the
@@ -4171,8 +4171,8 @@ mod tests {
     /// `min(remaining, block_size)` regression here reintroduces the
     /// R7 rejection bug.
     #[test]
-    fn lz4_block_budget_final_block_takes_full_remaining() {
-        assert_eq!(lz4_block_budget(300, 128, true), 300);
+    fn block_codec_budget_final_block_takes_full_remaining() {
+        assert_eq!(block_codec_budget(300, 128, true), 300);
     }
 
     /// The `locked()` helper recovers from a poisoned mutex
