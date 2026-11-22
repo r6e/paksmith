@@ -48,6 +48,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::footer::PakFooter;
+use paksmith_core::container::pak::index::CompressionMethod;
 use paksmith_core::container::pak::version::PakVersion;
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -834,15 +835,45 @@ fn cross_parser_agreement_v11_lz4() {
     assert_cross_parser_agreement("real_v11_lz4.pak");
 }
 
+// Issue #1082 Zstd corpus: one entry of several compression blocks.
+#[test]
+fn cross_parser_agreement_v8b_zstd() {
+    assert_cross_parser_agreement("real_v8b_zstd.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v11_zstd() {
+    assert_cross_parser_agreement("real_v11_zstd.pak");
+}
+
+/// Both Zstd fixtures' one entry resolves to `CompressionMethod::Zstd`, so a
+/// fixture row regenerated with another codec fails here rather than
+/// leaving the Zstd agreement tests green.
+#[test]
+fn zstd_fixtures_resolve_to_zstd() {
+    for name in ["real_v8b_zstd.pak", "real_v11_zstd.pak"] {
+        let reader = PakReader::open(fixture_path(name))
+            .unwrap_or_else(|e| panic!("paksmith open of `{name}`: {e}"));
+        let methods: Vec<CompressionMethod> = reader
+            .entries()
+            .map(|meta| {
+                let entry = reader.index_entry(meta.path()).expect("listed entry");
+                entry.header().compression_method().clone()
+            })
+            .collect();
+        assert_eq!(methods, [CompressionMethod::Zstd], "{name}");
+    }
+}
+
 /// Issue #69 explicit pinning: the new compressed fixtures must
 /// surface `is_compressed = true` to BOTH paksmith and the oracle.
 /// The cross_parser_agreement tests above merely assert
 /// "paksmith and oracle agree"; if a future regression flipped
 /// BOTH parsers to `is_compressed = false`, agreement would hold
 /// vacuously. This test pins the absolute value, catching that
-/// double-failure mode. v10/v11 compressed fixtures (issue #90) and the
-/// LZ4 fixtures (#636) are included for the same anti-vacuous-agreement
-/// reason.
+/// double-failure mode. v10/v11 compressed fixtures (issue #90), the
+/// LZ4 fixtures (#636) and the Zstd fixtures (#1082) are included for
+/// the same anti-vacuous-agreement reason.
 #[test]
 fn issue_69_compressed_fixtures_actually_compressed() {
     for name in [
@@ -853,6 +884,8 @@ fn issue_69_compressed_fixtures_actually_compressed() {
         "real_v11_compressed.pak",
         "real_v8b_lz4.pak",
         "real_v11_lz4.pak",
+        "real_v8b_zstd.pak",
+        "real_v11_zstd.pak",
     ] {
         let snapshot = read_with_paksmith(name);
         assert_eq!(
