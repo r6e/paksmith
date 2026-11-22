@@ -22,13 +22,13 @@ const SCRATCH_BYTES: usize = 8 * 1024;
 /// even when `out` is full: a decoder reports a stream cut short only to
 /// a read with room. An error other than `Interrupted` ends the read
 /// through `read_failed`.
-pub(crate) fn read_to_end_within<R: Read + ?Sized>(
+pub(crate) fn read_to_end_within<R: Read + ?Sized, E>(
     reader: &mut R,
     out: &mut Vec<u8>,
     ceiling: usize,
-    mut reserved: impl FnMut(Result<(), TryReserveError>, usize) -> crate::Result<()>,
-    read_failed: impl FnOnce(io::Error) -> crate::PaksmithError,
-) -> crate::Result<usize> {
+    mut reserved: impl FnMut(Result<(), TryReserveError>, usize) -> Result<(), E>,
+    read_failed: impl FnOnce(io::Error) -> E,
+) -> Result<usize, E> {
     let start = out.len();
     let mut scratch = [0u8; SCRATCH_BYTES];
     loop {
