@@ -201,7 +201,7 @@ Wire layout §*Encoded entries (v10+)* and
 `start == end` is a zero-byte compressed block, which holds no codec
 stream: a zlib stream is at least 8 bytes (a 2-byte header, a 2-byte
 empty final block and a 4-byte Adler-32), an LZ4 block opens with a
-token byte, and a zstd block is whole frames, the smallest an 8-byte
+token byte, and a [zstd](zstd.md) block is whole frames, the smallest an 8-byte
 skippable frame or a 9-byte frame (a 4-byte magic, a 2-byte frame header
 and one 3-byte block header, RFC 8878).
 
@@ -293,7 +293,8 @@ See `docs/security/allocation-caps.md` for the broader policy.
   but NOT the bomb-budget mechanism — it decodes into a buffer reserved
   at the block's capped expected output, so over-expansion surfaces as
   `Lz4DecodeError` or `BlockDecodeFailed` rather than
-  `take(budget)`/`DecompressionBomb` (see [`lz4.md`](lz4.md)).
+  `take(budget)`/`DecompressionBomb` (see [`lz4.md`](lz4.md) and
+  [`zstd.md`](zstd.md)).
 
 **Status:** `complete` for v5-v11. `require_relative_chunk_offsets`
 refuses a V3-V4 zlib entry with `UnsupportedVersion`; a read runs it

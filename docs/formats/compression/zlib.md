@@ -2,7 +2,7 @@
 
 > The default `.pak` compression backend — Zlib (RFC 1950) wrapping a
 > deflate stream (RFC 1951). One of three decompressors paksmith fully
-> implements (the others are [LZ4](lz4.md) and Zstd); the remaining UE
+> implements (the others are [LZ4](lz4.md) and [Zstd](zstd.md)); the remaining UE
 > compression methods are detected but not decompressed.
 
 ## Overview
@@ -36,7 +36,7 @@ per-chunk fallible allocation).
 **Paksmith parser status: `complete`.** Phase 1 deliverable; the
 decompression path ships as part of
 `paksmith-core/src/container/pak/mod.rs` (`stream_zlib_to`); Zlib,
-[LZ4](lz4.md) and Zstd are the three `CompressionMethod`s paksmith fully
+[LZ4](lz4.md) and [Zstd](zstd.md) are the three `CompressionMethod`s paksmith fully
 decompresses, other methods detect-only and route to
 `DecompressionFault::UnsupportedMethod`.
 
@@ -205,7 +205,7 @@ file-bounds across both the extract and verify paths).
 **Status:** `complete`.
 
 **Public surface:**
-- Zlib, [LZ4](lz4.md) and Zstd are the `CompressionMethod`s paksmith's
+- Zlib, [LZ4](lz4.md) and [Zstd](zstd.md) are the `CompressionMethod`s paksmith's
   `PakReader::read_entry` / `read_entry_to` will fully process. Other
   methods route to
   `PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method } }`.

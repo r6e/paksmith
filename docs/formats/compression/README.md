@@ -9,10 +9,10 @@ located them.
   uses.
 - **`lz4.md`** — raw LZ4 Block Format per compression block (v8+
   FName-slot resolution); the second backend paksmith fully decompresses.
-- **Zstd** (v8+ FName slot `Zstd`) — one or more zstd v1 or skippable
-  frames per compression block, per RFC 8878; paksmith decompresses it
-  and refuses legacy frames and bytes after the last frame. Its format
-  doc is not written yet (#1082).
+- **`zstd.md`** — one or more zstd v1 or skippable frames per
+  compression block, per RFC 8878 (v8+ FName-slot resolution); the third
+  backend paksmith fully decompresses, refusing legacy frames and bytes
+  after the last frame.
 - **`oodle.md`** — Oodle Data (Kraken, Mermaid, Selkie, Leviathan).
   Notes on licensing: the Oodle decompressor is not redistributable;
   if paksmith adds Oodle support in the future, it would link against
