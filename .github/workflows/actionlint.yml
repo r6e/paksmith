@@ -1,6 +1,6 @@
 name: actionlint
 
-# Three checks over the CI configuration:
+# Four checks over the CI configuration and what it releases:
 # - actionlint on the workflow files, with shellcheck on their `run`
 #   scripts
 # - scripts/lint-composite-actions.sh on the composite actions, which
@@ -8,9 +8,14 @@ name: actionlint
 # - scripts/check-release-targets.sh, that the release and nightly
 #   workflows name the same build targets, and that the README
 #   matches what is released
+# - scripts/check-release-notes-size.sh, that the changelog's newest
+#   section fits a GitHub release body, so that a release PR whose
+#   notes GitHub would refuse is red before it is merged
 #
 # No `paths` filter: a workflow the filter skips never reports its
 # check, so a filtered workflow could not be made a required check.
+# The last check holds a release PR back only while this job, `Lint
+# workflows`, is a required check on `main`.
 on:
   push:
     branches: [main]
@@ -58,3 +63,5 @@ jobs:
         run: scripts/lint-composite-actions.sh
       - name: Check the release files and README agree
         run: scripts/check-release-targets.sh
+      - name: Check the newest changelog section fits a release body
+        run: scripts/check-release-notes-size.sh
