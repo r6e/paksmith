@@ -21,8 +21,9 @@
 //!   each payload at [`crate::container::pak::index::PakEntryHeader::offset`],
 //!   with cross-validation against the index entry.
 //! - Zlib decompression for v5+ archives (block offsets are relative to the
-//!   entry record start), and LZ4 decompression for v8+ archives (the
-//!   only versions where the `"LZ4"` FName slot is resolvable).
+//!   entry record start), and LZ4 and Zstd decompression for v8+ archives
+//!   (the only versions where the `"LZ4"` and `"Zstd"` FName slots are
+//!   resolvable).
 //! - SHA1 verification of the index and per-entry stored bytes via opt-in
 //!   [`PakReader::verify_index`], [`PakReader::verify_entry`], and
 //!   [`PakReader::verify`]. **v10+ encoded entries omit SHA1**, so
@@ -43,10 +44,9 @@
 //!   index verification requires the key (#635).
 //!
 //! It does NOT yet handle:
-//! - Gzip / Oodle / Zstd decompression — resolvable (Gzip and Oodle
-//!   also via the v3-v7 numeric IDs, Zstd via the v8+ FName table)
-//!   and verified over their compressed blocks, but a read refuses them
-//!   (only Zlib and LZ4 decompress).
+//! - Gzip / Oodle decompression — resolvable (also via the v3-v7
+//!   numeric IDs) and verified over their compressed blocks, but a read
+//!   refuses them.
 //! - Three legacy shapes are deliberately fail-closed and left unsupported —
 //!   see issue #637 for the recorded decision. Two of the three are an
 //!   effort/value deferral, NOT a capability gap: repak (our writer oracle)
@@ -143,6 +143,9 @@ pub(in crate::container::pak) const MAX_UNCOMPRESSED_ENTRY_BYTES: u64 = 8 * 1024
 pub fn max_uncompressed_entry_bytes() -> u64 {
     MAX_UNCOMPRESSED_ENTRY_BYTES
 }
+
+#[cfg(feature = "__test_utils")]
+pub use crate::codec::max_zstd_block_expansion_ratio;
 
 /// The reads of one entry a [`PakReader::with_read_budget`] reader
 /// admits. Exposed to tests via [`max_reads_per_entry`].
@@ -1193,7 +1196,7 @@ impl PakReader {
     /// - `Err(Decompression)` for a PLAINTEXT entry in a compression
     ///   method paksmith doesn't recognise (Unknown, UnknownByName). From
     ///   v5, a plaintext entry in any recognised method verifies normally,
-    ///   a Gzip, Oodle or Zstd one included though a read refuses it: the
+    ///   a Gzip or Oodle one included though a read refuses it: the
     ///   entry SHA1 covers the on-disk compressed bytes, so no
     ///   decompression happens on the verify path. This method gate applies
     ///   ONLY to plaintext entries — encrypted entries hash opaque
@@ -1802,9 +1805,8 @@ fn pak_decode_route(method: &CompressionMethod) -> PakDecodeRoute {
         CompressionMethod::None => PakDecodeRoute::Stored,
         CompressionMethod::Zlib => PakDecodeRoute::Compressed(PakCodec::Zlib),
         CompressionMethod::Lz4 => PakDecodeRoute::Compressed(PakCodec::Block(Codec::Lz4)),
-        CompressionMethod::Gzip | CompressionMethod::Oodle | CompressionMethod::Zstd => {
-            PakDecodeRoute::Undecodable
-        }
+        CompressionMethod::Zstd => PakDecodeRoute::Compressed(PakCodec::Block(Codec::Zstd)),
+        CompressionMethod::Gzip | CompressionMethod::Oodle => PakDecodeRoute::Undecodable,
         CompressionMethod::Unknown(_) | CompressionMethod::UnknownByName(_) => {
             PakDecodeRoute::Unknown
         }
@@ -1950,7 +1952,7 @@ fn ensure_compressed_size_within_cap(comp: u64, path: &str) -> crate::Result<()>
     Ok(())
 }
 
-/// The checks of an encrypted Zlib or LZ4 entry's payload its read makes
+/// The checks of an encrypted Zlib, LZ4 or Zstd entry's payload its read makes
 /// before reading it, shared by `read_decrypted_compressed_payload` and
 /// `check_compressed_payload` so the two can't drift. Returns the
 /// payload's end, which bounds its blocks, and its AES-aligned length,
@@ -2804,7 +2806,7 @@ thread_local! {
     static BLOCKS_CHECKED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// [`PakReader::check_read`]'s checks of a Zlib or LZ4 entry's payload, in
+/// [`PakReader::check_read`]'s checks of a Zlib, LZ4 or Zstd entry's payload, in
 /// the read's order: an encrypted payload's size and extent
 /// (`read_decrypted_compressed_payload`), a pre-v5 compressed entry, every
 /// block, against the decrypted payload for an encrypted entry and the
@@ -2853,9 +2855,7 @@ fn check_compressed_payload(
 /// [`PakSeam::CompressedReserve`] OOM seam, and read exactly the
 /// on-disk compressed bytes. `buf` is `clear()`ed, not dropped, so
 /// hoisted capacity survives across blocks (#373). `codec` labels the
-/// reservation-failure `warn!` ("zlib" / "lz4") so the per-codec
-/// operator log strings stay byte-identical to their pre-extraction
-/// forms.
+/// reservation-failure `warn!` with the codec's label.
 fn read_compressed_block<R: Read + Seek>(
     file: &mut R,
     buf: &mut Vec<u8>,
@@ -2981,8 +2981,10 @@ thread_local! {
 /// compressed-input buffer sized to the largest block seen so far,
 /// plus a decompressed-output buffer sized to that block's output.
 /// Both buffers are hoisted outside the per-block loop and reuse
-/// capacity across blocks (#373); the full `uncompressed_size`
-/// never lives in memory at once. The entry's one zlib decoder is
+/// capacity across blocks (#373). A block's output is buffered whole,
+/// up to the entry's remaining `uncompressed_size`, so a single-block
+/// entry's whole output can be in memory, within the 8 GiB
+/// `MAX_UNCOMPRESSED_ENTRY_BYTES` cap. The entry's one zlib decoder is
 /// built on block 0 and reset in place for each later block (#848),
 /// so after block 0 a block allocates only when its input or output
 /// is larger than any before it.
@@ -3211,7 +3213,7 @@ fn stream_zlib_to<R: Read + Seek>(
 /// `compression_block_size`, so a larger buffer could only be dead
 /// weight (an eager `remaining`-sized reservation here was R8's
 /// memory-discipline finding: block 0 of a multi-block entry would
-/// reserve and zero-fill up to the whole entry). The FINAL block is
+/// reserve, and for LZ4 zero-fill, up to the whole entry). The FINAL block is
 /// budgeted at `remaining` — NOT `min(remaining, block_size)` — the
 /// exact mirror of `stream_zlib_to`'s `take(remaining + 1)`: a
 /// single-block entry can legitimately declare a
@@ -3240,20 +3242,22 @@ fn block_codec_budget(remaining: u64, block_size: u64, is_final: bool) -> u64 {
 /// derives each block's decompressed size: every block except the
 /// last inflates to exactly `compression_block_size`; the last takes
 /// the remainder of `uncompressed_size`. See
-/// `docs/formats/compression/lz4.md`. Issue #636.
+/// `docs/formats/compression/lz4.md`. Issue #636. A Zstd block is one
+/// or more whole zstd frames with nothing after the last.
 ///
 /// Buffer discipline mirrors [`stream_zlib_to`] (#373): one
 /// compressed-input buffer and one decompressed-output buffer,
-/// hoisted and capacity-reused across blocks; the full
-/// `uncompressed_size` never lives in memory at once. Unlike zlib
-/// there is no mid-decode growth loop: [`codec::decode_block`] decodes
-/// each block within its budget (`block_codec_budget`:
-/// `min(remaining, compression_block_size)` for non-final blocks,
-/// the remaining output for the final block), into a buffer LZ4 caps
-/// input-proportionally at `compressed_len × 255`. The capped buffer
-/// doubles as the decompression-bomb cap: a block that would expand
-/// past it fails to decode (surfaced as
-/// [`DecompressionFault::Lz4DecodeError`]), so over-expansion can
+/// hoisted and capacity-reused across blocks, with each block's output
+/// buffered whole. Unlike zlib there is no mid-decode growth loop:
+/// [`codec::decode_block`] decodes each block within its budget
+/// (`block_codec_budget`: `min(remaining, compression_block_size)` for
+/// non-final blocks, the entry's remaining output, within the 8 GiB
+/// `MAX_UNCOMPRESSED_ENTRY_BYTES` cap, for the final block), into a
+/// buffer capped further at `compressed_len × 255` for LZ4 and
+/// `compressed_len × 32768` for zstd. The capped buffer doubles as the
+/// decompression-bomb cap: a block that would expand past it fails to
+/// decode (surfaced as [`DecompressionFault::Lz4DecodeError`] or
+/// [`DecompressionFault::BlockDecodeFailed`]), so over-expansion can
 /// never allocate beyond the per-block capped budget.
 #[allow(clippy::too_many_lines)] // bounded by per-block error-reporting, mirroring stream_zlib_to
 fn stream_block_codec_to<R: Read + Seek>(
@@ -3265,10 +3269,10 @@ fn stream_block_codec_to<R: Read + Seek>(
     writer: &mut dyn Write,
 ) -> crate::Result<u64> {
     // NOTE: unlike `stream_zlib_to`, this takes no `version` and has no
-    // pre-v5 relative-offset guard. `CompressionMethod::Lz4` is
-    // obtainable ONLY through the v8+ FName compression-slot table
+    // pre-v5 relative-offset guard. `CompressionMethod::Lz4` and `Zstd`
+    // are obtainable ONLY through the v8+ FName compression-slot table
     // (`CompressionMethod::from_name`); the v3-v7 numeric method IDs
-    // (`from_u32`) never yield `Lz4`. So any entry reaching here parsed
+    // (`from_u32`) never yield either. So any entry reaching here parsed
     // as v8 or newer, where compression-block offsets are already
     // relative — the guard `stream_zlib_to` needs (zlib IS reachable
     // pre-v5 via numeric method 1) would be structurally unreachable
@@ -3307,17 +3311,15 @@ fn stream_block_codec_to<R: Read + Seek>(
         // Decode budget for THIS block — see `block_codec_budget` for
         // the non-final/final split and its rationale. A crafted
         // entry with excess blocks yields budget 0 for the extras
-        // (remaining is exhausted): a content-carrying extra dies
-        // INSIDE the decoder (`OutputTooSmall` against the 0-byte
-        // buffer → `Lz4DecodeError`), a zero-output non-final extra
-        // dies at the block-size check below (0 != block_size), and
-        // while a single TRAILING zero-output block (e.g. the 1-byte
-        // `0x00` "empty last sequence" block) does decode Ok into an
-        // empty buffer, it produces no bytes — output stays exactly
+        // (remaining is exhausted): a content-carrying extra fails to
+        // decode against its 0-byte bound (`Lz4DecodeError` or
+        // `BlockDecodeFailed`), a zero-output non-final extra dies at
+        // the block-size check below (0 != block_size), and while a
+        // single TRAILING zero-output block (LZ4's 1-byte `0x00` "empty
+        // last sequence" block, or an empty zstd frame) does decode Ok
+        // into an empty buffer, it produces no bytes — output stays exactly
         // the declared `uncompressed_size` via
-        // `check_cumulative_size`. The repak oracle is more lenient
-        // still (it silently ignores ALL excess blocks), so this is
-        // matching-or-stricter behavior.
+        // `check_cumulative_size`.
         let remaining = uncompressed_size.saturating_sub(bytes_written);
         let is_final = i + 1 == entry.header().compression_blocks().len();
         let budget = block_codec_budget(remaining, block_size, is_final);
@@ -3327,6 +3329,7 @@ fn stream_block_codec_to<R: Read + Seek>(
                 reserved,
                 crate::testing::oom::SeamSite::Pak(match codec {
                     Codec::Lz4 => PakSeam::Lz4OutputReserve,
+                    Codec::Zstd => PakSeam::BlockOutputReserve,
                 })
             );
             reserved.map_err(|source| {
@@ -3346,6 +3349,12 @@ fn stream_block_codec_to<R: Read + Seek>(
                             requested,
                             source,
                         },
+                        Codec::Zstd => DecompressionFault::BlockOutputReserveFailed {
+                            codec: label,
+                            block_index: i,
+                            requested,
+                            source,
+                        },
                     },
                 }
             })
@@ -3354,7 +3363,8 @@ fn stream_block_codec_to<R: Read + Seek>(
         codec::decode_block(codec, &compressed, &mut block_out, budget, reserve).map_err(|e| {
             match e {
                 // 32-bit-only: `value` is the DERIVED allocation bound
-                // (`min(budget, block_len × 255)`), not a raw wire field.
+                // (`min(budget, block_len × the codec's ratio)`), not a raw
+                // wire field.
                 // The narrow can only fail for the FINAL block: a non-final
                 // budget is capped by `compression_block_size`, a u32 that
                 // always fits a 32-bit usize, so a failing bound always
@@ -3384,6 +3394,26 @@ fn stream_block_codec_to<R: Read + Seek>(
                                 block_index: i,
                                 message,
                             },
+                            Codec::Zstd => DecompressionFault::BlockDecodeFailed {
+                                codec: label,
+                                block_index: i,
+                                message,
+                            },
+                        },
+                    }
+                }
+                CodecError::ContextUnavailable => {
+                    warn!(
+                        path = &*clamp_path(path),
+                        block = i,
+                        "{label} decoder context unavailable"
+                    );
+                    PaksmithError::Decompression {
+                        path: path.to_string(),
+                        offset: abs_start,
+                        fault: DecompressionFault::BlockContextUnavailable {
+                            codec: label,
+                            block_index: i,
                         },
                     }
                 }
@@ -4135,7 +4165,10 @@ mod tests {
             ),
             (CompressionMethod::Gzip, PakDecodeRoute::Undecodable),
             (CompressionMethod::Oodle, PakDecodeRoute::Undecodable),
-            (CompressionMethod::Zstd, PakDecodeRoute::Undecodable),
+            (
+                CompressionMethod::Zstd,
+                PakDecodeRoute::Compressed(PakCodec::Block(Codec::Zstd)),
+            ),
             (
                 CompressionMethod::Unknown(unknown_id),
                 PakDecodeRoute::Unknown,
@@ -8343,7 +8376,7 @@ mod tests {
         logs_assert(lines_carrying(MISMATCH, "WARN"));
     }
 
-    /// Gzip, Oodle and Zstd are methods paksmith names but doesn't decode:
+    /// Gzip and Oodle are methods paksmith names but doesn't decode:
     /// a read and `stream_entry_to`'s dispatch refuse a plaintext entry in
     /// one, while a verify hashes its blocks, so the stored SHA-1 verifies
     /// and a flipped payload byte doesn't.
@@ -8357,7 +8390,6 @@ mod tests {
         for (name, method) in [
             ("Gzip", CompressionMethod::Gzip),
             ("Oodle", CompressionMethod::Oodle),
-            ("Zstd", CompressionMethod::Zstd),
         ] {
             let pak = build_v8b_pak(name, PATH, &[vec![7; 16]], 16, 16);
             let reader = PakReader::from_bytes(pak.clone()).unwrap();
@@ -9034,6 +9066,51 @@ mod tests {
                 assert!(read.is_err(), "{message}");
             }
             logs_assert(lines_clamped(message, "READ"));
+        }
+    }
+
+    /// Zstd entries: one frame per block, the shape repak writes.
+    #[cfg(feature = "__test_utils")]
+    mod zstd_entries {
+        use super::*;
+        use crate::testing::bench::zstd_stream;
+        use crate::testing::oom::{SeamSite, arm_at};
+        use crate::testing::wire::{ZSTD_SYNTH_PATH, build_v8b_zstd_pak};
+
+        /// Varied bytes with no short period.
+        fn payload(len: u32) -> Vec<u8> {
+            (0..len).map(|i| ((i * 7 + i / 61) % 251) as u8).collect()
+        }
+
+        /// A reader over one Zstd entry of `blocks` frames.
+        fn zstd_reader(blocks: &[Vec<u8>], size: u64, block_size: u32) -> PakReader {
+            PakReader::from_bytes(build_v8b_zstd_pak(blocks, size, block_size)).unwrap()
+        }
+
+        /// A non-final block reserves its block size, not the entry's
+        /// remainder or `len × 32768`.
+        #[test]
+        fn read_entry_surfaces_block_output_reserve_failed_under_oom() {
+            let plaintext = payload(300);
+            let blocks: Vec<_> = plaintext.chunks(128).map(zstd_stream).collect();
+            let reader = zstd_reader(&blocks, 300, 128);
+            let _guard = arm_at(SeamSite::Pak(PakSeam::BlockOutputReserve), 0);
+            let err = reader.read_entry(ZSTD_SYNTH_PATH).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PaksmithError::Decompression {
+                        fault: DecompressionFault::BlockOutputReserveFailed {
+                            codec: "zstd",
+                            block_index: 0,
+                            requested: 128,
+                            ..
+                        },
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
         }
     }
 

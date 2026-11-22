@@ -1,10 +1,13 @@
-//! Block decoders the containers share, and the zstd v1-frame gate the
-//! `.usmap` parser applies to its payload. A block decoder takes one
+//! Block decoders the containers share, and the zstd v1-frame gate the zstd
+//! decoder and the `.usmap` parser apply to their input. A block decoder takes one
 //! compressed block in and appends its output to a caller's buffer, with
 //! every output reservation made through the caller so the caller
 //! attributes a failure.
 
 use std::collections::TryReserveError;
+use std::io::Cursor;
+
+use zstd::zstd_safe::{self, DCtx};
 
 /// Maximum factor by which one raw LZ4 block can inflate: a block of
 /// N compressed bytes decodes to at most `N × 255` output bytes.
@@ -15,17 +18,43 @@ use std::collections::TryReserveError;
 /// safe over-estimate that never under-sizes a valid decode.
 const MAX_LZ4_BLOCK_EXPANSION_RATIO: u64 = 255;
 
+/// Maximum factor by which zstd v1 and skippable frames can inflate:
+/// N compressed bytes decode to fewer than `N × 32768` output bytes
+/// (RFC 8878). A block's output is at most its frame's
+/// Block_Maximum_Size, the smaller of Window_Size and 128 KiB, and the
+/// block with the most output per byte is an RLE block of a 3-byte
+/// Block_Header and one byte: 131072 / 4. A raw block copies its bytes
+/// 1:1, a compressed block carries literals and sequences section
+/// headers on top of its Block_Header, and frame headers (at least six
+/// bytes with the magic) and skippable frames add input with no output.
+const MAX_ZSTD_BLOCK_EXPANSION_RATIO: u64 = 32_768;
+
+/// Test-only accessor for `MAX_ZSTD_BLOCK_EXPANSION_RATIO`, gated behind
+/// the `__test_utils` feature like
+/// [`crate::container::pak::max_uncompressed_entry_bytes`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_zstd_block_expansion_ratio() -> u64 {
+    MAX_ZSTD_BLOCK_EXPANSION_RATIO
+}
+
 // zstd frame magics: the v1 frame's, and the range of sixteen that mark a
 // skippable frame.
 const ZSTD_FRAME_MAGIC: u32 = 0xFD2F_B528;
 const ZSTD_SKIPPABLE_MAGIC_FIRST: u32 = 0x184D_2A50;
 const ZSTD_SKIPPABLE_MAGIC_LAST: u32 = 0x184D_2A5F;
 
+const NOT_ZSTD_V1_FRAMES: &str = "not zstd v1 or skippable frames";
+const FRAME_PAST_STREAM: &str = "zstd frame runs past the block";
+const PAST_OUTPUT_CAP: &str = "output past the block's bound";
+
 /// A block format [`decode_block`] decodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Codec {
     /// A raw LZ4 block, with no frame header or size prefix.
     Lz4,
+    /// One or more zstd v1 or skippable frames.
+    Zstd,
 }
 
 impl Codec {
@@ -33,6 +62,7 @@ impl Codec {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Lz4 => "lz4",
+            Self::Zstd => "zstd",
         }
     }
 }
@@ -48,6 +78,8 @@ pub(crate) enum CodecError {
     /// `src` is not a block that decodes within the budget: the decoder's
     /// message.
     Decode(String),
+    /// The decoder could not allocate its state.
+    ContextUnavailable,
 }
 
 /// Decode the block `src` and append its output, at most `budget` bytes,
@@ -67,6 +99,7 @@ pub(crate) fn decode_block(
     let start = out.len();
     let decoded = match codec {
         Codec::Lz4 => decode_lz4(src, out, budget, &mut reserve),
+        Codec::Zstd => decode_zstd(src, out, budget, &mut reserve),
     };
     if decoded.is_err() {
         out.truncate(start);
@@ -121,33 +154,66 @@ fn reserve_output(
     Ok(cap)
 }
 
+/// Decode `src`, one or more zstd v1 or skippable frames, one-shot into
+/// `out`'s spare capacity: no zero-fill, and no window buffer sized by the
+/// frame. libzstd fails a frame that needs more than the capacity, and
+/// since capacity an earlier, larger block left in `out` can exceed this
+/// block's reservation, output past the reservation fails here.
+fn decode_zstd(
+    src: &[u8],
+    out: &mut Vec<u8>,
+    budget: u64,
+    reserve: &mut impl FnMut(Result<(), TryReserveError>, usize) -> crate::Result<()>,
+) -> Result<(), CodecError> {
+    zstd_v1_frames(src).map_err(|why| CodecError::Decode(why.to_owned()))?;
+    let start = out.len();
+    let bound = block_output_cap(budget, src.len() as u64, MAX_ZSTD_BLOCK_EXPANSION_RATIO);
+    let cap = reserve_output(out, bound, reserve)?;
+    let mut spare = Cursor::new(&mut *out);
+    spare.set_position(start as u64);
+    let produced = zstd_context(DCtx::try_create())?
+        .decompress(&mut spare, src)
+        .map_err(|code| CodecError::Decode(zstd_safe::get_error_name(code).to_owned()))?;
+    if produced > cap {
+        return Err(CodecError::Decode(PAST_OUTPUT_CAP.to_owned()));
+    }
+    Ok(())
+}
+
+fn zstd_context(created: Option<DCtx<'static>>) -> Result<DCtx<'static>, CodecError> {
+    created.ok_or(CodecError::ContextUnavailable)
+}
+
 /// Whether `stream` is one or more zstd v1 or skippable frames. Any crate in
 /// the build can turn on zstd's `legacy` feature, which builds libzstd's
 /// pre-v1 decoders, and a one-shot decode hands each frame to whichever
 /// decoder its magic names.
-pub(crate) fn is_zstd_v1_stream(mut stream: &[u8]) -> bool {
+pub(crate) fn is_zstd_v1_stream(stream: &[u8]) -> bool {
+    zstd_v1_frames(stream).is_ok()
+}
+
+/// [`is_zstd_v1_stream`], with why not: [`NOT_ZSTD_V1_FRAMES`] for an empty
+/// stream or a frame whose magic is neither, and libzstd's error name for
+/// a frame of either magic that does not parse.
+fn zstd_v1_frames(mut stream: &[u8]) -> Result<(), &'static str> {
     if stream.is_empty() {
-        return false;
+        return Err(NOT_ZSTD_V1_FRAMES);
     }
     while !stream.is_empty() {
         let Some(magic) = stream.first_chunk::<4>().map(|m| u32::from_le_bytes(*m)) else {
-            return false;
+            return Err(NOT_ZSTD_V1_FRAMES);
         };
         if !matches!(
             magic,
             ZSTD_FRAME_MAGIC | ZSTD_SKIPPABLE_MAGIC_FIRST..=ZSTD_SKIPPABLE_MAGIC_LAST
         ) {
-            return false;
+            return Err(NOT_ZSTD_V1_FRAMES);
         }
-        let Some(rest) = zstd::zstd_safe::find_frame_compressed_size(stream)
-            .ok()
-            .and_then(|len| stream.get(len..))
-        else {
-            return false;
-        };
-        stream = rest;
+        let len =
+            zstd_safe::find_frame_compressed_size(stream).map_err(zstd_safe::get_error_name)?;
+        stream = stream.get(len..).ok_or(FRAME_PAST_STREAM)?;
     }
-    true
+    Ok(())
 }
 
 #[cfg(test)]
@@ -163,16 +229,25 @@ mod tests {
         (0..4096u32).map(|i| (i * 7 % 251) as u8).collect()
     }
 
-    /// `src` decoded as LZ4 within `budget` onto [`EARLIER`], with every
+    /// `src` decoded as `codec` within `budget` onto `out`, with every
     /// reservation's size.
-    fn decode_lz4(src: &[u8], budget: u64) -> (Result<(), CodecError>, Vec<u8>, Vec<usize>) {
-        let mut out = EARLIER.to_vec();
+    fn decode_onto(
+        codec: Codec,
+        mut out: Vec<u8>,
+        src: &[u8],
+        budget: u64,
+    ) -> (Result<(), CodecError>, Vec<u8>, Vec<usize>) {
         let mut requests = Vec::new();
-        let decoded = decode_block(Codec::Lz4, src, &mut out, budget, |reserved, n| {
+        let decoded = decode_block(codec, src, &mut out, budget, |reserved, n| {
             requests.push(n);
             reserved.map_err(|e| crate::PaksmithError::Io(e.into()))
         });
         (decoded, out, requests)
+    }
+
+    /// `src` decoded as LZ4 within `budget` onto [`EARLIER`].
+    fn decode_lz4(src: &[u8], budget: u64) -> (Result<(), CodecError>, Vec<u8>, Vec<usize>) {
+        decode_onto(Codec::Lz4, EARLIER.to_vec(), src, budget)
     }
 
     #[test]
@@ -243,11 +318,194 @@ mod tests {
     /// `compressed_len × ratio` must saturate (not overflow/panic) for a
     /// pathological length, in which case the budget wins the
     /// `min`. Pins the `saturating_mul` against a `checked`/wrapping
-    /// mutant: `0x0101_0101_0101_0102 × 255` wraps to 254.
+    /// mutant: each length times its ratio wraps to below its budget,
+    /// `0x0101_0101_0101_0102 × 255` to 254 and
+    /// `0x0002_0000_0000_0001 × 32768` to 32768.
     #[test]
     fn block_output_cap_saturates_without_overflow() {
-        let ratio = MAX_LZ4_BLOCK_EXPANSION_RATIO;
-        assert_eq!(block_output_cap(1_000, u64::MAX, ratio), 1_000);
-        assert_eq!(block_output_cap(1_000, 0x0101_0101_0101_0102, ratio), 1_000);
+        for (ratio, wraps, budget) in [
+            (MAX_LZ4_BLOCK_EXPANSION_RATIO, 0x0101_0101_0101_0102, 1_000),
+            (
+                MAX_ZSTD_BLOCK_EXPANSION_RATIO,
+                0x0002_0000_0000_0001,
+                1_000_000,
+            ),
+        ] {
+            assert_eq!(block_output_cap(budget, u64::MAX, ratio), budget, "{ratio}");
+            assert_eq!(block_output_cap(budget, wraps, ratio), budget, "{ratio}");
+        }
+    }
+
+    #[cfg(feature = "__test_utils")]
+    mod zstd_arm {
+        use super::*;
+        use crate::testing::bench::{zstd_legacy_frame, zstd_stream};
+
+        /// `src` decoded as zstd within `budget` onto [`EARLIER`].
+        fn decode_zstd(src: &[u8], budget: u64) -> (Result<(), CodecError>, Vec<u8>, Vec<usize>) {
+            decode_onto(Codec::Zstd, EARLIER.to_vec(), src, budget)
+        }
+
+        /// The message a failed decode carries.
+        fn decode_message(decoded: &Result<(), CodecError>) -> Option<&str> {
+            match decoded {
+                Err(CodecError::Decode(message)) => Some(message),
+                _ => None,
+            }
+        }
+
+        #[test]
+        fn zstd_decode_block_known_answer() {
+            let plaintext = plaintext();
+            let src = zstd_stream(&plaintext);
+            for budget in [plaintext.len() as u64, u64::MAX] {
+                let (decoded, out, _) = decode_zstd(&src, budget);
+                assert!(decoded.is_ok(), "budget {budget}: {decoded:?}");
+                assert_eq!(out, [EARLIER, &plaintext].concat(), "budget {budget}");
+            }
+        }
+
+        /// One reservation of `min(budget, src.len() × 32768)`, and `out`
+        /// grows by the decoded bytes, not by the reservation.
+        #[test]
+        fn zstd_reservation_is_exact_and_len_matches_produced() {
+            let plaintext = plaintext();
+            let src = zstd_stream(&plaintext);
+            for (budget, requested) in [
+                (plaintext.len() as u64 + 1, plaintext.len() + 1),
+                (u64::MAX, src.len() * 32_768),
+            ] {
+                let (decoded, out, requests) = decode_zstd(&src, budget);
+                assert!(decoded.is_ok(), "budget {budget}: {decoded:?}");
+                assert_eq!(requests, [requested], "budget {budget}");
+                assert_eq!(
+                    out.len(),
+                    EARLIER.len() + plaintext.len(),
+                    "budget {budget}"
+                );
+            }
+        }
+
+        /// Output past the budget fails whether libzstd runs out of
+        /// capacity, with its own error name, or `out` already had room
+        /// for it.
+        #[test]
+        fn zstd_output_past_budget_is_corrupt() {
+            let plaintext = plaintext();
+            let src = zstd_stream(&plaintext);
+            let too_small = zstd_safe::get_error_name(
+                zstd_safe::decompress(&mut Vec::new(), &src).unwrap_err(),
+            );
+            let mut roomy = Vec::with_capacity(EARLIER.len() + plaintext.len());
+            roomy.extend_from_slice(EARLIER);
+            for (out, cause) in [(EARLIER.to_vec(), too_small), (roomy, PAST_OUTPUT_CAP)] {
+                let budget = plaintext.len() as u64 - 1;
+                let (decoded, out, _) = decode_onto(Codec::Zstd, out, &src, budget);
+                assert_eq!(decode_message(&decoded), Some(cause), "{decoded:?}");
+                assert_eq!(out, EARLIER, "{cause}");
+            }
+        }
+
+        /// An empty block, pre-v1 frames, and bytes after the last frame
+        /// are refused before anything is reserved. The v0.2 frame is first
+        /// shown to decode, so the refusal is the gate's. A truncated v1
+        /// frame is refused there too, with libzstd's reason.
+        #[test]
+        fn zstd_refuses_what_is_not_v1_or_skippable_frames() {
+            let plaintext = plaintext();
+            let payload = &plaintext[..200];
+            let v02 = zstd_legacy_frame(0xFD2F_B522, &[], payload);
+            assert_eq!(
+                ::zstd::bulk::decompress(&v02, payload.len()).unwrap(),
+                payload
+            );
+            let frame = zstd_stream(&plaintext);
+            let truncated = frame[..frame.len() - 1].to_vec();
+            let unparsable = zstd_safe::get_error_name(
+                zstd_safe::find_frame_compressed_size(&truncated).unwrap_err(),
+            );
+            assert_ne!(unparsable, NOT_ZSTD_V1_FRAMES);
+            let mut cases = vec![
+                ("empty".to_owned(), Vec::new(), NOT_ZSTD_V1_FRAMES),
+                (
+                    "v1 then v0.2".to_owned(),
+                    [frame.as_slice(), &v02].concat(),
+                    NOT_ZSTD_V1_FRAMES,
+                ),
+                (
+                    "trailing bytes".to_owned(),
+                    [frame.as_slice(), b"tail"].concat(),
+                    NOT_ZSTD_V1_FRAMES,
+                ),
+                ("truncated".to_owned(), truncated, unparsable),
+            ];
+            for magic in 0xFD2F_B522..=0xFD2F_B527_u32 {
+                let legacy = zstd_legacy_frame(magic, &[], payload);
+                cases.push((format!("{magic:#x}"), legacy, NOT_ZSTD_V1_FRAMES));
+            }
+            for (label, src, cause) in cases {
+                let (decoded, out, requests) = decode_zstd(&src, u64::MAX);
+                assert_eq!(
+                    decode_message(&decoded),
+                    Some(cause),
+                    "{label}: {decoded:?}"
+                );
+                assert_eq!(out, EARLIER, "{label}");
+                assert!(requests.is_empty(), "{label}: {requests:?}");
+            }
+        }
+
+        #[test]
+        fn zstd_skippable_and_empty_frames_add_no_output() {
+            let plaintext = plaintext();
+            let skippable = [
+                &0x184D_2A5F_u32.to_le_bytes()[..],
+                &4u32.to_le_bytes(),
+                b"skip",
+            ]
+            .concat();
+            let src = [
+                skippable.as_slice(),
+                &zstd_stream(&[]),
+                &zstd_stream(&plaintext),
+                &skippable,
+            ]
+            .concat();
+            let (decoded, out, _) = decode_zstd(&src, plaintext.len() as u64);
+            assert!(decoded.is_ok(), "{decoded:?}");
+            assert_eq!(out, [EARLIER, &plaintext].concat());
+        }
+
+        #[test]
+        fn a_zstd_context_libzstd_could_not_create_is_context_unavailable() {
+            assert!(matches!(
+                zstd_context(None),
+                Err(CodecError::ContextUnavailable)
+            ));
+            assert!(zstd_context(DCtx::try_create()).is_ok());
+        }
+
+        /// Two RLE blocks of 128 KiB in a 14-byte frame, at the RFC's
+        /// Block_Maximum_Size and past half the ratio, decode.
+        #[test]
+        fn zstd_rle_frame_near_the_ratio_decodes() {
+            let mut src = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x38];
+            src.extend_from_slice(&[0x02, 0x00, 0x10, 0x5A, 0x03, 0x00, 0x10, 0xA5]);
+            let produced = 2 * 128 * 1024;
+            assert!(produced > src.len() as u64 * MAX_ZSTD_BLOCK_EXPANSION_RATIO / 2);
+            let (decoded, out, requests) = decode_zstd(&src, produced);
+            assert!(decoded.is_ok(), "{decoded:?}");
+            assert_eq!(requests, [262_144]);
+            let expected = [EARLIER, &vec![0x5A; 131_072], &vec![0xA5; 131_072]].concat();
+            assert_eq!(out, expected);
+        }
+
+        #[test]
+        fn accessor_reads_the_live_cap() {
+            assert_eq!(
+                max_zstd_block_expansion_ratio(),
+                MAX_ZSTD_BLOCK_EXPANSION_RATIO
+            );
+        }
     }
 }
