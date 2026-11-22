@@ -315,11 +315,10 @@ fn a_plaintext_entry_verify_cannot_hash_exits_2() {
     );
 }
 
-/// A plaintext Gzip or Oodle entry, which paksmith recognises but doesn't
-/// decode, is hashed: it exits 0 when its hash matches and 1 when it
-/// doesn't.
+/// A plaintext Gzip or Oodle entry is hashed, though paksmith doesn't
+/// decode Oodle: it exits 0 when its hash matches and 1 when it doesn't.
 #[test]
-fn a_plaintext_entry_in_a_method_paksmith_does_not_decode_is_hashed() {
+fn a_plaintext_gzip_or_oodle_entry_is_hashed() {
     const GZIP: u32 = 2;
     const OODLE: u32 = 4;
 

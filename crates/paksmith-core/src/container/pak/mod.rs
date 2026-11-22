@@ -8537,19 +8537,18 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn verify_checks_the_blocks_of_undecodable_methods() {
-        for method in [2, 4] {
-            let reader = bad_record_reader(5, method, &sevens_sha1(), &[(73, 1 << 20)]);
-            let err = reader.verify_entry("Content/bad.bin").unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    PaksmithError::InvalidIndex {
-                        fault: IndexParseFault::BlockBoundsViolation { .. },
-                    }
-                ),
-                "{method}: {err:?}"
-            );
-        }
+        const OODLE: u32 = 4;
+        let reader = bad_record_reader(5, OODLE, &sevens_sha1(), &[(73, 1 << 20)]);
+        let err = reader.verify_entry("Content/bad.bin").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BlockBoundsViolation { .. },
+                }
+            ),
+            "{err:?}"
+        );
     }
 
     /// A plaintext entry in a method paksmith doesn't recognise, by v3-v7
@@ -9051,7 +9050,7 @@ mod tests {
     #[test]
     #[tracing_test::traced_test]
     fn read_logs_clamp_the_entry_path() {
-        use crate::testing::bench::{zlib_stream, zstd_stream};
+        use crate::testing::bench::{gzip_stream, zlib_stream, zstd_stream};
         use crate::testing::oom::{SeamSite, arm_at};
         use crate::testing::wire::build_v8b_pak;
         use crate::untrusted::test_support::{hostile_path, lines_clamped};
@@ -9073,6 +9072,10 @@ mod tests {
         let zstd = |sizes: &[usize], size, block| {
             let streams = sizes.iter().map(|&n| zstd_stream(&vec![0; n]));
             pak("Zstd", streams.collect(), size, block)
+        };
+        let gzip = |sizes: &[usize], size, block| {
+            let streams = sizes.iter().map(|&n| gzip_stream(&vec![0; n]));
+            pak("Gzip", streams.collect(), size, block)
         };
         let lzma = pak("LZMA", vec![vec![0; 4]], 4, 4);
         let corrupt = pak("Zlib", vec![vec![0xff; 16]], 8, 8);
@@ -9106,6 +9109,13 @@ mod tests {
             ),
             (zstd(&[300], 100, 100), None, "zstd decompress failed"),
             (zstd(&[64, 128], 192, 128), None, "non-final zstd block"),
+            (
+                gzip(&[8], 8, 8),
+                Some(PakSeam::BlockGrowReserve),
+                "gzip output reservation failed",
+            ),
+            (gzip(&[300], 100, 100), None, "gzip decompress failed"),
+            (gzip(&[64, 128], 192, 128), None, "non-final gzip block"),
         ];
         for (pak, seam, message) in cases {
             let reader = PakReader::from_bytes(pak).unwrap();
@@ -9187,6 +9197,42 @@ mod tests {
         /// A reader over one Gzip entry of `blocks` members.
         fn gzip_reader(blocks: &[Vec<u8>], size: u64, block_size: u32) -> PakReader {
             PakReader::from_bytes(build_v8b_gzip_pak(blocks, size, block_size)).unwrap()
+        }
+
+        #[test]
+        fn read_v8b_gzip_entry_round_trips() {
+            let block_size = 4096u32;
+            let plaintext = payload(2 * block_size + 1000);
+            let blocks: Vec<_> = plaintext
+                .chunks(block_size as usize)
+                .map(gzip_stream)
+                .collect();
+            let pak = build_v8b_gzip_pak(&blocks, plaintext.len() as u64, block_size);
+            assert_reads_and_verifies(pak, GZIP_SYNTH_PATH, &plaintext);
+        }
+
+        #[test]
+        fn read_v6_numeric_gzip_entry_round_trips() {
+            use crate::testing::wire::build_legacy_pak;
+
+            const GZIP_ID: u32 = 2;
+            let plaintext = payload(300);
+            let blocks: Vec<_> = plaintext.chunks(128).map(gzip_stream).collect();
+            let pak = build_legacy_pak(6, GZIP_ID, GZIP_SYNTH_PATH, &blocks, 300, 128);
+            let reader = PakReader::from_bytes(pak.clone()).unwrap();
+            let entry = reader.index_entry(GZIP_SYNTH_PATH).unwrap();
+            let method = entry.header().compression_method();
+            assert_eq!(method, &CompressionMethod::Gzip);
+            assert_reads_and_verifies(pak, GZIP_SYNTH_PATH, &plaintext);
+        }
+
+        #[test]
+        fn reads_encrypted_gzip_entry_round_trips() {
+            let plaintext = payload(300);
+            let member = gzip_stream(&plaintext);
+            assert_ne!(member.len() % 16, 0, "the block must leave AES padding");
+            let out = encrypted_single_block_read_back("Gzip", &member, plaintext.len());
+            assert_eq!(out, plaintext);
         }
 
         /// One decoder per block: each block's member is decoded alone.
@@ -9449,9 +9495,10 @@ mod tests {
         use proptest::prelude::*;
 
         use super::*;
-        use crate::testing::bench::{zlib_stream, zstd_stream};
+        use crate::testing::bench::{gzip_stream, zlib_stream, zstd_stream};
         use crate::testing::wire::{
-            LZ4_SYNTH_PATH, ZSTD_SYNTH_PATH, build_v8b_lz4_pak, build_v8b_zstd_pak,
+            GZIP_SYNTH_PATH, LZ4_SYNTH_PATH, ZSTD_SYNTH_PATH, build_v8b_gzip_pak,
+            build_v8b_lz4_pak, build_v8b_zstd_pak,
         };
 
         /// Payloads spanning both compressibility regimes. Uniform bytes
@@ -9509,6 +9556,24 @@ mod tests {
             ) {
                 let (out, _) = multi_block_read_back(
                     &plaintext, block_size, zstd_stream, build_v8b_zstd_pak, ZSTD_SYNTH_PATH,
+                );
+                prop_assert_eq!(out, plaintext);
+            }
+
+            #[test]
+            fn encrypted_gzip_entry_round_trips(plaintext in payload(2048)) {
+                let compressed = gzip_stream(&plaintext);
+                let out = encrypted_single_block_read_back("Gzip", &compressed, plaintext.len());
+                prop_assert_eq!(out, plaintext);
+            }
+
+            #[test]
+            fn gzip_multi_block_round_trips(
+                plaintext in payload(4096),
+                block_size in 32u32..512,
+            ) {
+                let (out, _) = multi_block_read_back(
+                    &plaintext, block_size, gzip_stream, build_v8b_gzip_pak, GZIP_SYNTH_PATH,
                 );
                 prop_assert_eq!(out, plaintext);
             }
