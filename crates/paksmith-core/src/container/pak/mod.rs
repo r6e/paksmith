@@ -9004,12 +9004,13 @@ mod tests {
     /// The read and decode log lines that a crafted entry or an OOM seam
     /// reaches clamp the entry path, in their own field and in the
     /// `entry_read` span of both read entry points. `read_entry`'s
-    /// output-reservation warn has no seam and is not driven.
+    /// output-reservation warn has no seam and is not driven, nor is the
+    /// decoder-context warn, which needs libzstd's allocation to fail.
     #[cfg(feature = "__test_utils")]
     #[test]
     #[tracing_test::traced_test]
     fn read_logs_clamp_the_entry_path() {
-        use crate::testing::bench::zlib_stream;
+        use crate::testing::bench::{zlib_stream, zstd_stream};
         use crate::testing::oom::{SeamSite, arm_at};
         use crate::testing::wire::build_v8b_pak;
         use crate::untrusted::test_support::{hostile_path, lines_clamped};
@@ -9027,6 +9028,10 @@ mod tests {
                 .iter()
                 .map(|&n| lz4_flex::block::compress(&vec![0; n]));
             pak("LZ4", streams.collect(), size, block)
+        };
+        let zstd = |sizes: &[usize], size, block| {
+            let streams = sizes.iter().map(|&n| zstd_stream(&vec![0; n]));
+            pak("Zstd", streams.collect(), size, block)
         };
         let lzma = pak("LZMA", vec![vec![0; 4]], 4, 4);
         let corrupt = pak("Zlib", vec![vec![0xff; 16]], 8, 8);
@@ -9053,6 +9058,13 @@ mod tests {
             ),
             (lz4(&[300], 100, 100), None, "lz4 decompress failed"),
             (lz4(&[64, 128], 192, 128), None, "non-final lz4 block"),
+            (
+                zstd(&[8], 8, 8),
+                Some(PakSeam::BlockOutputReserve),
+                "zstd output reservation failed",
+            ),
+            (zstd(&[300], 100, 100), None, "zstd decompress failed"),
+            (zstd(&[64, 128], 192, 128), None, "non-final zstd block"),
         ];
         for (pak, seam, message) in cases {
             let reader = PakReader::from_bytes(pak).unwrap();
@@ -9073,7 +9085,7 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     mod zstd_entries {
         use super::*;
-        use crate::testing::bench::zstd_stream;
+        use crate::testing::bench::{zstd_legacy_frame, zstd_stream};
         use crate::testing::oom::{SeamSite, arm_at};
         use crate::testing::wire::{ZSTD_SYNTH_PATH, build_v8b_zstd_pak};
 
@@ -9085,6 +9097,174 @@ mod tests {
         /// A reader over one Zstd entry of `blocks` frames.
         fn zstd_reader(blocks: &[Vec<u8>], size: u64, block_size: u32) -> PakReader {
             PakReader::from_bytes(build_v8b_zstd_pak(blocks, size, block_size)).unwrap()
+        }
+
+        fn decode_failed_at(err: &PaksmithError) -> Option<usize> {
+            match err {
+                PaksmithError::Decompression {
+                    fault:
+                        DecompressionFault::BlockDecodeFailed {
+                            codec: "zstd",
+                            block_index,
+                            ..
+                        },
+                    ..
+                } => Some(*block_index),
+                _ => None,
+            }
+        }
+
+        #[test]
+        fn read_v8b_zstd_entry_round_trips_without_content_size() {
+            let block_size = 4096u32;
+            let plaintext = payload(2 * block_size + 1000);
+            let blocks: Vec<_> = plaintext
+                .chunks(block_size as usize)
+                .map(zstd_stream)
+                .collect();
+            assert_eq!(blocks.len(), 3);
+            for block in &blocks {
+                let content_size = zstd::zstd_safe::get_frame_content_size(block);
+                assert!(matches!(content_size, Ok(None)), "{content_size:?}");
+            }
+            let size = plaintext.len() as u64;
+            let reader = zstd_reader(&blocks, size, block_size);
+            assert_eq!(reader.read_entry(ZSTD_SYNTH_PATH).unwrap(), plaintext);
+            let mut out = Vec::new();
+            let written = reader.read_entry_to(ZSTD_SYNTH_PATH, &mut out).unwrap();
+            assert_eq!((written, out), (size, plaintext));
+            assert_eq!(
+                reader.verify_entry(ZSTD_SYNTH_PATH).unwrap(),
+                VerifyOutcome::Verified
+            );
+            let mut flipped = build_v8b_zstd_pak(&blocks, size, block_size);
+            let payload_start = crate::testing::wire::pak_entry_wire_size(3);
+            flipped[usize::try_from(payload_start).unwrap()] ^= 0xFF;
+            let err = PakReader::from_bytes(flipped)
+                .unwrap()
+                .verify_entry(ZSTD_SYNTH_PATH)
+                .unwrap_err();
+            assert!(matches!(err, PaksmithError::HashMismatch { .. }), "{err:?}");
+        }
+
+        #[test]
+        fn reads_encrypted_zstd_entry_round_trips() {
+            let plaintext = payload(300);
+            let frame = zstd_stream(&plaintext);
+            assert_ne!(frame.len() % 16, 0, "the block must leave AES padding");
+            let out = encrypted_single_block_read_back("Zstd", &frame, plaintext.len());
+            assert_eq!(out, plaintext);
+        }
+
+        /// libzstd decodes both legacy frames, so the refusal is the gate's.
+        #[test]
+        fn read_zstd_entry_rejects_a_legacy_frame() {
+            let plaintext = payload(200);
+            for (magic, header) in [(0xFD2F_B522, &[][..]), (0xFD2F_B524, &[0][..])] {
+                let frame = zstd_legacy_frame(magic, header, &plaintext);
+                assert_eq!(
+                    zstd::bulk::decompress(&frame, plaintext.len()).unwrap(),
+                    plaintext
+                );
+                let reader = zstd_reader(&[frame], plaintext.len() as u64, 4096);
+                let err = reader.read_entry(ZSTD_SYNTH_PATH).unwrap_err();
+                assert_eq!(decode_failed_at(&err), Some(0), "{magic:#x}: {err:?}");
+            }
+        }
+
+        /// Unlike zlib, whose trailing bytes a read ignores, a zstd block is
+        /// whole frames: a skippable frame after the last one reads, other
+        /// bytes don't.
+        #[test]
+        fn read_zstd_entry_rejects_trailing_non_frame_bytes() {
+            let plaintext = payload(300);
+            let frame = zstd_stream(&plaintext);
+            let skippable = [&0x184D_2A50_u32.to_le_bytes()[..], &[0; 4]].concat();
+            let size = plaintext.len() as u64;
+            let padded = zstd_reader(&[[frame.as_slice(), &skippable].concat()], size, 4096);
+            assert_eq!(padded.read_entry(ZSTD_SYNTH_PATH).unwrap(), plaintext);
+            for tail in [&b"pak"[..], &[0; 4]] {
+                let reader = zstd_reader(&[[frame.as_slice(), tail].concat()], size, 4096);
+                let err = reader.read_entry(ZSTD_SYNTH_PATH).unwrap_err();
+                assert_eq!(decode_failed_at(&err), Some(0), "{tail:?}: {err:?}");
+            }
+        }
+
+        /// A 10-byte frame whose one RLE block claims `2^21 - 1` bytes,
+        /// within the entry's claim but past `10 × 32768`: libzstd's one-shot
+        /// decode holds an RLE block only to the output capacity. Given the
+        /// room, libzstd decodes the frame, so the refusal is the
+        /// capacity's.
+        #[test]
+        fn zstd_rle_block_claiming_past_capacity_is_block_decode_failed() {
+            const CLAIM: u32 = (1 << 21) - 1;
+            let block_header = (CLAIM << 3) | 0b011;
+            let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00];
+            frame.extend_from_slice(&block_header.to_le_bytes()[..3]);
+            frame.push(0xAB);
+            assert_eq!(frame.len(), 10);
+            assert!(u64::from(CLAIM) > 10 * max_zstd_block_expansion_ratio());
+            let claim = usize::try_from(CLAIM).unwrap();
+            assert_eq!(
+                zstd::bulk::decompress(&frame, claim).unwrap(),
+                vec![0xAB; claim]
+            );
+            let too_small = zstd::zstd_safe::get_error_name(
+                zstd::zstd_safe::decompress(&mut Vec::new(), &frame).unwrap_err(),
+            );
+            let reader = zstd_reader(&[frame], u64::from(CLAIM), CLAIM);
+            let err = reader.read_entry(ZSTD_SYNTH_PATH).unwrap_err();
+            assert_eq!(decode_failed_at(&err), Some(0), "{err:?}");
+            assert!(
+                matches!(
+                    &err,
+                    PaksmithError::Decompression {
+                        fault: DecompressionFault::BlockDecodeFailed { message, .. },
+                        ..
+                    } if message == too_small
+                ),
+                "{err:?}"
+            );
+        }
+
+        /// The capacity block 0 left behind holds the final block's whole
+        /// output, so libzstd alone would not stop it.
+        #[test]
+        fn final_zstd_block_past_the_entry_claim_is_block_decode_failed() {
+            let plaintext = payload(228);
+            let blocks = [
+                zstd_stream(&plaintext[..128]),
+                zstd_stream(&plaintext[128..]),
+            ];
+            let mut out = Vec::new();
+            let err = zstd_reader(&blocks, 168, 128)
+                .read_entry_to(ZSTD_SYNTH_PATH, &mut out)
+                .unwrap_err();
+            assert_eq!(decode_failed_at(&err), Some(1), "{err:?}");
+            assert_eq!(out, plaintext[..128]);
+        }
+
+        #[test]
+        fn short_non_final_zstd_block_is_size_mismatch() {
+            let plaintext = payload(192);
+            let blocks = [zstd_stream(&plaintext[..64]), zstd_stream(&plaintext[64..])];
+            let err = zstd_reader(&blocks, 192, 128)
+                .read_entry(ZSTD_SYNTH_PATH)
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PaksmithError::Decompression {
+                        fault: DecompressionFault::NonFinalBlockSizeMismatch {
+                            block_index: 0,
+                            expected: 128,
+                            actual: 64,
+                        },
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
         }
 
         /// A non-final block reserves its block size, not the entry's
@@ -9126,7 +9306,8 @@ mod tests {
         use proptest::prelude::*;
 
         use super::*;
-        use crate::testing::bench::zlib_stream;
+        use crate::testing::bench::{zlib_stream, zstd_stream};
+        use crate::testing::wire::{ZSTD_SYNTH_PATH, build_v8b_zstd_pak};
 
         /// Payloads spanning both compressibility regimes. Uniform bytes
         /// alone never compress — every codec call would emit a stream at
@@ -9160,6 +9341,29 @@ mod tests {
                 block_size in 32u32..512,
             ) {
                 let (out, _) = multi_block_lz4_read_back(&plaintext, block_size);
+                prop_assert_eq!(out, plaintext);
+            }
+
+            #[test]
+            fn encrypted_zstd_entry_round_trips(plaintext in payload(2048)) {
+                let compressed = zstd_stream(&plaintext);
+                let out = encrypted_single_block_read_back("Zstd", &compressed, plaintext.len());
+                prop_assert_eq!(out, plaintext);
+            }
+
+            #[test]
+            fn zstd_multi_block_round_trips(
+                plaintext in payload(4096),
+                block_size in 32u32..512,
+            ) {
+                let blocks: Vec<_> = plaintext.chunks(block_size as usize).map(zstd_stream).collect();
+                let pak = build_v8b_zstd_pak(&blocks, plaintext.len() as u64, block_size);
+                let mut out = Vec::new();
+                let written = PakReader::from_bytes(pak)
+                    .unwrap()
+                    .read_entry_to(ZSTD_SYNTH_PATH, &mut out)
+                    .unwrap();
+                prop_assert_eq!(written, plaintext.len() as u64);
                 prop_assert_eq!(out, plaintext);
             }
         }
