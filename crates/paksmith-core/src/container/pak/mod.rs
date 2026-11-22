@@ -9190,6 +9190,7 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     mod gzip_entries {
         use super::*;
+        use crate::codec::PAST_OUTPUT_CAP;
         use crate::testing::bench::gzip_stream;
         use crate::testing::oom::{SeamSite, arm_at};
         use crate::testing::wire::{GZIP_SYNTH_PATH, build_v8b_gzip_pak};
@@ -9235,6 +9236,61 @@ mod tests {
             assert_eq!(out, plaintext);
         }
 
+        /// The CRC-32 of the second block's member is wrong: the first
+        /// block is written, and the second fails with flate2's error.
+        #[test]
+        fn gzip_crc_mismatch_is_block_decode_failed() {
+            let plaintext = payload(256);
+            let mut blocks: Vec<_> = plaintext.chunks(128).map(gzip_stream).collect();
+            let crc = blocks[1].len() - 8;
+            blocks[1][crc] ^= 1;
+            let mut out = Vec::new();
+            let err = gzip_reader(&blocks, 256, 128)
+                .read_entry_to(GZIP_SYNTH_PATH, &mut out)
+                .unwrap_err();
+            let mismatch = "corrupt gzip stream does not have a matching checksum";
+            assert_eq!(
+                block_decode_failure(&err, "gzip"),
+                Some((1, mismatch)),
+                "{err:?}"
+            );
+            assert_eq!(out, plaintext[..128]);
+        }
+
+        #[test]
+        fn gzip_truncated_trailer_is_block_decode_failed() {
+            let plaintext = payload(128);
+            let mut member = gzip_stream(&plaintext);
+            let _ = member.pop();
+            let err = gzip_reader(&[member], 128, 128)
+                .read_entry(GZIP_SYNTH_PATH)
+                .unwrap_err();
+            let short = "unexpected end of file";
+            assert_eq!(
+                block_decode_failure(&err, "gzip"),
+                Some((0, short)),
+                "{err:?}"
+            );
+        }
+
+        /// Bytes after a block's member, a second member's included, are
+        /// ignored as repak's single-member decoder ignores them, and
+        /// hashed with the block.
+        #[test]
+        fn gzip_bytes_after_the_member_are_ignored() {
+            let plaintext = payload(256);
+            let blocks = [
+                [gzip_stream(&plaintext[..128]), b"pak".to_vec()].concat(),
+                [
+                    gzip_stream(&plaintext[128..]),
+                    gzip_stream(b"a second member"),
+                ]
+                .concat(),
+            ];
+            let pak = build_v8b_gzip_pak(&blocks, 256, 128);
+            assert_reads_and_verifies(pak, GZIP_SYNTH_PATH, &plaintext);
+        }
+
         /// One decoder per block: each block's member is decoded alone.
         #[test]
         fn read_gzip_entry_builds_a_decoder_per_block() {
@@ -9245,6 +9301,44 @@ mod tests {
             let before = built();
             assert_eq!(reader.read_entry(GZIP_SYNTH_PATH).unwrap(), plaintext);
             assert_eq!(built() - before, 3);
+        }
+
+        /// The final block decodes to one byte past the entry's size: the
+        /// block before it is written, and the final block fails.
+        #[test]
+        fn gzip_final_block_past_entry_size_is_block_decode_failed() {
+            let plaintext = payload(228);
+            let blocks = [
+                gzip_stream(&plaintext[..128]),
+                gzip_stream(&plaintext[128..]),
+            ];
+            let mut out = Vec::new();
+            let err = gzip_reader(&blocks, 227, 128)
+                .read_entry_to(GZIP_SYNTH_PATH, &mut out)
+                .unwrap_err();
+            assert_eq!(
+                block_decode_failure(&err, "gzip"),
+                Some((1, PAST_OUTPUT_CAP)),
+                "{err:?}"
+            );
+            assert_eq!(out, plaintext[..128]);
+        }
+
+        #[test]
+        fn gzip_non_final_block_past_block_size_is_block_decode_failed() {
+            let plaintext = payload(300);
+            let blocks = [
+                gzip_stream(&plaintext[..129]),
+                gzip_stream(&plaintext[129..]),
+            ];
+            let err = gzip_reader(&blocks, 300, 128)
+                .read_entry(GZIP_SYNTH_PATH)
+                .unwrap_err();
+            assert_eq!(
+                block_decode_failure(&err, "gzip"),
+                Some((0, PAST_OUTPUT_CAP)),
+                "{err:?}"
+            );
         }
 
         #[test]

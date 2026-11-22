@@ -49,7 +49,7 @@ const ZSTD_SKIPPABLE_MAGIC_LAST: u32 = 0x184D_2A5F;
 
 const NOT_ZSTD_V1_FRAMES: &str = "not zstd v1 or skippable frames";
 const FRAME_PAST_STREAM: &str = "zstd frame runs past the block";
-const PAST_OUTPUT_CAP: &str = "output past the block's bound";
+pub(crate) const PAST_OUTPUT_CAP: &str = "output past the block's bound";
 
 /// A block format [`decode_block`] decodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -582,6 +582,60 @@ mod tests {
             }
         }
 
+        /// With no budget to bound it, `out` still grows only as the member
+        /// decodes. Counting the capacity `out` starts with as reserved, the
+        /// first reservation is one read, each later one at most the bytes
+        /// reserved before it plus a read, and `out`'s capacity stays under
+        /// twice its final length. The 16,401-byte member ends just past a
+        /// doubling.
+        #[test]
+        fn gzip_reservations_follow_the_output() {
+            const READ: usize = 8192;
+            for len in [102_400, 16_401] {
+                let plaintext = &plaintext().repeat(25)[..len];
+                let (decoded, out, requests) = decode_gzip(&gzip_stream(plaintext), u64::MAX);
+                assert!(decoded.is_ok(), "{len}: {decoded:?}");
+                assert_eq!(out.len(), EARLIER.len() + len);
+                assert!(requests.len() > 1, "{len}: {requests:?}");
+                assert!(requests[0] <= READ, "{len}: {requests:?}");
+                let mut reserved = EARLIER.len();
+                for &requested in &requests {
+                    assert!(requested <= reserved + READ, "{len}: {requests:?}");
+                    reserved += requested;
+                }
+                assert!(out.capacity() < 2 * out.len(), "{len}: {}", out.capacity());
+            }
+        }
+
+        /// Growth stops at the budget plus one byte past `out`'s length: a
+        /// member of exactly the budget fits, and one a byte past it fails,
+        /// with neither buffer's capacity past that ceiling.
+        #[test]
+        fn gzip_growth_stops_at_the_budget() {
+            let plaintext: Vec<u8> = plaintext().repeat(5)[..20_000].to_vec();
+            let src = gzip_stream(&plaintext);
+            let (decoded, out, _) = decode_gzip(&src, 20_000);
+            assert!(decoded.is_ok(), "{decoded:?}");
+            assert_eq!(out, [EARLIER, &plaintext].concat());
+            assert!(
+                out.capacity() <= EARLIER.len() + 20_001,
+                "{}",
+                out.capacity()
+            );
+            let (decoded, out, _) = decode_gzip(&src, 19_999);
+            assert_eq!(
+                decode_message(&decoded),
+                Some(PAST_OUTPUT_CAP),
+                "{decoded:?}"
+            );
+            assert_eq!(out, EARLIER);
+            assert!(
+                out.capacity() <= EARLIER.len() + 20_000,
+                "{}",
+                out.capacity()
+            );
+        }
+
         #[test]
         fn gzip_output_past_budget_is_corrupt() {
             let plaintext = plaintext();
@@ -593,6 +647,45 @@ mod tests {
                 "{decoded:?}"
             );
             assert_eq!(out, EARLIER);
+        }
+
+        /// The trailer is checked when the output fills the budget exactly,
+        /// so a wrong CRC-32 or length, or a trailer cut short, fails.
+        #[test]
+        fn gzip_refuses_a_bad_or_short_trailer() {
+            let plaintext = plaintext();
+            let src = gzip_stream(&plaintext);
+            let end = src.len();
+            let flipped = |at: usize| {
+                let mut bad = src.clone();
+                bad[at] ^= 1;
+                bad
+            };
+            let mismatch = "corrupt gzip stream does not have a matching checksum";
+            for (label, bad, cause) in [
+                ("CRC-32", flipped(end - 8), mismatch),
+                ("length", flipped(end - 4), mismatch),
+                ("short", src[..end - 1].to_vec(), "unexpected end of file"),
+                ("absent", src[..end - 8].to_vec(), "unexpected end of file"),
+            ] {
+                for budget in [plaintext.len() as u64, u64::MAX] {
+                    let (decoded, out, _) = decode_gzip(&bad, budget);
+                    assert_eq!(decode_message(&decoded), Some(cause), "{label}, {budget}");
+                    assert_eq!(out, EARLIER, "{label}, {budget}");
+                }
+            }
+        }
+
+        /// Bytes after the member are left unread, a second member included.
+        #[test]
+        fn gzip_ignores_bytes_after_the_member() {
+            let plaintext = plaintext();
+            let src = gzip_stream(&plaintext);
+            for tail in [b"pak".to_vec(), gzip_stream(b"a second member")] {
+                let (decoded, out, _) = decode_gzip(&[src.as_slice(), &tail].concat(), u64::MAX);
+                assert!(decoded.is_ok(), "{tail:?}: {decoded:?}");
+                assert_eq!(out, [EARLIER, &plaintext].concat(), "{tail:?}");
+            }
         }
     }
 }
