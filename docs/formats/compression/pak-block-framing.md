@@ -200,8 +200,10 @@ Wire layout §*Encoded entries (v10+)* and
 
 `start == end` is a zero-byte compressed block, which holds no codec
 stream: a zlib stream is at least 8 bytes (a 2-byte header, a 2-byte
-empty final block and a 4-byte Adler-32), and an LZ4 block opens with a
-token byte.
+empty final block and a 4-byte Adler-32), an LZ4 block opens with a
+token byte, and a zstd block is whole frames, the smallest an 8-byte
+skippable frame or a 9-byte frame (a 4-byte magic, a 2-byte frame header
+and one 3-byte block header, RFC 8878).
 
 ## Caps & limits
 
@@ -287,11 +289,11 @@ See `docs/security/allocation-caps.md` for the broader policy.
   `encoded_entry_in_data_record_size` for the cursor base offset.
 - `crates/paksmith-core/src/container/pak/mod.rs` — `stream_zlib_to`
   block loop (the canonical reference implementation); `stream_block_codec_to`
-  shares the same outer loop shape for raw LZ4 blocks but NOT the
-  bomb-budget mechanism — it decodes into a buffer pre-sized to the
-  block's capped expected output, so over-expansion surfaces as
-  `Lz4DecodeError` rather than `take(budget)`/`DecompressionBomb`
-  (see [`lz4.md`](lz4.md)).
+  shares the same outer loop shape for raw LZ4 blocks and zstd frames
+  but NOT the bomb-budget mechanism — it decodes into a buffer reserved
+  at the block's capped expected output, so over-expansion surfaces as
+  `Lz4DecodeError` or `BlockDecodeFailed` rather than
+  `take(budget)`/`DecompressionBomb` (see [`lz4.md`](lz4.md)).
 
 **Status:** `complete` for v5-v11. `require_relative_chunk_offsets`
 refuses a V3-V4 zlib entry with `UnsupportedVersion`; a read runs it
@@ -313,9 +315,11 @@ net.
 - `DecompressionFault::CompressedBlockReserveFailed { block_index, requested, source }`.
 - `DecompressionFault::DecompressionBomb { block_index, actual, claimed_uncompressed }`.
 - `DecompressionFault::ZlibStreamError { block_index, kind, message }`
-  (zlib path) and `DecompressionFault::Lz4DecodeError { block_index,
-  message }` (LZ4 path); other methods get analogous variants when
-  implemented. An empty block fails with one of these when it is decoded.
+  (zlib path), `DecompressionFault::Lz4DecodeError { block_index,
+  message }` (LZ4 path) and `DecompressionFault::BlockDecodeFailed {
+  codec, block_index, message }` (Zstd path); other methods get
+  analogous variants when implemented. An empty block fails with one of
+  these when it is decoded.
 
 **Cap constants:** see *Caps & limits* above.
 

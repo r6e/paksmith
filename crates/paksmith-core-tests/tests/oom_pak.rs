@@ -8,7 +8,7 @@
 //! the production code paths through `__test_utils`-feature-gated
 //! injection seams that synthesize a `TryReserveError` at the
 //! `try_reserve*` sites in the pak decompression paths
-//! (`read_compressed_block`, shared by zlib and LZ4;
+//! (`read_compressed_block`, shared by zlib, LZ4 and Zstd;
 //! `stream_zlib_to`'s scratch-growth loop; `stream_block_codec_to`'s
 //! LZ4 output reservation). See `paksmith_core::testing::oom` for the seam API.
 //!

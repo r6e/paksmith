@@ -63,7 +63,7 @@ pub enum SeamSite {
 pub enum PakSeam {
     /// `read_compressed_block`'s pre-decode per-block
     /// `try_reserve_exact` — the compressed-input read shared by the
-    /// zlib and LZ4 paths. Surfaces as
+    /// zlib, LZ4 and Zstd paths. Surfaces as
     /// [`crate::error::DecompressionFault::CompressedBlockReserveFailed`].
     CompressedReserve,
     /// `stream_zlib_to`'s mid-decode `try_reserve(n)` loop. Surfaces
@@ -119,7 +119,7 @@ pub enum PakSeam {
     /// reached via the v10+ index parser.
     V10IndexEntries,
     /// `stream_block_codec_to`'s pre-decode per-block output-buffer
-    /// `try_reserve_exact` (#636). Surfaces as
+    /// `try_reserve_exact` for an LZ4 block (#636). Surfaces as
     /// [`crate::error::DecompressionFault::Lz4OutputReserveFailed`].
     /// The LZ4 path's compressed-INPUT reservation shares
     /// [`Self::CompressedReserve`] with the zlib path (identical
@@ -148,13 +148,17 @@ pub enum PakSeam {
     /// Surfaces as [`crate::error::IndexParseFault::AllocationFailed`]
     /// with `context: AllocationContext::EntryReadCounts`.
     EntryReadCounts,
+    /// `stream_block_codec_to`'s pre-decode output reservation for a block
+    /// codec without its own seam (zstd). Surfaces as
+    /// [`crate::error::DecompressionFault::BlockOutputReserveFailed`].
+    BlockOutputReserve,
 }
 
 impl PakSeam {
     /// Total number of pak-side seam sites. Pinned by the `const _`
     /// guard below and, in `tests`, by the exhaustive `expected_pak_slot`
     /// match and the length of its list of every variant.
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 21;
 }
 
 // Compile-time guard: refuses to build when `COUNT` and the largest
@@ -162,7 +166,7 @@ impl PakSeam {
 // the `AssetSeam` guard below): variants are declared in source order
 // with no explicit `= N` assignments and no gaps, so that
 // `last as usize + 1` equals the variant count.
-const _: [(); PakSeam::COUNT] = [(); PakSeam::EntryReadCounts as usize + 1];
+const _: [(); PakSeam::COUNT] = [(); PakSeam::BlockOutputReserve as usize + 1];
 
 /// Asset parser OOM seams (#276). The inner enum of [`SeamSite::Asset`].
 ///
@@ -411,8 +415,9 @@ mod tests {
     /// Pak/index/decompression variants are tested in
     /// `paksmith-core-tests/tests/oom_pak.rs`, except `DedupTracker`,
     /// `ByPathLookup`, `DedupSurvivorFlags` and `ByPathKey`, tested in
-    /// `container/pak/index/mod.rs`, and `EntryReadCounts`, tested in
-    /// `container/pak/mod.rs`, so that cargo-mutants credits them;
+    /// `container/pak/index/mod.rs`, and `EntryReadCounts` and
+    /// `BlockOutputReserve`, tested in `container/pak/mod.rs`, so that
+    /// cargo-mutants credits them;
     /// asset-side variants are tested in
     /// `paksmith-core-tests/tests/oom_asset.rs`, except
     /// `SkinWeightDataBytes`, tested in
@@ -476,6 +481,9 @@ mod tests {
                 PakSeam::ByPathKey => "from_entries_copies_by_path_keys_fallibly_in_order",
                 PakSeam::EntryReadCounts => {
                     "read_budget_surfaces_entry_read_counts_allocation_failed"
+                }
+                PakSeam::BlockOutputReserve => {
+                    "read_entry_surfaces_block_output_reserve_failed_under_oom"
                 }
             }
         }
@@ -594,6 +602,7 @@ mod tests {
                 PakSeam::DedupSurvivorFlags => 17,
                 PakSeam::ByPathKey => 18,
                 PakSeam::EntryReadCounts => 19,
+                PakSeam::BlockOutputReserve => 20,
             }
         }
         const fn expected_asset_slot(site: AssetSeam) -> usize {
@@ -647,6 +656,7 @@ mod tests {
             PakSeam::DedupSurvivorFlags,
             PakSeam::ByPathKey,
             PakSeam::EntryReadCounts,
+            PakSeam::BlockOutputReserve,
         ];
         assert_eq!(pak_all.len(), PakSeam::COUNT);
         for site in pak_all {
