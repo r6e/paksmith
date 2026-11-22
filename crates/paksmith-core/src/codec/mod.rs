@@ -74,9 +74,9 @@ pub(crate) fn decode_block(
     decoded
 }
 
-/// Decode a raw LZ4 block into a zero-filled tail of
-/// [`lz4_block_output_cap`] bytes. The tail is also the bomb cap: the
-/// decoder fails a block that would expand past it.
+/// Decode a raw LZ4 block into a zero-filled tail of [`block_output_cap`]
+/// bytes. The tail is also the bomb cap: the decoder fails a block that
+/// would expand past it.
 fn decode_lz4(
     src: &[u8],
     out: &mut Vec<u8>,
@@ -84,9 +84,8 @@ fn decode_lz4(
     reserve: &mut impl FnMut(Result<(), TryReserveError>, usize) -> crate::Result<()>,
 ) -> Result<(), CodecError> {
     let start = out.len();
-    let bound = lz4_block_output_cap(budget, src.len() as u64);
-    let cap = usize::try_from(bound).map_err(|_| CodecError::BoundExceedsPlatformUsize(bound))?;
-    reserve(out.try_reserve_exact(cap), cap).map_err(CodecError::Reserve)?;
+    let bound = block_output_cap(budget, src.len() as u64, MAX_LZ4_BLOCK_EXPANSION_RATIO);
+    let cap = reserve_output(out, bound, reserve)?;
     out.resize(start + cap, 0);
     let produced = lz4_flex::block::decompress_into(src, &mut out[start..])
         .map_err(|e| CodecError::Decode(e.to_string()))?;
@@ -94,19 +93,32 @@ fn decode_lz4(
     Ok(())
 }
 
-/// Bound the pre-decode output reservation for one LZ4 block.
+/// Bound the pre-decode output reservation for one block of
+/// `compressed_len` bytes in a codec that inflates by at most `ratio`.
 ///
 /// `budget` can be entry-scale rather than block-scale (a pak entry's
 /// final block is budgeted at the entry's whole remaining output, bounded
 /// upstream by the 8 GiB `MAX_UNCOMPRESSED_ENTRY_BYTES` open-time cap):
 /// pre-allocating it verbatim would let a tiny crafted block force a
 /// multi-gigabyte eager allocation (memory-amplification DoS, #636).
-/// Intersecting with `compressed_len` × [`MAX_LZ4_BLOCK_EXPANSION_RATIO`]
-/// keeps the reservation input-proportional: a valid block's real output
-/// is always `≤ compressed_len × 255`, so the cap is transparent for
-/// well-formed blocks and only bites the crafted case.
-fn lz4_block_output_cap(budget: u64, compressed_len: u64) -> u64 {
-    budget.min(compressed_len.saturating_mul(MAX_LZ4_BLOCK_EXPANSION_RATIO))
+/// Intersecting with `compressed_len × ratio` keeps the reservation
+/// input-proportional: a valid block's real output is always within it,
+/// so the cap is transparent for well-formed blocks and only bites the
+/// crafted case.
+fn block_output_cap(budget: u64, compressed_len: u64, ratio: u64) -> u64 {
+    budget.min(compressed_len.saturating_mul(ratio))
+}
+
+/// Reserve `bound` bytes past `out`'s length, through `reserve`, and
+/// return the bound as a `usize`.
+fn reserve_output(
+    out: &mut Vec<u8>,
+    bound: u64,
+    reserve: &mut impl FnMut(Result<(), TryReserveError>, usize) -> crate::Result<()>,
+) -> Result<usize, CodecError> {
+    let cap = usize::try_from(bound).map_err(|_| CodecError::BoundExceedsPlatformUsize(bound))?;
+    reserve(out.try_reserve_exact(cap), cap).map_err(CodecError::Reserve)?;
+    Ok(cap)
 }
 
 /// Whether `stream` is one or more zstd v1 or skippable frames. Any crate in
@@ -209,7 +221,10 @@ mod tests {
     /// decode.
     #[test]
     fn lz4_block_output_cap_passes_through_valid_block() {
-        assert_eq!(lz4_block_output_cap(65_536, 300), 65_536);
+        assert_eq!(
+            block_output_cap(65_536, 300, MAX_LZ4_BLOCK_EXPANSION_RATIO),
+            65_536
+        );
     }
 
     /// The security property (#636): a 400-byte compressed block that
@@ -219,16 +234,20 @@ mod tests {
     /// cannot amplify.
     #[test]
     fn lz4_block_output_cap_bounds_crafted_oversized_claim() {
-        assert_eq!(lz4_block_output_cap(4 * 1024 * 1024 * 1024, 400), 102_000);
+        assert_eq!(
+            block_output_cap(4 * 1024 * 1024 * 1024, 400, MAX_LZ4_BLOCK_EXPANSION_RATIO),
+            102_000
+        );
     }
 
-    /// `compressed_len × 255` must saturate (not overflow/panic) for a
+    /// `compressed_len × ratio` must saturate (not overflow/panic) for a
     /// pathological length, in which case the budget wins the
     /// `min`. Pins the `saturating_mul` against a `checked`/wrapping
     /// mutant: `0x0101_0101_0101_0102 × 255` wraps to 254.
     #[test]
-    fn lz4_block_output_cap_saturates_without_overflow() {
-        assert_eq!(lz4_block_output_cap(1_000, u64::MAX), 1_000);
-        assert_eq!(lz4_block_output_cap(1_000, 0x0101_0101_0101_0102), 1_000);
+    fn block_output_cap_saturates_without_overflow() {
+        let ratio = MAX_LZ4_BLOCK_EXPANSION_RATIO;
+        assert_eq!(block_output_cap(1_000, u64::MAX, ratio), 1_000);
+        assert_eq!(block_output_cap(1_000, 0x0101_0101_0101_0102, ratio), 1_000);
     }
 }

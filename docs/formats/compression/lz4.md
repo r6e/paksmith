@@ -167,7 +167,7 @@ is unconfirmed and tracked in issue #685.
 - Additionally cap that pre-sized buffer by `compressed_len × 255`
   (the max block expansion above), so a crafted
   `compression_block_size` cannot force a huge *eager* allocation
-  before the decode even runs (paksmith: `lz4_block_output_cap`,
+  before the decode even runs (paksmith: `block_output_cap`,
   #636). A valid block's real output never exceeds this bound, so the
   cap never rejects well-formed data.
 - Enforce the non-final-block == `compression_block_size` invariant
@@ -237,17 +237,16 @@ through `decode_block` in `crates/paksmith-core/src/codec/mod.rs`
 
 - Same shared `validate_block_bounds` walk and the same hoisted
   two-buffer scheme (one compressed-input + one decompressed-output
-  buffer reused across blocks; the full `uncompressed_size` never
-  lives in memory). Unlike `stream_zlib_to` it takes no `version` and
-  has no pre-v5 relative-offset guard: `LZ4` is reachable only via the
-  v8+ FName slot table, so any entry reaching the decoder already
-  parsed as v8+ (where block offsets are relative) — the guard would
-  be unreachable dead code.
+  buffer reused across blocks). Unlike `stream_zlib_to` it takes no
+  `version` and has no pre-v5 relative-offset guard: `LZ4` is
+  reachable only via the v8+ FName slot table, so any entry reaching
+  the decoder already parsed as v8+ (where block offsets are
+  relative) — the guard would be unreachable dead code.
 - Decodes with `lz4_flex::block::decompress_into` into a buffer
-  pre-sized to the block's decode budget (`lz4_block_budget`:
+  pre-sized to the block's decode budget (`block_codec_budget`:
   `min(remaining, compression_block_size)` for non-final blocks, the
   remaining output for the final block), capped by
-  `lz4_block_output_cap` (`compressed_len × 255`) so a crafted
+  `block_output_cap` (`compressed_len × 255`) so a crafted
   `compression_block_size` or `uncompressed_size` cannot force a huge
   eager allocation (#636). Over-expansion errors inside the decoder
   (`DecompressionFault::Lz4DecodeError`) instead of allocating, so no
@@ -267,8 +266,8 @@ through `decode_block` in `crates/paksmith-core/src/codec/mod.rs`
   carry no checksum, this SHA1 is the ONLY content-integrity layer
   for LZ4 entries — a tampered literal byte that decodes cleanly is
   caught by `verify_entry`, not by `read_entry`.
-- Encrypted + compressed entries remain rejected upstream
-  (see issue #634); LZ4 support does not change that gate.
+- Encrypted LZ4 entries are decrypted, then decoded through the same
+  streamer; see `crypto/aes-pak.md`.
 
 ## References
 

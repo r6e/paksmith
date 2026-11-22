@@ -84,7 +84,7 @@ section "Format inventory" for column semantics.
 | `data/locres.md` | complete | complete | `localization/locres.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `a35c183` |
 | `compression/pak-block-framing.md` | complete | complete | `container/pak/index/compression.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `cb613a8` |
 | `compression/zlib.md` | complete | complete | `container/pak/mod.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `01a3ad4` |
-| `compression/lz4.md` | complete | complete | `container/pak/mod.rs` | repak @ `e215472c51db69328b1ce77be2db24d24c1d646b` + CUE4Parse @ `c7e78422ec4858036c9bba5d9d3c55eb197f93c9` | `83a84f0` |
+| `compression/lz4.md` | complete | complete | `container/pak/mod.rs` | repak @ `e215472c51db69328b1ce77be2db24d24c1d646b` + CUE4Parse @ `c7e78422ec4858036c9bba5d9d3c55eb197f93c9` | `9f510b0` |
 | `compression/oodle.md` | complete | partial | `container/pak/index/compression.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `01a3ad4` |
 | `crypto/aes-pak.md` | complete | partial | `container/pak/footer.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `ca02fea` |
 

@@ -567,8 +567,8 @@ pub enum DecompressionFault {
     /// a buffer pre-sized to the block's decode budget
     /// (`min(remaining, compression_block_size)` for non-final
     /// blocks, the remaining output for the final block — see
-    /// `lz4_block_budget`),
-    /// capped input-proportionally by `lz4_block_output_cap` at
+    /// `block_codec_budget`),
+    /// capped input-proportionally by `block_output_cap` at
     /// `compressed_len × 255` so a crafted claim cannot force a huge
     /// eager allocation. Unlike zlib there is no mid-decode growth
     /// site — this is the LZ4 path's only output-side reservation.
@@ -577,7 +577,7 @@ pub enum DecompressionFault {
         /// 0-based block index for context.
         block_index: usize,
         /// Bytes the reservation requested (the block's capped
-        /// expected output; see `lz4_block_output_cap`).
+        /// expected output; see `block_output_cap`).
         requested: usize,
         /// Underlying `try_reserve_exact` failure reason.
         source: TryReserveError,

@@ -2007,6 +2007,7 @@ fn usmap_fixture(name: &str) -> std::path::PathBuf {
 #[cfg(all(test, feature = "__test_utils"))]
 mod tests {
     use super::*;
+    use crate::testing::bench::zstd_legacy_frame;
     use crate::testing::usmap::build_hero_usmap_with_leading_gear;
     use crate::testing::usmap::build_minimal_usmap_bytes as minimal_usmap_none;
     use crate::testing::usmap::{
@@ -3295,17 +3296,6 @@ mod tests {
         }
         encoder.write_all(payload).unwrap();
         encoder.finish().unwrap()
-    }
-
-    /// A pre-v1 zstd frame holding `payload` in one raw block: v0.2 has no
-    /// frame header byte, v0.4 has one.
-    fn zstd_legacy_frame(magic: u32, header: &[u8], payload: &[u8]) -> Vec<u8> {
-        let mut frame = magic.to_le_bytes().to_vec();
-        frame.extend_from_slice(header);
-        frame.extend_from_slice(&[0x40, 0, u8::try_from(payload.len()).unwrap()]);
-        frame.extend_from_slice(payload);
-        frame.extend_from_slice(&[0xC0, 0, 0]);
-        frame
     }
 
     fn assert_matches_uncompressed(usmap: &Usmap) {

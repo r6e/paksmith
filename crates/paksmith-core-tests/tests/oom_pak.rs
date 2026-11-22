@@ -171,7 +171,7 @@ fn read_entry_surfaces_lz4_output_reserve_failed_under_oom() {
 /// not the entry's full remaining output: arm the output seam so block
 /// 0 of a three-block entry fails its reservation, and assert the
 /// `requested` size is the 128-byte block size rather than the 296-byte
-/// entry remainder. Guards `lz4_block_budget`'s is-final branch (#636
+/// entry remainder. Guards `block_codec_budget`'s is-final branch (#636
 /// R8 finding): a regression to a remaining-based non-final budget
 /// eagerly reserves (and zero-fills) up to the whole entry per block.
 #[test]

@@ -3,7 +3,7 @@
 //
 // What this catches:
 //   - Panics / aborts in the per-block decode loop: arbitrary bytes
-//     exercise `lz4_block_output_cap` (the input-proportional
+//     exercise `block_output_cap` (the input-proportional
 //     reservation cap), the raw-block decoder (`decompress_into` via
 //     lz4_flex `safe-decode`), the non-final block-size invariant, and
 //     `check_cumulative_size` — all must surface typed errors, never
@@ -38,7 +38,7 @@ use paksmith_core::testing::wire::{LZ4_SYNTH_PATH, build_v8b_lz4_pak};
 /// honest work (output buffer + `Vec` writer) stays small and
 /// iterations stay fast. The cap-vs-claim interplay is fully exercised
 /// well below this — a 50-byte block claiming ~1 MiB already trips
-/// `lz4_block_output_cap` at `50 × 255`.
+/// `block_output_cap` at `50 × 255`.
 const MAX_CLAIMED_BYTES: u32 = 1 << 20;
 
 fuzz_target!(|data: &[u8]| {
