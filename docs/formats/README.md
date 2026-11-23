@@ -42,7 +42,7 @@ section "Format inventory" for column semantics.
 
 | Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
 |-----|------------|---------------|----------------|-------------------|---------------|
-| `container/pak.md` | complete | complete | `container/pak/` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` + CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `01a3ad4` |
+| `container/pak.md` | complete | complete | `container/pak/` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` + CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + UEViewer @ `a0bfb468d42be831b126632fd8a0ae6b3614f981` | `b6c0b7e` |
 | `container/iostore-utoc.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + retoc @ `885a8dae740cb1ce1e41ff2e74f67f9f0c118237` | `4e81b15` |
 | `container/iostore-ucas.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` + retoc @ `885a8dae740cb1ce1e41ff2e74f67f9f0c118237` | `4e81b15` |
 | `container/iostore-directory-index.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + CUE4Parse @ `77b94fa26cde08d34e80be2ced29c8f8885ff0a7` | `3545dc0` |
@@ -83,11 +83,11 @@ section "Format inventory" for column semantics.
 | `data/data-table.md` | complete | complete | `asset/exports/data_table.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `8f56038` |
 | `data/locres.md` | complete | complete | `localization/locres.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `a35c183` |
 | `compression/pak-block-framing.md` | complete | complete | `container/pak/index/compression.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `b6c0b7e` |
-| `compression/zlib.md` | complete | complete | `container/pak/mod.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `ed4d4c0` |
+| `compression/zlib.md` | complete | complete | `container/pak/mod.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `b6c0b7e` |
 | `compression/lz4.md` | complete | complete | `container/pak/mod.rs` | repak @ `e215472c51db69328b1ce77be2db24d24c1d646b` + CUE4Parse @ `c7e78422ec4858036c9bba5d9d3c55eb197f93c9` | `b6c0b7e` |
 | `compression/zstd.md` | complete | complete | `codec/mod.rs` | repak @ `e215472c51db69328b1ce77be2db24d24c1d646b` + CUE4Parse @ `c7e78422ec4858036c9bba5d9d3c55eb197f93c9` | `161c0ab` |
 | `compression/oodle.md` | complete | partial | `container/pak/index/compression.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` + repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `01a3ad4` |
-| `crypto/aes-pak.md` | complete | partial | `container/pak/footer.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `9f510b0` |
+| `crypto/aes-pak.md` | complete | partial | `container/pak/footer.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `b6c0b7e` |
 
 Status enums (the `paksmith-doc-lint status-enum` check enforces these):
 

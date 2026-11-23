@@ -52,7 +52,7 @@ pub trait ContainerReader: Send + Sync {
 }
 ```
 
-Implementations: `PakReader` (.pak v3–v11), which handles zlib (v5+), LZ4 (v8+) and Zstd (v8+) decompression and AES-256 decryption internally; an `IoStoreReader` (.utoc/.ucas) is planned. The trait boundary means adding a new container format doesn't touch existing code.
+Implementations: `PakReader` (.pak v3–v11), which handles zlib (v5+), Gzip (v5+), LZ4 (v8+) and Zstd (v8+) decompression and AES-256 decryption internally; an `IoStoreReader` (.utoc/.ucas) is planned. The trait boundary means adding a new container format doesn't touch existing code.
 
 ### Format Handler Trait
 

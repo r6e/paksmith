@@ -263,6 +263,56 @@ pub(crate) fn build_v8b_pak(
     uncompressed_size: u64,
     block_size: u32,
 ) -> Vec<u8> {
+    // 1-based index into the footer name table → slot 0 = `method`.
+    let record = compressed_record(1, streams, uncompressed_size, block_size);
+    let mut data = record.clone();
+    for s in streams {
+        data.extend_from_slice(s);
+    }
+
+    // The index record must be the in-data one: `verify_entry`
+    // cross-validates them.
+    let mut index = Vec::new();
+    write_fstring(&mut index, "../../../");
+    index.write_u32::<LittleEndian>(1).unwrap();
+    write_fstring(&mut index, path);
+    index.extend_from_slice(&record);
+
+    let index_offset = data.len() as u64;
+    let index_size = index.len() as u64;
+    let mut pak = data;
+    pak.extend_from_slice(&index);
+
+    write_v8b_plus_footer(&mut pak, 8, index_offset, index_size, method);
+    pak
+}
+
+/// [`build_v8b_pak`] for a flat pak of a `version` below 7: one entry at
+/// `path` in the v3-v7 method ID `method_id`.
+#[cfg(test)]
+pub(crate) fn build_legacy_pak(
+    version: u32,
+    method_id: u32,
+    path: &str,
+    streams: &[Vec<u8>],
+    uncompressed_size: u64,
+    block_size: u32,
+) -> Vec<u8> {
+    let record = compressed_record(method_id, streams, uncompressed_size, block_size);
+    let mut pak = [record.as_slice(), &streams.concat()].concat();
+    append_legacy_index(&mut pak, version, &[(path, record)]);
+    pak
+}
+
+/// The record at offset 0 of an entry in `method_id` whose blocks are
+/// `streams`, laid back to back after it, with the SHA-1 `verify_entry`
+/// takes of them: the on-disk compressed bytes in block order.
+fn compressed_record(
+    method_id: u32,
+    streams: &[Vec<u8>],
+    uncompressed_size: u64,
+    block_size: u32,
+) -> Vec<u8> {
     use sha1::{Digest, Sha1};
 
     let header_size = pak_entry_wire_size(streams.len() as u64);
@@ -274,56 +324,29 @@ pub(crate) fn build_v8b_pak(
         cursor = end;
     }
     let compressed_size: u64 = streams.iter().map(|s| s.len() as u64).sum();
-
-    // Entry hash covers the on-disk COMPRESSED block bytes in block
-    // order (what `verify_entry` hashes).
     let mut hasher = Sha1::new();
     for s in streams {
         hasher.update(s);
     }
     let sha1: [u8; 20] = hasher.finalize().into();
-
-    // The in-data record and the index record MUST be identical
-    // (`verify_entry` cross-validates them); one closure guarantees
-    // the two call sites can't drift.
-    let write_entry = |buf: &mut Vec<u8>| {
-        write_pak_entry(
-            buf,
-            0,
-            compressed_size,
-            uncompressed_size,
-            1, // 1-based index into the footer name table → slot 0 = `method`
-            &sha1,
-            &blocks,
-            block_size,
-            0,
-        );
-    };
-
-    let mut data = Vec::new();
-    write_entry(&mut data);
+    let mut record = Vec::new();
+    write_pak_entry(
+        &mut record,
+        0,
+        compressed_size,
+        uncompressed_size,
+        method_id,
+        &sha1,
+        &blocks,
+        block_size,
+        0,
+    );
     assert_eq!(
-        data.len() as u64,
+        record.len() as u64,
         header_size,
         "pak_entry_wire_size drifted from write_pak_entry's layout"
     );
-    for s in streams {
-        data.extend_from_slice(s);
-    }
-
-    let mut index = Vec::new();
-    write_fstring(&mut index, "../../../");
-    index.write_u32::<LittleEndian>(1).unwrap();
-    write_fstring(&mut index, path);
-    write_entry(&mut index);
-
-    let index_offset = data.len() as u64;
-    let index_size = index.len() as u64;
-    let mut pak = data;
-    pak.extend_from_slice(&index);
-
-    write_v8b_plus_footer(&mut pak, 8, index_offset, index_size, method);
-    pak
+    record
 }
 
 /// Append the footer v8b, v10 and v11 share to `pak`: guid(16) +

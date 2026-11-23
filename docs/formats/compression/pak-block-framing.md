@@ -112,8 +112,8 @@ After parsing, every `CompressionBlock` carries two `u64` offsets:
 The **relativity** of `start` and `end` depends on the pak version:
 
 - **V3 / V4** (`CompressionEncryption` / `IndexEncryption`): offsets are
-  **file-relative**. A Paksmith read refuses a zlib entry from these
-  versions rather than attempting normalization (see
+  **file-relative**. A Paksmith read refuses a zlib or gzip entry from
+  these versions rather than attempting normalization (see
   [Paksmith implementation](#paksmith-implementation)).
 - **V5+** (`RelativeChunkOffsets` onward): offsets are
   **entry-record-relative**. `start = 0x40` means "byte 0x40 after the
@@ -181,8 +181,8 @@ layout-dependent and vary by fixture. Tracked in
 ### V3-V4 file-relative offsets (unsupported)
 
 V3 and V4 archives published block offsets relative to the file start.
-A Paksmith read refuses a zlib entry from these versions rather than
-attempting normalization (see
+A Paksmith read refuses a zlib or gzip entry from these versions rather
+than attempting normalization (see
 [Paksmith implementation](#paksmith-implementation)). Pre-v5
 compressed archives are rare in practice (UE 4.3 through UE 4.19 era),
 and supporting the normalization adds surface area for off-by-one
@@ -201,9 +201,11 @@ Wire layout §*Encoded entries (v10+)* and
 `start == end` is a zero-byte compressed block, which holds no codec
 stream: a zlib stream is at least 8 bytes (a 2-byte header, a 2-byte
 empty final block and a 4-byte Adler-32), an LZ4 block opens with a
-token byte, and a [zstd](zstd.md) block is whole frames, the smallest an 8-byte
+token byte, a [zstd](zstd.md) block is whole frames, the smallest an 8-byte
 skippable frame or a 9-byte frame (a 4-byte magic, a 2-byte frame header
-and one 3-byte block header, RFC 8878).
+and one 3-byte block header, RFC 8878), and a gzip member is at least 20
+bytes (a 10-byte header, a 2-byte empty final block and an 8-byte CRC-32
+and length trailer, RFC 1952).
 
 ## Caps & limits
 
@@ -289,16 +291,16 @@ See `docs/security/allocation-caps.md` for the broader policy.
   `encoded_entry_in_data_record_size` for the cursor base offset.
 - `crates/paksmith-core/src/container/pak/mod.rs` — `stream_zlib_to`
   block loop (the canonical reference implementation); `stream_block_codec_to`
-  shares the same outer loop shape for raw LZ4 blocks and zstd frames
-  but NOT the bomb-budget mechanism — it decodes into a buffer reserved
-  at the block's capped expected output, so over-expansion surfaces as
-  `Lz4DecodeError` or `BlockDecodeFailed` rather than
-  `take(budget)`/`DecompressionBomb` (see [`lz4.md`](lz4.md) and
-  [`zstd.md`](zstd.md)).
+  shares the same outer loop shape for raw LZ4 blocks, zstd frames and
+  gzip members but NOT the `DecompressionBomb` fault — it decodes LZ4
+  and zstd into a buffer reserved at the block's capped expected output
+  and gzip into one that grows as it decodes, and output past the
+  block's budget surfaces as `Lz4DecodeError` or `BlockDecodeFailed`
+  (see [`lz4.md`](lz4.md) and [`zstd.md`](zstd.md)).
 
 **Status:** `complete` for v5-v11. `require_relative_chunk_offsets`
-refuses a V3-V4 zlib entry with `UnsupportedVersion`; a read runs it
-in `PakReader::check_read`, and `stream_zlib_to` and
+refuses a V3-V4 zlib or gzip entry with `UnsupportedVersion`; a read
+runs it in `PakReader::check_read`, and `stream_zlib_to` and
 `stream_block_codec_to` keep it as a safety net.
 
 **Public surface:**
@@ -318,7 +320,7 @@ in `PakReader::check_read`, and `stream_zlib_to` and
 - `DecompressionFault::ZlibStreamError { block_index, kind, message }`
   (zlib path), `DecompressionFault::Lz4DecodeError { block_index,
   message }` (LZ4 path) and `DecompressionFault::BlockDecodeFailed {
-  codec, block_index, message }` (Zstd path); other methods get
+  codec, block_index, message }` (Zstd and Gzip paths); other methods get
   analogous variants when implemented. An empty block fails with one of
   these when it is decoded.
 

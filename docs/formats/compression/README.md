@@ -13,6 +13,10 @@ located them.
   compression block, per RFC 8878 (v8+ FName-slot resolution); the third
   backend paksmith fully decompresses, refusing legacy frames and bytes
   after the last frame.
+- **Gzip** (v3-v7 method ID 2, v8+ FName slot `Gzip`) — one gzip member
+  per compression block, per RFC 1952; paksmith decompresses it from v5,
+  checks the member's CRC-32 and length, and ignores bytes after the
+  member. Its format doc is not written yet (#1082).
 - **`oodle.md`** — Oodle Data (Kraken, Mermaid, Selkie, Leviathan).
   Notes on licensing: the Oodle decompressor is not redistributable;
   if paksmith adds Oodle support in the future, it would link against
