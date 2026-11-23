@@ -140,10 +140,11 @@ jobs:
           # + 1 issue-#651 unversioned uasset (real_v8b_unversioned.pak)
           # + 1 v4-v6-footer encrypted index
           #   (real_v5_encrypted_index.pak, VENDORED-STATIC)
-          # = 50.
+          # + 2 issue-#1082 Zstd (real_v{8b,11}_zstd.pak)
+          # = 52.
           # The pre-run rm + this count assertion together catch zero-write
           # bugs that the diff alone would miss.
-          expected=50
+          expected=52
           actual=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f | wc -l | tr -d ' ')
           # Emit the gate's verdict to the job-summary panel so reviewers
           # can see what was checked without scrolling raw step logs.

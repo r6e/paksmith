@@ -30,8 +30,9 @@
 //! bullet is the latter; the rest are the former:
 //! - **Compressed fixtures are v8+ only (a matrix choice, not a repak
 //!   limit).** Issue #69 added zlib-compressed fixtures
-//!   (`real_v{8a,8b,9,10,11}_compressed.pak`) and issue #636 added
-//!   LZ4-compressed fixtures (`real_v{8b,11}_lz4.pak`). repak CAN emit
+//!   (`real_v{8a,8b,9,10,11}_compressed.pak`), issue #636 added
+//!   LZ4-compressed fixtures (`real_v{8b,11}_lz4.pak`) and issue #1082
+//!   Zstd-compressed ones (`real_v{8b,11}_zstd.pak`). repak CAN emit
 //!   compressed output at any compression-capable version (v3+; compression
 //!   is a v3 wire feature) — v3-v7 via the numeric compression IDs (repak's
 //!   own test corpus ships `pack_v5_compress.pak` / `pack_v7_compress.pak`),
@@ -56,9 +57,11 @@
 //! Ten versions (v3, v4, v5, v6, v7, v8a, v8b, v9, v10, v11) × three
 //! shape variants (minimal / multi / mixed_paths) + five
 //! zlib-compressed variants (v8a/v8b/v9/v10/v11) + two
-//! LZ4-compressed variants (v8b/v11, #636). Total 37 fixtures, each
-//! well under 1 KiB. (v4/v5 are uncompressed/unencrypted, added by
-//! issue #637 to make the "v3-v11" claim literal for the flat path.)
+//! LZ4-compressed variants (v8b/v11, #636) + two Zstd-compressed
+//! variants (v8b/v11, #1082). Total 39 fixtures, each well under 1 KiB
+//! except the Zstd pair, whose one entry spans three compression blocks.
+//! (v4/v5 are uncompressed/unencrypted, added by issue #637 to make the
+//! "v3-v11" claim literal for the flat path.)
 
 use std::fs::File;
 
@@ -95,9 +98,9 @@ struct Fixture<'a> {
     /// branch real archives do.
     mount_point: &'static str,
     entries: &'a [Entry<'a>],
-    /// Issue #69 (Zlib) / #636 (LZ4): when `Some(method)`, configure
-    /// repak with that compression method (the FName slot table for v8+,
-    /// or the pre-populated numeric slots for v3-v7) and pass
+    /// Issue #69 (Zlib) / #636 (LZ4) / #1082 (Zstd): when `Some(method)`,
+    /// configure repak with that compression method (the FName slot table
+    /// for v8+, or the pre-populated numeric slots for v3-v7) and pass
     /// `allow_compress: true` per entry. This matrix only sets compression
     /// on v8+ fixtures — repak CAN compress pre-v8 too (see the module doc),
     /// but the corpus stays v8+ by choice. The fixture's payloads must
@@ -105,6 +108,50 @@ struct Fixture<'a> {
     /// larger than uncompressed, so any non-empty compressible input trips
     /// the compressed path.
     compression: Option<Compression>,
+}
+
+/// repak's `compression_block_size` for every compressed entry, `0x3e << 11`
+/// (`build_partial_entry` in repak's `data.rs`): it cuts the payload into
+/// blocks of this many bytes.
+const REPAK_BLOCK_BYTES: usize = 0x3e << 11;
+
+/// The Zstd fixtures' payload: two full repak compression blocks and a
+/// short final one. Numbered pages, each the same 4 KiB of asset-like lines
+/// rotated by a different amount, so no two blocks are alike and zstd
+/// copies from many offsets, yet the whole compresses to a few KiB.
+fn zstd_payload() -> Vec<u8> {
+    const LEN: usize = 2 * REPAK_BLOCK_BYTES + 7_919;
+    const PAGE: usize = 4_096;
+    const PAGE_SHIFT: usize = 997;
+    const KINDS: [&str; 8] = [
+        "Texture2D",
+        "StaticMesh",
+        "SoundWave",
+        "DataTable",
+        "MaterialInstance",
+        "Skeleton",
+        "AnimSequence",
+        "Blueprint",
+    ];
+    let page: Vec<u8> = (0..)
+        .flat_map(|n: usize| {
+            let (dir, stem) = (KINDS[n % 8], KINDS[n / 8 % 8]);
+            let rule = "-=".repeat(n % 7 + 1);
+            format!("{n:06} /Game/{dir}/{stem}_{:02}.uasset {rule}\n", n % 13).into_bytes()
+        })
+        .take(PAGE)
+        .collect();
+    let mut payload = Vec::with_capacity(LEN + PAGE);
+    let mut page_no = 0;
+    while payload.len() < LEN {
+        let (head, tail) = page.split_at(page_no * PAGE_SHIFT % PAGE);
+        payload.extend_from_slice(format!("page {page_no:04}\n").as_bytes());
+        payload.extend_from_slice(tail);
+        payload.extend_from_slice(head);
+        page_no += 1;
+    }
+    payload.truncate(LEN);
+    payload
 }
 
 fn write_fixture(fixture: &Fixture<'_>) -> Result<(), Box<dyn std::error::Error>> {
@@ -225,6 +272,12 @@ fn main() {
     let compressed_entries: &[Entry<'_>] = &[Entry {
         path: "Content/Compressed.uasset",
         payload: compressible_payload,
+    }];
+
+    let zstd_payload = zstd_payload();
+    let zstd_entries: &[Entry<'_>] = &[Entry {
+        path: "Content/Compressed.uasset",
+        payload: &zstd_payload,
     }];
 
     let mount = MOUNT_POINT;
@@ -531,6 +584,26 @@ fn main() {
             mount_point: mount,
             entries: compressed_entries,
             compression: Some(Compression::LZ4),
+        },
+        // Issue #1082 Zstd corpus: repak writes each compression block as
+        // one zstd frame (`zstd::stream::encode_all`). The payload spans
+        // three blocks, the last one short, at the same v8b and v11
+        // layouts as the LZ4 pair. The frames are the output of the
+        // libzstd that zstd-sys bundles, so a zstd-sys bump that changes
+        // it can change these bytes: regenerate and commit them with it.
+        Fixture {
+            name: "real_v8b_zstd.pak",
+            version: Version::V8B,
+            mount_point: mount,
+            entries: zstd_entries,
+            compression: Some(Compression::Zstd),
+        },
+        Fixture {
+            name: "real_v11_zstd.pak",
+            version: Version::V11,
+            mount_point: mount,
+            entries: zstd_entries,
+            compression: Some(Compression::Zstd),
         },
     ];
 
