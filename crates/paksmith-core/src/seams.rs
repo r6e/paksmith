@@ -63,7 +63,7 @@ pub enum SeamSite {
 pub enum PakSeam {
     /// `read_compressed_block`'s pre-decode per-block
     /// `try_reserve_exact` — the compressed-input read shared by the
-    /// zlib, LZ4 and Zstd paths. Surfaces as
+    /// zlib, LZ4, Zstd and Gzip paths. Surfaces as
     /// [`crate::error::DecompressionFault::CompressedBlockReserveFailed`].
     CompressedReserve,
     /// `stream_zlib_to`'s mid-decode `try_reserve(n)` loop. Surfaces

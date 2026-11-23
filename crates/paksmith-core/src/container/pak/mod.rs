@@ -20,10 +20,10 @@
 //! - The duplicate FPakEntry record header that real archives write before
 //!   each payload at [`crate::container::pak::index::PakEntryHeader::offset`],
 //!   with cross-validation against the index entry.
-//! - Zlib decompression for v5+ archives (block offsets are relative to the
-//!   entry record start), and LZ4 and Zstd decompression for v8+ archives
-//!   (the only versions where the `"LZ4"` and `"Zstd"` FName slots are
-//!   resolvable).
+//! - Zlib and Gzip decompression for v5+ archives (block offsets are
+//!   relative to the entry record start), and LZ4 and Zstd decompression
+//!   for v8+ archives (the only versions where the `"LZ4"` and `"Zstd"`
+//!   FName slots are resolvable).
 //! - SHA1 verification of the index and per-entry stored bytes via opt-in
 //!   [`PakReader::verify_index`], [`PakReader::verify_entry`], and
 //!   [`PakReader::verify`]. **v10+ encoded entries omit SHA1**, so
@@ -44,9 +44,8 @@
 //!   index verification requires the key (#635).
 //!
 //! It does NOT yet handle:
-//! - Gzip / Oodle decompression — resolvable (also via the v3-v7
-//!   numeric IDs) and verified over their compressed blocks, but a read
-//!   refuses them.
+//! - Oodle decompression — resolvable (also via the v3-v7 numeric ID)
+//!   and verified over its compressed blocks, but a read refuses it.
 //! - Three legacy shapes are deliberately fail-closed and left unsupported —
 //!   see issue #637 for the recorded decision. Two of the three are an
 //!   effort/value deferral, NOT a capability gap: repak (our writer oracle)
@@ -1196,14 +1195,14 @@ impl PakReader {
     /// - `Err(Decompression)` for a PLAINTEXT entry in a compression
     ///   method paksmith doesn't recognise (Unknown, UnknownByName). From
     ///   v5, a plaintext entry in any recognised method verifies normally,
-    ///   a Gzip or Oodle one included though a read refuses it: the
+    ///   an Oodle one included though a read refuses it: the
     ///   entry SHA1 covers the on-disk compressed bytes, so no
     ///   decompression happens on the verify path. This method gate applies
     ///   ONLY to plaintext entries — encrypted entries hash opaque
     ///   ciphertext (see above), so the method never matters for them.
     /// - `Err(UnsupportedVersion)` for a plaintext compressed entry in a
     ///   recognised method in a v3-v4 archive, whose block offsets are
-    ///   file-relative (#637), as a read refuses a zlib one.
+    ///   file-relative (#637), as a read refuses a zlib or gzip one.
     /// - `Err(InvalidIndex)` for offset/bounds problems uncovered while
     ///   reading.
     /// - `Err(HashMismatch { target: Entry { path }, .. })` when the
@@ -1959,7 +1958,7 @@ fn ensure_compressed_size_within_cap(comp: u64, path: &str) -> crate::Result<()>
     Ok(())
 }
 
-/// The checks of an encrypted Zlib, LZ4 or Zstd entry's payload its read makes
+/// The checks of an encrypted Zlib, Gzip, LZ4 or Zstd entry's payload its read makes
 /// before reading it, shared by `read_decrypted_compressed_payload` and
 /// `check_compressed_payload` so the two can't drift. Returns the
 /// payload's end, which bounds its blocks, and its AES-aligned length,
@@ -2813,7 +2812,7 @@ thread_local! {
     static BLOCKS_CHECKED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// [`PakReader::check_read`]'s checks of a Zlib, LZ4 or Zstd entry's payload, in
+/// [`PakReader::check_read`]'s checks of a Zlib, Gzip, LZ4 or Zstd entry's payload, in
 /// the read's order: an encrypted payload's size and extent
 /// (`read_decrypted_compressed_payload`), a pre-v5 compressed entry, every
 /// block, against the decrypted payload for an encrypted entry and the

@@ -42,8 +42,8 @@ outside this doc's scope.
 encryption metadata surface is complete. Decryption is implemented for
 the v3-v9 flat index, the v10+ path-hash index (primary/PHI/FDI regions,
 issue #635), for encrypted uncompressed entries, and — as of issue
-#634 (zlib, LZ4) and #1082 (Zstd) — for encrypted COMPRESSED zlib, LZ4
-and Zstd entries; a key is supplied
+#634 (zlib, LZ4) and #1082 (Zstd, Gzip) — for encrypted COMPRESSED zlib,
+LZ4, Zstd and Gzip entries; a key is supplied
 via `PakReader::open_with_key`, the CLI `--aes-key`, or the profile key
 store. paksmith still rejects whole-archive-encrypted archives at
 `from_reader` time (`PaksmithError::Decryption`). Encrypted ENTRIES verify
@@ -369,8 +369,8 @@ See `docs/security/allocation-caps.md` for the broader policy.
 ## Paksmith implementation
 
 Index decryption (v3-v9), entry decryption for uncompressed entries,
-and — as of issue #634 (zlib, LZ4) and #1082 (Zstd) — decrypt-then-decompress
-for zlib, LZ4 and Zstd entries are all implemented behind `AesKey`
+and — as of issue #634 (zlib, LZ4) and #1082 (Zstd, Gzip) — decrypt-then-decompress
+for zlib, LZ4, Zstd and Gzip entries are all implemented behind `AesKey`
 (`PakReader::open_with_key`, CLI `--aes-key`, profile key store).
 Encrypted compressed payloads are read as one 16-aligned contiguous
 region, AES-256-ECB-decrypted into a `Zeroizing` buffer, truncated to

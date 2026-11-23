@@ -240,7 +240,8 @@ through `decode_block` in `crates/paksmith-core/src/codec/mod.rs`
   buffer reused across blocks). Like `stream_zlib_to`, it takes the
   version and keeps `require_relative_chunk_offsets` as a safety net
   behind `PakReader::check_read`; `LZ4` is reachable only through the
-  v8+ FName slot table.
+  v8+ FName slot table, but Gzip shares the function and is reachable
+  through the v3-v7 ID 2.
 - Decodes with `lz4_flex::block::decompress_into` into a buffer
   pre-sized to the block's decode budget (`block_codec_budget`:
   `min(remaining, compression_block_size)` for non-final blocks, the

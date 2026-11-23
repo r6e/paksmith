@@ -459,8 +459,8 @@ impl std::fmt::Display for InvalidFooterFault {
 #[non_exhaustive]
 pub enum DecompressionFault {
     /// The entry's compression method isn't supported by paksmith.
-    /// A read currently fires it for Gzip, Oodle, Unknown(_), and
-    /// UnknownByName(_); None, Zlib, LZ4 and Zstd are wired up. A read
+    /// A read currently fires it for Oodle, Unknown(_), and
+    /// UnknownByName(_); None, Zlib, Gzip, LZ4 and Zstd are wired up. A read
     /// (`read_entry` or `read_entry_to`) rejects these methods in
     /// `PakReader::check_read`, after an encrypted entry's key check,
     /// rather than returning bytes it can't decode. A verify hashes the
@@ -513,7 +513,7 @@ pub enum DecompressionFault {
     /// any decompression has started. Fired by the
     /// `try_reserve_exact(block_len_usize)` site in
     /// `read_compressed_block` — the compressed-input read shared by
-    /// the zlib, LZ4 and Zstd paths. Distinct from a generic OOM because the
+    /// the zlib, LZ4, Zstd and Gzip paths. Distinct from a generic OOM because the
     /// path is bounded by `MAX_UNCOMPRESSED_ENTRY_BYTES` upstream
     /// — surfacing here means a fallible reservation legitimately
     /// failed at the pre-decode stage.
@@ -906,10 +906,11 @@ pub enum IndexParseFault {
     StreamEntryToDispatchedUnsupportedCompression {
         /// The [`CompressionMethod`] that reached the unsupported
         /// arm. Carries the full typed value so operators see whether
-        /// the dispatch hit `Gzip` / `Oodle` /
+        /// the dispatch hit `Oodle` /
         /// `Unknown(...)` / `UnknownByName(...)` without needing to
-        /// re-derive the variant from log context. (`Lz4` and `Zstd` no
-        /// longer route here: they decode as blocks, #636 and #1082.)
+        /// re-derive the variant from log context. (`Lz4`, `Zstd` and
+        /// `Gzip` no longer route here: they decode as blocks, #636 and
+        /// #1082.)
         method: CompressionMethod,
     },
     /// An encoded entry declared a compression method but

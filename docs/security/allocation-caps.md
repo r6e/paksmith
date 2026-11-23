@@ -19,6 +19,10 @@ x86_64 measurements are tracked separately; see `Out of scope` below.
 | `MAX_ZSTD_BLOCK_EXPANSION_RATIO` | 32768 × `compressed_len` | `codec/mod.rs` | `Vec<u8>` per zstd block | One output reservation per zstd block, `min(budget, compressed_len × 32768)`, with no zero-fill. A final block's budget is the entry's remaining output, so it can reserve up to the 8 GiB `MAX_UNCOMPRESSED_ENTRY_BYTES` cap. libzstd fails output past the capacity, and the post-decode check refuses output past the reservation. The constant's doc derives the ratio from RFC 8878. |
 | `MAX_IOSTORE_DIRECTORY_INDEX_BYTES` | 256 MiB *(provisional)* | *(Phase 8 deliverable — no constant exists yet)* | `Vec<u8>` | RAM commit for the `.utoc` directory-index buffer read (see `docs/formats/container/iostore-directory-index.md` §*Caps & limits*). Provisional value borrowed by analogy from `MAX_FDI_BYTES` — both are "metadata sub-region read in full before parsing inside a larger container." The Phase 8 IoStore-reader implementation PR MUST land this constant and replace the provisional value with an empirically-justified one if real-world cooked containers exceed 256 MiB. |
 
+A gzip pak block has no ratio row: its output buffer is reserved as the
+block decodes, doubling to at most a byte past the block's budget, and
+a byte past the budget fails the block.
+
 ## The "thrashing" claim was wrong
 
 Source-code comments and PR-message language framed the caps as

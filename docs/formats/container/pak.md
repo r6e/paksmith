@@ -465,9 +465,9 @@ does not surface as the fault its bullet names.
   reader first checks the index record and refuses a missing key, an
   unsupported method, a record past the end of the file, an encrypted
   compressed entry whose compressed size passes the 8 GiB per-entry cap,
-  a payload past the end of the file, a pre-v5 zlib entry, a block out
-  of bounds, and a compressed entry with no blocks and a nonzero
-  uncompressed size. An entry it refuses fails with its own fault and
+  a payload past the end of the file, a pre-v5 zlib or gzip entry, a
+  block out of bounds, and a compressed entry with no blocks and a
+  nonzero uncompressed size. An entry it refuses fails with its own fault and
   isn't charged or counted, instead of being charged its extent, which
   could refuse the reads after it. Opting in sums the in-file parts of
   the extents of the entries those checks pass, checking once each v10+
@@ -728,8 +728,8 @@ the full enum):
 - `PaksmithError::UnsupportedVersion { version }` — a version or
   version-specific feature paksmith does not read: for example a version
   outside 3–11, a frozen V9 index, or a compressed entry in a V3/V4
-  archive (a zlib one read, or a zlib, gzip or Oodle one verified unless
-  it is encrypted).
+  archive (a zlib or gzip one read, or a zlib, gzip or Oodle one verified
+  unless it is encrypted).
 - `PaksmithError::InvalidFooter { fault: InvalidFooterFault::* }` —
   `OtherUnpromoted { reason }` (catch-all for magic mismatch and the other
   footer faults not yet promoted to typed variants),
