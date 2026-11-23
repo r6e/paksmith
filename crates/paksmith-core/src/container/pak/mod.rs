@@ -1914,9 +1914,15 @@ fn dispatch_compressed<R: Read + Seek>(
 ) -> crate::Result<u64> {
     match codec {
         PakCodec::Zlib => stream_zlib_to(reader, entry, file_size, payload_start, version, writer),
-        PakCodec::Block(codec) => {
-            stream_block_codec_to(reader, codec, entry, file_size, payload_start, writer)
-        }
+        PakCodec::Block(codec) => stream_block_codec_to(
+            reader,
+            codec,
+            entry,
+            file_size,
+            payload_start,
+            version,
+            writer,
+        ),
     }
 }
 
@@ -3266,21 +3272,12 @@ fn stream_block_codec_to<R: Read + Seek>(
     entry: &PakIndexEntry,
     file_size: u64,
     payload_start: u64,
+    version: PakVersion,
     writer: &mut dyn Write,
 ) -> crate::Result<u64> {
-    // NOTE: unlike `stream_zlib_to`, this takes no `version` and has no
-    // pre-v5 relative-offset guard. `CompressionMethod::Lz4` and `Zstd`
-    // are obtainable ONLY through the v8+ FName compression-slot table
-    // (`CompressionMethod::from_name`); the v3-v7 numeric method IDs
-    // (`from_u32`) never yield either. So any entry reaching here parsed
-    // as v8 or newer, where compression-block offsets are already
-    // relative — the guard `stream_zlib_to` needs (zlib IS reachable
-    // pre-v5 via numeric method 1) would be structurally unreachable
-    // dead code here. Defense in depth: even a hypothetical
-    // absolute-offset entry reaching this loop fails closed at
-    // `validate_block_bounds` (abs_end > file_size), never decoding
-    // out-of-bounds bytes.
     let path = entry.filename();
+
+    require_relative_chunk_offsets(version)?;
     let label = codec.label();
 
     let uncompressed_size = entry.header().uncompressed_size();
@@ -4668,6 +4665,45 @@ mod tests {
         );
     }
 
+    /// `stream_block_codec_to` refuses pre-v5 versions itself, behind
+    /// `check_read`, as `stream_zlib_to` does, and lets v5 through. Driven
+    /// directly on a v8b LZ4 entry, whose blocks are entry-relative, under
+    /// each version.
+    #[test]
+    fn stream_block_codec_to_version_boundary_rejects_pre_v5_only() {
+        let path = "Content/Compressed.uasset";
+        let reader = PakReader::open(fixture("real_v8b_lz4.pak")).unwrap();
+        let entry = reader.index_entry(path).unwrap();
+        let payload_start = reader.check_read(entry).unwrap();
+        let read = |version| {
+            let mut file = std::fs::File::open(fixture("real_v8b_lz4.pak")).unwrap();
+            let mut sink = Vec::new();
+            let streamed = stream_block_codec_to(
+                &mut file,
+                Codec::Lz4,
+                entry,
+                reader.file_size,
+                payload_start,
+                version,
+                &mut sink,
+            );
+            streamed.map(|written| (written, sink.len()))
+        };
+        for v in [
+            PakVersion::CompressionEncryption,
+            PakVersion::IndexEncryption,
+        ] {
+            let err = read(v).unwrap_err();
+            assert!(
+                matches!(err, PaksmithError::UnsupportedVersion { version } if version == v.wire_version()),
+                "{v:?}: {err:?}"
+            );
+        }
+        let size = entry.header().uncompressed_size();
+        let read = read(PakVersion::RelativeChunkOffsets).unwrap();
+        assert_eq!(read, (size, usize::try_from(size).unwrap()));
+    }
+
     /// `check_compressed_payload` refuses a pre-v5 entry of either codec,
     /// and passes the same entry at v5.
     #[test]
@@ -5018,27 +5054,32 @@ mod tests {
     // paksmith-gui's dev-dep in the bare default-members `cargo test`. CI's guard is
     // therefore `-p paksmith-core`-scoped (#636 R8/R9).
 
-    /// Chunk `plaintext` into `block_size` blocks, LZ4-compress each,
-    /// and read the assembled entry back through the production path,
-    /// asserting the written size. Returns the decoded bytes alongside
-    /// the number of blocks actually assembled, so callers can pin the
-    /// shape of the entry they built.
+    /// Chunk `plaintext` into `block_size` blocks, compress each with
+    /// `compress`, and read the entry at `path` of the pak `build` makes
+    /// of them back through the production path, asserting the written
+    /// size. Returns the decoded bytes alongside the number of blocks
+    /// actually assembled, so callers can pin the shape of the entry they
+    /// built.
     #[cfg(feature = "__test_utils")]
-    fn multi_block_lz4_read_back(plaintext: &[u8], block_size: u32) -> (Vec<u8>, usize) {
+    fn multi_block_read_back(
+        plaintext: &[u8],
+        block_size: u32,
+        compress: fn(&[u8]) -> Vec<u8>,
+        build: fn(&[Vec<u8>], u64, u32) -> Vec<u8>,
+        path: &str,
+    ) -> (Vec<u8>, usize) {
         let streams: Vec<Vec<u8>> = plaintext
             .chunks(block_size as usize)
-            .map(lz4_flex::block::compress)
+            .map(compress)
             .collect();
-        let block_count = streams.len();
-        let pak =
-            crate::testing::wire::build_v8b_lz4_pak(&streams, plaintext.len() as u64, block_size);
+        let pak = build(&streams, plaintext.len() as u64, block_size);
         let reader = PakReader::from_bytes(pak).expect("synthetic multi-block v8b pak parses");
         let mut out = Vec::new();
         let written = reader
-            .read_entry_to(crate::testing::wire::LZ4_SYNTH_PATH, &mut out)
-            .expect("multi-block lz4 round-trip must succeed");
+            .read_entry_to(path, &mut out)
+            .expect("multi-block round-trip must succeed");
         assert_eq!(written, plaintext.len() as u64);
-        (out, block_count)
+        (out, streams.len())
     }
 
     /// A valid multi-block LZ4 entry (two full non-final blocks that
@@ -5050,9 +5091,17 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn read_lz4_entry_multi_block_round_trips() {
+        use crate::testing::wire::{LZ4_SYNTH_PATH, build_v8b_lz4_pak};
+
         let block_size = 128u32;
         let payload: Vec<u8> = (0..296u32).map(|i| (i % 251) as u8).collect();
-        let (out, block_count) = multi_block_lz4_read_back(&payload, block_size);
+        let (out, block_count) = multi_block_read_back(
+            &payload,
+            block_size,
+            lz4_flex::block::compress,
+            build_v8b_lz4_pak,
+            LZ4_SYNTH_PATH,
+        );
         assert_eq!(block_count, 3, "fixture invariant: 2 full + 1 remainder");
         assert_eq!(out, payload, "multi-block decode must be byte-exact");
     }
@@ -8383,10 +8432,9 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn undecodable_plaintext_entries_verify_but_reads_refuse() {
-        use crate::testing::wire::{build_v8b_pak, pak_entry_wire_size};
+        use crate::testing::wire::build_v8b_pak;
 
         const PATH: &str = "Content/a.bin";
-        let payload_start = usize::try_from(pak_entry_wire_size(1)).unwrap();
         for (name, method) in [
             ("Gzip", CompressionMethod::Gzip),
             ("Oodle", CompressionMethod::Oodle),
@@ -8423,16 +8471,7 @@ mod tests {
                 ),
                 "{name}: {direct:?}"
             );
-            let mut flipped = pak;
-            flipped[payload_start] ^= 0xFF;
-            let err = PakReader::from_bytes(flipped)
-                .unwrap()
-                .verify_entry(PATH)
-                .unwrap_err();
-            assert!(
-                matches!(err, PaksmithError::HashMismatch { .. }),
-                "{name}: {err:?}"
-            );
+            assert_flipped_payload_fails_verify(pak, PATH);
         }
     }
 
@@ -9081,6 +9120,60 @@ mod tests {
         }
     }
 
+    /// Varied bytes with no short period.
+    #[cfg(feature = "__test_utils")]
+    fn payload(len: u32) -> Vec<u8> {
+        (0..len).map(|i| ((i * 7 + i / 61) % 251) as u8).collect()
+    }
+
+    /// The block and message of `err`, a `BlockDecodeFailed` from `codec`.
+    #[cfg(feature = "__test_utils")]
+    fn block_decode_failure<'e>(err: &'e PaksmithError, codec: &str) -> Option<(usize, &'e str)> {
+        match err {
+            PaksmithError::Decompression {
+                fault:
+                    DecompressionFault::BlockDecodeFailed {
+                        codec: failed,
+                        block_index,
+                        message,
+                    },
+                ..
+            } if *failed == codec => Some((*block_index, message)),
+            _ => None,
+        }
+    }
+
+    /// `pak`'s entry at `path` reads as `plaintext` through both read entry
+    /// points and verifies, and a flipped payload byte fails the verify.
+    #[cfg(feature = "__test_utils")]
+    fn assert_reads_and_verifies(pak: Vec<u8>, path: &str, plaintext: &[u8]) {
+        let reader = PakReader::from_bytes(pak.clone()).unwrap();
+        assert_eq!(reader.read_entry(path).unwrap(), plaintext);
+        let mut out = Vec::new();
+        let written = reader.read_entry_to(path, &mut out).unwrap();
+        assert_eq!(
+            (written, out.as_slice()),
+            (plaintext.len() as u64, plaintext)
+        );
+        assert_eq!(reader.verify_entry(path).unwrap(), VerifyOutcome::Verified);
+        assert_flipped_payload_fails_verify(pak, path);
+    }
+
+    /// Flipping the first payload byte of `pak`'s entry at `path` fails its
+    /// verify.
+    #[cfg(feature = "__test_utils")]
+    fn assert_flipped_payload_fails_verify(mut pak: Vec<u8>, path: &str) {
+        let reader = PakReader::from_bytes(pak.clone()).unwrap();
+        let header = reader.index_entry(path).unwrap().header();
+        let payload_start = header.offset() + header.wire_size();
+        pak[usize::try_from(payload_start).unwrap()] ^= 0xFF;
+        let err = PakReader::from_bytes(pak)
+            .unwrap()
+            .verify_entry(path)
+            .unwrap_err();
+        assert!(matches!(err, PaksmithError::HashMismatch { .. }), "{err:?}");
+    }
+
     /// Zstd entries: one frame per block, the shape repak writes.
     #[cfg(feature = "__test_utils")]
     mod zstd_entries {
@@ -9089,29 +9182,13 @@ mod tests {
         use crate::testing::oom::{SeamSite, arm_at};
         use crate::testing::wire::{ZSTD_SYNTH_PATH, build_v8b_zstd_pak};
 
-        /// Varied bytes with no short period.
-        fn payload(len: u32) -> Vec<u8> {
-            (0..len).map(|i| ((i * 7 + i / 61) % 251) as u8).collect()
-        }
-
         /// A reader over one Zstd entry of `blocks` frames.
         fn zstd_reader(blocks: &[Vec<u8>], size: u64, block_size: u32) -> PakReader {
             PakReader::from_bytes(build_v8b_zstd_pak(blocks, size, block_size)).unwrap()
         }
 
         fn decode_failed_at(err: &PaksmithError) -> Option<usize> {
-            match err {
-                PaksmithError::Decompression {
-                    fault:
-                        DecompressionFault::BlockDecodeFailed {
-                            codec: "zstd",
-                            block_index,
-                            ..
-                        },
-                    ..
-                } => Some(*block_index),
-                _ => None,
-            }
+            block_decode_failure(err, "zstd").map(|(block, _)| block)
         }
 
         #[test]
@@ -9127,24 +9204,8 @@ mod tests {
                 let content_size = zstd::zstd_safe::get_frame_content_size(block);
                 assert!(matches!(content_size, Ok(None)), "{content_size:?}");
             }
-            let size = plaintext.len() as u64;
-            let reader = zstd_reader(&blocks, size, block_size);
-            assert_eq!(reader.read_entry(ZSTD_SYNTH_PATH).unwrap(), plaintext);
-            let mut out = Vec::new();
-            let written = reader.read_entry_to(ZSTD_SYNTH_PATH, &mut out).unwrap();
-            assert_eq!((written, out), (size, plaintext));
-            assert_eq!(
-                reader.verify_entry(ZSTD_SYNTH_PATH).unwrap(),
-                VerifyOutcome::Verified
-            );
-            let mut flipped = build_v8b_zstd_pak(&blocks, size, block_size);
-            let payload_start = crate::testing::wire::pak_entry_wire_size(3);
-            flipped[usize::try_from(payload_start).unwrap()] ^= 0xFF;
-            let err = PakReader::from_bytes(flipped)
-                .unwrap()
-                .verify_entry(ZSTD_SYNTH_PATH)
-                .unwrap_err();
-            assert!(matches!(err, PaksmithError::HashMismatch { .. }), "{err:?}");
+            let pak = build_v8b_zstd_pak(&blocks, plaintext.len() as u64, block_size);
+            assert_reads_and_verifies(pak, ZSTD_SYNTH_PATH, &plaintext);
         }
 
         #[test]
@@ -9307,7 +9368,9 @@ mod tests {
 
         use super::*;
         use crate::testing::bench::{zlib_stream, zstd_stream};
-        use crate::testing::wire::{ZSTD_SYNTH_PATH, build_v8b_zstd_pak};
+        use crate::testing::wire::{
+            LZ4_SYNTH_PATH, ZSTD_SYNTH_PATH, build_v8b_lz4_pak, build_v8b_zstd_pak,
+        };
 
         /// Payloads spanning both compressibility regimes. Uniform bytes
         /// alone never compress — every codec call would emit a stream at
@@ -9340,7 +9403,13 @@ mod tests {
                 plaintext in payload(4096),
                 block_size in 32u32..512,
             ) {
-                let (out, _) = multi_block_lz4_read_back(&plaintext, block_size);
+                let (out, _) = multi_block_read_back(
+                    &plaintext,
+                    block_size,
+                    lz4_flex::block::compress,
+                    build_v8b_lz4_pak,
+                    LZ4_SYNTH_PATH,
+                );
                 prop_assert_eq!(out, plaintext);
             }
 
@@ -9356,14 +9425,9 @@ mod tests {
                 plaintext in payload(4096),
                 block_size in 32u32..512,
             ) {
-                let blocks: Vec<_> = plaintext.chunks(block_size as usize).map(zstd_stream).collect();
-                let pak = build_v8b_zstd_pak(&blocks, plaintext.len() as u64, block_size);
-                let mut out = Vec::new();
-                let written = PakReader::from_bytes(pak)
-                    .unwrap()
-                    .read_entry_to(ZSTD_SYNTH_PATH, &mut out)
-                    .unwrap();
-                prop_assert_eq!(written, plaintext.len() as u64);
+                let (out, _) = multi_block_read_back(
+                    &plaintext, block_size, zstd_stream, build_v8b_zstd_pak, ZSTD_SYNTH_PATH,
+                );
                 prop_assert_eq!(out, plaintext);
             }
         }
