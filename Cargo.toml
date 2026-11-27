@@ -29,7 +29,7 @@ default-members = ["crates/paksmith-core", "crates/paksmith-cli", "crates/paksmi
 # The one version of the released crates (core, cli, gui), which
 # inherit it with `version.workspace = true`. release-please rewrites
 # this line and the `paksmith-core` requirement below.
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 # muda (paksmith-gui's native menu) declares 1.90 from 0.20 on and
@@ -37,7 +37,7 @@ license = "MIT"
 rust-version = "1.92"
 
 [workspace.dependencies]
-paksmith-core = { path = "crates/paksmith-core", version = "0.1.0" }
+paksmith-core = { path = "crates/paksmith-core", version = "0.2.0" }
 thiserror = "2.0.12"
 # `rc` enables Serialize/Deserialize for `Arc<T>`. Required by
 # `PropertyValue`'s `Arc<str>` fields (#365 — propagate FName's Arc
