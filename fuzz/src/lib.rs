@@ -49,6 +49,16 @@ pub const ZSTD: BlockPak = BlockPak {
 ///
 /// The targets have no committed seed corpus: a fixture file wouldn't be
 /// well-formed for this layout, so the fuzzer starts from scratch.
+///
+/// A fuzz run sees a panic, an abort, an ASan fault, a timeout or an
+/// allocation at libFuzzer's malloc limit. The panics include a read that
+/// succeeds with a size other than the claimed `uncompressed_size`, or
+/// with output other than the size it returns. Every claim stays below
+/// 1 MiB, so a reservation bounded by the claim stays under the malloc
+/// limit and goes unseen. One that reaches the limit is reported, such as
+/// the `compressed_len × 32768` a Zstd cap that lost its budget term
+/// would reserve for a block of 64 KiB or more. Each target names the
+/// codec unit tests that pin its output bounds.
 pub fn fuzz_v8b_block_codec_pak(data: &[u8], pak: &BlockPak) {
     if data.len() < 9 {
         return;
@@ -79,5 +89,8 @@ pub fn fuzz_v8b_block_codec_pak(data: &[u8], pak: &BlockPak) {
         return;
     };
     let mut out = Vec::new();
-    let _ = reader.read_entry_to(pak.path, &mut out);
+    if let Ok(n) = reader.read_entry_to(pak.path, &mut out) {
+        assert_eq!(n, uncompressed_size, "read size isn't the claimed size");
+        assert_eq!(out.len() as u64, n, "output size isn't the read size");
+    }
 }
