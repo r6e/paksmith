@@ -636,6 +636,25 @@ mod tests {
             );
         }
 
+        /// A member twice the budget stops a byte past it, so `out` never
+        /// grows past the budget plus one byte.
+        #[test]
+        fn gzip_take_stops_a_member_past_its_budget() {
+            let plaintext: Vec<u8> = plaintext().repeat(5)[..20_000].to_vec();
+            let (decoded, out, _) = decode_gzip(&gzip_stream(&plaintext), 9_999);
+            assert_eq!(
+                decode_message(&decoded),
+                Some(PAST_OUTPUT_CAP),
+                "{decoded:?}"
+            );
+            assert_eq!(out, EARLIER);
+            assert!(
+                out.capacity() <= EARLIER.len() + 10_000,
+                "{}",
+                out.capacity()
+            );
+        }
+
         #[test]
         fn gzip_output_past_budget_is_corrupt() {
             let plaintext = plaintext();
