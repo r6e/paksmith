@@ -1,0 +1,10 @@
+# libFuzzer dictionary for fuzz_gzip_decompress. flate2 checks the gzip
+# magic and method as 1-byte integer compares, and libFuzzer keeps integer
+# compare operands only from 4- and 8-byte compares; a local unseeded
+# 60-second run without this dictionary found the magic but never the
+# method byte.
+
+# The magic, then method 8 (deflate).
+magic_deflate="\x1f\x8b\x08"
+# A minimal 10-byte header: no flags, no mtime, XFL 0, OS unknown.
+minimal_header="\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"

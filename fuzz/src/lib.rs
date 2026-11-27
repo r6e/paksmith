@@ -3,7 +3,8 @@
 use paksmith_core::container::ContainerReader as _;
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::testing::wire::{
-    LZ4_SYNTH_PATH, ZSTD_SYNTH_PATH, build_v8b_lz4_pak, build_v8b_zstd_pak,
+    GZIP_SYNTH_PATH, LZ4_SYNTH_PATH, ZSTD_SYNTH_PATH, build_v8b_gzip_pak, build_v8b_lz4_pak,
+    build_v8b_zstd_pak,
 };
 
 /// Cap on the wire-claimed sizes (both `uncompressed_size` and
@@ -30,6 +31,12 @@ pub const LZ4: BlockPak = BlockPak {
 pub const ZSTD: BlockPak = BlockPak {
     build: build_v8b_zstd_pak,
     path: ZSTD_SYNTH_PATH,
+};
+
+/// A pak of one Gzip entry.
+pub const GZIP: BlockPak = BlockPak {
+    build: build_v8b_gzip_pak,
+    path: GZIP_SYNTH_PATH,
 };
 
 /// Wrap `data` in the v8b pak `pak` builds and read its entry back

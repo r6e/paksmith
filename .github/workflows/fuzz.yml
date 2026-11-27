@@ -57,6 +57,7 @@ jobs:
           - fuzz_bulk_decompress
           - fuzz_lz4_decompress
           - fuzz_zstd_decompress
+          - fuzz_gzip_decompress
           - fuzz_texture_decode
           - fuzz_audio_decode
           - fuzz_export_pipeline
@@ -75,8 +76,12 @@ jobs:
           # as the asset parser, so it shares the `.uasset` seed corpus.
           - target: fuzz_export_pipeline
             seed_glob: '*.uasset'
+          # A target's `dict` becomes the fuzz step's `-dict`; the file says why.
+          - target: fuzz_gzip_decompress
+            dict: fuzz/dicts/gzip.dict
           # fuzz_bulk_decompress / fuzz_lz4_decompress / fuzz_zstd_decompress /
-          # fuzz_texture_decode / fuzz_audio_decode / fuzz_locres_parse have no top-level
+          # fuzz_gzip_decompress / fuzz_texture_decode / fuzz_audio_decode /
+          # fuzz_locres_parse have no top-level
           # `tests/fixtures` seed (the sole `.locres` fixture lives at
           # `tests/fixtures/data/`, below the `-maxdepth 1` seed glob;
           # the flat header-first parser reaches its magic/version/
@@ -87,10 +92,12 @@ jobs:
           # paths are reached on random input by construction (texture
           # self-sizes the encoded buffer to the exact length its decoder
           # validates; the bulk/audio targets exercise the reject + cap paths
-          # that are the DoS-relevant surface), except zstd's: random input
-          # stops at its v1-frame gate, and the cap and decode behind it run
-          # once the fuzzer builds a block of whole v1 or skippable frames. The empty
-          # `${SEED_GLOB}` makes the seed step a clean zero-match.
+          # that are the DoS-relevant surface), except zstd's and gzip's:
+          # random input stops at zstd's v1-frame gate, and the cap and decode
+          # behind it run once the fuzzer builds a block of whole v1 or
+          # skippable frames; gzip's `dict` carries it past flate2's header
+          # check. The empty `${SEED_GLOB}` makes the seed step a clean
+          # zero-match.
     env:
       # libfuzzer instrumentation needs nightly; clear RUSTFLAGS so
       # workspace-wide `-D warnings` doesn't escalate nightly's
@@ -254,6 +261,7 @@ jobs:
           # the literal 600. Defensive default in env keeps `${BUDGET}`
           # bound even if the action's input parsing is broken.
           BUDGET: ${{ inputs.max_total_time || '600' }}
+          DICT: ${{ matrix.dict }}
         # Explicit limits matter:
         #   -max_total_time=$BUDGET    : overall fuzzing wall clock
         #   -timeout=60                : per-input timeout (kills hangs)
@@ -268,19 +276,27 @@ jobs:
         #   -max_len=1048576           : 1 MiB ceiling on a single
         #                                input. Real pak files in the
         #                                fixture set are <= 30 KiB.
+        #   -dict=$DICT                : only when the target has a
+        #                                matrix `dict`, which must
+        #                                exist.
         # `--target x86_64-unknown-linux-gnu` overrides cargo-fuzz's
         # Linux default (`-linux-musl`). musl is statically-linked
         # libc and incompatible with the ASan instrumentation
         # cargo-fuzz injects; gnu is dynamically-linked. Same
         # override applied in the ci.yml `fuzz_build` job.
         run: |
+          if [[ -n "${DICT}" && ! -f "${DICT}" ]]; then
+            echo "::error::${TARGET}: dictionary ${DICT} not found"
+            exit 1
+          fi
           cargo fuzz run "${TARGET}" \
             --target x86_64-unknown-linux-gnu \
             -- \
             -max_total_time="${BUDGET}" \
             -timeout=60 \
             -rss_limit_mb=2048 \
-            -max_len=1048576
+            -max_len=1048576 \
+            ${DICT:+"-dict=${DICT}"}
       # Issue #205: cmin gating — measure the corpus delta produced
       # by the fuzz step. If fuzz crashed early (harness died, OOM
       # in first seconds) the delta is tiny and cmin would waste
