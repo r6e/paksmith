@@ -78,7 +78,7 @@ jobs:
           # not find the token in .git/config.
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: nextest
       - name: Regenerate all fixtures and verify byte-determinism
@@ -311,7 +311,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-llvm-cov
       # `--no-report` collects instrumented coverage data without
@@ -474,7 +474,7 @@ jobs:
       # cargo-minimal-versions delegates the actual check phase to
       # cargo-hack (its sister tool by taiki-e), so both need to be on
       # PATH. Comma-separated tool list installs both via one action call.
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-minimal-versions,cargo-hack
       - run: cargo minimal-versions check --direct --all-features
@@ -508,7 +508,7 @@ jobs:
           # The cache key holds the nightly's version, so each day saves
           # a new set that cache-prune.yml cannot group with the last.
           cache: "false"
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-fuzz
       # `cargo fuzz` is invoked from the repo root (matches the

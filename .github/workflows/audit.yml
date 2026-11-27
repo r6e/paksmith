@@ -25,7 +25,7 @@ jobs:
     steps:
       # Installed here, with no token: the audit action would otherwise
       # build the newest cargo-audit from crates.io while holding one.
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           # No version: the action's pinned manifest fixes it, with a
           # checksum, and moves it when Dependabot bumps the action.
